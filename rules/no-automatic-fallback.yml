@@ -5,7 +5,7 @@ message: Use explicit provider selection; do not implement automatic fallback ch
 rule:
   pattern: |
     try {
-      $$$PRIMARY
+      await $PRIMARY.$PRIMARY_METHOD($$$PRIMARY_ARGS);
     } catch ($ERR) {
-      $$$SECONDARY
+      await $SECONDARY.$SECONDARY_METHOD($$$SECONDARY_ARGS);
     }

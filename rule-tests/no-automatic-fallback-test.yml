@@ -7,6 +7,12 @@ valid:
       if (selectedProvider.kind === "qwen3_5_9b") {
         await selectedProvider.describeScene(input);
       }
+  - |
+      try {
+        await writeAuditEvent(event);
+      } catch (error) {
+        logger.error(error);
+      }
 invalid:
   - |
       try {

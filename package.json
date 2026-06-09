@@ -19,7 +19,7 @@
     "test": "vitest run",
     "lint": "eslint .",
     "format": "biome format --write .",
-    "format:check": "biome format .",
+    "format:check": "biome ci .",
     "ast": "ast-grep scan --config sgconfig.yml src tests",
     "ast:test": "ast-grep test --config sgconfig.yml --skip-snapshot-tests",
     "check": "npm run typecheck && npm run lint && npm run ast:test && npm run ast && npm run format:check && npm run test"
