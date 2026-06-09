@@ -1,0 +1,11 @@
+id: no-automatic-fallback
+language: TypeScript
+severity: error
+message: Use explicit provider selection; do not implement automatic fallback chains.
+rule:
+  pattern: |
+    try {
+      $$$PRIMARY
+    } catch ($ERR) {
+      $$$SECONDARY
+    }

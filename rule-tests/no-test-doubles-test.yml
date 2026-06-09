@@ -1,0 +1,9 @@
+id: no-test-doubles
+valid:
+  - |
+      const selectedProvider = createQwenVisionProvider();
+invalid:
+  - |
+      const fallbackProvider = createProvider();
+  - |
+      const mockVision = createVisionProvider();

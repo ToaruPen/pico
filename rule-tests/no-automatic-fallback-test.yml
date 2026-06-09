@@ -1,0 +1,16 @@
+id: no-automatic-fallback
+valid:
+  - |
+      const provider = selectedProvider;
+      await provider.describeScene(input);
+  - |
+      if (selectedProvider.kind === "qwen3_5_9b") {
+        await selectedProvider.describeScene(input);
+      }
+invalid:
+  - |
+      try {
+        await primary.describeScene(input);
+      } catch (error) {
+        await secondary.describeScene(input);
+      }
