@@ -41,10 +41,23 @@ milestone suite with the selected provider environment:
 
 ```bash
 just check
+
+# Example local sample generation for the STT smoke. A real recorded sample can
+# also be used if it is PCM16LE, mono, 16 kHz.
+say -v Kyoko -o /tmp/pico-known-ja.aiff 'こんにちは。今日はピコの音声認識テストです。'
+ffmpeg -y -hide_banner -loglevel error \
+  -i /tmp/pico-known-ja.aiff \
+  -ac 1 \
+  -ar 16000 \
+  -f s16le \
+  /tmp/pico-known-ja.pcm
+
+# Choose an Aivis Speech style id from:
+# curl -s http://127.0.0.1:10101/speakers
 PICO_STT_MLX_WHISPER_BASE_URL=http://127.0.0.1:8765 \
-PICO_STT_SAMPLE_PCM16LE_PATH=./samples/known-ja.pcm \
+PICO_STT_SAMPLE_PCM16LE_PATH=/tmp/pico-known-ja.pcm \
 PICO_TTS_AIVIS_BASE_URL=http://127.0.0.1:10101 \
-PICO_TTS_AIVIS_SPEAKER_ID=1 \
+PICO_TTS_AIVIS_SPEAKER_ID=888753760 \
 PICO_TAPO_HOST=192.168.10.25 \
 PICO_TAPO_USER=your-camera-user \
 PICO_TAPO_PASSWORD=your-camera-password \
@@ -78,16 +91,26 @@ just smoke-voice-providers
 To run the Aivis Speech TTS smoke:
 
 ```bash
+# Choose a style id from:
+# curl -s http://127.0.0.1:10101/speakers
 PICO_TTS_AIVIS_BASE_URL=http://127.0.0.1:10101 \
-PICO_TTS_AIVIS_SPEAKER_ID=1 \
+PICO_TTS_AIVIS_SPEAKER_ID=888753760 \
 just smoke-voice-providers
 ```
 
 To run the mlx-whisper STT smoke, provide a known PCM16LE sample:
 
 ```bash
+say -v Kyoko -o /tmp/pico-known-ja.aiff 'こんにちは。今日はピコの音声認識テストです。'
+ffmpeg -y -hide_banner -loglevel error \
+  -i /tmp/pico-known-ja.aiff \
+  -ac 1 \
+  -ar 16000 \
+  -f s16le \
+  /tmp/pico-known-ja.pcm
+
 PICO_STT_MLX_WHISPER_BASE_URL=http://127.0.0.1:8765 \
-PICO_STT_SAMPLE_PCM16LE_PATH=./samples/known-ja.pcm \
+PICO_STT_SAMPLE_PCM16LE_PATH=/tmp/pico-known-ja.pcm \
 PICO_STT_SAMPLE_RATE_HZ=16000 \
 PICO_STT_CHANNELS=1 \
 just smoke-voice-providers
