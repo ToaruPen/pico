@@ -1,0 +1,7 @@
+id: no-test-doubles
+language: TypeScript
+severity: error
+message: Do not add mock, stub, fake, or fallback architecture to pico.
+rule:
+  kind: identifier
+  regex: "(?i)(mock|stub|fake|fallback)"

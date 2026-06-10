@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+early_access: false
+reviews:
+  profile: "assertive"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  review_details: true
+  auto_review:
+    enabled: true
+    drafts: true
+  instructions: |
+    Review this repository as a Pi Agent-centered TypeScript project.
+
+    Important project references:
+    - AGENTS.md
+    - TOOLS.md
+    - docs/superpowers/specs/2026-06-09-pico-agent-design.md
+    - docs/superpowers/research/2026-06-09-pico-module-dependency-survey.md
+    - docs/superpowers/plans/2026-06-09-pico-foundation-implementation-plan.md
+
+    Start with ordinary code-review fundamentals:
+    - Correctness bugs and behavior regressions.
+    - Type-safety gaps, unsafe narrowing, and unchecked unknown data.
+    - Async/concurrency bugs, lifecycle leaks, cancellation bugs, and resource leaks.
+    - Security, secret exposure, trust-boundary mistakes, and unsafe network defaults.
+    - Missing validation at module, API, configuration, and provider boundaries.
+    - Test coverage gaps that make the changed behavior unverified.
+
+    Enforce these project constraints:
+    - No test-double modules, compatibility layers, or automatic provider switching.
+    - Vision provider is Qwen/Qwen3.5-9B through Ollama qwen3.5:9b on a protected Windows GPU host.
+    - Remote model access must use protected Tailscale or Cloudflare SSH tunneling.
+    - Keep module boundaries clear under src/modules/<module>/index.ts.
+    - Prefer deterministic tooling changes over prose-only rules.
+
+    Review aggressively for AI slop:
+    - YAGNI violations: speculative abstractions, unused extension points, unused options, future-proofing without an active requirement, and generic framework code that is not needed by the current slice.
+    - DRY violations: duplicated logic, duplicated constants, copied schemas, copied provider metadata, repeated validation, and near-duplicate tests.
+    - Weak tests: assertions that only check existence, snapshots without behavior, tests that mirror implementation details, broad happy-path-only tests, missing failure assertions, and tests that would pass if the implementation returned empty/default data.
+    - Unnecessary compatibility: backward-compatibility shims, migration layers, legacy aliases, old path re-exports, deprecated provider names, and compatibility code that preserves behavior not required by the current docs.
+    - Fallback slop: automatic provider fallback, silent default providers, try/catch chains that switch providers, hidden alternate endpoints, and fail-open behavior around model, transport, camera, STT, or TTS providers.
+    - Wrapper slop: pass-through helpers, unnecessary classes, one-line indirection layers, premature factories, needless registries, and abstractions with only one real implementation unless they encode an explicit boundary from the docs.
+    - Configuration slop: options with no user, settings that are never read, defaults that change behavior silently, or environment variables that bypass explicit provider selection.
+    - Documentation slop: stale roadmap text, contradicted source-of-truth docs, outdated provider discussion, or instructions that should be encoded in ESLint, TypeScript, ast-grep, tests, or Justfile tasks.
+
+    When flagging slop, explain the concrete maintenance or behavioral risk.
+    Prefer actionable recommendations that delete code, tighten a contract, add a deterministic check, or strengthen an assertion. Avoid style-only comments unless they point to a real bug, review burden, or future maintenance cost.
+chat:
+  auto_reply: true
