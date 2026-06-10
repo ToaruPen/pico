@@ -18,6 +18,9 @@ test:
 smoke-voice-providers:
   npm run smoke:voice-providers
 
+smoke-pi-runtime:
+  npm run smoke:pi-runtime
+
 ast:
   npm run ast:test
   npm run ast

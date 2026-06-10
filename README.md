@@ -28,6 +28,19 @@ Run the same parallel gate shape used by CI:
 just ci
 ```
 
+Run the authenticated Pi Agent runtime smoke after `pi` is configured with model
+credentials:
+
+```bash
+just smoke-pi-runtime
+```
+
+To pass explicit Pi provider/model flags, run:
+
+```bash
+npm run smoke:pi-runtime -- --provider openai --model gpt-4o-mini
+```
+
 Run the optional live voice provider smoke. Without provider environment
 variables, the command exits successfully with explicit skipped sections:
 
