@@ -15,6 +15,9 @@ format:
 test:
   npm run test
 
+smoke-voice-providers:
+  npm run smoke:voice-providers
+
 ast:
   npm run ast:test
   npm run ast

@@ -28,6 +28,31 @@ Run the same parallel gate shape used by CI:
 just ci
 ```
 
+Run the optional live voice provider smoke. Without provider environment
+variables, the command exits successfully with explicit skipped sections:
+
+```bash
+just smoke-voice-providers
+```
+
+To run the Aivis Speech TTS smoke:
+
+```bash
+PICO_TTS_AIVIS_BASE_URL=http://127.0.0.1:10101 \
+PICO_TTS_AIVIS_SPEAKER_ID=1 \
+just smoke-voice-providers
+```
+
+To run the mlx-whisper STT smoke, provide a known PCM16LE sample:
+
+```bash
+PICO_STT_MLX_WHISPER_BASE_URL=http://127.0.0.1:8765 \
+PICO_STT_SAMPLE_PCM16LE_PATH=./samples/known-ja.pcm \
+PICO_STT_SAMPLE_RATE_HZ=16000 \
+PICO_STT_CHANNELS=1 \
+just smoke-voice-providers
+```
+
 See:
 
 - `AGENTS.md` for agent-facing repository guidance.
