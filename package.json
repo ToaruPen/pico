@@ -21,6 +21,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "smoke:camera-tapo": "jiti scripts/smoke/tapo-rtsp-snapshot.ts",
+    "smoke:ollama-vlm": "jiti scripts/smoke/ollama-vlm-connectivity.ts",
     "lint": "eslint .",
     "format": "biome format --write .",
     "format:check": "biome ci .",

@@ -18,6 +18,9 @@ test:
 smoke-camera-tapo:
   npm run smoke:camera-tapo
 
+smoke-ollama-vlm:
+  npm run smoke:ollama-vlm
+
 ast:
   npm run ast:test
   npm run ast
