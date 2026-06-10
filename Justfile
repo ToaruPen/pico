@@ -15,14 +15,20 @@ format:
 test:
   npm run test
 
-smoke-camera-tapo:
-  npm run smoke:camera-tapo
-
 smoke-camera-vlm-scene:
   npm run smoke:camera-vlm-scene
 
 smoke-ollama-vlm:
   npm run smoke:ollama-vlm
+
+smoke-camera-tapo:
+  npm run smoke:camera-tapo
+
+smoke-voice-providers:
+  npm run smoke:voice-providers
+
+smoke-pi-runtime:
+  npm run smoke:pi-runtime
 
 ast:
   npm run ast:test

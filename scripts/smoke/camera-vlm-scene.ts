@@ -105,6 +105,13 @@ export function cameraVlmSceneSmokeExitCode(report: CameraVlmSceneSmokeReport): 
   return report.status === "failed" ? 1 : 0;
 }
 
+export function formatCameraVlmSceneSmokeFatalError(
+  error: unknown,
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  return sanitizeMessage(errorMessage(error), readDirectExecutionSensitiveValues(env));
+}
+
 function buildCameraVlmSceneSmokePlan(env: NodeJS.ProcessEnv):
   | {
       readonly status: "run";
@@ -220,6 +227,15 @@ function readSensitiveValues(env: NodeJS.ProcessEnv, rtspUrl: string): readonly 
   return [...new Set(values.filter((value) => value.trim() !== ""))];
 }
 
+function readDirectExecutionSensitiveValues(env: NodeJS.ProcessEnv): readonly string[] {
+  const values = [
+    readEnvironment(env, "PICO_TAPO_USER"),
+    readEnvironment(env, "PICO_TAPO_PASSWORD")
+  ].flatMap((value) => (value === undefined ? [] : [value, encodeURIComponent(value)]));
+
+  return [...new Set(values.filter((value) => value.trim() !== ""))];
+}
+
 function readEnvironment(env: NodeJS.ProcessEnv, name: string): string | undefined {
   const value = env[name]?.trim();
 
@@ -264,7 +280,7 @@ if (isDirectExecution()) {
       );
       process.exitCode = 1;
     } else {
-      process.stderr.write(`${errorMessage(error)}\n`);
+      process.stderr.write(`${formatCameraVlmSceneSmokeFatalError(error)}\n`);
       process.exitCode = 2;
     }
   }

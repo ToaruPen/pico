@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   cameraVlmSceneSmokeExitCode,
+  formatCameraVlmSceneSmokeFatalError,
   runCameraVlmSceneSmoke
 } from "../scripts/smoke/camera-vlm-scene.js";
 import type { SceneDescription } from "../src/modules/vision/index.js";
@@ -144,5 +145,19 @@ describe("camera to VLM scene smoke", () => {
       reason: "pico camera to VLM scene smoke description failed: VLM request failed"
     });
     expect(cameraVlmSceneSmokeExitCode(report)).toBe(1);
+  });
+
+  it("redacts RTSP URLs and camera credentials from direct execution fatal errors", () => {
+    const message = formatCameraVlmSceneSmokeFatalError(
+      new Error("rtsp://camera-user:camera-passphrase@192.168.10.25:554/stream2 camera-passphrase"),
+      {
+        PICO_TAPO_USER: "camera-user",
+        PICO_TAPO_PASSWORD: "camera-passphrase"
+      }
+    );
+
+    expect(message).not.toContain("rtsp://");
+    expect(message).not.toContain("camera-user");
+    expect(message).not.toContain("camera-passphrase");
   });
 });
