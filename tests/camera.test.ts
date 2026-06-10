@@ -24,8 +24,33 @@ describe("RTSP snapshot boundary", () => {
     });
   });
 
+  it("builds an RTSP snapshot URL with a custom port", () => {
+    const source = defineRtspSnapshotSource({
+      ...snapshotSourceInput,
+      port: 8554
+    });
+
+    expect(source.url).toBe("rtsp://camera%20user:pa%3Ass%40word@192.168.10.25:8554/stream2");
+  });
+
   it.each([
     ["missing source", undefined, "pico camera snapshot source config is required"],
+    [
+      "missing id",
+      {
+        ...snapshotSourceInput,
+        id: undefined
+      },
+      "pico camera snapshot source id is required"
+    ],
+    [
+      "empty username",
+      {
+        ...snapshotSourceInput,
+        username: ""
+      },
+      "pico camera snapshot source username is required"
+    ],
     [
       "invalid host",
       {
@@ -73,6 +98,30 @@ describe("RTSP snapshot boundary", () => {
         stream: "../stream2"
       },
       "pico camera snapshot source stream must be a relative RTSP path"
+    ],
+    [
+      "zero port",
+      {
+        ...snapshotSourceInput,
+        port: 0
+      },
+      "pico camera snapshot source port must be a valid TCP port"
+    ],
+    [
+      "out-of-range port",
+      {
+        ...snapshotSourceInput,
+        port: 99_999
+      },
+      "pico camera snapshot source port must be a valid TCP port"
+    ],
+    [
+      "string port",
+      {
+        ...snapshotSourceInput,
+        port: "554"
+      },
+      "pico camera snapshot source port must be a valid TCP port"
     ]
   ])("rejects invalid RTSP source config: %s", (_name, input, expectedMessage) => {
     expect(() => defineRtspSnapshotSource(input)).toThrow(expectedMessage);
