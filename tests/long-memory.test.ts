@@ -251,6 +251,46 @@ describe("SQLite long memory store", () => {
     });
   });
 
+  it("rejects malformed durable tags before marker scanning", async () => {
+    await withLongMemoryDatabase((path) => {
+      withLongMemoryStore(path, (store) => {
+        const input = {
+          title: "施設メモ",
+          body: "タグの型が壊れた入力。",
+          category: "care_continuity",
+          tags: "weather",
+          reviewedBy: "staff-a",
+          reviewedAt: "2026-06-10T09:00:00.000Z"
+        } as unknown as Parameters<LongMemoryStore["writeReviewed"]>[0];
+
+        expect(() => store.writeReviewed(input)).toThrow("pico long memory input is malformed");
+      });
+    });
+  });
+
+  it("rejects individual child assessment content in delete review notes", async () => {
+    await withLongMemoryDatabase((path) => {
+      withLongMemoryStore(path, (store) => {
+        const written = store.writeReviewed({
+          title: "室内準備",
+          body: "雨の日は工作セットを早めに準備する。",
+          category: "care_continuity",
+          reviewedBy: "staff-a",
+          reviewedAt: "2026-06-10T09:00:00.000Z"
+        });
+
+        expect(() =>
+          store.delete(written.id, {
+            reviewedBy: "staff-b",
+            reviewedAt: "2026-06-10T10:00:00.000Z",
+            note: "child evaluation note must not become durable memory."
+          })
+        ).toThrow("pico long memory must not contain individual child profile data");
+        expect(store.read(written.id)?.status).toBe("active");
+      });
+    });
+  });
+
   it("rolls back reviewed mutations when event recording fails", async () => {
     await withLongMemoryDatabase((path) => {
       withLongMemoryStore(path, (store) => {

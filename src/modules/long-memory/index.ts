@@ -231,22 +231,16 @@ function normalizeLongMemoryInput(input: ReviewedLongMemoryInput): NormalizedLon
   requireKnownInputKeys(input);
   const title = requireMemoryText(input.title);
   const body = requireMemoryText(input.body);
-  const reviewNote = input.reviewNote === undefined ? "" : requireMemoryText(input.reviewNote);
 
   rejectIndividualChildText(title);
   rejectIndividualChildText(body);
-  rejectIndividualChildText(reviewNote);
 
   return {
     title,
     body,
     category: requireLongMemoryCategory(input.category),
     tags: normalizeTags(input.tags),
-    review: normalizeReview(
-      input.reviewedBy,
-      input.reviewedAt,
-      reviewNote === "" ? undefined : reviewNote
-    )
+    review: normalizeReview(input.reviewedBy, input.reviewedAt, input.reviewNote)
   };
 }
 
@@ -448,6 +442,7 @@ function normalizeReview(
   note: unknown
 ): Required<LongMemoryReview> {
   const normalizedNote = note === undefined ? "" : requireMemoryText(note);
+  rejectIndividualChildText(normalizedNote);
 
   return {
     reviewedBy: requireReviewText(reviewedBy),
@@ -473,6 +468,10 @@ function normalizeStoredReview(
 function normalizeTags(value: readonly string[] | undefined): readonly string[] {
   if (value === undefined) {
     return [];
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error("pico long memory input is malformed");
   }
 
   const tags = value.map((tag) => {
