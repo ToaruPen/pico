@@ -15,6 +15,9 @@ format:
 test:
   npm run test
 
+smoke-camera-vlm-scene:
+  npm run smoke:camera-vlm-scene
+
 smoke-ollama-vlm:
   npm run smoke:ollama-vlm
 

@@ -233,7 +233,7 @@ export function parseOllamaSceneDescriptionResponse(
 }
 
 function buildOllamaChatUrl(endpoint: SelectedModelEndpointConfig): string {
-  return `${endpoint.host.tunnel.localBaseUrl}/api/chat`;
+  return new URL("/api/chat", endpoint.host.tunnel.localBaseUrl).toString();
 }
 
 function requireRecord(value: unknown): Record<string, unknown> {
