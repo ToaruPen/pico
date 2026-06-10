@@ -13,6 +13,7 @@ instructions.
 
 - `just --list`: show available repo tasks.
 - `just check`: run the full local gate.
+- `just ci`: run the parallel CI gate shape locally.
 - `just typecheck`: run TypeScript type checking.
 - `just lint`: run type-aware ESLint.
 - `just ast`: run ast-grep rule tests and scans.
@@ -27,6 +28,8 @@ instructions.
 - ast-grep: `sgconfig.yml`, `rules/`, and `rule-tests/`.
 - Vitest: `vitest.config.ts` and `tests/`.
 - npm package and Pi extension metadata: `package.json`.
+- GitHub Actions CI: `.github/workflows/ci.yml`.
+- CI parallel gate runner: `scripts/ci/run-quality-gates.sh`.
 
 ## Project-Specific Checks
 

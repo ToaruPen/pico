@@ -20,6 +20,12 @@ Run all local checks:
 just check
 ```
 
+Run the same parallel gate shape used by CI:
+
+```bash
+just ci
+```
+
 See:
 
 - `AGENTS.md` for agent-facing repository guidance.
@@ -28,4 +34,3 @@ See:
   module boundaries.
 - `docs/superpowers/plans/2026-06-09-pico-foundation-implementation-plan.md`
   for the current implementation plan.
-

@@ -22,7 +22,8 @@
     "format:check": "biome ci .",
     "ast": "ast-grep scan --config sgconfig.yml src tests",
     "ast:test": "ast-grep test --config sgconfig.yml --skip-snapshot-tests",
-    "check": "npm run typecheck && npm run lint && npm run ast:test && npm run ast && npm run format:check && npm run test"
+    "check": "npm run typecheck && npm run lint && npm run ast:test && npm run ast && npm run format:check && npm run test",
+    "check:ci": "bash scripts/ci/run-quality-gates.sh"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

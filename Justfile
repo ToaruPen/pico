@@ -21,3 +21,6 @@ ast:
 
 check:
   npm run check
+
+ci:
+  npm run check:ci

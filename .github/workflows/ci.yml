@@ -10,10 +10,14 @@ concurrency:
   group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.number) || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+
 jobs:
   pico:
     name: Pico quality gates
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
 
@@ -26,4 +30,4 @@ jobs:
         run: npm ci
 
       - name: Run quality gates
-        run: npm run check
+        run: npm run check:ci
