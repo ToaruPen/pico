@@ -157,6 +157,53 @@ describe("bounded vision scene description", () => {
     }
   });
 
+  it("aborts Ollama scene response parsing after the bounded request timeout", async () => {
+    vi.useFakeTimers();
+    const slowResponse = new Response("{}", { status: 200 });
+    vi.spyOn(slowResponse, "json").mockImplementation(() => new Promise<unknown>(() => undefined));
+    const slowJsonFetch: typeof fetch = () => Promise.resolve(slowResponse);
+    const settled = vi.fn<(message: string) => void>();
+
+    try {
+      void describeScene(sceneRequest, slowJsonFetch).catch((error: unknown) => {
+        settled(error instanceof Error ? error.message : String(error));
+      });
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await Promise.resolve();
+
+      expect(settled).toHaveBeenCalledWith("pico vision Ollama request timed out");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects late Ollama responses after the request timeout has already fired", async () => {
+    vi.useFakeTimers();
+    const slowResponse = new Response("{}", { status: 200 });
+    vi.spyOn(slowResponse, "json").mockImplementation(() => new Promise<unknown>(() => undefined));
+    const lateFetch: typeof fetch = () =>
+      new Promise((resolve) => {
+        setTimeout(() => {
+          resolve(slowResponse);
+        }, 31_000);
+      });
+    const settled = vi.fn<(message: string) => void>();
+
+    try {
+      void describeScene(sceneRequest, lateFetch).catch((error: unknown) => {
+        settled(error instanceof Error ? error.message : String(error));
+      });
+
+      await vi.advanceTimersByTimeAsync(31_000);
+      await Promise.resolve();
+
+      expect(settled).toHaveBeenCalledWith("pico vision Ollama request timed out");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     ["non-object response", []],
     ["missing message", {}],
@@ -188,6 +235,45 @@ describe("bounded vision scene description", () => {
         }
       })
     ).toThrow("pico vision scene response content is empty");
+  });
+
+  it("rejects model output that crosses individual child assessment boundaries", () => {
+    expect(() =>
+      parseOllamaSceneDescriptionResponse({
+        message: {
+          content: JSON.stringify({
+            summary: "A child ID badge is visible.",
+            observedPeople: ["child score appears high"],
+            environment: ["indoor room"],
+            humanAttention: ["staff should identify the child"],
+            uncertainty: ["single snapshot"]
+          })
+        }
+      })
+    ).toThrow("pico vision scene response must not identify or assess individual children");
+  });
+
+  it.each([
+    ["identify a child"],
+    ["diagnose the child"],
+    ["child diagnosis is likely"],
+    ["assess the child"],
+    ["子どもを診断"],
+    ["子どもを評価"]
+  ])("rejects model output boundary variant: %s", (boundaryText) => {
+    expect(() =>
+      parseOllamaSceneDescriptionResponse({
+        message: {
+          content: JSON.stringify({
+            summary: "A room is visible.",
+            observedPeople: [boundaryText],
+            environment: ["indoor room"],
+            humanAttention: [],
+            uncertainty: ["single snapshot"]
+          })
+        }
+      })
+    ).toThrow("pico vision scene response must not identify or assess individual children");
   });
 
   it("maps structured model output without returning raw image data", async () => {

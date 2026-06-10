@@ -76,6 +76,7 @@ const longMemoryCategories = new Set<LongMemoryCategory>([
   "facility_knowledge",
   "operational_note"
 ]);
+const minimumTrigramQueryLength = 3;
 const longMemoryInputKeys = new Set([
   "title",
   "body",
@@ -227,8 +228,7 @@ function initializeLongMemorySchema(database: DatabaseSync): void {
 }
 
 function normalizeLongMemoryInput(input: ReviewedLongMemoryInput): NormalizedLongMemoryInput {
-  rejectIndividualChildFields(input);
-  requireKnownInputKeys(input);
+  validateLongMemoryInputKeys(input);
   const title = requireMemoryText(input.title);
   const body = requireMemoryText(input.body);
 
@@ -326,7 +326,7 @@ function readActiveMemory(database: DatabaseSync, id: number): LongMemoryRecord 
 }
 
 function searchActiveMemories(database: DatabaseSync, query: string): LongMemorySearchResult[] {
-  if (query.length >= 3) {
+  if (query.length >= minimumTrigramQueryLength) {
     return searchActiveMemoriesByMatch(database, query);
   }
 
@@ -490,16 +490,12 @@ function normalizeTags(value: readonly string[] | undefined): readonly string[] 
   return Object.freeze(tags);
 }
 
-function rejectIndividualChildFields(input: Record<string, unknown>): void {
+function validateLongMemoryInputKeys(input: Record<string, unknown>): void {
   for (const key of Object.keys(input)) {
     if (isIndividualChildField(key)) {
       throw new Error("pico long memory must not contain individual child profile data");
     }
-  }
-}
 
-function requireKnownInputKeys(input: Record<string, unknown>): void {
-  for (const key of Object.keys(input)) {
     if (!longMemoryInputKeys.has(key)) {
       throw new Error("pico long memory input is malformed");
     }
@@ -532,28 +528,22 @@ function requireLongMemoryCategory(value: unknown): LongMemoryCategory {
 }
 
 function requireMemoryText(value: unknown): string {
-  if (typeof value !== "string") {
-    throw new Error("pico long memory text is required");
-  }
-
-  const trimmed = value.trim();
-
-  if (trimmed === "") {
-    throw new Error("pico long memory text is required");
-  }
-
-  return trimmed;
+  return requireNonEmptyTrimmedString(value, "pico long memory text is required");
 }
 
 function requireReviewText(value: unknown): string {
+  return requireNonEmptyTrimmedString(value, "pico long memory review metadata is required");
+}
+
+function requireNonEmptyTrimmedString(value: unknown, message: string): string {
   if (typeof value !== "string") {
-    throw new Error("pico long memory review metadata is required");
+    throw new Error(message);
   }
 
   const trimmed = value.trim();
 
   if (trimmed === "") {
-    throw new Error("pico long memory review metadata is required");
+    throw new Error(message);
   }
 
   return trimmed;
