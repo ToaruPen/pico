@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   createStructuredAuditLog,
+  type OpenTelemetryAuditLogRecord,
   toOpenTelemetryLogRecord
 } from "../../src/modules/audit/index.js";
 import {
@@ -54,7 +55,7 @@ export type PiRuntimeSmokeCommandResult = {
 };
 
 export type PicoMilestoneSmokeDependencies = {
-  readonly runPiRuntimeCommand?: () => PiRuntimeSmokeCommandResult;
+  readonly runPiRuntimeCommand?: (env: NodeJS.ProcessEnv) => PiRuntimeSmokeCommandResult;
   readonly runVoiceProviderSmoke?: (env: NodeJS.ProcessEnv) => Promise<VoiceSmokeReport>;
   readonly runTapoRtspSnapshotSmoke?: (env: NodeJS.ProcessEnv) => Promise<TapoRtspSmokeReport>;
   readonly runOllamaVlmConnectivitySmoke?: (
@@ -90,7 +91,7 @@ export async function runPicoMilestoneSmokeSuite(
 ): Promise<PicoMilestoneSmokeReport> {
   const sections: PicoMilestoneSmokeSectionReport[] = [];
 
-  sections.push(runPiRuntimeSection(dependencies.runPiRuntimeCommand ?? runPiRuntimeCommand));
+  sections.push(runPiRuntimeSection(dependencies.runPiRuntimeCommand ?? runPiRuntimeCommand, env));
   sections.push(
     ...(await runVoiceSections(dependencies.runVoiceProviderSmoke ?? runVoiceProviderSmoke, env))
   );
@@ -130,11 +131,11 @@ export function picoMilestoneSmokeExitCode(report: PicoMilestoneSmokeReport): nu
   return report.status === "failed" ? 1 : 0;
 }
 
-function runPiRuntimeCommand(): PiRuntimeSmokeCommandResult {
+function runPiRuntimeCommand(env: NodeJS.ProcessEnv): PiRuntimeSmokeCommandResult {
   const result = spawnSync("npm", ["run", "smoke:pi-runtime", "--silent"], {
     cwd: repositoryRoot,
     encoding: "utf8",
-    env: process.env,
+    env,
     timeout: 70_000
   });
 
@@ -146,9 +147,14 @@ function runPiRuntimeCommand(): PiRuntimeSmokeCommandResult {
 }
 
 function runPiRuntimeSection(
-  runCommand: () => PiRuntimeSmokeCommandResult
+  runCommand: (env: NodeJS.ProcessEnv) => PiRuntimeSmokeCommandResult,
+  env: NodeJS.ProcessEnv
 ): PicoMilestoneSmokeSectionReport {
-  return mapPiRuntimeCommandResult(runCommand());
+  try {
+    return mapPiRuntimeCommandResult(runCommand(env));
+  } catch (error) {
+    return failedSection("pi_runtime", "pi", errorMessage(error));
+  }
 }
 
 function mapPiRuntimeCommandResult(
@@ -239,6 +245,7 @@ async function runMemoryAndAuditSections(): Promise<readonly PicoMilestoneSmokeS
         note: "Milestone smoke reviewed memory candidate."
       });
       const otelRecords = audit.entries().map(toOpenTelemetryLogRecord);
+      const firstOtelRecord = validateAuditOtelRecords(audit.entries().length, otelRecords);
       assertPromotedMemorySearch(path);
 
       return [
@@ -256,7 +263,8 @@ async function runMemoryAndAuditSections(): Promise<readonly PicoMilestoneSmokeS
           status: "passed",
           provider: "structured-audit",
           details: {
-            category: "memory_write",
+            category: firstOtelRecord.attributes["pico.audit.category"],
+            eventName: firstOtelRecord.attributes["event.name"],
             eventCount: audit.entries().length,
             otelRecordCount: otelRecords.length
           }
@@ -272,6 +280,37 @@ async function runMemoryAndAuditSections(): Promise<readonly PicoMilestoneSmokeS
     ];
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+}
+
+function validateAuditOtelRecords(
+  eventCount: number,
+  records: readonly OpenTelemetryAuditLogRecord[]
+): OpenTelemetryAuditLogRecord {
+  const firstRecord = records[0];
+
+  if (eventCount === 0 || firstRecord === undefined) {
+    throw new Error("pico milestone smoke did not emit any audit OTel records");
+  }
+
+  if (records.length !== eventCount) {
+    throw new Error("pico milestone smoke emitted mismatched audit OTel record counts");
+  }
+
+  for (const record of records) {
+    assertMemoryWriteOtelRecord(record);
+  }
+
+  return firstRecord;
+}
+
+function assertMemoryWriteOtelRecord(record: OpenTelemetryAuditLogRecord): void {
+  if (record.attributes["pico.audit.category"] !== "memory_write") {
+    throw new Error("pico milestone smoke emitted an unexpected audit OTel category");
+  }
+
+  if (typeof record.attributes["event.name"] !== "string") {
+    throw new Error("pico milestone smoke did not emit an audit event.name attribute");
   }
 }
 

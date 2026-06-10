@@ -152,6 +152,58 @@ describe("pico milestone smoke suite", () => {
     });
   });
 
+  it("passes the suite environment into the Pi runtime command", async () => {
+    const suiteEnvironment = {
+      PICO_PI_AGENT_TOKEN: "configured-for-test"
+    } as NodeJS.ProcessEnv;
+    let observedEnvironment: NodeJS.ProcessEnv | undefined;
+
+    const report = await runPicoMilestoneSmokeSuite(suiteEnvironment, {
+      ...configuredSectionDependencies(),
+      runPiRuntimeCommand: (env) => {
+        observedEnvironment = env;
+
+        return piPassed;
+      }
+    });
+
+    expect(observedEnvironment).toBe(suiteEnvironment);
+    expect(report.sections[0]?.status).toBe("passed");
+  });
+
+  it("normalizes thrown Pi runtime errors into a failed section", async () => {
+    const report = await runPicoMilestoneSmokeSuite(
+      {},
+      {
+        ...configuredSectionDependencies(),
+        runPiRuntimeCommand: () => {
+          throw new Error("Pi runtime command crashed.");
+        }
+      }
+    );
+
+    expect(report.sections[0]).toEqual({
+      name: "pi_runtime",
+      status: "failed",
+      provider: "pi",
+      reason: "Pi runtime command crashed."
+    });
+    expect(report.status).toBe("failed");
+    expect(picoMilestoneSmokeExitCode(report)).toBe(1);
+  });
+
+  it("reports audit OTel evidence from mapped audit records", async () => {
+    const report = await runPicoMilestoneSmokeSuite({}, configuredSectionDependencies());
+    const auditSection = requireSection(report, "audit_otel");
+
+    expect(auditSection.details).toMatchObject({
+      category: "memory_write",
+      eventName: "long_memory.candidate_job.enqueued",
+      eventCount: 4,
+      otelRecordCount: 4
+    });
+  });
+
   it("classifies missing Pi Agent model credentials as an actionable skip", async () => {
     const report = await runPicoMilestoneSmokeSuite(
       {},
