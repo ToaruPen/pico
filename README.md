@@ -28,6 +28,33 @@ Run the same parallel gate shape used by CI:
 just ci
 ```
 
+Run the milestone smoke suite after local credentials and hardware/provider
+sidecars are configured. Missing optional provider configuration is reported as
+an explicit skipped section; failed configured sections make the command fail.
+
+```bash
+just smoke-milestone
+```
+
+For full real-world validation, run the deterministic gate first, then the
+milestone suite with the selected provider environment:
+
+```bash
+just check
+PICO_STT_MLX_WHISPER_BASE_URL=http://127.0.0.1:8765 \
+PICO_STT_SAMPLE_PCM16LE_PATH=./samples/known-ja.pcm \
+PICO_TTS_AIVIS_BASE_URL=http://127.0.0.1:10101 \
+PICO_TTS_AIVIS_SPEAKER_ID=1 \
+PICO_TAPO_HOST=192.168.10.25 \
+PICO_TAPO_USER=your-camera-user \
+PICO_TAPO_PASSWORD=your-camera-password \
+PICO_TAPO_STREAM=stream2 \
+PICO_VISION_LOCAL_BASE_URL=http://127.0.0.1:11434 \
+PICO_VISION_TUNNEL_KIND=tailscale_ssh \
+PICO_VISION_SSH_TARGET=pico-vision-host \
+just smoke-milestone
+```
+
 Run the authenticated Pi Agent runtime smoke after `pi` is configured with model
 credentials:
 

@@ -15,6 +15,9 @@ format:
 test:
   npm run test
 
+smoke-milestone:
+  npm run smoke:milestone
+
 smoke-camera-vlm-scene:
   npm run smoke:camera-vlm-scene
 

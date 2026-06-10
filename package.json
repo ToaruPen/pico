@@ -20,6 +20,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "smoke:milestone": "jiti scripts/smoke/milestone-suite.ts",
     "smoke:camera-vlm-scene": "jiti scripts/smoke/camera-vlm-scene.ts",
     "smoke:ollama-vlm": "jiti scripts/smoke/ollama-vlm-connectivity.ts",
     "smoke:camera-tapo": "jiti scripts/smoke/tapo-rtsp-snapshot.ts",
