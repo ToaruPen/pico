@@ -131,6 +131,35 @@ describe("bounded vision scene description", () => {
     expect(request.init?.body).toBe(JSON.stringify(expectedOllamaSceneRequestBody));
   });
 
+  it("normalizes the Ollama image chat URL when the local tunnel URL has a trailing slash", async () => {
+    let recordedRequest: RecordedRequest | undefined;
+    const endpointWithSlash = defineSelectedModelEndpoint({
+      ...selectedEndpoint,
+      host: {
+        ...selectedEndpoint.host,
+        tunnel: {
+          ...selectedEndpoint.host.tunnel,
+          localBaseUrl: "http://127.0.0.1:11434/"
+        }
+      }
+    });
+    const recordingFetch: typeof fetch = (input, init) => {
+      recordedRequest = { input, init };
+
+      return Promise.resolve(buildOllamaResponse(structuredSceneContent));
+    };
+
+    await describeScene(
+      {
+        ...sceneRequest,
+        endpoint: endpointWithSlash
+      },
+      recordingFetch
+    );
+
+    expect(requireRecordedRequest(recordedRequest).input).toBe("http://127.0.0.1:11434/api/chat");
+  });
+
   it("aborts Ollama scene requests after the bounded request timeout", async () => {
     vi.useFakeTimers();
     let abortObserved = false;

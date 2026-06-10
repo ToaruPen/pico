@@ -62,6 +62,28 @@ PICO_VISION_SSH_TARGET=pico-vision-host \
 just smoke-ollama-vlm
 ```
 
+Run the optional camera-to-VLM scene smoke. Without both `PICO_TAPO_HOST` and
+`PICO_VISION_LOCAL_BASE_URL`, the command exits successfully with an explicit
+skipped report:
+
+```bash
+just smoke-camera-vlm-scene
+```
+
+To capture one Tapo RTSP JPEG frame and send that frame to the selected Ollama
+scene description path:
+
+```bash
+PICO_TAPO_HOST=192.168.10.25 \
+PICO_TAPO_USER=your-camera-user \
+PICO_TAPO_PASSWORD=your-camera-password \
+PICO_TAPO_STREAM=stream2 \
+PICO_VISION_LOCAL_BASE_URL=http://127.0.0.1:11434 \
+PICO_VISION_TUNNEL_KIND=tailscale_ssh \
+PICO_VISION_SSH_TARGET=pico-vision-host \
+just smoke-camera-vlm-scene
+```
+
 See:
 
 - `AGENTS.md` for agent-facing repository guidance.
