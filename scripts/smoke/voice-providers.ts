@@ -2,6 +2,7 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
+import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
 import {
   type AivisSpeechServiceConfig,
   createAivisSpeechTtsClient,
@@ -64,9 +65,9 @@ type VoiceSmokePlan = {
 };
 
 export async function runVoiceProviderSmoke(
-  env: NodeJS.ProcessEnv = process.env
+  config: PicoConfig = loadPicoConfigFromEnvironment()
 ): Promise<VoiceSmokeReport> {
-  const plan = buildVoiceSmokePlan(env);
+  const plan = buildVoiceSmokePlan(config);
 
   return {
     stt: await runSttSmoke(plan.stt),
@@ -74,10 +75,10 @@ export async function runVoiceProviderSmoke(
   };
 }
 
-export function buildVoiceSmokePlan(env: NodeJS.ProcessEnv): VoiceSmokePlan {
+export function buildVoiceSmokePlan(config: PicoConfig): VoiceSmokePlan {
   return {
-    stt: buildSttSmokePlan(env),
-    tts: buildTtsSmokePlan(env)
+    stt: buildSttSmokePlan(config),
+    tts: buildTtsSmokePlan(config)
   };
 }
 
@@ -183,160 +184,66 @@ async function runTtsSmoke(plan: TtsSmokePlan): Promise<VoiceSmokeSectionReport>
   };
 }
 
-function buildSttSmokePlan(env: NodeJS.ProcessEnv): SttSmokePlan {
-  const localBaseUrl = readEnvironment(env, "PICO_STT_MLX_WHISPER_BASE_URL");
+function buildSttSmokePlan(config: PicoConfig): SttSmokePlan {
+  const mlxWhisper = config.voice.stt.mlxWhisper;
 
-  if (localBaseUrl === undefined) {
+  if (mlxWhisper === undefined) {
     return {
       status: "skip",
-      reason: "Set PICO_STT_MLX_WHISPER_BASE_URL to run the mlx-whisper STT smoke."
+      reason: "Set voice.stt.mlxWhisper in pico config to run the mlx-whisper STT smoke."
     };
   }
-
-  const samplePath = requireEnvironment(
-    env,
-    "PICO_STT_SAMPLE_PCM16LE_PATH",
-    "PICO_STT_SAMPLE_PCM16LE_PATH is required when PICO_STT_MLX_WHISPER_BASE_URL is set"
-  );
 
   return {
     status: "run",
-    sidecar: buildMlxWhisperSidecar(localBaseUrl, env),
-    samplePath,
-    sampleRateHz:
-      readPositiveIntegerEnvironment(env, "PICO_STT_SAMPLE_RATE_HZ") ?? defaultSampleRateHz,
-    channels: readPositiveIntegerEnvironment(env, "PICO_STT_CHANNELS") ?? defaultChannels
+    sidecar: buildMlxWhisperSidecar(mlxWhisper),
+    samplePath: mlxWhisper.samplePcm16lePath,
+    sampleRateHz: mlxWhisper.sampleRateHz ?? defaultSampleRateHz,
+    channels: mlxWhisper.channels ?? defaultChannels
   };
 }
 
-function buildTtsSmokePlan(env: NodeJS.ProcessEnv): TtsSmokePlan {
-  const localBaseUrl = readEnvironment(env, "PICO_TTS_AIVIS_BASE_URL");
+function buildTtsSmokePlan(config: PicoConfig): TtsSmokePlan {
+  const aivis = config.voice.tts.aivis;
 
-  if (localBaseUrl === undefined) {
+  if (aivis === undefined) {
     return {
       status: "skip",
-      reason: "Set PICO_TTS_AIVIS_BASE_URL to run the Aivis Speech TTS smoke."
+      reason: "Set voice.tts.aivis in pico config to run the Aivis Speech TTS smoke."
     };
   }
-
-  const speakerId = requireNonNegativeIntegerEnvironment(
-    env,
-    "PICO_TTS_AIVIS_SPEAKER_ID",
-    "PICO_TTS_AIVIS_SPEAKER_ID is required when PICO_TTS_AIVIS_BASE_URL is set"
-  );
 
   return {
     status: "run",
     service: defineAivisSpeechService({
-      id: readEnvironment(env, "PICO_TTS_AIVIS_ID") ?? "local-aivis",
+      id: aivis.id ?? "local-aivis",
       provider: "aivis-speech",
-      localBaseUrl,
-      speakerId,
-      timeoutMs: readPositiveIntegerEnvironment(env, "PICO_TTS_TIMEOUT_MS") ?? defaultTimeoutMs
+      localBaseUrl: aivis.localBaseUrl,
+      speakerId: aivis.speakerId,
+      timeoutMs: aivis.timeoutMs ?? defaultTimeoutMs
     }),
-    text: readEnvironment(env, "PICO_TTS_TEXT") ?? defaultTtsText
+    text: aivis.text ?? defaultTtsText
   };
 }
 
 function buildMlxWhisperSidecar(
-  localBaseUrl: string,
-  env: NodeJS.ProcessEnv
+  config: PicoConfig["voice"]["stt"]["mlxWhisper"]
 ): MlxWhisperSidecarConfig {
+  if (config === undefined) {
+    throw new Error("pico mlx-whisper smoke config is required");
+  }
+
   return defineMlxWhisperSidecar({
-    id: readEnvironment(env, "PICO_STT_MLX_WHISPER_ID") ?? "local-mlx-whisper",
+    id: config.id ?? "local-mlx-whisper",
     provider: "mlx-whisper",
-    localBaseUrl,
-    modelRepo:
-      readEnvironment(env, "PICO_STT_MLX_WHISPER_MODEL_REPO") ?? defaultMlxWhisperModelRepo,
-    language: readEnvironment(env, "PICO_STT_LANGUAGE") ?? defaultLanguage,
-    timeoutMs: readPositiveIntegerEnvironment(env, "PICO_STT_TIMEOUT_MS") ?? defaultTimeoutMs,
+    localBaseUrl: config.localBaseUrl,
+    modelRepo: config.modelRepo ?? defaultMlxWhisperModelRepo,
+    language: config.language ?? defaultLanguage,
+    timeoutMs: config.timeoutMs ?? defaultTimeoutMs,
     warmup: {
-      audioSeconds:
-        readPositiveNumberEnvironment(env, "PICO_STT_WARMUP_AUDIO_SECONDS") ??
-        defaultWarmupAudioSeconds
+      audioSeconds: config.warmupAudioSeconds ?? defaultWarmupAudioSeconds
     }
   });
-}
-
-function readEnvironment(env: NodeJS.ProcessEnv, name: string): string | undefined {
-  const value = env[name]?.trim();
-
-  return value === "" ? undefined : value;
-}
-
-function requireEnvironment(env: NodeJS.ProcessEnv, name: string, message: string): string {
-  const value = readEnvironment(env, name);
-
-  if (value === undefined) {
-    throw new Error(message);
-  }
-
-  return value;
-}
-
-function readPositiveIntegerEnvironment(env: NodeJS.ProcessEnv, name: string): number | undefined {
-  const value = readEnvironment(env, name);
-
-  if (value === undefined) {
-    return undefined;
-  }
-
-  const parsed = Number(value);
-
-  if (!Number.isInteger(parsed) || parsed < 1) {
-    throw new Error(`${name} must be a positive integer`);
-  }
-
-  return parsed;
-}
-
-function readNonNegativeIntegerEnvironment(
-  env: NodeJS.ProcessEnv,
-  name: string
-): number | undefined {
-  const value = readEnvironment(env, name);
-
-  if (value === undefined) {
-    return undefined;
-  }
-
-  const parsed = Number(value);
-
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw new Error(`${name} must be a non-negative integer`);
-  }
-
-  return parsed;
-}
-
-function requireNonNegativeIntegerEnvironment(
-  env: NodeJS.ProcessEnv,
-  name: string,
-  message: string
-): number {
-  const value = readNonNegativeIntegerEnvironment(env, name);
-
-  if (value === undefined) {
-    throw new Error(message);
-  }
-
-  return value;
-}
-
-function readPositiveNumberEnvironment(env: NodeJS.ProcessEnv, name: string): number | undefined {
-  const value = readEnvironment(env, name);
-
-  if (value === undefined) {
-    return undefined;
-  }
-
-  const parsed = Number(value);
-
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`${name} must be a positive number`);
-  }
-
-  return parsed;
 }
 
 function voiceSmokeFailure(

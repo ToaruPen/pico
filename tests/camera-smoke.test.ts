@@ -5,26 +5,33 @@ import {
   runTapoRtspSnapshotSmoke,
   tapoRtspSmokeExitCode
 } from "../scripts/smoke/tapo-rtsp-snapshot.js";
+import { definePicoConfig } from "../src/config/index.js";
 
 describe("Tapo RTSP snapshot smoke configuration", () => {
   it("skips when the Tapo host is not configured", async () => {
-    await expect(runTapoRtspSnapshotSmoke({})).resolves.toEqual({
+    await expect(runTapoRtspSnapshotSmoke(definePicoConfig({}))).resolves.toEqual({
       status: "skipped",
       provider: "tapo-rtsp",
-      reason: "Set PICO_TAPO_HOST to run the Tapo RTSP snapshot smoke."
+      reason: "Set camera.tapo in pico config to run the Tapo RTSP snapshot smoke."
     });
   });
 
-  it("builds a private RTSP source from configured environment", () => {
-    const plan = buildTapoRtspSmokePlan({
-      PICO_TAPO_HOST: "192.168.10.25",
-      PICO_TAPO_USER: " camera user ",
-      PICO_TAPO_PASSWORD: " camera passphrase ",
-      PICO_TAPO_STREAM: "stream1",
-      PICO_TAPO_PORT: "8554",
-      PICO_TAPO_TIMEOUT_MS: "15000",
-      PICO_TAPO_MAX_FRAME_BYTES: "1024"
-    });
+  it("builds a private RTSP source from configured YAML settings", () => {
+    const plan = buildTapoRtspSmokePlan(
+      definePicoConfig({
+        camera: {
+          tapo: {
+            host: "192.168.10.25",
+            user: " camera user ",
+            password: " camera passphrase ",
+            stream: "stream1",
+            port: 8554,
+            timeoutMs: 15_000,
+            maxFrameBytes: 1024
+          }
+        }
+      })
+    );
 
     expect(plan).toMatchObject({
       status: "run",
@@ -39,17 +46,25 @@ describe("Tapo RTSP snapshot smoke configuration", () => {
 
   it("rejects partial Tapo smoke configuration", () => {
     expect(() =>
-      buildTapoRtspSmokePlan({
-        PICO_TAPO_HOST: "192.168.10.25"
+      definePicoConfig({
+        camera: {
+          tapo: {
+            host: "192.168.10.25"
+          }
+        }
       })
-    ).toThrow("PICO_TAPO_USER is required when PICO_TAPO_HOST is set");
+    ).toThrow("pico config camera.tapo.user is required when camera.tapo is set");
 
     expect(() =>
-      buildTapoRtspSmokePlan({
-        PICO_TAPO_HOST: "192.168.10.25",
-        PICO_TAPO_USER: "camera"
+      definePicoConfig({
+        camera: {
+          tapo: {
+            host: "192.168.10.25",
+            user: "camera"
+          }
+        }
       })
-    ).toThrow("PICO_TAPO_PASSWORD is required when PICO_TAPO_HOST is set");
+    ).toThrow("pico config camera.tapo.password is required when camera.tapo is set");
   });
 
   it("returns a failing process code only for failed smoke reports", () => {

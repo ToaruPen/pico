@@ -1,3 +1,7 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -8,6 +12,7 @@ import {
   picoMilestoneSmokeExitCode,
   runPicoMilestoneSmokeSuite
 } from "../scripts/smoke/milestone-suite.js";
+import type { PicoConfig } from "../src/config/index.js";
 
 const piPassed = {
   status: 0,
@@ -37,7 +42,7 @@ function configuredSectionDependencies(): PicoMilestoneSmokeDependencies {
       Promise.resolve({
         status: "skipped",
         provider: "tapo-rtsp",
-        reason: "Tapo camera env is not configured."
+        reason: "Tapo camera config is not configured."
       }),
     runOllamaVlmConnectivitySmoke: () =>
       Promise.resolve({
@@ -54,7 +59,7 @@ function configuredSectionDependencies(): PicoMilestoneSmokeDependencies {
       Promise.resolve({
         status: "skipped",
         provider: "tapo-rtsp+ollama",
-        reason: "Camera env is not configured."
+        reason: "Camera config is not configured."
       })
   };
 }
@@ -137,7 +142,7 @@ describe("pico milestone smoke suite", () => {
           Promise.resolve({
             status: "skipped",
             provider: "tapo-rtsp+ollama",
-            reason: "Camera env is not configured."
+            reason: "Camera config is not configured."
           })
       }
     );
@@ -169,6 +174,109 @@ describe("pico milestone smoke suite", () => {
 
     expect(observedEnvironment).toBe(suiteEnvironment);
     expect(report.sections[0]?.status).toBe("passed");
+  });
+
+  it("loads YAML config once and passes it to provider smoke sections", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-milestone-config-"));
+    const configPath = join(directory, "pico.local.yaml");
+    writeFileSync(
+      configPath,
+      `
+camera:
+  tapo:
+    host: 192.168.10.25
+    user: camera-user
+    password: camera-passphrase
+vision:
+  ollama:
+    localBaseUrl: http://127.0.0.1:11434
+`
+    );
+
+    const observedConfigs: PicoConfig[] = [];
+    const report = await runPicoMilestoneSmokeSuite(
+      { PICO_CONFIG_PATH: configPath },
+      {
+        ...configuredSectionDependencies(),
+        runVoiceProviderSmoke: (config) => {
+          observedConfigs.push(config);
+
+          return Promise.resolve({
+            stt: {
+              status: "skipped",
+              provider: "mlx-whisper"
+            },
+            tts: {
+              status: "skipped",
+              provider: "aivis-speech"
+            }
+          });
+        },
+        runTapoRtspSnapshotSmoke: (config) => {
+          observedConfigs.push(config);
+
+          return Promise.resolve({
+            status: "skipped",
+            provider: "tapo-rtsp"
+          });
+        },
+        runOllamaVlmConnectivitySmoke: (config) => {
+          observedConfigs.push(config);
+
+          return Promise.resolve({
+            status: "skipped",
+            provider: "ollama"
+          });
+        },
+        runCameraVlmSceneSmoke: (config) => {
+          observedConfigs.push(config);
+
+          return Promise.resolve({
+            status: "skipped",
+            provider: "tapo-rtsp+ollama",
+            reason: "Camera config is not configured."
+          });
+        }
+      }
+    );
+
+    expect(report.status).toBe("skipped");
+    expect(observedConfigs).toHaveLength(4);
+    expect(new Set(observedConfigs).size).toBe(1);
+    expect(observedConfigs[0]?.camera.tapo?.host).toBe("192.168.10.25");
+    expect(observedConfigs[0]?.vision.ollama?.localBaseUrl).toBe("http://127.0.0.1:11434");
+  });
+
+  it("reports config load failures without bypassing the milestone report", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-milestone-invalid-config-"));
+    const configPath = join(directory, "pico.local.yaml");
+    writeFileSync(
+      configPath,
+      `
+vision:
+  ollama:
+    localBaseUrl: http://192.168.0.10:11434
+`
+    );
+
+    const report = await runPicoMilestoneSmokeSuite(
+      { PICO_CONFIG_PATH: configPath },
+      {
+        ...configuredSectionDependencies(),
+        runPiRuntimeCommand: () => piPassed
+      }
+    );
+
+    expect(report.status).toBe("failed");
+    expect(requireSection(report, "pi_runtime").status).toBe("passed");
+    expect(requireSection(report, "ollama_vlm")).toEqual({
+      name: "ollama_vlm",
+      status: "failed",
+      provider: "ollama",
+      reason:
+        "pico config load failed: pico config vision.ollama.localBaseUrl must use a local SSH tunnel URL"
+    });
+    expectMemoryAndAuditEvidence(report);
   });
 
   it("normalizes thrown Pi runtime errors into a failed section", async () => {
@@ -239,7 +347,7 @@ describe("pico milestone smoke suite", () => {
           Promise.resolve({
             status: "skipped",
             provider: "tapo-rtsp+ollama",
-            reason: "Camera env is not configured."
+            reason: "Camera config is not configured."
           })
       }
     );

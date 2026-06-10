@@ -8,4 +8,4 @@ coverage/
 *.log
 reports/
 tmp/
-
+config/pico.local.yaml

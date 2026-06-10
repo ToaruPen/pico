@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
 import {
   createStructuredAuditLog,
   type OpenTelemetryAuditLogRecord,
@@ -56,12 +57,10 @@ export type PiRuntimeSmokeCommandResult = {
 
 export type PicoMilestoneSmokeDependencies = {
   readonly runPiRuntimeCommand?: (env: NodeJS.ProcessEnv) => PiRuntimeSmokeCommandResult;
-  readonly runVoiceProviderSmoke?: (env: NodeJS.ProcessEnv) => Promise<VoiceSmokeReport>;
-  readonly runTapoRtspSnapshotSmoke?: (env: NodeJS.ProcessEnv) => Promise<TapoRtspSmokeReport>;
-  readonly runOllamaVlmConnectivitySmoke?: (
-    env: NodeJS.ProcessEnv
-  ) => Promise<OllamaVlmSmokeReport>;
-  readonly runCameraVlmSceneSmoke?: (env: NodeJS.ProcessEnv) => Promise<CameraVlmSceneSmokeReport>;
+  readonly runVoiceProviderSmoke?: (config: PicoConfig) => Promise<VoiceSmokeReport>;
+  readonly runTapoRtspSnapshotSmoke?: (config: PicoConfig) => Promise<TapoRtspSmokeReport>;
+  readonly runOllamaVlmConnectivitySmoke?: (config: PicoConfig) => Promise<OllamaVlmSmokeReport>;
+  readonly runCameraVlmSceneSmoke?: (config: PicoConfig) => Promise<CameraVlmSceneSmokeReport>;
 };
 
 const repositoryRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
@@ -92,14 +91,29 @@ export async function runPicoMilestoneSmokeSuite(
   const sections: PicoMilestoneSmokeSectionReport[] = [];
 
   sections.push(runPiRuntimeSection(dependencies.runPiRuntimeCommand ?? runPiRuntimeCommand, env));
+
+  let config: PicoConfig;
+
+  try {
+    config = loadPicoConfigFromEnvironment(env);
+  } catch (error) {
+    sections.push(...failedConfigProviderSections(error));
+    sections.push(...(await runMemoryAndAuditSections()));
+
+    return {
+      status: summarizeStatus(sections),
+      sections
+    };
+  }
+
   sections.push(
-    ...(await runVoiceSections(dependencies.runVoiceProviderSmoke ?? runVoiceProviderSmoke, env))
+    ...(await runVoiceSections(dependencies.runVoiceProviderSmoke ?? runVoiceProviderSmoke, config))
   );
   sections.push(
     await captureSection("tapo_snapshot", "tapo-rtsp", async () =>
       toSection(
         "tapo_snapshot",
-        await (dependencies.runTapoRtspSnapshotSmoke ?? runTapoRtspSnapshotSmoke)(env)
+        await (dependencies.runTapoRtspSnapshotSmoke ?? runTapoRtspSnapshotSmoke)(config)
       )
     )
   );
@@ -107,7 +121,7 @@ export async function runPicoMilestoneSmokeSuite(
     await captureSection("ollama_vlm", "ollama", async () =>
       toSection(
         "ollama_vlm",
-        await (dependencies.runOllamaVlmConnectivitySmoke ?? runOllamaVlmConnectivitySmoke)(env)
+        await (dependencies.runOllamaVlmConnectivitySmoke ?? runOllamaVlmConnectivitySmoke)(config)
       )
     )
   );
@@ -115,7 +129,7 @@ export async function runPicoMilestoneSmokeSuite(
     await captureSection("camera_vlm_scene", "tapo-rtsp+ollama", async () =>
       toSection(
         "camera_vlm_scene",
-        await (dependencies.runCameraVlmSceneSmoke ?? runCameraVlmSceneSmoke)(env)
+        await (dependencies.runCameraVlmSceneSmoke ?? runCameraVlmSceneSmoke)(config)
       )
     )
   );
@@ -201,12 +215,24 @@ function isPicoRuntimeLoaded(output: string): boolean {
   }
 }
 
+function failedConfigProviderSections(error: unknown): readonly PicoMilestoneSmokeSectionReport[] {
+  const reason = `pico config load failed: ${errorMessage(error)}`;
+
+  return [
+    failedSection("voice_stt", "mlx-whisper", reason),
+    failedSection("voice_tts", "aivis-speech", reason),
+    failedSection("tapo_snapshot", "tapo-rtsp", reason),
+    failedSection("ollama_vlm", "ollama", reason),
+    failedSection("camera_vlm_scene", "tapo-rtsp+ollama", reason)
+  ];
+}
+
 async function runVoiceSections(
-  runVoice: (env: NodeJS.ProcessEnv) => Promise<VoiceSmokeReport>,
-  env: NodeJS.ProcessEnv
+  runVoice: (config: PicoConfig) => Promise<VoiceSmokeReport>,
+  config: PicoConfig
 ): Promise<readonly PicoMilestoneSmokeSectionReport[]> {
   try {
-    const report = await runVoice(env);
+    const report = await runVoice(config);
 
     return [toSection("voice_stt", report.stt), toSection("voice_tts", report.tts)];
   } catch (error) {

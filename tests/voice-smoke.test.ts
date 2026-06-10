@@ -6,33 +6,46 @@ import {
   type VoiceSmokeReport,
   voiceSmokeExitCode
 } from "../scripts/smoke/voice-providers.js";
+import { definePicoConfig } from "../src/config/index.js";
 
 describe("voice provider smoke configuration", () => {
   it("skips both provider smokes when endpoints are not configured", async () => {
-    await expect(runVoiceProviderSmoke({})).resolves.toEqual({
+    await expect(runVoiceProviderSmoke(definePicoConfig({}))).resolves.toEqual({
       stt: {
         status: "skipped",
         provider: "mlx-whisper",
-        reason: "Set PICO_STT_MLX_WHISPER_BASE_URL to run the mlx-whisper STT smoke."
+        reason: "Set voice.stt.mlxWhisper in pico config to run the mlx-whisper STT smoke."
       },
       tts: {
         status: "skipped",
         provider: "aivis-speech",
-        reason: "Set PICO_TTS_AIVIS_BASE_URL to run the Aivis Speech TTS smoke."
+        reason: "Set voice.tts.aivis in pico config to run the Aivis Speech TTS smoke."
       }
     });
   });
 
-  it("builds explicit mlx-whisper and Aivis Speech smoke plans from environment", () => {
-    const plan = buildVoiceSmokePlan({
-      PICO_STT_MLX_WHISPER_BASE_URL: " http://127.0.0.1:8765 ",
-      PICO_STT_SAMPLE_PCM16LE_PATH: " ./samples/known-ja.pcm ",
-      PICO_STT_SAMPLE_RATE_HZ: "16000",
-      PICO_STT_CHANNELS: "1",
-      PICO_TTS_AIVIS_BASE_URL: " http://127.0.0.1:10101 ",
-      PICO_TTS_AIVIS_SPEAKER_ID: "1",
-      PICO_TTS_TEXT: "こんにちは。"
-    });
+  it("builds explicit mlx-whisper and Aivis Speech smoke plans from YAML config", () => {
+    const plan = buildVoiceSmokePlan(
+      definePicoConfig({
+        voice: {
+          stt: {
+            mlxWhisper: {
+              localBaseUrl: " http://127.0.0.1:8765 ",
+              samplePcm16lePath: " ./samples/known-ja.pcm ",
+              sampleRateHz: 16_000,
+              channels: 1
+            }
+          },
+          tts: {
+            aivis: {
+              localBaseUrl: " http://127.0.0.1:10101 ",
+              speakerId: 1,
+              text: "こんにちは。"
+            }
+          }
+        }
+      })
+    );
 
     expect(plan.stt).toMatchObject({
       status: "run",
@@ -57,27 +70,47 @@ describe("voice provider smoke configuration", () => {
     });
   });
 
-  it("rejects invalid numeric smoke environment values", () => {
+  it("rejects invalid numeric smoke config values", () => {
     expect(() =>
-      buildVoiceSmokePlan({
-        PICO_TTS_AIVIS_BASE_URL: "http://127.0.0.1:10101",
-        PICO_TTS_AIVIS_SPEAKER_ID: "-1"
+      definePicoConfig({
+        voice: {
+          tts: {
+            aivis: {
+              localBaseUrl: "http://127.0.0.1:10101",
+              speakerId: -1
+            }
+          }
+        }
       })
-    ).toThrow("PICO_TTS_AIVIS_SPEAKER_ID must be a non-negative integer");
+    ).toThrow("pico config voice.tts.aivis.speakerId must be a non-negative integer");
   });
 
   it("rejects partial provider smoke configuration", () => {
     expect(() =>
-      buildVoiceSmokePlan({
-        PICO_STT_MLX_WHISPER_BASE_URL: "http://127.0.0.1:8765"
+      definePicoConfig({
+        voice: {
+          stt: {
+            mlxWhisper: {
+              localBaseUrl: "http://127.0.0.1:8765"
+            }
+          }
+        }
       })
-    ).toThrow("PICO_STT_SAMPLE_PCM16LE_PATH is required when PICO_STT_MLX_WHISPER_BASE_URL is set");
+    ).toThrow(
+      "pico config voice.stt.mlxWhisper.samplePcm16lePath is required when voice.stt.mlxWhisper is set"
+    );
 
     expect(() =>
-      buildVoiceSmokePlan({
-        PICO_TTS_AIVIS_BASE_URL: "http://127.0.0.1:10101"
+      definePicoConfig({
+        voice: {
+          tts: {
+            aivis: {
+              localBaseUrl: "http://127.0.0.1:10101"
+            }
+          }
+        }
       })
-    ).toThrow("PICO_TTS_AIVIS_SPEAKER_ID is required when PICO_TTS_AIVIS_BASE_URL is set");
+    ).toThrow("pico config voice.tts.aivis.speakerId is required when voice.tts.aivis is set");
   });
 
   it("returns a failing process code only when a smoke section fails", () => {
