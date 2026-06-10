@@ -77,7 +77,10 @@ describe("Ollama VLM connectivity smoke configuration", () => {
     });
 
     expect(plan.status).toBe("run");
-    expect(plan.status === "run" ? plan.timeoutMs : undefined).toBe(2_147_483_647);
+    if (plan.status !== "run") {
+      throw new Error("Expected the boundary timeout to produce a run plan.");
+    }
+    expect(plan.timeoutMs).toBe(2_147_483_647);
   });
 
   it("rejects timeout values that exceed Node timer limits", () => {
