@@ -14,7 +14,8 @@ const missingCredentialsPattern = /no\s+api\s+key|api\s+key\s+not\s+found/i;
 
 type SmokeResult = {
   readonly status: number;
-  readonly output: string;
+  readonly stdout: string;
+  readonly stderr: string;
 };
 
 function writeError(message: string): void {
@@ -48,7 +49,8 @@ function runPiSmoke(): SmokeResult {
     }
   );
 
-  const output = `${result.stdout}${result.stderr}`.trim();
+  const stdout = result.stdout.trim();
+  const stderr = result.stderr.trim();
 
   if (result.error !== undefined) {
     if ("code" in result.error && result.error.code === "ETIMEDOUT") {
@@ -62,8 +64,13 @@ function runPiSmoke(): SmokeResult {
 
   return {
     status: result.status ?? 1,
-    output
+    stdout,
+    stderr
   };
+}
+
+function combinedOutput(result: SmokeResult): string {
+  return `${result.stdout}\n${result.stderr}`.trim();
 }
 
 function handleFailedSmoke(result: SmokeResult): void {
@@ -71,14 +78,16 @@ function handleFailedSmoke(result: SmokeResult): void {
     return;
   }
 
-  if (missingCredentialsPattern.test(result.output)) {
+  const output = combinedOutput(result);
+
+  if (missingCredentialsPattern.test(output)) {
     writeError(
       "pico Pi runtime smoke requires configured Pi Agent model credentials. Authenticate Pi Agent or pass provider/model args after `--`."
     );
     process.exit(2);
   }
 
-  writeError(result.output);
+  writeError(output);
   process.exit(result.status);
 }
 
@@ -115,5 +124,5 @@ requirePiBinary();
 
 const result = runPiSmoke();
 handleFailedSmoke(result);
-validateSmokeOutput(parseSmokeOutput(result.output), result.output);
+validateSmokeOutput(parseSmokeOutput(result.stdout), result.stdout);
 process.stdout.write(`${JSON.stringify(expected)}\n`);
