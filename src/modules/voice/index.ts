@@ -363,11 +363,17 @@ function requireRecord(value: unknown, message: string): Record<string, unknown>
 }
 
 function requireString(value: unknown, message: string): string {
-  if (typeof value !== "string" || value.trim() === "") {
+  if (typeof value !== "string") {
     throw new Error(message);
   }
 
-  return value;
+  const trimmed = value.trim();
+
+  if (trimmed === "") {
+    throw new Error(message);
+  }
+
+  return trimmed;
 }
 
 function requireMlxWhisperProvider(value: unknown): "mlx-whisper" {

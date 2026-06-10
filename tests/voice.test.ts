@@ -78,6 +78,22 @@ describe("mlx-whisper STT sidecar boundary", () => {
     ).toThrow("pico STT sidecar provider must be mlx-whisper");
   });
 
+  it("normalizes string config fields at the sidecar boundary", () => {
+    const normalizedSidecar = defineMlxWhisperSidecar({
+      id: " local-mlx-whisper ",
+      provider: "mlx-whisper",
+      localBaseUrl: " http://127.0.0.1:8765 ",
+      modelRepo: " mlx-community/whisper-large-v3-turbo ",
+      language: " ja ",
+      timeoutMs: 250,
+      warmup: {
+        audioSeconds: 0.25
+      }
+    });
+
+    expect(normalizedSidecar).toEqual(sidecar);
+  });
+
   it("returns an empty transcript for empty audio without calling the sidecar", async () => {
     const recordingFetch: typeof fetch = () => {
       throw new Error("empty audio should not call the STT sidecar");
