@@ -28,6 +28,23 @@ Run the same parallel gate shape used by CI:
 just ci
 ```
 
+Run the optional live Tapo RTSP snapshot smoke. Without `PICO_TAPO_HOST`, the
+command exits successfully with an explicit skipped report:
+
+```bash
+just smoke-camera-tapo
+```
+
+To capture one JPEG frame from a Tapo RTSP source:
+
+```bash
+PICO_TAPO_HOST=192.168.10.25 \
+PICO_TAPO_USER=your-camera-user \
+PICO_TAPO_PASSWORD=your-camera-password \
+PICO_TAPO_STREAM=stream2 \
+just smoke-camera-tapo
+```
+
 See:
 
 - `AGENTS.md` for agent-facing repository guidance.

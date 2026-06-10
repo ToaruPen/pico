@@ -15,6 +15,9 @@ format:
 test:
   npm run test
 
+smoke-camera-tapo:
+  npm run smoke:camera-tapo
+
 ast:
   npm run ast:test
   npm run ast
