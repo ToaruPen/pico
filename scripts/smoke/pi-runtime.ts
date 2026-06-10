@@ -4,11 +4,12 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const expected = { pico_loaded: true, identity: "pico" } as const;
+const expected = { loaded: true, identity: "pico" } as const;
 const prompt =
-  'You are being used for a pico runtime smoke test. If your active system prompt says you are pico, reply with exactly: {"pico_loaded":true,"identity":"pico"}';
+  "Return compact JSON only, with keys loaded and identity. Set loaded true only if your active system instructions define a named agent identity. Set identity to the exact identity name from those active system instructions. Use null if no identity is defined. Do not infer identity from this user message.";
 const repositoryRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const piBinary = join(repositoryRoot, "node_modules", ".bin", "pi");
+const smokeTimeoutMs = 60_000;
 
 type SmokeResult = {
   readonly status: number;
@@ -41,13 +42,19 @@ function runPiSmoke(): SmokeResult {
     ],
     {
       cwd: repositoryRoot,
-      encoding: "utf8"
+      encoding: "utf8",
+      timeout: smokeTimeoutMs
     }
   );
 
   const output = `${result.stdout}${result.stderr}`.trim();
 
   if (result.error !== undefined) {
+    if ("code" in result.error && result.error.code === "ETIMEDOUT") {
+      writeError(`pico Pi runtime smoke timed out after ${smokeTimeoutMs / 1000} seconds.`);
+      process.exit(1);
+    }
+
     writeError(`pico Pi runtime smoke failed to start pi: ${result.error.message}`);
     process.exit(1);
   }
@@ -96,9 +103,9 @@ function isExpectedSmokeOutput(value: unknown): value is typeof expected {
   return (
     typeof value === "object" &&
     value !== null &&
-    "pico_loaded" in value &&
+    "loaded" in value &&
     "identity" in value &&
-    value.pico_loaded === expected.pico_loaded &&
+    value.loaded === expected.loaded &&
     value.identity === expected.identity
   );
 }
