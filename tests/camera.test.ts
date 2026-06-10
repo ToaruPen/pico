@@ -1,8 +1,12 @@
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 
 import {
+  createFfmpegRtspSnapshotTransport,
   createRtspSnapshotClient,
   defineRtspSnapshotSource,
+  type FfmpegRtspSnapshotProcess,
   type RtspSnapshotTransport
 } from "../src/modules/camera/index.js";
 
@@ -13,6 +17,47 @@ const snapshotSourceInput = {
   password: "pa:ss@word",
   stream: "stream2"
 } as const;
+
+function createFfmpegProcessHarness(): {
+  readonly process: FfmpegRtspSnapshotProcess;
+  readonly stdout: PassThrough;
+  readonly stderr: PassThrough;
+  readonly close: (code: number) => void;
+  readonly emitError: (error: Error) => void;
+  readonly killedSignals: NodeJS.Signals[];
+} {
+  const events = new EventEmitter();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const killedSignals: NodeJS.Signals[] = [];
+  const on: FfmpegRtspSnapshotProcess["on"] = (event, listener) => {
+    events.on(event, listener);
+
+    return process;
+  };
+  const process: FfmpegRtspSnapshotProcess = {
+    stdout,
+    stderr,
+    on,
+    kill(signal?: NodeJS.Signals) {
+      killedSignals.push(signal ?? "SIGTERM");
+
+      return true;
+    }
+  };
+  return {
+    process,
+    stdout,
+    stderr,
+    close(code: number) {
+      events.emit("close", code, undefined);
+    },
+    emitError(error: Error) {
+      events.emit("error", error);
+    },
+    killedSignals
+  };
+}
 
 describe("RTSP snapshot boundary", () => {
   it("builds one credential-encoded RTSP snapshot URL", () => {
@@ -194,5 +239,107 @@ describe("RTSP snapshot boundary", () => {
       reason: "capture_failed",
       message: "capture constructor failed"
     });
+  });
+});
+
+describe("ffmpeg RTSP snapshot transport", () => {
+  it("captures one JPEG frame from ffmpeg stdout", async () => {
+    const harness = createFfmpegProcessHarness();
+    let recordedCommand = "";
+    let recordedArguments: readonly string[] = [];
+    const transport = createFfmpegRtspSnapshotTransport(
+      {
+        ffmpegPath: "ffmpeg",
+        timeoutMs: 5000,
+        rtspTransport: "tcp"
+      },
+      (command, arguments_) => {
+        recordedCommand = command;
+        recordedArguments = arguments_;
+
+        return harness.process;
+      }
+    );
+    const result = transport.captureJpeg(
+      "rtsp://camera%20user:pa%3Ass%40word@192.168.10.25:554/stream2"
+    );
+
+    harness.stdout.write(Buffer.from([0xff, 0xd8, 0x01, 0x02, 0xff, 0xd9]));
+    harness.close(0);
+
+    await expect(result).resolves.toEqual(Buffer.from([0xff, 0xd8, 0x01, 0x02, 0xff, 0xd9]));
+    expect(recordedCommand).toBe("ffmpeg");
+    expect(recordedArguments).toEqual([
+      "-hide_banner",
+      "-nostdin",
+      "-loglevel",
+      "error",
+      "-rtsp_transport",
+      "tcp",
+      "-timeout",
+      "5000000",
+      "-i",
+      "rtsp://camera%20user:pa%3Ass%40word@192.168.10.25:554/stream2",
+      "-frames:v",
+      "1",
+      "-an",
+      "-sn",
+      "-dn",
+      "-f",
+      "image2pipe",
+      "-vcodec",
+      "mjpeg",
+      "pipe:1"
+    ]);
+  });
+
+  it("rejects ffmpeg output that is not a complete JPEG frame", async () => {
+    const harness = createFfmpegProcessHarness();
+    const transport = createFfmpegRtspSnapshotTransport({ timeoutMs: 5000 }, () => harness.process);
+    const result = transport.captureJpeg("rtsp://user:password@192.168.10.25:554/stream2");
+
+    harness.stdout.write(Buffer.from([0xff, 0xd8, 0x01, 0x02]));
+    harness.close(0);
+
+    await expect(result).rejects.toThrow(
+      "ffmpeg RTSP snapshot capture did not produce a JPEG frame"
+    );
+  });
+
+  it("does not include RTSP credentials or stderr in ffmpeg failure messages", async () => {
+    const harness = createFfmpegProcessHarness();
+    const transport = createFfmpegRtspSnapshotTransport({ timeoutMs: 5000 }, () => harness.process);
+    const result = transport.captureJpeg("rtsp://user:password@192.168.10.25:554/stream2");
+
+    harness.stderr.write("rtsp://user:password@192.168.10.25:554/stream2 Unauthorized");
+    harness.close(1);
+
+    await expect(result).rejects.toThrow("ffmpeg RTSP snapshot capture failed with exit code 1");
+    await expect(result).rejects.not.toThrow("password");
+    await expect(result).rejects.not.toThrow("Unauthorized");
+  });
+
+  it("kills ffmpeg when snapshot capture exceeds the configured byte limit", async () => {
+    const harness = createFfmpegProcessHarness();
+    const transport = createFfmpegRtspSnapshotTransport(
+      { timeoutMs: 5000, maxFrameBytes: 3 },
+      () => harness.process
+    );
+    const result = transport.captureJpeg("rtsp://user:password@192.168.10.25:554/stream2");
+
+    harness.stdout.write(Buffer.from([0xff, 0xd8, 0x01, 0x02]));
+
+    await expect(result).rejects.toThrow("ffmpeg RTSP snapshot capture exceeded 3 bytes");
+    expect(harness.killedSignals).toEqual(["SIGKILL"]);
+  });
+
+  it("kills ffmpeg when snapshot capture times out", async () => {
+    const harness = createFfmpegProcessHarness();
+    const transport = createFfmpegRtspSnapshotTransport({ timeoutMs: 10 }, () => harness.process);
+
+    await expect(
+      transport.captureJpeg("rtsp://user:password@192.168.10.25:554/stream2")
+    ).rejects.toThrow("ffmpeg RTSP snapshot capture timed out after 10 ms");
+    expect(harness.killedSignals).toEqual(["SIGKILL"]);
   });
 });

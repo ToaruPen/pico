@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { isIPv4 } from "node:net";
 
 import type { FuturePicoModuleMetadata } from "../../orchestrator/contracts.js";
@@ -27,6 +28,35 @@ export type RtspSnapshotTransport = {
   readonly captureJpeg: (url: string) => Promise<Uint8Array>;
 };
 
+export type FfmpegRtspSnapshotTransportInput = {
+  readonly ffmpegPath?: string;
+  readonly timeoutMs: number;
+  readonly maxFrameBytes?: number;
+  readonly rtspTransport?: "tcp" | "udp";
+};
+
+export type FfmpegRtspSnapshotProcess = {
+  readonly stdout: {
+    readonly on: (event: "data", listener: (chunk: Buffer | Uint8Array | string) => void) => void;
+  };
+  readonly stderr: {
+    readonly on: (event: "data", listener: (chunk: Buffer | Uint8Array | string) => void) => void;
+  };
+  readonly on: {
+    (event: "error", listener: (error: Error) => void): FfmpegRtspSnapshotProcess;
+    (
+      event: "close",
+      listener: (code: number | null, signal: NodeJS.Signals | null) => void
+    ): FfmpegRtspSnapshotProcess;
+  };
+  readonly kill: (signal?: NodeJS.Signals) => boolean;
+};
+
+export type FfmpegRtspSnapshotSpawner = (
+  command: string,
+  arguments_: readonly string[]
+) => FfmpegRtspSnapshotProcess;
+
 export type RtspSnapshotResult =
   | {
       readonly ok: true;
@@ -52,6 +82,8 @@ type RtspUrlParts = {
   readonly stream: string;
   readonly port: number;
 };
+
+const DEFAULT_MAX_FRAME_BYTES = 5 * 1024 * 1024;
 
 export function defineRtspSnapshotSource(input: unknown): RtspSnapshotSource {
   if (input === undefined) {
@@ -120,6 +152,223 @@ export function createRtspSnapshotClient(
       return inFlightSnapshot;
     }
   };
+}
+
+export function createFfmpegRtspSnapshotTransport(
+  input: FfmpegRtspSnapshotTransportInput,
+  spawnProcess: FfmpegRtspSnapshotSpawner = spawnFfmpegProcess
+): RtspSnapshotTransport {
+  const ffmpegPath = input.ffmpegPath?.trim() || "ffmpeg";
+  const timeoutMs = requirePositiveInteger(input.timeoutMs, "ffmpeg RTSP snapshot timeoutMs");
+  const maxFrameBytes =
+    input.maxFrameBytes === undefined
+      ? DEFAULT_MAX_FRAME_BYTES
+      : requirePositiveInteger(input.maxFrameBytes, "ffmpeg RTSP snapshot maxFrameBytes");
+  const rtspTransport = input.rtspTransport ?? "tcp";
+
+  return {
+    captureJpeg(url) {
+      return captureFfmpegJpeg({
+        ffmpegPath,
+        maxFrameBytes,
+        rtspTransport,
+        timeoutMs,
+        url,
+        spawnProcess
+      });
+    }
+  };
+}
+
+type FfmpegCaptureRequest = {
+  readonly ffmpegPath: string;
+  readonly maxFrameBytes: number;
+  readonly rtspTransport: "tcp" | "udp";
+  readonly timeoutMs: number;
+  readonly url: string;
+  readonly spawnProcess: FfmpegRtspSnapshotSpawner;
+};
+
+function captureFfmpegJpeg(request: FfmpegCaptureRequest): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const stdoutChunks: Buffer[] = [];
+    const child = request.spawnProcess(
+      request.ffmpegPath,
+      buildFfmpegSnapshotArguments(request.url, request.rtspTransport, request.timeoutMs)
+    );
+    const timeout = setTimeout(() => {
+      settleFfmpegCapture({
+        settled,
+        markSettled: () => {
+          settled = true;
+        },
+        cleanup: () => {
+          clearTimeout(timeout);
+        },
+        reject,
+        error: new Error(`ffmpeg RTSP snapshot capture timed out after ${request.timeoutMs} ms`)
+      });
+      child.kill("SIGKILL");
+    }, request.timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdoutChunks.push(Buffer.from(chunk));
+      const totalBytes = stdoutChunks.reduce((total, current) => total + current.byteLength, 0);
+
+      if (totalBytes > request.maxFrameBytes) {
+        settleFfmpegCapture({
+          settled,
+          markSettled: () => {
+            settled = true;
+          },
+          cleanup: () => {
+            clearTimeout(timeout);
+          },
+          reject,
+          error: new Error(`ffmpeg RTSP snapshot capture exceeded ${request.maxFrameBytes} bytes`)
+        });
+        child.kill("SIGKILL");
+      }
+    });
+    child.stderr.on("data", () => {});
+    child.on("error", (error) => {
+      settleFfmpegCapture({
+        settled,
+        markSettled: () => {
+          settled = true;
+        },
+        cleanup: () => {
+          clearTimeout(timeout);
+        },
+        reject,
+        error
+      });
+    });
+    child.on("close", (code, signal) => {
+      settleClosedFfmpegCapture({
+        code,
+        signal,
+        settled,
+        markSettled: () => {
+          settled = true;
+        },
+        cleanup: () => {
+          clearTimeout(timeout);
+        },
+        resolve,
+        reject,
+        stdout: Buffer.concat(stdoutChunks)
+      });
+    });
+  });
+}
+
+type FfmpegCaptureSettlement = {
+  readonly settled: boolean;
+  readonly markSettled: () => void;
+  readonly cleanup: () => void;
+};
+
+type FfmpegCaptureRejectSettlement = FfmpegCaptureSettlement & {
+  readonly reject: (error: Error) => void;
+  readonly error: Error;
+};
+
+type ClosedFfmpegCaptureSettlement = FfmpegCaptureSettlement & {
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly resolve: (frame: Uint8Array) => void;
+  readonly reject: (error: Error) => void;
+  readonly stdout: Buffer;
+};
+
+function settleFfmpegCapture(settlement: FfmpegCaptureRejectSettlement): void {
+  if (settlement.settled) {
+    return;
+  }
+
+  settlement.markSettled();
+  settlement.cleanup();
+  settlement.reject(settlement.error);
+}
+
+function settleClosedFfmpegCapture(settlement: ClosedFfmpegCaptureSettlement): void {
+  if (settlement.settled) {
+    return;
+  }
+
+  settlement.markSettled();
+  settlement.cleanup();
+
+  if (settlement.code !== 0) {
+    settlement.reject(buildFfmpegExitError(settlement.code, settlement.signal));
+
+    return;
+  }
+
+  if (!isCompleteJpegFrame(settlement.stdout)) {
+    settlement.reject(new Error("ffmpeg RTSP snapshot capture did not produce a JPEG frame"));
+
+    return;
+  }
+
+  settlement.resolve(settlement.stdout);
+}
+
+function buildFfmpegSnapshotArguments(
+  url: string,
+  rtspTransport: "tcp" | "udp",
+  timeoutMs: number
+): readonly string[] {
+  return [
+    "-hide_banner",
+    "-nostdin",
+    "-loglevel",
+    "error",
+    "-rtsp_transport",
+    rtspTransport,
+    "-timeout",
+    String(timeoutMs * 1000),
+    "-i",
+    url,
+    "-frames:v",
+    "1",
+    "-an",
+    "-sn",
+    "-dn",
+    "-f",
+    "image2pipe",
+    "-vcodec",
+    "mjpeg",
+    "pipe:1"
+  ];
+}
+
+function spawnFfmpegProcess(
+  command: string,
+  arguments_: readonly string[]
+): FfmpegRtspSnapshotProcess {
+  return spawn(command, arguments_, {
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true
+  });
+}
+
+function buildFfmpegExitError(code: number | null, signal: NodeJS.Signals | null): Error {
+  const status = code === null ? `signal ${signal ?? "unknown"}` : `exit code ${code}`;
+
+  return new Error(`ffmpeg RTSP snapshot capture failed with ${status}`);
+}
+
+function isCompleteJpegFrame(frame: Uint8Array): boolean {
+  return (
+    frame.byteLength >= 4 &&
+    frame[0] === 0xff &&
+    frame[1] === 0xd8 &&
+    frame.at(-2) === 0xff &&
+    frame.at(-1) === 0xd9
+  );
 }
 
 function buildRtspUrl(source: RtspUrlParts): string {
@@ -236,6 +485,14 @@ function requirePort(value: unknown): number {
 
   if (!Number.isInteger(value) || typeof value !== "number" || value < 1 || value > 65_535) {
     throw new Error("pico camera snapshot source port must be a valid TCP port");
+  }
+
+  return value;
+}
+
+function requirePositiveInteger(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new Error(`${label} must be a positive integer`);
   }
 
   return value;

@@ -18,6 +18,15 @@ test:
 smoke-ollama-vlm:
   npm run smoke:ollama-vlm
 
+smoke-camera-tapo:
+  npm run smoke:camera-tapo
+
+smoke-voice-providers:
+  npm run smoke:voice-providers
+
+smoke-pi-runtime:
+  npm run smoke:pi-runtime
+
 ast:
   npm run ast:test
   npm run ast
