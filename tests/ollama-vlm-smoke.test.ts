@@ -70,6 +70,16 @@ describe("Ollama VLM connectivity smoke configuration", () => {
     ).toThrow("PICO_VISION_TIMEOUT_MS must be a positive integer");
   });
 
+  it("accepts the maximum Node timer timeout value", () => {
+    const plan = buildOllamaVlmSmokePlan({
+      PICO_VISION_LOCAL_BASE_URL: "http://127.0.0.1:11434",
+      PICO_VISION_TIMEOUT_MS: "2147483647"
+    });
+
+    expect(plan.status).toBe("run");
+    expect(plan.status === "run" ? plan.timeoutMs : undefined).toBe(2_147_483_647);
+  });
+
   it("rejects timeout values that exceed Node timer limits", () => {
     expect(() =>
       buildOllamaVlmSmokePlan({

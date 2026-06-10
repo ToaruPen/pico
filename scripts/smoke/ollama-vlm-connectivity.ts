@@ -7,6 +7,7 @@ const defaultEndpointId = "windows-ollama-qwen3-5";
 const defaultTunnelKind = "tailscale_ssh";
 const defaultSshTarget = "pico-vision-host";
 const defaultTimeoutMs = 10_000;
+// Node.js timers reject delays beyond the signed 32-bit millisecond limit.
 const maxNodeTimeoutMs = 2_147_483_647;
 
 export type OllamaVlmSmokeStatus = "passed" | "failed" | "skipped";
