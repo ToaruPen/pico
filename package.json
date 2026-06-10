@@ -20,6 +20,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "smoke:ollama-vlm": "jiti scripts/smoke/ollama-vlm-connectivity.ts",
     "lint": "eslint .",
     "format": "biome format --write .",
     "format:check": "biome ci .",

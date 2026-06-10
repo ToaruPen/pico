@@ -15,6 +15,9 @@ format:
 test:
   npm run test
 
+smoke-ollama-vlm:
+  npm run smoke:ollama-vlm
+
 ast:
   npm run ast:test
   npm run ast

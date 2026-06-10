@@ -28,6 +28,23 @@ Run the same parallel gate shape used by CI:
 just ci
 ```
 
+Run the optional protected Ollama VLM connectivity smoke. Without
+`PICO_VISION_LOCAL_BASE_URL`, the command exits successfully with an explicit
+skipped report:
+
+```bash
+just smoke-ollama-vlm
+```
+
+To verify `qwen3.5:9b` through a local protected tunnel:
+
+```bash
+PICO_VISION_LOCAL_BASE_URL=http://127.0.0.1:11434 \
+PICO_VISION_TUNNEL_KIND=tailscale_ssh \
+PICO_VISION_SSH_TARGET=pico-vision-host \
+just smoke-ollama-vlm
+```
+
 See:
 
 - `AGENTS.md` for agent-facing repository guidance.
