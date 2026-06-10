@@ -15,6 +15,9 @@ format:
 test:
   npm run test
 
+smoke-pi-runtime:
+  npm run smoke:pi-runtime
+
 ast:
   npm run ast:test
   npm run ast
