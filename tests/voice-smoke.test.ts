@@ -94,5 +94,18 @@ describe("voice provider smoke configuration", () => {
     } satisfies VoiceSmokeReport;
 
     expect(voiceSmokeExitCode(report)).toBe(1);
+
+    const nonFailingReport = {
+      stt: {
+        status: "skipped",
+        provider: "mlx-whisper"
+      },
+      tts: {
+        status: "passed",
+        provider: "aivis-speech"
+      }
+    } satisfies VoiceSmokeReport;
+
+    expect(voiceSmokeExitCode(nonFailingReport)).toBe(0);
   });
 });
