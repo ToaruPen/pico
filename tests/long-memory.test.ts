@@ -268,6 +268,23 @@ describe("SQLite long memory store", () => {
     });
   });
 
+  it("rejects sparse durable tags before persistence", async () => {
+    await withLongMemoryDatabase((path) => {
+      withLongMemoryStore(path, (store) => {
+        const input = {
+          title: "施設メモ",
+          body: "タグ配列の穴を永続化しない。",
+          category: "care_continuity",
+          tags: Array(1),
+          reviewedBy: "staff-a",
+          reviewedAt: "2026-06-10T09:00:00.000Z"
+        } as unknown as Parameters<LongMemoryStore["writeReviewed"]>[0];
+
+        expect(() => store.writeReviewed(input)).toThrow("pico long memory input is malformed");
+      });
+    });
+  });
+
   it("rejects individual child assessment content in delete review notes", async () => {
     await withLongMemoryDatabase((path) => {
       withLongMemoryStore(path, (store) => {

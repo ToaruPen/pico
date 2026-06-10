@@ -474,12 +474,18 @@ function normalizeTags(value: readonly string[] | undefined): readonly string[] 
     throw new Error("pico long memory input is malformed");
   }
 
-  const tags = value.map((tag) => {
-    const normalized = requireMemoryText(tag);
+  const tags: string[] = [];
+
+  for (let index = 0; index < value.length; index += 1) {
+    if (!(index in value)) {
+      throw new Error("pico long memory input is malformed");
+    }
+
+    const normalized = requireMemoryText(value[index]);
     rejectIndividualChildText(normalized);
 
-    return normalized;
-  });
+    tags.push(normalized);
+  }
 
   return Object.freeze(tags);
 }
