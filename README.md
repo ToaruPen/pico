@@ -36,8 +36,23 @@ an explicit skipped section; failed configured sections make the command fail.
 just smoke-milestone
 ```
 
-For full real-world validation, run the deterministic gate first, then the
-milestone suite with the selected provider environment:
+Pico smoke provider settings are loaded from `config/pico.local.yaml` by
+default. Copy the tracked example and fill in local-only values, including the
+Tapo camera account credentials created in the Tapo app:
+
+```bash
+cp config/pico.example.yaml config/pico.local.yaml
+```
+
+`config/pico.local.yaml` is ignored by git. To use another path, set
+`PICO_CONFIG_PATH`:
+
+```bash
+PICO_CONFIG_PATH=/path/to/pico.local.yaml just smoke-milestone
+```
+
+For full real-world validation, run the deterministic gate first, prepare the
+voice sample if the STT smoke is enabled, then run the milestone suite:
 
 ```bash
 just check
@@ -54,17 +69,6 @@ ffmpeg -y -hide_banner -loglevel error \
 
 # Choose an Aivis Speech style id from:
 # curl -s http://127.0.0.1:10101/speakers
-PICO_STT_MLX_WHISPER_BASE_URL=http://127.0.0.1:8765 \
-PICO_STT_SAMPLE_PCM16LE_PATH=/tmp/pico-known-ja.pcm \
-PICO_TTS_AIVIS_BASE_URL=http://127.0.0.1:10101 \
-PICO_TTS_AIVIS_SPEAKER_ID=888753760 \
-PICO_TAPO_HOST=192.168.10.25 \
-PICO_TAPO_USER=your-camera-user \
-PICO_TAPO_PASSWORD=your-camera-password \
-PICO_TAPO_STREAM=stream2 \
-PICO_VISION_LOCAL_BASE_URL=http://127.0.0.1:11434 \
-PICO_VISION_TUNNEL_KIND=tailscale_ssh \
-PICO_VISION_SSH_TARGET=pico-vision-host \
 just smoke-milestone
 ```
 
@@ -81,96 +85,25 @@ To pass explicit Pi provider/model flags, run:
 npm run smoke:pi-runtime -- --provider openai --model gpt-4o-mini
 ```
 
-Run the optional live voice provider smoke. Without provider environment
-variables, the command exits successfully with explicit skipped sections:
+Optional provider smoke commands read the same local config. Missing provider
+sections exit successfully with explicit skipped reports:
 
 ```bash
 just smoke-voice-providers
-```
-
-To run the Aivis Speech TTS smoke:
-
-```bash
-# Choose a style id from:
-# curl -s http://127.0.0.1:10101/speakers
-PICO_TTS_AIVIS_BASE_URL=http://127.0.0.1:10101 \
-PICO_TTS_AIVIS_SPEAKER_ID=888753760 \
-just smoke-voice-providers
-```
-
-To run the mlx-whisper STT smoke, provide a known PCM16LE sample:
-
-```bash
-say -v Kyoko -o /tmp/pico-known-ja.aiff 'こんにちは。今日はピコの音声認識テストです。'
-ffmpeg -y -hide_banner -loglevel error \
-  -i /tmp/pico-known-ja.aiff \
-  -ac 1 \
-  -ar 16000 \
-  -f s16le \
-  /tmp/pico-known-ja.pcm
-
-PICO_STT_MLX_WHISPER_BASE_URL=http://127.0.0.1:8765 \
-PICO_STT_SAMPLE_PCM16LE_PATH=/tmp/pico-known-ja.pcm \
-PICO_STT_SAMPLE_RATE_HZ=16000 \
-PICO_STT_CHANNELS=1 \
-just smoke-voice-providers
-```
-
-Run the optional live Tapo RTSP snapshot smoke. Without `PICO_TAPO_HOST`, the
-command exits successfully with an explicit skipped report:
-
-```bash
 just smoke-camera-tapo
-```
-
-To capture one JPEG frame from a Tapo RTSP source:
-
-```bash
-PICO_TAPO_HOST=192.168.10.25 \
-PICO_TAPO_USER=your-camera-user \
-PICO_TAPO_PASSWORD=your-camera-password \
-PICO_TAPO_STREAM=stream2 \
-just smoke-camera-tapo
-```
-
-Run the optional protected Ollama VLM connectivity smoke. Without
-`PICO_VISION_LOCAL_BASE_URL`, the command exits successfully with an explicit
-skipped report:
-
-```bash
 just smoke-ollama-vlm
-```
-
-To verify `qwen3.5:9b` through a local protected tunnel:
-
-```bash
-PICO_VISION_LOCAL_BASE_URL=http://127.0.0.1:11434 \
-PICO_VISION_TUNNEL_KIND=tailscale_ssh \
-PICO_VISION_SSH_TARGET=pico-vision-host \
-just smoke-ollama-vlm
-```
-
-Run the optional camera-to-VLM scene smoke. Without both `PICO_TAPO_HOST` and
-`PICO_VISION_LOCAL_BASE_URL`, the command exits successfully with an explicit
-skipped report:
-
-```bash
 just smoke-camera-vlm-scene
 ```
 
-To capture one Tapo RTSP JPEG frame and send that frame to the selected Ollama
-scene description path:
+Configure these sections in `config/pico.local.yaml` as needed:
 
-```bash
-PICO_TAPO_HOST=192.168.10.25 \
-PICO_TAPO_USER=your-camera-user \
-PICO_TAPO_PASSWORD=your-camera-password \
-PICO_TAPO_STREAM=stream2 \
-PICO_VISION_LOCAL_BASE_URL=http://127.0.0.1:11434 \
-PICO_VISION_TUNNEL_KIND=tailscale_ssh \
-PICO_VISION_SSH_TARGET=pico-vision-host \
-just smoke-camera-vlm-scene
-```
+- `voice.tts.aivis` for Aivis Speech TTS. Choose a style id from
+  `curl -s http://127.0.0.1:10101/speakers`.
+- `voice.stt.mlxWhisper` for mlx-whisper STT. `samplePcm16lePath` must point to
+  a PCM16LE mono 16 kHz sample.
+- `camera.tapo` for one Tapo RTSP JPEG frame.
+- `vision.ollama` for `qwen3.5:9b` through the protected local tunnel.
+- `camera.tapo` plus `vision.ollama` for camera-to-VLM scene smoke.
 
 See:
 

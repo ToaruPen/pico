@@ -1,13 +1,13 @@
 #!/usr/bin/env jiti
 import { pathToFileURL } from "node:url";
 
+import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
 import { defineSelectedModelEndpoint } from "../../src/modules/local-models/index.js";
 
 const defaultEndpointId = "windows-ollama-qwen3-5";
 const defaultTunnelKind = "tailscale_ssh";
 const defaultSshTarget = "pico-vision-host";
 const defaultTimeoutMs = 10_000;
-const maxNodeTimeoutMs = 2_147_483_647; // Node.js setTimeout uses signed 32-bit millisecond delays.
 
 export type OllamaVlmSmokeStatus = "passed" | "failed" | "skipped";
 
@@ -41,10 +41,10 @@ type OllamaTagsResponse = {
 };
 
 export async function runOllamaVlmConnectivitySmoke(
-  env: NodeJS.ProcessEnv = process.env,
+  config: PicoConfig = loadPicoConfigFromEnvironment(),
   fetchImplementation: typeof fetch = fetch
 ): Promise<OllamaVlmSmokeReport> {
-  const plan = buildOllamaVlmSmokePlan(env);
+  const plan = buildOllamaVlmSmokePlan(config);
 
   if (plan.status === "skip") {
     return {
@@ -78,32 +78,32 @@ export async function runOllamaVlmConnectivitySmoke(
   };
 }
 
-export function buildOllamaVlmSmokePlan(env: NodeJS.ProcessEnv): OllamaVlmSmokePlan {
-  const localBaseUrl = readEnvironment(env, "PICO_VISION_LOCAL_BASE_URL");
+export function buildOllamaVlmSmokePlan(config: PicoConfig): OllamaVlmSmokePlan {
+  const ollama = config.vision.ollama;
 
-  if (localBaseUrl === undefined) {
+  if (ollama === undefined) {
     return {
       status: "skip",
-      reason: "Set PICO_VISION_LOCAL_BASE_URL to run the Ollama VLM connectivity smoke."
+      reason: "Set vision.ollama in pico config to run the Ollama VLM connectivity smoke."
     };
   }
 
   return {
     status: "run",
     endpoint: defineSelectedModelEndpoint({
-      id: readEnvironment(env, "PICO_VISION_ENDPOINT_ID") ?? defaultEndpointId,
+      id: ollama.endpointId ?? defaultEndpointId,
       provider: "ollama",
       model: "qwen3.5:9b",
       host: {
         platform: "windows",
         tunnel: {
-          kind: readEnvironment(env, "PICO_VISION_TUNNEL_KIND") ?? defaultTunnelKind,
-          localBaseUrl,
-          sshTarget: readEnvironment(env, "PICO_VISION_SSH_TARGET") ?? defaultSshTarget
+          kind: ollama.tunnel?.kind ?? defaultTunnelKind,
+          localBaseUrl: ollama.localBaseUrl,
+          sshTarget: ollama.tunnel?.sshTarget ?? defaultSshTarget
         }
       }
     }),
-    timeoutMs: readPositiveIntegerEnvironment(env, "PICO_VISION_TIMEOUT_MS") ?? defaultTimeoutMs
+    timeoutMs: ollama.timeoutMs ?? defaultTimeoutMs
   };
 }
 
@@ -173,28 +173,6 @@ function requireRecord(value: unknown, message: string): Record<string, unknown>
   }
 
   return value as Record<string, unknown>;
-}
-
-function readEnvironment(env: NodeJS.ProcessEnv, name: string): string | undefined {
-  const value = env[name]?.trim();
-
-  return value === "" ? undefined : value;
-}
-
-function readPositiveIntegerEnvironment(env: NodeJS.ProcessEnv, name: string): number | undefined {
-  const value = readEnvironment(env, name);
-
-  if (value === undefined) {
-    return undefined;
-  }
-
-  const parsed = Number(value);
-
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > maxNodeTimeoutMs) {
-    throw new Error(`${name} must be a positive integer <= ${maxNodeTimeoutMs}`);
-  }
-
-  return parsed;
 }
 
 function isAbortError(error: unknown): boolean {

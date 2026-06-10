@@ -1,0 +1,27 @@
+# Copy this file to config/pico.local.yaml and fill in local-only values.
+# Do not commit config/pico.local.yaml.
+camera:
+  tapo:
+    sourceId: tapo-rtsp
+    host: 192.168.10.25
+    user: your-camera-user
+    password: your-camera-password
+    # Optional runtime defaults: port=554, stream=stream2.
+
+vision:
+  ollama:
+    localBaseUrl: http://127.0.0.1:11434
+    # Optional defaults: endpointId=windows-ollama-qwen3-5,
+    # tunnel.kind=tailscale_ssh, tunnel.sshTarget=pico-vision-host.
+
+voice:
+  stt:
+    mlxWhisper:
+      localBaseUrl: http://127.0.0.1:8765
+      samplePcm16lePath: /tmp/pico-known-ja.pcm
+      # Optional defaults: language=ja, sampleRateHz=16000, channels=1.
+  tts:
+    aivis:
+      localBaseUrl: http://127.0.0.1:10101
+      speakerId: 888753760
+      # Optional default text: こんにちは。picoの音声スモークです。

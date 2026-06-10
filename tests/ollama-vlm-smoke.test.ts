@@ -5,6 +5,7 @@ import {
   ollamaVlmSmokeExitCode,
   runOllamaVlmConnectivitySmoke
 } from "../scripts/smoke/ollama-vlm-connectivity.js";
+import { definePicoConfig } from "../src/config/index.js";
 
 function tagsResponse(models: readonly string[]): Response {
   return new Response(
@@ -18,21 +19,31 @@ function tagsResponse(models: readonly string[]): Response {
 describe("Ollama VLM connectivity smoke configuration", () => {
   it("skips when the protected local Ollama endpoint is not configured", async () => {
     await expect(
-      runOllamaVlmConnectivitySmoke({}, () => Promise.reject(new Error("should not fetch")))
+      runOllamaVlmConnectivitySmoke(definePicoConfig({}), () =>
+        Promise.reject(new Error("should not fetch"))
+      )
     ).resolves.toEqual({
       status: "skipped",
       provider: "ollama",
-      reason: "Set PICO_VISION_LOCAL_BASE_URL to run the Ollama VLM connectivity smoke."
+      reason: "Set vision.ollama in pico config to run the Ollama VLM connectivity smoke."
     });
   });
 
-  it("builds the selected protected Windows Ollama endpoint from environment", () => {
-    const plan = buildOllamaVlmSmokePlan({
-      PICO_VISION_LOCAL_BASE_URL: " http://127.0.0.1:11434 ",
-      PICO_VISION_TUNNEL_KIND: "cloudflare_access_ssh",
-      PICO_VISION_SSH_TARGET: "vision-host",
-      PICO_VISION_TIMEOUT_MS: "15000"
-    });
+  it("builds the selected protected Windows Ollama endpoint from YAML config", () => {
+    const plan = buildOllamaVlmSmokePlan(
+      definePicoConfig({
+        vision: {
+          ollama: {
+            localBaseUrl: " http://127.0.0.1:11434 ",
+            tunnel: {
+              kind: "cloudflare_access_ssh",
+              sshTarget: "vision-host"
+            },
+            timeoutMs: 15_000
+          }
+        }
+      })
+    );
 
     expect(plan).toEqual({
       status: "run",
@@ -55,26 +66,42 @@ describe("Ollama VLM connectivity smoke configuration", () => {
 
   it("rejects direct non-loopback Ollama endpoints", () => {
     expect(() =>
-      buildOllamaVlmSmokePlan({
-        PICO_VISION_LOCAL_BASE_URL: "http://192.168.0.10:11434"
-      })
-    ).toThrow("pico local model endpoint must use a local SSH tunnel URL");
+      buildOllamaVlmSmokePlan(
+        definePicoConfig({
+          vision: {
+            ollama: {
+              localBaseUrl: "http://192.168.0.10:11434"
+            }
+          }
+        })
+      )
+    ).toThrow("pico config vision.ollama.localBaseUrl must use a local SSH tunnel URL");
   });
 
   it("rejects invalid timeout configuration", () => {
     expect(() =>
-      buildOllamaVlmSmokePlan({
-        PICO_VISION_LOCAL_BASE_URL: "http://127.0.0.1:11434",
-        PICO_VISION_TIMEOUT_MS: "0"
+      definePicoConfig({
+        vision: {
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434",
+            timeoutMs: 0
+          }
+        }
       })
-    ).toThrow("PICO_VISION_TIMEOUT_MS must be a positive integer");
+    ).toThrow("pico config vision.ollama.timeoutMs must be a positive integer");
   });
 
   it("accepts the maximum Node timer timeout value", () => {
-    const plan = buildOllamaVlmSmokePlan({
-      PICO_VISION_LOCAL_BASE_URL: "http://127.0.0.1:11434",
-      PICO_VISION_TIMEOUT_MS: "2147483647"
-    });
+    const plan = buildOllamaVlmSmokePlan(
+      definePicoConfig({
+        vision: {
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434",
+            timeoutMs: 2_147_483_647
+          }
+        }
+      })
+    );
 
     expect(plan.status).toBe("run");
     if (plan.status !== "run") {
@@ -85,19 +112,27 @@ describe("Ollama VLM connectivity smoke configuration", () => {
 
   it("rejects timeout values that exceed Node timer limits", () => {
     expect(() =>
-      buildOllamaVlmSmokePlan({
-        PICO_VISION_LOCAL_BASE_URL: "http://127.0.0.1:11434",
-        PICO_VISION_TIMEOUT_MS: "2147483648"
+      definePicoConfig({
+        vision: {
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434",
+            timeoutMs: 2_147_483_648
+          }
+        }
       })
-    ).toThrow("PICO_VISION_TIMEOUT_MS must be a positive integer <= 2147483647");
+    ).toThrow("pico config vision.ollama.timeoutMs must be a positive integer <= 2147483647");
   });
 
   it("passes when qwen3.5:9b is listed in Ollama tags", async () => {
     const requestedUrls: string[] = [];
     const report = await runOllamaVlmConnectivitySmoke(
-      {
-        PICO_VISION_LOCAL_BASE_URL: "http://127.0.0.1:11434"
-      },
+      definePicoConfig({
+        vision: {
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434"
+          }
+        }
+      }),
       (input) => {
         requestedUrls.push(requestUrl(input));
 
@@ -120,9 +155,13 @@ describe("Ollama VLM connectivity smoke configuration", () => {
 
   it("fails when the selected qwen3.5:9b model is absent", async () => {
     const report = await runOllamaVlmConnectivitySmoke(
-      {
-        PICO_VISION_LOCAL_BASE_URL: "http://127.0.0.1:11434"
-      },
+      definePicoConfig({
+        vision: {
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434"
+          }
+        }
+      }),
       () => Promise.resolve(tagsResponse(["llama3.2:latest"]))
     );
 

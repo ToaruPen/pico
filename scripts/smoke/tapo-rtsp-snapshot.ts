@@ -1,6 +1,7 @@
 #!/usr/bin/env jiti
 import { pathToFileURL } from "node:url";
 
+import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
 import {
   createFfmpegRtspSnapshotTransport,
   createRtspSnapshotClient,
@@ -38,9 +39,9 @@ type TapoRtspSmokePlan =
     };
 
 export async function runTapoRtspSnapshotSmoke(
-  env: NodeJS.ProcessEnv = process.env
+  config: PicoConfig = loadPicoConfigFromEnvironment()
 ): Promise<TapoRtspSmokeReport> {
-  const plan = buildTapoRtspSmokePlan(env);
+  const plan = buildTapoRtspSmokePlan(config);
 
   if (plan.status === "skip") {
     return {
@@ -78,74 +79,33 @@ export async function runTapoRtspSnapshotSmoke(
   };
 }
 
-export function buildTapoRtspSmokePlan(env: NodeJS.ProcessEnv): TapoRtspSmokePlan {
-  const host = readEnvironment(env, "PICO_TAPO_HOST");
+export function buildTapoRtspSmokePlan(config: PicoConfig): TapoRtspSmokePlan {
+  const tapo = config.camera.tapo;
 
-  if (host === undefined) {
+  if (tapo === undefined) {
     return {
       status: "skip",
-      reason: "Set PICO_TAPO_HOST to run the Tapo RTSP snapshot smoke."
+      reason: "Set camera.tapo in pico config to run the Tapo RTSP snapshot smoke."
     };
   }
 
   return {
     status: "run",
     source: defineRtspSnapshotSource({
-      id: readEnvironment(env, "PICO_TAPO_SOURCE_ID") ?? "tapo-rtsp",
-      host,
-      username: requireEnvironment(
-        env,
-        "PICO_TAPO_USER",
-        "PICO_TAPO_USER is required when PICO_TAPO_HOST is set"
-      ),
-      password: requireEnvironment(
-        env,
-        "PICO_TAPO_PASSWORD",
-        "PICO_TAPO_PASSWORD is required when PICO_TAPO_HOST is set"
-      ),
-      stream: readEnvironment(env, "PICO_TAPO_STREAM") ?? defaultTapoStream,
-      port: readPositiveIntegerEnvironment(env, "PICO_TAPO_PORT") ?? defaultTapoPort
+      id: tapo.sourceId ?? "tapo-rtsp",
+      host: tapo.host,
+      username: tapo.user,
+      password: tapo.password,
+      stream: tapo.stream ?? defaultTapoStream,
+      port: tapo.port ?? defaultTapoPort
     }),
-    timeoutMs: readPositiveIntegerEnvironment(env, "PICO_TAPO_TIMEOUT_MS") ?? defaultTimeoutMs,
-    maxFrameBytes:
-      readPositiveIntegerEnvironment(env, "PICO_TAPO_MAX_FRAME_BYTES") ?? defaultMaxFrameBytes
+    timeoutMs: tapo.timeoutMs ?? defaultTimeoutMs,
+    maxFrameBytes: tapo.maxFrameBytes ?? defaultMaxFrameBytes
   };
 }
 
 export function tapoRtspSmokeExitCode(report: TapoRtspSmokeReport): number {
   return report.status === "failed" ? 1 : 0;
-}
-
-function readEnvironment(env: NodeJS.ProcessEnv, name: string): string | undefined {
-  const value = env[name]?.trim();
-
-  return value === "" ? undefined : value;
-}
-
-function requireEnvironment(env: NodeJS.ProcessEnv, name: string, message: string): string {
-  const value = readEnvironment(env, name);
-
-  if (value === undefined) {
-    throw new Error(message);
-  }
-
-  return value;
-}
-
-function readPositiveIntegerEnvironment(env: NodeJS.ProcessEnv, name: string): number | undefined {
-  const value = readEnvironment(env, name);
-
-  if (value === undefined) {
-    return undefined;
-  }
-
-  const parsed = Number(value);
-
-  if (!Number.isInteger(parsed) || parsed < 1) {
-    throw new Error(`${name} must be a positive integer`);
-  }
-
-  return parsed;
 }
 
 function errorMessage(error: unknown): string {

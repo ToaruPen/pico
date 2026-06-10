@@ -1,6 +1,7 @@
 #!/usr/bin/env jiti
 import { pathToFileURL } from "node:url";
 
+import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
 import {
   createFfmpegRtspSnapshotTransport,
   createRtspSnapshotClient
@@ -52,10 +53,10 @@ export type CameraVlmSceneSmokeDependencies = {
 };
 
 export async function runCameraVlmSceneSmoke(
-  env: NodeJS.ProcessEnv = process.env,
+  config: PicoConfig = loadPicoConfigFromEnvironment(),
   dependencies: CameraVlmSceneSmokeDependencies = {}
 ): Promise<CameraVlmSceneSmokeReport> {
-  const plan = buildCameraVlmSceneSmokePlan(env);
+  const plan = buildCameraVlmSceneSmokePlan(config);
 
   if (plan.status === "skip") {
     return {
@@ -105,14 +106,13 @@ export function cameraVlmSceneSmokeExitCode(report: CameraVlmSceneSmokeReport): 
   return report.status === "failed" ? 1 : 0;
 }
 
-export function formatCameraVlmSceneSmokeFatalError(
-  error: unknown,
-  env: NodeJS.ProcessEnv = process.env
-): string {
-  return sanitizeMessage(errorMessage(error), readDirectExecutionSensitiveValues(env));
+export function formatCameraVlmSceneSmokeFatalError(error: unknown, config?: PicoConfig): string {
+  const sensitiveValues = config === undefined ? [] : readDirectExecutionSensitiveValues(config);
+
+  return sanitizeMessage(errorMessage(error), sensitiveValues);
 }
 
-function buildCameraVlmSceneSmokePlan(env: NodeJS.ProcessEnv):
+function buildCameraVlmSceneSmokePlan(config: PicoConfig):
   | {
       readonly status: "run";
       readonly camera: CameraVlmSceneSmokePlan["camera"];
@@ -123,14 +123,14 @@ function buildCameraVlmSceneSmokePlan(env: NodeJS.ProcessEnv):
       readonly status: "skip";
       readonly reason: string;
     } {
-  const cameraPlan = buildTapoRtspSmokePlan(env);
-  const vlmPlan = buildOllamaVlmSmokePlan(env);
+  const cameraPlan = buildTapoRtspSmokePlan(config);
+  const vlmPlan = buildOllamaVlmSmokePlan(config);
 
   if (cameraPlan.status === "skip" && vlmPlan.status === "skip") {
     return {
       status: "skip",
       reason:
-        "Set PICO_TAPO_HOST and PICO_VISION_LOCAL_BASE_URL to run the camera to VLM scene smoke."
+        "Set camera.tapo and vision.ollama in pico config to run the camera to VLM scene smoke."
     };
   }
 
@@ -152,7 +152,7 @@ function buildCameraVlmSceneSmokePlan(env: NodeJS.ProcessEnv):
     status: "run",
     camera: cameraPlan,
     vlm: vlmPlan,
-    sensitiveValues: readSensitiveValues(env, cameraPlan.source.url)
+    sensitiveValues: readSensitiveValues(config, cameraPlan.source.url)
   };
 }
 
@@ -217,29 +217,20 @@ async function captureFrameWithRtsp(plan: CameraVlmSceneSmokePlan): Promise<Capt
 
 class CameraVlmSceneSmokeError extends Error {}
 
-function readSensitiveValues(env: NodeJS.ProcessEnv, rtspUrl: string): readonly string[] {
-  const values = [
-    readEnvironment(env, "PICO_TAPO_USER"),
-    readEnvironment(env, "PICO_TAPO_PASSWORD"),
-    rtspUrl
-  ].flatMap((value) => (value === undefined ? [] : [value, encodeURIComponent(value)]));
+function readSensitiveValues(config: PicoConfig, rtspUrl: string): readonly string[] {
+  const values = [config.camera.tapo?.user, config.camera.tapo?.password, rtspUrl].flatMap(
+    (value) => (value === undefined ? [] : [value, encodeURIComponent(value)])
+  );
 
   return [...new Set(values.filter((value) => value.trim() !== ""))];
 }
 
-function readDirectExecutionSensitiveValues(env: NodeJS.ProcessEnv): readonly string[] {
-  const values = [
-    readEnvironment(env, "PICO_TAPO_USER"),
-    readEnvironment(env, "PICO_TAPO_PASSWORD")
-  ].flatMap((value) => (value === undefined ? [] : [value, encodeURIComponent(value)]));
+function readDirectExecutionSensitiveValues(config: PicoConfig): readonly string[] {
+  const values = [config.camera.tapo?.user, config.camera.tapo?.password].flatMap((value) =>
+    value === undefined ? [] : [value, encodeURIComponent(value)]
+  );
 
   return [...new Set(values.filter((value) => value.trim() !== ""))];
-}
-
-function readEnvironment(env: NodeJS.ProcessEnv, name: string): string | undefined {
-  const value = env[name]?.trim();
-
-  return value === "" ? undefined : value;
 }
 
 function sanitizeMessage(message: string, sensitiveValues: readonly string[]): string {
