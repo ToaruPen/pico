@@ -62,6 +62,32 @@ function requireProtectedTunnelKind(value: unknown): ProtectedSshTunnelKind {
   throw new Error("pico local model endpoint must use a protected SSH tunnel");
 }
 
+function requireHttpUrl(parsedUrl: URL): void {
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    throw new Error("pico local model endpoint localBaseUrl must use HTTP");
+  }
+}
+
+function requireOriginUrl(parsedUrl: URL): void {
+  if (
+    parsedUrl.pathname !== "/" ||
+    parsedUrl.search !== "" ||
+    parsedUrl.hash !== "" ||
+    parsedUrl.username !== "" ||
+    parsedUrl.password !== ""
+  ) {
+    throw new Error("pico local model endpoint localBaseUrl must be an origin URL");
+  }
+}
+
+function requireLocalTunnelUrl(parsedUrl: URL): void {
+  const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+  if (!loopbackHosts.has(parsedUrl.hostname)) {
+    throw new Error("pico local model endpoint must use a local SSH tunnel URL");
+  }
+}
+
 function requireLocalTunnelBaseUrl(value: unknown): string {
   const localBaseUrl = requireString(value, "pico local model endpoint localBaseUrl is required");
 
@@ -71,19 +97,9 @@ function requireLocalTunnelBaseUrl(value: unknown): string {
 
   const parsedUrl = new URL(localBaseUrl);
 
-  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-    throw new Error("pico local model endpoint localBaseUrl must use HTTP");
-  }
-
-  if (parsedUrl.pathname !== "/" || parsedUrl.search !== "" || parsedUrl.hash !== "") {
-    throw new Error("pico local model endpoint localBaseUrl must be an origin URL");
-  }
-
-  const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
-
-  if (!loopbackHosts.has(parsedUrl.hostname)) {
-    throw new Error("pico local model endpoint must use a local SSH tunnel URL");
-  }
+  requireHttpUrl(parsedUrl);
+  requireOriginUrl(parsedUrl);
+  requireLocalTunnelUrl(parsedUrl);
 
   return localBaseUrl;
 }

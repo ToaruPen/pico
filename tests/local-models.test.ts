@@ -77,6 +77,38 @@ describe("selected local model endpoint config", () => {
     ).toThrow("pico local model endpoint localBaseUrl must be an origin URL");
   });
 
+  it("rejects non-loopback local tunnel endpoint URLs", () => {
+    expect(() =>
+      defineSelectedModelEndpoint({
+        ...protectedEndpoint,
+        host: {
+          platform: "windows",
+          tunnel: {
+            kind: "tailscale_ssh",
+            localBaseUrl: "http://192.168.0.5:11434",
+            sshTarget: "pico-vision-host"
+          }
+        }
+      })
+    ).toThrow("pico local model endpoint must use a local SSH tunnel URL");
+  });
+
+  it("rejects credentialed local tunnel endpoint URLs", () => {
+    expect(() =>
+      defineSelectedModelEndpoint({
+        ...protectedEndpoint,
+        host: {
+          platform: "windows",
+          tunnel: {
+            kind: "tailscale_ssh",
+            localBaseUrl: "http://user:pass@127.0.0.1:11434",
+            sshTarget: "pico-vision-host"
+          }
+        }
+      })
+    ).toThrow("pico local model endpoint localBaseUrl must be an origin URL");
+  });
+
   it("selects exactly one protected Windows Ollama endpoint", () => {
     const endpoint = defineSelectedModelEndpoint(protectedEndpoint);
 

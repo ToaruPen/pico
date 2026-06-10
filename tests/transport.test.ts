@@ -35,4 +35,22 @@ describe("protected model endpoint connectivity", () => {
     });
     expect(checkedUrls).toEqual(["http://127.0.0.1:11434"]);
   });
+
+  it("reports unreachable protected endpoint connectivity without changing the selected endpoint", async () => {
+    const checkedUrls: string[] = [];
+
+    const result = await checkProtectedModelEndpointConnectivity(selectedEndpoint, {
+      canReach(localBaseUrl) {
+        checkedUrls.push(localBaseUrl);
+        return Promise.resolve(false);
+      }
+    });
+
+    expect(result).toEqual({
+      endpointId: "windows-ollama-qwen3-5",
+      reachable: false,
+      checkedUrl: "http://127.0.0.1:11434"
+    });
+    expect(checkedUrls).toEqual(["http://127.0.0.1:11434"]);
+  });
 });
