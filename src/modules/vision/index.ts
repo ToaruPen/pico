@@ -18,6 +18,8 @@ export const visionModuleMetadata = {
 const BOUNDED_SCENE_PROMPT =
   "Describe this after-school care scene as bounded JSON. Do not identify children, infer private traits, diagnose, score, or make final safety decisions. Include only visible scene details, uncertainty, and items a human staff member may need to check.";
 
+const OLLAMA_REQUEST_TIMEOUT_MS = 30_000;
+
 const SCENE_DESCRIPTION_FORMAT = {
   type: "object",
   additionalProperties: false,
@@ -88,13 +90,29 @@ async function postOllamaSceneRequest(
   request: SceneDescriptionRequest,
   fetchImplementation: typeof fetch
 ): Promise<unknown> {
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => {
+    abortController.abort();
+  }, OLLAMA_REQUEST_TIMEOUT_MS);
+
   const response = await fetchImplementation(buildOllamaChatUrl(request.endpoint), {
     method: "POST",
     headers: {
       "content-type": "application/json"
     },
-    body: JSON.stringify(buildOllamaSceneRequestBody(request))
-  });
+    body: JSON.stringify(buildOllamaSceneRequestBody(request)),
+    signal: abortController.signal
+  })
+    .catch((error: unknown) => {
+      if (isAbortError(error)) {
+        throw new Error("pico vision Ollama request timed out");
+      }
+
+      throw error;
+    })
+    .finally(() => {
+      clearTimeout(timeout);
+    });
 
   if (!response.ok) {
     throw new Error(`pico vision Ollama request failed with status ${response.status}`);
@@ -121,6 +139,10 @@ function buildOllamaSceneRequestBody(request: SceneDescriptionRequest): Record<s
       num_predict: 256
     }
   };
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 export function parseOllamaSceneDescriptionResponse(
