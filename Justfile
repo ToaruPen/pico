@@ -15,6 +15,9 @@ format:
 test:
   npm run test
 
+smoke-voice-providers:
+  npm run smoke:voice-providers
+
 smoke-pi-runtime:
   npm run smoke:pi-runtime
 
