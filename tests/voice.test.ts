@@ -198,6 +198,40 @@ describe("mlx-whisper STT sidecar boundary", () => {
     );
   });
 
+  it("normalizes trailing slash sidecar URLs when posting transcription requests", async () => {
+    let recordedRequest: RecordedRequest | undefined;
+    const recordingFetch: typeof fetch = (input, init) => {
+      recordedRequest = { input, init };
+
+      return Promise.resolve(
+        buildSidecarResponse({
+          ok: true,
+          provider: "mlx-whisper",
+          result: {
+            text: "ok",
+            language: "ja",
+            confidence: 1,
+            durationMs: 1,
+            segments: []
+          }
+        })
+      );
+    };
+    const client = createMlxWhisperSttClient(
+      {
+        ...sidecar,
+        localBaseUrl: "http://127.0.0.1:8765/"
+      },
+      recordingFetch
+    );
+
+    await client.transcribe(audioRequest);
+
+    expect(requireRecordedRequest(recordedRequest).input).toBe(
+      "http://127.0.0.1:8765/v1/transcriptions"
+    );
+  });
+
   it("maps sidecar request timeouts to an explicit failure result", async () => {
     vi.useFakeTimers();
     let abortObserved = false;
@@ -254,6 +288,58 @@ describe("mlx-whisper STT sidecar boundary", () => {
         provider: "mlx-whisper",
         modelRepo: "mlx-community/whisper-large-v3-turbo"
       }
+    });
+  });
+
+  it("maps sidecar transport failures to explicit failure results", async () => {
+    const failingFetch: typeof fetch = () => Promise.reject(new Error("connection refused"));
+    const client = createMlxWhisperSttClient(sidecar, failingFetch);
+
+    await expect(client.transcribe(audioRequest)).resolves.toEqual({
+      ok: false,
+      reason: "backend_error",
+      message: "pico STT mlx-whisper sidecar request failed: connection refused",
+      source: {
+        sidecarId: "local-mlx-whisper",
+        provider: "mlx-whisper",
+        modelRepo: "mlx-community/whisper-large-v3-turbo"
+      }
+    });
+  });
+
+  it("maps malformed sidecar JSON to explicit failure results", async () => {
+    const malformedFetch: typeof fetch = () =>
+      Promise.resolve(
+        new Response("not json", {
+          status: 200
+        })
+      );
+    const client = createMlxWhisperSttClient(sidecar, malformedFetch);
+
+    const result = await client.transcribe(audioRequest);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("backend_error");
+      expect(result.message).toContain("pico STT mlx-whisper sidecar request failed:");
+    }
+  });
+
+  it("rejects misaligned PCM16LE audio frames before calling the sidecar", async () => {
+    const recordingFetch: typeof fetch = () => {
+      throw new Error("invalid PCM16LE audio should not call the STT sidecar");
+    };
+    const client = createMlxWhisperSttClient(sidecar, recordingFetch);
+
+    await expect(
+      client.transcribe({
+        ...audioRequest,
+        audio: Buffer.from([0, 0, 1])
+      })
+    ).resolves.toMatchObject({
+      ok: false,
+      reason: "invalid_request",
+      message: "pico STT transcription request must be PCM16LE audio with positive metadata"
     });
   });
 

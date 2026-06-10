@@ -136,6 +136,17 @@ async function transcribeWithMlxWhisperSidecar(
   fetchImplementation: typeof fetch
 ): Promise<SttTranscriptionResult> {
   const source = transcriptionSource(sidecar);
+  const invalidRequestMessage = validatePcm16leRequest(request);
+
+  if (invalidRequestMessage !== undefined) {
+    return {
+      ok: false,
+      reason: "invalid_request",
+      message: invalidRequestMessage,
+      source
+    };
+  }
+
   const abortController = new AbortController();
   const timeout = setTimeout(() => {
     abortController.abort();
@@ -183,7 +194,12 @@ async function transcribeWithMlxWhisperSidecar(
       };
     }
 
-    throw error;
+    return {
+      ok: false,
+      reason: "backend_error",
+      message: sttRequestErrorMessage(error),
+      source
+    };
   } finally {
     clearTimeout(timeout);
   }
@@ -224,15 +240,13 @@ function transcriptionSource(sidecar: MlxWhisperSidecarConfig): SttTranscription
 }
 
 function buildTranscriptionUrl(sidecar: MlxWhisperSidecarConfig): string {
-  return `${sidecar.localBaseUrl}/v1/transcriptions`;
+  return new URL("/v1/transcriptions", sidecar.localBaseUrl).toString();
 }
 
 function buildTranscriptionRequestBody(
   request: SttTranscriptionRequest,
   sidecar: MlxWhisperSidecarConfig
 ): Record<string, unknown> {
-  requirePcm16leRequest(request);
-
   return {
     provider: sidecar.provider,
     modelRepo: sidecar.modelRepo,
@@ -252,15 +266,19 @@ function buildTranscriptionRequestBody(
   };
 }
 
-function requirePcm16leRequest(request: SttTranscriptionRequest): void {
+function validatePcm16leRequest(request: SttTranscriptionRequest): string | undefined {
   if (
     !Number.isInteger(request.sampleRateHz) ||
     request.sampleRateHz < 1 ||
     !Number.isInteger(request.channels) ||
-    request.channels < 1
+    request.channels < 1 ||
+    request.audio.byteLength === 0 ||
+    request.audio.byteLength % (request.channels * PCM16LE_BYTES_PER_SAMPLE) !== 0
   ) {
-    throw new Error("pico STT transcription request must be PCM16LE audio with positive metadata");
+    return "pico STT transcription request must be PCM16LE audio with positive metadata";
   }
+
+  return undefined;
 }
 
 export function parseMlxWhisperSidecarResponse(
@@ -467,6 +485,14 @@ function requireSidecarErrorCode(value: unknown): SttTranscriptionFailure["reaso
   }
 
   throw new Error("pico STT mlx-whisper sidecar response is malformed");
+}
+
+function sttRequestErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim() !== "") {
+    return `pico STT mlx-whisper sidecar request failed: ${error.message}`;
+  }
+
+  return "pico STT mlx-whisper sidecar request failed";
 }
 
 function isAbortError(error: unknown): boolean {
