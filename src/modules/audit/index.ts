@@ -210,8 +210,9 @@ function requireAuditSummary(value: unknown): string {
 
 function requireAuditTimestamp(value: unknown): string {
   const timestamp = requireAuditText(value, "pico audit event timestamp is required");
+  const date = new Date(timestamp);
 
-  if (new Date(timestamp).toISOString() !== timestamp) {
+  if (Number.isNaN(date.getTime()) || date.toISOString() !== timestamp) {
     throw new Error("pico audit event timestamp is invalid");
   }
 

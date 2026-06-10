@@ -184,6 +184,23 @@ describe("operational audit events", () => {
     ).toThrow("pico audit event name is too large");
   });
 
+  it.each([
+    "not-a-valid-date",
+    "2026-13-45"
+  ])("rejects malformed event timestamps: %s", (occurredAt) => {
+    const log = createStructuredAuditLog();
+
+    expect(() =>
+      log.record({
+        category: "tool_call",
+        name: "vision.describe_scene",
+        severity: "info",
+        occurredAt,
+        summary: "Vision scene description tool call completed."
+      })
+    ).toThrow("pico audit event timestamp is invalid");
+  });
+
   it("represents future staff daily report delivery without a LINE integration", () => {
     const log = createStructuredAuditLog();
 
