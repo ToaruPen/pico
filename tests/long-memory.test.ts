@@ -67,11 +67,12 @@ describe("SQLite long memory store", () => {
   it("creates the durable memory schema and FTS index in SQLite", async () => {
     await withLongMemoryDatabase((path) => {
       withLongMemoryStore(path, () => undefined);
+      const tables = listTables(path);
 
-      expect(listTables(path)).toEqual(
+      expect(tables).toEqual(
         expect.arrayContaining(["long_memory_entries", "long_memory_entries_fts"])
       );
-      expect(listTables(path).some((table) => table.toLowerCase().includes("vector"))).toBe(false);
+      expect(tables.some((table) => table.toLowerCase().includes("vector"))).toBe(false);
     });
   });
 
@@ -218,13 +219,29 @@ describe("SQLite long memory store", () => {
     });
   });
 
-  it("rejects individual child assessment content in reviewed text and tags", async () => {
+  it("rejects individual child assessment content in reviewed text", async () => {
     await withLongMemoryDatabase((path) => {
       withLongMemoryStore(path, (store) => {
         expect(() =>
           store.writeReviewed({
             title: "施設メモ",
             body: "child evaluation notes must not become durable memory.",
+            category: "care_continuity",
+            reviewedBy: "staff-a",
+            reviewedAt: "2026-06-10T09:00:00.000Z"
+          })
+        ).toThrow("pico long memory must not contain individual child profile data");
+      });
+    });
+  });
+
+  it("rejects individual child assessment content in reviewed tags", async () => {
+    await withLongMemoryDatabase((path) => {
+      withLongMemoryStore(path, (store) => {
+        expect(() =>
+          store.writeReviewed({
+            title: "施設メモ",
+            body: "施設全体の申し送りとして扱う。",
             category: "care_continuity",
             tags: ["child-evaluating"],
             reviewedBy: "staff-a",

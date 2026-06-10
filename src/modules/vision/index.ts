@@ -19,6 +19,44 @@ const BOUNDED_SCENE_PROMPT =
   "Describe this after-school care scene as bounded JSON. Do not identify children, infer private traits, diagnose, score, or make final safety decisions. Include only visible scene details, uncertainty, and items a human staff member may need to check.";
 
 const OLLAMA_REQUEST_TIMEOUT_MS = 30_000;
+const visionBoundaryMarkers = [
+  "childid",
+  "childevaluation",
+  "childscore",
+  "childscoring",
+  "evaluatechild",
+  "evaluatethechild",
+  "identifythechild",
+  "identifyachild",
+  "identifiesthechild",
+  "identifiedthechild",
+  "diagnosechild",
+  "diagnosethechild",
+  "diagnosingchild",
+  "childdiagnosis",
+  "assessthechild",
+  "児童id",
+  "子どもid",
+  "児童スコア",
+  "子どもスコア",
+  "児童のスコア",
+  "子どものスコア",
+  "児童を特定",
+  "子どもを特定",
+  "児童の特定",
+  "子どもの特定",
+  "児童診断",
+  "子ども診断",
+  "児童を診断",
+  "子どもを診断",
+  "児童の診断",
+  "子どもの診断",
+  "児童を評価",
+  "子どもを評価",
+  "児童の評価",
+  "子どもの評価"
+];
+const normalizedVisionBoundaryMarkers = visionBoundaryMarkers.map(normalizeVisionBoundaryText);
 
 const SCENE_DESCRIPTION_FORMAT = {
   type: "object",
@@ -95,30 +133,33 @@ async function postOllamaSceneRequest(
     abortController.abort();
   }, OLLAMA_REQUEST_TIMEOUT_MS);
 
-  const response = await fetchImplementation(buildOllamaChatUrl(request.endpoint), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json"
-    },
-    body: JSON.stringify(buildOllamaSceneRequestBody(request)),
-    signal: abortController.signal
-  })
-    .catch((error: unknown) => {
-      if (isAbortError(error)) {
-        throw new Error("pico vision Ollama request timed out");
-      }
+  try {
+    const response = await rejectOnAbort(
+      fetchImplementation(buildOllamaChatUrl(request.endpoint), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(buildOllamaSceneRequestBody(request)),
+        signal: abortController.signal
+      }),
+      abortController.signal
+    );
 
-      throw error;
-    })
-    .finally(() => {
-      clearTimeout(timeout);
-    });
+    if (!response.ok) {
+      throw new Error(`pico vision Ollama request failed with status ${response.status}`);
+    }
 
-  if (!response.ok) {
-    throw new Error(`pico vision Ollama request failed with status ${response.status}`);
+    return await rejectOnAbort(response.json() as Promise<unknown>, abortController.signal);
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error("pico vision Ollama request timed out", { cause: error });
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  return (await response.json()) as unknown;
 }
 
 function buildOllamaSceneRequestBody(request: SceneDescriptionRequest): Record<string, unknown> {
@@ -143,6 +184,41 @@ function buildOllamaSceneRequestBody(request: SceneDescriptionRequest): Record<s
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+function rejectOnAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(createAbortError());
+  }
+
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      signal.removeEventListener("abort", abort);
+    };
+    const abort = (): void => {
+      cleanup();
+      reject(createAbortError());
+    };
+
+    signal.addEventListener("abort", abort, { once: true });
+    operation.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    );
+  });
+}
+
+function createAbortError(): Error {
+  const error = new Error("aborted");
+  error.name = "AbortError";
+
+  return error;
 }
 
 export function parseOllamaSceneDescriptionResponse(
@@ -202,6 +278,14 @@ function requireSceneDescription(value: unknown): ParsedSceneDescription {
     throw new Error("pico vision scene response is malformed");
   }
 
+  rejectIndividualChildAssessmentText([
+    scene.summary,
+    ...scene.observedPeople,
+    ...scene.environment,
+    ...scene.humanAttention,
+    ...scene.uncertainty
+  ]);
+
   return {
     summary: scene.summary,
     observedPeople: scene.observedPeople,
@@ -213,4 +297,21 @@ function requireSceneDescription(value: unknown): ParsedSceneDescription {
 
 function isStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function rejectIndividualChildAssessmentText(values: readonly string[]): void {
+  for (const value of values) {
+    const normalized = normalizeVisionBoundaryText(value);
+
+    if (normalizedVisionBoundaryMarkers.some((marker) => normalized.includes(marker))) {
+      throw new Error("pico vision scene response must not identify or assess individual children");
+    }
+  }
+}
+
+function normalizeVisionBoundaryText(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replaceAll(/\s|_|-/gu, "");
 }
