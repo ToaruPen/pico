@@ -21,8 +21,11 @@ const BOUNDED_SCENE_PROMPT =
 const OLLAMA_REQUEST_TIMEOUT_MS = 30_000;
 const visionBoundaryMarkers = [
   "childid",
+  "childevaluation",
   "childscore",
   "childscoring",
+  "evaluatechild",
+  "evaluatethechild",
   "identifythechild",
   "identifyachild",
   "identifiesthechild",
@@ -53,6 +56,7 @@ const visionBoundaryMarkers = [
   "児童の評価",
   "子どもの評価"
 ];
+const normalizedVisionBoundaryMarkers = visionBoundaryMarkers.map(normalizeVisionBoundaryText);
 
 const SCENE_DESCRIPTION_FORMAT = {
   type: "object",
@@ -130,23 +134,23 @@ async function postOllamaSceneRequest(
   }, OLLAMA_REQUEST_TIMEOUT_MS);
 
   try {
-    const response = await fetchImplementation(buildOllamaChatUrl(request.endpoint), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify(buildOllamaSceneRequestBody(request)),
-      signal: abortController.signal
-    });
+    const response = await rejectOnAbort(
+      fetchImplementation(buildOllamaChatUrl(request.endpoint), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(buildOllamaSceneRequestBody(request)),
+        signal: abortController.signal
+      }),
+      abortController.signal
+    );
 
     if (!response.ok) {
       throw new Error(`pico vision Ollama request failed with status ${response.status}`);
     }
 
-    return await Promise.race([
-      response.json() as Promise<unknown>,
-      rejectOnAbort(abortController.signal)
-    ]);
+    return await rejectOnAbort(response.json() as Promise<unknown>, abortController.signal);
   } catch (error) {
     if (isAbortError(error)) {
       throw new Error("pico vision Ollama request timed out", { cause: error });
@@ -182,20 +186,39 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
-function rejectOnAbort(signal: AbortSignal): Promise<never> {
+function rejectOnAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) {
-    return Promise.reject(new DOMException("aborted", "AbortError"));
+    return Promise.reject(createAbortError());
   }
 
-  return new Promise((_resolve, reject) => {
-    signal.addEventListener(
-      "abort",
-      () => {
-        reject(new DOMException("aborted", "AbortError"));
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      signal.removeEventListener("abort", abort);
+    };
+    const abort = (): void => {
+      cleanup();
+      reject(createAbortError());
+    };
+
+    signal.addEventListener("abort", abort, { once: true });
+    operation.then(
+      (value) => {
+        cleanup();
+        resolve(value);
       },
-      { once: true }
+      (error: unknown) => {
+        cleanup();
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     );
   });
+}
+
+function createAbortError(): Error {
+  const error = new Error("aborted");
+  error.name = "AbortError";
+
+  return error;
 }
 
 export function parseOllamaSceneDescriptionResponse(
@@ -278,10 +301,17 @@ function isStringArray(value: unknown): value is readonly string[] {
 
 function rejectIndividualChildAssessmentText(values: readonly string[]): void {
   for (const value of values) {
-    const normalized = value.toLowerCase().replaceAll(/\s|_|-/gu, "");
+    const normalized = normalizeVisionBoundaryText(value);
 
-    if (visionBoundaryMarkers.some((marker) => normalized.includes(marker))) {
+    if (normalizedVisionBoundaryMarkers.some((marker) => normalized.includes(marker))) {
       throw new Error("pico vision scene response must not identify or assess individual children");
     }
   }
+}
+
+function normalizeVisionBoundaryText(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replaceAll(/\s|_|-/gu, "");
 }

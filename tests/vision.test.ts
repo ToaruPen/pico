@@ -157,6 +157,25 @@ describe("bounded vision scene description", () => {
     }
   });
 
+  it("rejects Ollama scene requests on timeout even when the fetch adapter ignores abort", async () => {
+    vi.useFakeTimers();
+    const ignoringFetch: typeof fetch = () => new Promise<Response>(() => undefined);
+    const settled = vi.fn<(message: string) => void>();
+
+    try {
+      void describeScene(sceneRequest, ignoringFetch).catch((error: unknown) => {
+        settled(error instanceof Error ? error.message : String(error));
+      });
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await Promise.resolve();
+
+      expect(settled).toHaveBeenCalledWith("pico vision Ollama request timed out");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("aborts Ollama scene response parsing after the bounded request timeout", async () => {
     vi.useFakeTimers();
     const slowResponse = new Response("{}", { status: 200 });
@@ -258,8 +277,12 @@ describe("bounded vision scene description", () => {
     ["diagnose the child"],
     ["child diagnosis is likely"],
     ["assess the child"],
+    ["evaluate the child"],
+    ["child evaluation is visible"],
+    ["ｃｈｉｌｄ　ｅｖａｌｕａｔｉｏｎ"],
     ["子どもを診断"],
-    ["子どもを評価"]
+    ["子どもを評価"],
+    ["子どもの評価"]
   ])("rejects model output boundary variant: %s", (boundaryText) => {
     expect(() =>
       parseOllamaSceneDescriptionResponse({
