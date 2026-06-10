@@ -7,6 +7,7 @@ const defaultEndpointId = "windows-ollama-qwen3-5";
 const defaultTunnelKind = "tailscale_ssh";
 const defaultSshTarget = "pico-vision-host";
 const defaultTimeoutMs = 10_000;
+const maxNodeTimeoutMs = 2_147_483_647;
 
 export type OllamaVlmSmokeStatus = "passed" | "failed" | "skipped";
 
@@ -189,8 +190,8 @@ function readPositiveIntegerEnvironment(env: NodeJS.ProcessEnv, name: string): n
 
   const parsed = Number(value);
 
-  if (!Number.isInteger(parsed) || parsed < 1) {
-    throw new Error(`${name} must be a positive integer`);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > maxNodeTimeoutMs) {
+    throw new Error(`${name} must be a positive integer <= ${maxNodeTimeoutMs}`);
   }
 
   return parsed;

@@ -70,6 +70,15 @@ describe("Ollama VLM connectivity smoke configuration", () => {
     ).toThrow("PICO_VISION_TIMEOUT_MS must be a positive integer");
   });
 
+  it("rejects timeout values that exceed Node timer limits", () => {
+    expect(() =>
+      buildOllamaVlmSmokePlan({
+        PICO_VISION_LOCAL_BASE_URL: "http://127.0.0.1:11434",
+        PICO_VISION_TIMEOUT_MS: "2147483648"
+      })
+    ).toThrow("PICO_VISION_TIMEOUT_MS must be a positive integer <= 2147483647");
+  });
+
   it("passes when qwen3.5:9b is listed in Ollama tags", async () => {
     const requestedUrls: string[] = [];
     const report = await runOllamaVlmConnectivitySmoke(
