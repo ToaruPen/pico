@@ -16,8 +16,8 @@ only active decisions and relevant source references.
 | identity | Local prompt/profile files | Final name and personality can change later. |
 | orchestrator | Thin TypeScript registry | Route modules without a broad control plane. |
 | context | Structured local files first | Add storage only when real context data exists. |
-| memory | In-process short-term memory first | Durable memory starts later. |
-| long_memory | SQLite + FTS5 when needed | SQLite is the durable source of truth. |
+| memory | In-process short-term memory first | Active interaction continuity only. |
+| long_memory | SQLite + FTS5 | Narrow reviewed durable-memory slice; SQLite is the source of truth. |
 | local_models | Selected provider boundary | Model access is explicit, not automatically switched. |
 | STT | `mlx-whisper` | Current local STT baseline. |
 | TTS | Aivis Speech | Current local Japanese TTS baseline. |
@@ -109,8 +109,10 @@ Sources:
 Selected direction:
 
 - Use in-process memory for active interaction continuity.
-- Use SQLite + FTS5 when durable memory becomes real.
+- Use SQLite + FTS5 for the reviewed durable facility-memory slice.
 - Treat vector search as a later secondary index, not the source of truth.
+- Keep durable writes behind explicit staff review, correction, and deletion
+  boundaries.
 
 Sources:
 

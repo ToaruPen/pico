@@ -104,6 +104,10 @@ The default framing is place memory and support knowledge, not child profiles.
 Long-term memory should be designed around what helps the facility provide
 consistent care.
 
+The initial durable slice is a reviewed SQLite store for facility knowledge,
+care-continuity notes, and operational notes. It is not an autonomous memory
+collector, a child dossier store, or a vector-primary memory system.
+
 ### local_models
 
 Provides local model capabilities around Pi Agent.
@@ -184,8 +188,8 @@ rather than an exposed Ollama port.
 
 - Do not create a separate complex `policy` module or rules engine as an early
   architecture layer.
-- Do not start by implementing LINE, camera control, voice, or long-term memory
-  in detail.
+- Do not start by implementing LINE, camera control, voice, or broad autonomous
+  long-term memory behavior in detail.
 - Do not split `pico` into many separate Pi plugins before the identity and
   module contract are stable.
 - Do not design the agent as a child-monitoring, scoring, or profiling system.
@@ -215,9 +219,12 @@ Suggested first slice:
    modules through typed contracts.
 4. Add first-slice modules for `context`, `memory`, `local_models`, `handoff`,
    `audit`, and `transport`.
-5. Keep `voice`, `vision`, `camera`, `channels`, and `long_memory` as explicit
-   future modules with contracts but no runtime implementation until their real
-   dependencies are selected and reachable.
+5. Keep `voice`, `vision`, `camera`, and `channels` as explicit future modules
+   with contracts but no runtime implementation until their real dependencies
+   are selected and reachable.
+6. Keep the first `long_memory` runtime surface limited to reviewed SQLite
+   facility memory. Broader extraction, compaction, and integration behavior is
+   future work.
 
 ## Open Decisions
 

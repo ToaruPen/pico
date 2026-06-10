@@ -18,7 +18,10 @@ responsible decision makers.
 - Module code uses one folder per module under `src/modules/<module>/index.ts`.
 - First-slice runtime modules are metadata/contract modules for context, memory,
   local models, handoff, audit, and transport.
-- Planned heavy modules include long memory, voice, vision, camera, and channels.
+- `long_memory` has a narrow SQLite durable-memory slice for reviewed facility
+  knowledge; broader long-memory automation remains future work.
+- Planned heavy modules include voice, vision, camera, channels, and broader
+  long-memory integrations.
 - Vision provider selection is `Qwen/Qwen3.5-9B` through Ollama `qwen3.5:9b`
   running on a protected Windows GPU host.
 - The `pico` host reaches the Windows vision host through a Tailscale or
