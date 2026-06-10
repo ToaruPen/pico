@@ -61,7 +61,7 @@ export default defineConfig([
         "error",
         {
           message: "Use explicit provider selection; do not encode automatic fallback chains.",
-          selector: "CatchClause > BlockStatement > TryStatement"
+          selector: "CatchClause TryStatement"
         }
       ],
       "unicorn/no-array-for-each": "error",

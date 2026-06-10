@@ -9,6 +9,9 @@
     "after-school-care",
     "agent-extension"
   ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "pi": {
     "extensions": [
       "./src/index.ts"

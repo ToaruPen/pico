@@ -101,18 +101,21 @@ Module imports should target the folder-per-module paths directly.
 Use these as implementation and test references. Do not copy stale product
 shape, daemon lifecycle, UI assumptions, or compatibility behavior.
 
+The archived files named below are author-local references from Wooly-Fluffy
+archived and are not included in this repository.
+
 ### Vision / VLM
 
 Source implementation references:
 
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/daemon/src/daemon/adapters/camera/vlm_protocol.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/daemon/src/daemon/adapters/camera/vlm_adapter.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/daemon/src/daemon/adapters/camera/adapter.py`
+- `daemon/src/daemon/adapters/camera/vlm_protocol.py`
+- `daemon/src/daemon/adapters/camera/vlm_adapter.py`
+- `daemon/src/daemon/adapters/camera/adapter.py`
 
 Source test references:
 
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/tests/adapters/camera/test_vlm_adapter.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/tests/adapters/camera/test_adapter.py`
+- `tests/adapters/camera/test_vlm_adapter.py`
+- `tests/adapters/camera/test_adapter.py`
 
 Reusable ideas:
 
@@ -144,18 +147,18 @@ Do not carry forward:
 
 Source implementation references:
 
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/daemon/src/daemon/adapters/tts/base.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/daemon/src/daemon/adapters/tts/aivispeech.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/daemon/src/daemon/adapters/tts/segmenter.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/daemon/src/daemon/adapters/tts/sentence_queue.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/daemon/src/daemon/adapters/tts/orchestrator.py`
+- `daemon/src/daemon/adapters/tts/base.py`
+- `daemon/src/daemon/adapters/tts/aivispeech.py`
+- `daemon/src/daemon/adapters/tts/segmenter.py`
+- `daemon/src/daemon/adapters/tts/sentence_queue.py`
+- `daemon/src/daemon/adapters/tts/orchestrator.py`
 
 Source test references:
 
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/tests/adapters/tts/test_aivispeech.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/tests/adapters/tts/test_segmenter.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/tests/adapters/tts/test_sentence_queue.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/tests/adapters/tts/test_orchestrator.py`
+- `tests/adapters/tts/test_aivispeech.py`
+- `tests/adapters/tts/test_segmenter.py`
+- `tests/adapters/tts/test_sentence_queue.py`
+- `tests/adapters/tts/test_orchestrator.py`
 
 Reusable ideas:
 
@@ -183,17 +186,17 @@ Do not carry forward:
 
 Source implementation references:
 
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/daemon/src/daemon/adapters/stt/base.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/daemon/src/daemon/adapters/stt/mlx_whisper.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/daemon/src/daemon/adapters/stt/factory.py`
+- `daemon/src/daemon/adapters/stt/base.py`
+- `daemon/src/daemon/adapters/stt/mlx_whisper.py`
+- `daemon/src/daemon/adapters/stt/factory.py`
 
 Source test references:
 
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/tests/adapters/stt/test_base.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/tests/adapters/stt/test_mlx_whisper.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/tests/adapters/stt/test_mlx_whisper_helpers.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/tests/adapters/stt/test_factory.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/tests/integration/test_stt.py`
+- `tests/adapters/stt/test_base.py`
+- `tests/adapters/stt/test_mlx_whisper.py`
+- `tests/adapters/stt/test_mlx_whisper_helpers.py`
+- `tests/adapters/stt/test_factory.py`
+- `tests/integration/test_stt.py`
 
 Reusable ideas:
 
@@ -221,16 +224,16 @@ Do not carry forward:
 
 Source implementation references:
 
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/daemon/src/daemon/adapters/camera/adapter.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/daemon/src/daemon/adapters/camera/onvif_client.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/daemon/src/daemon/adapters/camera/ptz_control.py`
+- `daemon/src/daemon/adapters/camera/adapter.py`
+- `daemon/src/daemon/adapters/camera/onvif_client.py`
+- `daemon/src/daemon/adapters/camera/ptz_control.py`
 
 Source test references:
 
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/tests/adapters/camera/test_adapter.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/tests/adapters/camera/test_onvif_client.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/tests/adapters/camera/test_ptz_control.py`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/tests/adapters/camera/test_live_snapshot_yolo_validation.py`
+- `tests/adapters/camera/test_adapter.py`
+- `tests/adapters/camera/test_onvif_client.py`
+- `tests/adapters/camera/test_ptz_control.py`
+- `tests/adapters/camera/test_live_snapshot_yolo_validation.py`
 
 Reusable ideas:
 

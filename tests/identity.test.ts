@@ -13,7 +13,8 @@ describe("pico identity", () => {
     const prompt = buildSystemPrompt(picoIdentity);
 
     expect(prompt).toContain("one AI support staff member");
-    expect(prompt).toContain("Human staff remain responsible");
-    expect(prompt).toContain("Do not track, score, or profile individual children");
+    expect(prompt).toContain("- discipline");
+    expect(prompt).toContain("- emergency judgment");
+    expect(prompt).toContain("- tracking, scoring, or profiling individual children");
   });
 });

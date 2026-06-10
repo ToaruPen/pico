@@ -4,4 +4,4 @@ severity: error
 message: Do not add mock, stub, fake, or fallback architecture to pico.
 rule:
   kind: identifier
-  regex: "(mock|stub|fake|fallback)"
+  regex: "(?i)(mock|stub|fake|fallback)"

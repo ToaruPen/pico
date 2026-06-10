@@ -8,6 +8,8 @@ module boundaries, quality gates, and active provider decisions.
 
 ## Development
 
+Use Node.js 24 or newer. CI runs on Node 24.
+
 Install dependencies:
 
 ```bash

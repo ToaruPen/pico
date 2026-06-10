@@ -74,8 +74,9 @@ Selected provider:
 
 Sources:
 
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/docs/adr/0029-mlx-whisper-stt-on-apple-silicon.md`
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/docs/adr/0041-provider-selectable-stt-with-apple-speechanalyzer.md`
+- Author-local archived references, not included in this repository:
+  - `0029-mlx-whisper-stt-on-apple-silicon.md`
+  - `0041-provider-selectable-stt-with-apple-speechanalyzer.md`
 - `mlx-whisper`: https://pypi.org/project/mlx-whisper/
 
 ## TTS
@@ -99,7 +100,8 @@ Selected direction:
 
 Sources:
 
-- `/Users/monsoon/Dev/Wooly-Fluffy (archived)/docs/adr/0040-onvif-first-tapo-c210-camera-control.md`
+- Author-local archived reference, not included in this repository:
+  - `0040-onvif-first-tapo-c210-camera-control.md`
 - Tapo RTSP/ONVIF FAQ: https://www.tapo.com/faq/34/
 
 ## Memory
@@ -115,4 +117,3 @@ Sources:
 - SQLite JSON: https://www.sqlite.org/json1.html
 - SQLite FTS5: https://www.sqlite.org/fts5.html
 - SQLite WAL: https://www.sqlite.org/wal.html
-
