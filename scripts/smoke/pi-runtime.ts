@@ -10,6 +10,7 @@ const prompt =
 const repositoryRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const piBinary = join(repositoryRoot, "node_modules", ".bin", "pi");
 const smokeTimeoutMs = 60_000;
+const missingCredentialsPattern = /no\s+api\s+key|api\s+key\s+not\s+found/i;
 
 type SmokeResult = {
   readonly status: number;
@@ -70,7 +71,7 @@ function handleFailedSmoke(result: SmokeResult): void {
     return;
   }
 
-  if (result.output.includes("No API key found")) {
+  if (missingCredentialsPattern.test(result.output)) {
     writeError(
       "pico Pi runtime smoke requires configured Pi Agent model credentials. Authenticate Pi Agent or pass provider/model args after `--`."
     );
