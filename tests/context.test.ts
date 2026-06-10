@@ -169,7 +169,13 @@ describe("facility context loader", () => {
         await expect(loadFacilityContextFile(path)).resolves.toMatchObject({
           facility: {
             name: "放課後ケア ひだまり"
-          }
+          },
+          notes: [
+            {
+              id: "child-guidance",
+              text: "子ども全体への声かけはスタッフの判断に合わせる。"
+            }
+          ]
         });
       }
     );

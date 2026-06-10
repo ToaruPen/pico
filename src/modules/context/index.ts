@@ -152,15 +152,7 @@ function parseContextItems<T>(value: unknown, parseItem: (item: unknown) => T): 
 }
 
 function parseStringList(value: unknown): readonly string[] {
-  if (value === undefined) {
-    return [];
-  }
-
-  if (!Array.isArray(value)) {
-    throw new Error("pico facility context file is malformed");
-  }
-
-  return value.map(requireContextString);
+  return parseContextItems(value, requireContextString);
 }
 
 function rejectIndividualChildFields(context: Record<string, unknown>): void {
