@@ -15,6 +15,9 @@ describe("pico identity", () => {
     expect(prompt).toContain("one AI support staff member");
     expect(prompt).toContain("- discipline");
     expect(prompt).toContain("- emergency judgment");
+    expect(prompt).toContain("- parental communication");
+    expect(prompt).toContain("- medical diagnosis");
+    expect(prompt).toContain("- legal judgment");
     expect(prompt).toContain("- tracking, scoring, or profiling individual children");
   });
 });
