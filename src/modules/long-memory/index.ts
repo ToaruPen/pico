@@ -229,16 +229,24 @@ function initializeLongMemorySchema(database: DatabaseSync): void {
 function normalizeLongMemoryInput(input: ReviewedLongMemoryInput): NormalizedLongMemoryInput {
   rejectIndividualChildFields(input);
   requireKnownInputKeys(input);
-  rejectIndividualChildText(input.title);
-  rejectIndividualChildText(input.body);
-  rejectIndividualChildText(input.reviewNote ?? "");
+  const title = requireMemoryText(input.title);
+  const body = requireMemoryText(input.body);
+  const reviewNote = input.reviewNote === undefined ? "" : requireMemoryText(input.reviewNote);
+
+  rejectIndividualChildText(title);
+  rejectIndividualChildText(body);
+  rejectIndividualChildText(reviewNote);
 
   return {
-    title: requireMemoryText(input.title),
-    body: requireMemoryText(input.body),
+    title,
+    body,
     category: requireLongMemoryCategory(input.category),
     tags: normalizeTags(input.tags),
-    review: normalizeReview(input.reviewedBy, input.reviewedAt, input.reviewNote)
+    review: normalizeReview(
+      input.reviewedBy,
+      input.reviewedAt,
+      reviewNote === "" ? undefined : reviewNote
+    )
   };
 }
 
@@ -467,11 +475,14 @@ function normalizeTags(value: readonly string[] | undefined): readonly string[] 
     return [];
   }
 
-  for (const tag of value) {
-    rejectIndividualChildText(tag);
-  }
+  const tags = value.map((tag) => {
+    const normalized = requireMemoryText(tag);
+    rejectIndividualChildText(normalized);
 
-  return Object.freeze(value.map(requireMemoryText));
+    return normalized;
+  });
+
+  return Object.freeze(tags);
 }
 
 function rejectIndividualChildFields(input: Record<string, unknown>): void {
