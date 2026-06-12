@@ -321,7 +321,7 @@ export function openLongMemoryStore(
       return readMemoryLifecycle(database, id);
     },
     search(query) {
-      return searchActiveMemories(database, requireSearchQuery(query), now());
+      return searchActiveMemories(database, requireSearchQuery(query), requireTimestamp(now()));
     },
     runDecay(input) {
       return runInTransaction(database, () => runLongMemoryDecay(database, input));
@@ -1099,7 +1099,7 @@ function runLongMemoryDecay(
   database: DatabaseSync,
   input: LongMemoryDecayInput
 ): readonly LongMemoryDecayResult[] {
-  const now = requireReviewText(input.now);
+  const now = requireTimestamp(input.now);
   const archiveThreshold = requireDecayThreshold(input.archiveThreshold, "archiveThreshold");
   const deleteThreshold = requireDecayThreshold(input.deleteThreshold, "deleteThreshold");
   const decayWindowDays = requirePositiveNumber(input.decayWindowDays, "decayWindowDays");
@@ -1286,7 +1286,7 @@ function recordMemoryEvent(
 function normalizeSessionMemoryCutoffInput(input: unknown): SessionMemoryCutoffInput {
   const record = requireMemoryRecord(input, "pico session memory cutoff input is malformed");
   const sessionId = requireMemoryText(record.sessionId);
-  const cutoffAt = requireReviewText(record.cutoffAt);
+  const cutoffAt = requireTimestamp(record.cutoffAt);
   const requestedBy = requireReviewText(record.requestedBy);
   const sourceEntryIds = normalizeSourceEntryIds(record.sourceEntryIds);
   const entries = normalizeSessionEntries(record.entries);
@@ -1740,7 +1740,7 @@ function normalizeReview(
 
   return {
     reviewedBy: requireReviewText(reviewedBy),
-    reviewedAt: requireReviewText(reviewedAt),
+    reviewedAt: requireTimestamp(reviewedAt),
     note: normalizedNote
   };
 }
@@ -1885,6 +1885,16 @@ function requireMemoryText(value: unknown): string {
 
 function requireReviewText(value: unknown): string {
   return requireNonEmptyTrimmedString(value, "pico long memory review metadata is required");
+}
+
+function requireTimestamp(value: unknown): string {
+  const timestamp = requireReviewText(value);
+
+  if (!Number.isFinite(Date.parse(timestamp))) {
+    throw new Error("pico long memory timestamp is invalid");
+  }
+
+  return timestamp;
 }
 
 function requireNonEmptyTrimmedString(value: unknown, message: string): string {

@@ -352,6 +352,63 @@ describe("SQLite long memory store", () => {
     });
   });
 
+  it("rejects invalid review and decay timestamps before lifecycle persistence", async () => {
+    await withLongMemoryDatabase((path) => {
+      withLongMemoryStore(path, (store) => {
+        expect(() =>
+          store.writeReviewed({
+            title: "一時運用",
+            body: "一時的に玄関掲示を変更した。",
+            category: "operational_note",
+            reviewedBy: "staff-a",
+            reviewedAt: "not-a-date"
+          })
+        ).toThrow("pico long memory timestamp is invalid");
+
+        const written = store.writeReviewed({
+          title: "一時運用",
+          body: "一時的に玄関掲示を変更した。",
+          category: "operational_note",
+          reviewedBy: "staff-a",
+          reviewedAt: "2026-05-01T09:00:00.000Z"
+        });
+
+        expect(() =>
+          store.runDecay({
+            now: "not-a-date",
+            archiveThreshold: 0.35,
+            deleteThreshold: 0.12,
+            decayWindowDays: 30
+          })
+        ).toThrow("pico long memory timestamp is invalid");
+        expect(store.readLifecycle(written.id)?.status).toBe("active");
+      });
+    });
+  });
+
+  it("rejects invalid access timestamps before updating lifecycle metadata", async () => {
+    await withLongMemoryDatabase((path) => {
+      const store = openLongMemoryStore(path, {
+        now: () => "not-a-date"
+      });
+
+      try {
+        const written = store.writeReviewed({
+          title: "雨の日の工作準備",
+          body: "雨の日は工作セットを早めに準備する。",
+          category: "care_continuity",
+          reviewedBy: "staff-a",
+          reviewedAt: "2026-06-10T09:00:00.000Z"
+        });
+
+        expect(() => store.search("工作準備")).toThrow("pico long memory timestamp is invalid");
+        expect(store.readLifecycle(written.id)?.lastAccessedAt).toBeUndefined();
+      } finally {
+        store.close();
+      }
+    });
+  });
+
   it("migrates legacy reviewed memory tables before lifecycle decay", async () => {
     await withLongMemoryDatabase((path) => {
       createLegacyLongMemoryDatabase(path);
