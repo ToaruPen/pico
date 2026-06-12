@@ -36,7 +36,7 @@ describe("pico YAML config", () => {
     );
   });
 
-  it("loads configured camera, vision, person detection, and voice providers from YAML", () => {
+  it("loads configured camera, vision, voice, memory, and person detection providers from YAML", () => {
     const path = temporaryConfigFile(`
 session:
   enabled: true
@@ -112,6 +112,22 @@ voice:
       speakerId: 888753760
       timeoutMs: 30000
       text: こんにちは。
+memory:
+  mem0:
+    enabled: true
+    historyDbPath: /var/lib/pico/mem0-history.sqlite
+    vectorStore:
+      provider: qdrant
+      localBaseUrl: http://127.0.0.1:6333
+      collectionName: pico_long_memory
+    llm:
+      provider: ollama
+      localBaseUrl: http://127.0.0.1:11434
+      model: qwen3.5:9b
+    embedder:
+      provider: ollama
+      localBaseUrl: http://127.0.0.1:11434
+      model: nomic-embed-text
 `);
 
     expect(loadPicoConfig({ path })).toMatchObject({
@@ -181,21 +197,49 @@ voice:
             text: "こんにちは。"
           }
         }
+      },
+      memory: {
+        mem0: {
+          enabled: true,
+          historyDbPath: "/var/lib/pico/mem0-history.sqlite",
+          vectorStore: {
+            provider: "qdrant",
+            localBaseUrl: "http://127.0.0.1:6333",
+            collectionName: "pico_long_memory"
+          },
+          llm: {
+            provider: "ollama",
+            localBaseUrl: "http://127.0.0.1:11434",
+            model: "qwen3.5:9b"
+          },
+          embedder: {
+            provider: "ollama",
+            localBaseUrl: "http://127.0.0.1:11434",
+            model: "nomic-embed-text"
+          }
+        }
       }
     });
   });
 
   it("defaults session ending to one timed minute", () => {
-    expect(definePicoConfig({}).session).toEqual({
-      enabled: true,
-      startTriggers: {
-        wakeNames: [],
-        greetings: [],
-        candidateTimeoutMs: 10_000
+    expect(definePicoConfig({})).toMatchObject({
+      session: {
+        enabled: true,
+        startTriggers: {
+          wakeNames: [],
+          greetings: [],
+          candidateTimeoutMs: 10_000
+        },
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
       },
-      ending: {
-        mode: "timed",
-        durationMs: 60_000
+      memory: {
+        mem0: {
+          enabled: false
+        }
       }
     });
   });
@@ -314,6 +358,92 @@ camera:
         }
       })
     ).toThrow("pico config session.ending.durationMs must be a positive integer <= 2147483647");
+  });
+
+  it("rejects hosted Mem0 model providers at the config boundary", () => {
+    expect(() =>
+      definePicoConfig({
+        memory: {
+          mem0: {
+            enabled: true,
+            historyDbPath: "/var/lib/pico/mem0-history.sqlite",
+            vectorStore: {
+              provider: "qdrant",
+              localBaseUrl: "http://127.0.0.1:6333",
+              collectionName: "pico_long_memory"
+            },
+            llm: {
+              provider: "openai",
+              localBaseUrl: "http://127.0.0.1:11434",
+              model: "gpt-5-mini"
+            },
+            embedder: {
+              provider: "ollama",
+              localBaseUrl: "http://127.0.0.1:11434",
+              model: "nomic-embed-text"
+            }
+          }
+        }
+      })
+    ).toThrow("pico config memory.mem0.llm.provider must be ollama");
+  });
+
+  it("rejects non-local Mem0 provider URLs at the config boundary", () => {
+    expect(() =>
+      definePicoConfig({
+        memory: {
+          mem0: {
+            enabled: true,
+            historyDbPath: "/var/lib/pico/mem0-history.sqlite",
+            vectorStore: {
+              provider: "qdrant",
+              localBaseUrl: "https://qdrant.example.com",
+              collectionName: "pico_long_memory"
+            },
+            llm: {
+              provider: "ollama",
+              localBaseUrl: "http://127.0.0.1:11434",
+              model: "qwen3.5:9b"
+            },
+            embedder: {
+              provider: "ollama",
+              localBaseUrl: "http://127.0.0.1:11434",
+              model: "nomic-embed-text"
+            }
+          }
+        }
+      })
+    ).toThrow("pico config memory.mem0.vectorStore.localBaseUrl must use a local SSH tunnel URL");
+  });
+
+  it("rejects incomplete enabled Mem0 config at the config boundary", () => {
+    expect(() =>
+      definePicoConfig({
+        memory: {
+          mem0: {
+            enabled: true,
+            historyDbPath: "/var/lib/pico/mem0-history.sqlite",
+            vectorStore: {
+              provider: "qdrant",
+              localBaseUrl: "http://127.0.0.1:6333",
+              collectionName: ""
+            },
+            llm: {
+              provider: "ollama",
+              localBaseUrl: "http://127.0.0.1:11434",
+              model: "qwen3.5:9b"
+            },
+            embedder: {
+              provider: "ollama",
+              localBaseUrl: "http://127.0.0.1:11434",
+              model: "nomic-embed-text"
+            }
+          }
+        }
+      })
+    ).toThrow(
+      "pico config memory.mem0.vectorStore.collectionName is required when memory.mem0.vectorStore is set"
+    );
   });
 
   it("rejects Tapo timeout values beyond Node timer bounds", () => {
