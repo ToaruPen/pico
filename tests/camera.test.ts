@@ -5,10 +5,12 @@ import { describe, expect, it } from "vitest";
 import {
   buildPersonFollowMove,
   createFfmpegRtspSnapshotTransport,
+  createOnvifPersonFollowPtzDriver,
   createPersonFollowController,
   createRtspSnapshotClient,
   defineRtspSnapshotSource,
   type FfmpegRtspSnapshotProcess,
+  type OnvifCameraConstructor,
   type PersonFollowPtzDriver,
   type RtspSnapshotTransport
 } from "../src/modules/camera/index.js";
@@ -446,6 +448,90 @@ describe("person-follow PTZ boundary", () => {
     expect(moves).toEqual([]);
     expect(stops).toEqual([1]);
     expect(auditEvents).toEqual(["camera.person_follow.stop"]);
+  });
+
+  it("sends ONVIF relative move and stop commands through the live driver boundary", async () => {
+    const calls: unknown[] = [];
+    const Camera: OnvifCameraConstructor = class {
+      constructor(options: unknown) {
+        calls.push({
+          method: "constructor",
+          options
+        });
+      }
+
+      connect() {
+        calls.push({ method: "connect" });
+
+        return Promise.resolve();
+      }
+
+      relativeMove(options: unknown) {
+        calls.push({
+          method: "relativeMove",
+          options
+        });
+
+        return Promise.resolve();
+      }
+
+      stop(options: unknown) {
+        calls.push({
+          method: "stop",
+          options
+        });
+
+        return Promise.resolve();
+      }
+    };
+    const driver = createOnvifPersonFollowPtzDriver(
+      {
+        host: "192.168.10.25",
+        port: 2020,
+        username: "camera-user",
+        password: "camera-passphrase"
+      },
+      { Camera }
+    );
+
+    await driver.relativeMove({
+      pan: 0.2,
+      tilt: -0.1,
+      speed: 0.4
+    });
+    await driver.stop();
+
+    expect(calls).toEqual([
+      {
+        method: "constructor",
+        options: {
+          hostname: "192.168.10.25",
+          port: 2020,
+          username: "camera-user",
+          password: "camera-passphrase"
+        }
+      },
+      { method: "connect" },
+      {
+        method: "relativeMove",
+        options: {
+          x: 0.2,
+          y: -0.1,
+          zoom: 0,
+          speed: {
+            x: 0.4,
+            y: 0.4
+          }
+        }
+      },
+      {
+        method: "stop",
+        options: {
+          panTilt: true,
+          zoom: false
+        }
+      }
+    ]);
   });
 });
 

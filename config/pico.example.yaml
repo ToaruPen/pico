@@ -21,7 +21,7 @@ camera:
     host: 192.168.10.25
     user: your-camera-user
     password: your-camera-password
-    # Optional runtime defaults: port=554, stream=stream2.
+    # Optional runtime defaults: port=554, onvifPort=2020, stream=stream2.
   personFollow:
     enabled: false
     sourceCameraId: tapo-rtsp

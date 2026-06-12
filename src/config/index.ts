@@ -39,6 +39,7 @@ export type PicoTapoConfig = {
   readonly sourceId?: string;
   readonly host: string;
   readonly port?: number;
+  readonly onvifPort?: number;
   readonly user: string;
   readonly password: string;
   readonly stream?: string;
@@ -277,6 +278,12 @@ function defineTapoConfig(input: Record<string, unknown>): PicoTapoConfig {
       input,
       "port",
       "pico config camera.tapo.port",
+      maxTcpPort
+    ),
+    ...optionalBoundedPositiveIntegerProperty(
+      input,
+      "onvifPort",
+      "pico config camera.tapo.onvifPort",
       maxTcpPort
     ),
     user: requireString(input.user, "pico config camera.tapo.user"),

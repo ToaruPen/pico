@@ -24,6 +24,7 @@
     "smoke:camera-vlm-scene": "jiti scripts/smoke/camera-vlm-scene.ts",
     "smoke:ollama-vlm": "jiti scripts/smoke/ollama-vlm-connectivity.ts",
     "smoke:camera-tapo": "jiti scripts/smoke/tapo-rtsp-snapshot.ts",
+    "smoke:camera-ptz": "jiti scripts/smoke/tapo-person-follow-nudge.ts",
     "smoke:voice-providers": "jiti scripts/smoke/voice-providers.ts",
     "smoke:pi-runtime": "jiti scripts/smoke/pi-runtime.ts",
     "lint": "eslint .",
@@ -51,6 +52,7 @@
     "vitest": "^4.1.8"
   },
   "dependencies": {
+    "onvif": "^0.8.1",
     "yaml": "^2.9.0"
   }
 }

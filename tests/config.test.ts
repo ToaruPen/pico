@@ -56,6 +56,7 @@ camera:
     sourceId: tapo-main
     host: 192.168.3.25
     port: 554
+    onvifPort: 2020
     user: camera-user
     password: camera-password
     stream: stream2
@@ -118,6 +119,7 @@ voice:
         tapo: {
           sourceId: "tapo-main",
           host: "192.168.3.25",
+          onvifPort: 2020,
           user: "camera-user",
           password: "camera-password"
         },
@@ -317,6 +319,21 @@ camera:
         }
       })
     ).toThrow("pico config camera.tapo.port must be a positive integer <= 65535");
+  });
+
+  it("rejects Tapo ONVIF ports outside the TCP port range", () => {
+    expect(() =>
+      definePicoConfig({
+        camera: {
+          tapo: {
+            host: "192.168.3.25",
+            onvifPort: 65_536,
+            user: "camera-user",
+            password: "camera-password"
+          }
+        }
+      })
+    ).toThrow("pico config camera.tapo.onvifPort must be a positive integer <= 65535");
   });
 
   it("rejects non-local Ollama endpoints at the config boundary", () => {

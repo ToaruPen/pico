@@ -21,6 +21,10 @@ import {
   type OllamaVlmSmokeReport,
   runOllamaVlmConnectivitySmoke
 } from "./ollama-vlm-connectivity.js";
+import {
+  runTapoPersonFollowSmoke,
+  type TapoPersonFollowSmokeReport
+} from "./tapo-person-follow-nudge.js";
 import { runTapoRtspSnapshotSmoke, type TapoRtspSmokeReport } from "./tapo-rtsp-snapshot.js";
 import { runVoiceProviderSmoke, type VoiceSmokeReport } from "./voice-providers.js";
 
@@ -31,6 +35,7 @@ export type PicoMilestoneSmokeSectionName =
   | "voice_stt"
   | "voice_tts"
   | "tapo_snapshot"
+  | "tapo_ptz"
   | "ollama_vlm"
   | "camera_vlm_scene"
   | "memory_candidate"
@@ -59,6 +64,10 @@ export type PicoMilestoneSmokeDependencies = {
   readonly runPiRuntimeCommand?: (env: NodeJS.ProcessEnv) => PiRuntimeSmokeCommandResult;
   readonly runVoiceProviderSmoke?: (config: PicoConfig) => Promise<VoiceSmokeReport>;
   readonly runTapoRtspSnapshotSmoke?: (config: PicoConfig) => Promise<TapoRtspSmokeReport>;
+  readonly runTapoPersonFollowSmoke?: (
+    config: PicoConfig,
+    env: NodeJS.ProcessEnv
+  ) => Promise<TapoPersonFollowSmokeReport>;
   readonly runOllamaVlmConnectivitySmoke?: (config: PicoConfig) => Promise<OllamaVlmSmokeReport>;
   readonly runCameraVlmSceneSmoke?: (config: PicoConfig) => Promise<CameraVlmSceneSmokeReport>;
 };
@@ -114,6 +123,14 @@ export async function runPicoMilestoneSmokeSuite(
       toSection(
         "tapo_snapshot",
         await (dependencies.runTapoRtspSnapshotSmoke ?? runTapoRtspSnapshotSmoke)(config)
+      )
+    )
+  );
+  sections.push(
+    await captureSection("tapo_ptz", "tapo-onvif-ptz", async () =>
+      toSection(
+        "tapo_ptz",
+        await (dependencies.runTapoPersonFollowSmoke ?? runTapoPersonFollowSmoke)(config, env)
       )
     )
   );
@@ -222,6 +239,7 @@ function failedConfigProviderSections(error: unknown): readonly PicoMilestoneSmo
     failedSection("voice_stt", "mlx-whisper", reason),
     failedSection("voice_tts", "aivis-speech", reason),
     failedSection("tapo_snapshot", "tapo-rtsp", reason),
+    failedSection("tapo_ptz", "tapo-onvif-ptz", reason),
     failedSection("ollama_vlm", "ollama", reason),
     failedSection("camera_vlm_scene", "tapo-rtsp+ollama", reason)
   ];

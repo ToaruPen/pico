@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { isIPv4 } from "node:net";
 
 import type { FuturePicoModuleMetadata } from "../../orchestrator/contracts.js";
@@ -116,6 +117,47 @@ export type PersonFollowPtzDriver = {
   readonly stop: () => Promise<void>;
 };
 
+export type OnvifCamera = {
+  readonly connect: () => Promise<void>;
+  readonly relativeMove: (options: OnvifRelativeMoveOptions) => Promise<void>;
+  readonly stop: (options: OnvifStopOptions) => Promise<void>;
+};
+
+export type OnvifCameraConstructor = new (options: OnvifCameraOptions) => OnvifCamera;
+
+export type OnvifCameraOptions = {
+  readonly hostname: string;
+  readonly port: number;
+  readonly username: string;
+  readonly password: string;
+};
+
+export type OnvifRelativeMoveOptions = {
+  readonly x: number;
+  readonly y: number;
+  readonly zoom: 0;
+  readonly speed: {
+    readonly x: number;
+    readonly y: number;
+  };
+};
+
+export type OnvifStopOptions = {
+  readonly panTilt: true;
+  readonly zoom: false;
+};
+
+export type OnvifPersonFollowPtzDriverInput = {
+  readonly host: string;
+  readonly port: number;
+  readonly username: string;
+  readonly password: string;
+};
+
+export type OnvifPersonFollowPtzDriverDependencies = {
+  readonly Camera?: OnvifCameraConstructor;
+};
+
 export type PersonFollowAuditEvent = {
   readonly name: "camera.person_follow.move" | "camera.person_follow.stop";
   readonly sourceId: string;
@@ -151,6 +193,7 @@ type RtspUrlParts = {
 };
 
 const DEFAULT_MAX_FRAME_BYTES = 5 * 1024 * 1024;
+const requireFromCameraModule = createRequire(import.meta.url);
 
 export function defineRtspSnapshotSource(input: unknown): RtspSnapshotSource {
   if (input === undefined) {
@@ -384,6 +427,60 @@ export function createPersonFollowController(
       await stopDriver("manual_stop");
     }
   };
+}
+
+export function createOnvifPersonFollowPtzDriver(
+  input: OnvifPersonFollowPtzDriverInput,
+  dependencies: OnvifPersonFollowPtzDriverDependencies = {}
+): PersonFollowPtzDriver {
+  const Camera = dependencies.Camera ?? loadOnvifCameraConstructor();
+  const camera = new Camera({
+    hostname: requireHost(input.host),
+    port: requirePort(input.port),
+    username: requireString(input.username, "pico ONVIF camera username is required"),
+    password: requireString(input.password, "pico ONVIF camera password is required")
+  });
+  let connected: Promise<void> | undefined;
+
+  const connect = (): Promise<void> => {
+    connected ??= camera.connect();
+
+    return connected;
+  };
+
+  return {
+    async relativeMove(command) {
+      await connect();
+      await camera.relativeMove({
+        x: command.pan,
+        y: command.tilt,
+        zoom: 0,
+        speed: {
+          x: command.speed,
+          y: command.speed
+        }
+      });
+    },
+    async stop() {
+      await connect();
+      await camera.stop({
+        panTilt: true,
+        zoom: false
+      });
+    }
+  };
+}
+
+function loadOnvifCameraConstructor(): OnvifCameraConstructor {
+  return requireOnvifPromisesModule(requireFromCameraModule("onvif/promises")).Cam;
+}
+
+function requireOnvifPromisesModule(value: unknown): { readonly Cam: OnvifCameraConstructor } {
+  if (!isRecord(value) || typeof value.Cam !== "function") {
+    throw new Error("pico ONVIF runtime is unavailable");
+  }
+
+  return value as { readonly Cam: OnvifCameraConstructor };
 }
 
 type FfmpegCaptureRequest = {

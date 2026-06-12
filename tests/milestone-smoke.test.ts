@@ -44,6 +44,12 @@ function configuredSectionDependencies(): PicoMilestoneSmokeDependencies {
         provider: "tapo-rtsp",
         reason: "Tapo camera config is not configured."
       }),
+    runTapoPersonFollowSmoke: () =>
+      Promise.resolve({
+        status: "skipped",
+        provider: "tapo-onvif-ptz",
+        reason: "Live PTZ nudge is not enabled."
+      }),
     runOllamaVlmConnectivitySmoke: () =>
       Promise.resolve({
         status: "passed",
@@ -70,6 +76,7 @@ function expectMilestoneSectionNames(report: PicoMilestoneSmokeReport): void {
     "voice_stt",
     "voice_tts",
     "tapo_snapshot",
+    "tapo_ptz",
     "ollama_vlm",
     "camera_vlm_scene",
     "memory_candidate",
@@ -131,6 +138,11 @@ describe("pico milestone smoke suite", () => {
           Promise.resolve({
             status: "skipped",
             provider: "tapo-rtsp"
+          }),
+        runTapoPersonFollowSmoke: () =>
+          Promise.resolve({
+            status: "skipped",
+            provider: "tapo-onvif-ptz"
           }),
         runOllamaVlmConnectivitySmoke: () =>
           Promise.resolve({
@@ -220,6 +232,14 @@ vision:
             provider: "tapo-rtsp"
           });
         },
+        runTapoPersonFollowSmoke: (config) => {
+          observedConfigs.push(config);
+
+          return Promise.resolve({
+            status: "skipped",
+            provider: "tapo-onvif-ptz"
+          });
+        },
         runOllamaVlmConnectivitySmoke: (config) => {
           observedConfigs.push(config);
 
@@ -241,7 +261,7 @@ vision:
     );
 
     expect(report.status).toBe("skipped");
-    expect(observedConfigs).toHaveLength(4);
+    expect(observedConfigs).toHaveLength(5);
     expect(new Set(observedConfigs).size).toBe(1);
     expect(observedConfigs[0]?.camera.tapo?.host).toBe("192.168.10.25");
     expect(observedConfigs[0]?.vision.ollama?.localBaseUrl).toBe("http://127.0.0.1:11434");
@@ -337,6 +357,11 @@ vision:
           Promise.resolve({
             status: "skipped",
             provider: "tapo-rtsp"
+          }),
+        runTapoPersonFollowSmoke: () =>
+          Promise.resolve({
+            status: "skipped",
+            provider: "tapo-onvif-ptz"
           }),
         runOllamaVlmConnectivitySmoke: () =>
           Promise.resolve({
