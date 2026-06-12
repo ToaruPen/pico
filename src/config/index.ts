@@ -5,6 +5,9 @@ import { parse } from "yaml";
 
 export type PicoConfig = DeepReadonly<{
   session: PicoSessionConfig;
+  memory: {
+    mem0: PicoMem0Config;
+  };
   camera: {
     tapo?: PicoTapoConfig;
     personFollow: PicoPersonFollowConfig;
@@ -34,6 +37,26 @@ export type PicoSessionConfig = {
     readonly mode: "timed";
     readonly durationMs: number;
   };
+};
+
+export type PicoMem0Config = {
+  readonly enabled: boolean;
+  readonly historyDbPath?: string;
+  readonly vectorStore?: PicoMem0VectorStoreConfig;
+  readonly llm?: PicoMem0ModelConfig;
+  readonly embedder?: PicoMem0ModelConfig;
+};
+
+export type PicoMem0VectorStoreConfig = {
+  readonly provider: "qdrant";
+  readonly localBaseUrl: string;
+  readonly collectionName: string;
+};
+
+export type PicoMem0ModelConfig = {
+  readonly provider: "ollama";
+  readonly localBaseUrl: string;
+  readonly model: string;
 };
 
 export type PicoTapoConfig = {
@@ -155,6 +178,11 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
       durationMs: 60_000
     }
   },
+  memory: {
+    mem0: {
+      enabled: false
+    }
+  },
   camera: {
     personFollow: {
       enabled: false
@@ -204,6 +232,7 @@ export function definePicoConfig(input: unknown): PicoConfig {
 
   return deepFreeze({
     session: defineSessionSection(root),
+    memory: defineMemorySection(root),
     camera: defineCameraSection(root),
     vision: defineVisionSection(root),
     voice: defineVoiceSection(root)
@@ -266,6 +295,95 @@ function defineSessionEnding(
         "pico config session.ending.durationMs",
         maxNodeTimeoutMs
       ) ?? 60_000
+  };
+}
+
+function defineMemorySection(root: Record<string, unknown>): PicoConfig["memory"] {
+  const memory = readOptionalRecord(root.memory, "pico config memory");
+  const mem0 = readOptionalRecord(memory?.mem0, "pico config memory.mem0");
+
+  return {
+    mem0: defineMem0Config(mem0)
+  };
+}
+
+function defineMem0Config(input: Record<string, unknown> | undefined): PicoMem0Config {
+  if (input === undefined) {
+    return {
+      enabled: false
+    };
+  }
+
+  const enabled = readOptionalBoolean(input.enabled, "pico config memory.mem0.enabled") ?? false;
+  const historyDatabasePath = readOptionalString(
+    input.historyDbPath,
+    "pico config memory.mem0.historyDbPath"
+  );
+  const vectorStore = readOptionalRecord(input.vectorStore, "pico config memory.mem0.vectorStore");
+  const llm = readOptionalRecord(input.llm, "pico config memory.mem0.llm");
+  const embedder = readOptionalRecord(input.embedder, "pico config memory.mem0.embedder");
+
+  if (enabled) {
+    return {
+      enabled,
+      historyDbPath: requireString(historyDatabasePath, "pico config memory.mem0.historyDbPath"),
+      vectorStore: defineMem0VectorStore(
+        requireRecord(vectorStore, "pico config memory.mem0.vectorStore")
+      ),
+      llm: defineMem0Model(requireRecord(llm, "pico config memory.mem0.llm"), "llm"),
+      embedder: defineMem0Model(
+        requireRecord(embedder, "pico config memory.mem0.embedder"),
+        "embedder"
+      )
+    };
+  }
+
+  return {
+    enabled,
+    ...(historyDatabasePath === undefined ? {} : { historyDbPath: historyDatabasePath }),
+    ...(vectorStore === undefined ? {} : { vectorStore: defineMem0VectorStore(vectorStore) }),
+    ...(llm === undefined ? {} : { llm: defineMem0Model(llm, "llm") }),
+    ...(embedder === undefined ? {} : { embedder: defineMem0Model(embedder, "embedder") })
+  };
+}
+
+function defineMem0VectorStore(input: Record<string, unknown>): PicoMem0VectorStoreConfig {
+  const provider = requireString(input.provider, "pico config memory.mem0.vectorStore.provider");
+
+  if (provider !== "qdrant") {
+    throw new Error("pico config memory.mem0.vectorStore.provider must be qdrant");
+  }
+
+  return {
+    provider,
+    localBaseUrl: requireLocalBaseUrl(
+      input.localBaseUrl,
+      "pico config memory.mem0.vectorStore.localBaseUrl"
+    ),
+    collectionName: requireString(
+      input.collectionName,
+      "pico config memory.mem0.vectorStore.collectionName"
+    )
+  };
+}
+
+function defineMem0Model(
+  input: Record<string, unknown>,
+  key: "llm" | "embedder"
+): PicoMem0ModelConfig {
+  const provider = requireString(input.provider, `pico config memory.mem0.${key}.provider`);
+
+  if (provider !== "ollama") {
+    throw new Error(`pico config memory.mem0.${key}.provider must be ollama`);
+  }
+
+  return {
+    provider,
+    localBaseUrl: requireLocalBaseUrl(
+      input.localBaseUrl,
+      `pico config memory.mem0.${key}.localBaseUrl`
+    ),
+    model: requireString(input.model, `pico config memory.mem0.${key}.model`)
   };
 }
 
@@ -405,7 +523,7 @@ function defineOllamaConfig(input: Record<string, unknown>): PicoOllamaConfig {
 
   return {
     ...optionalStringProperty(input, "endpointId", "pico config vision.ollama.endpointId"),
-    localBaseUrl: requireLocalTunnelBaseUrl(input.localBaseUrl),
+    localBaseUrl: requireLocalBaseUrl(input.localBaseUrl, "pico config vision.ollama.localBaseUrl"),
     ...(auth === undefined
       ? {}
       : {
@@ -701,18 +819,18 @@ function requirePersonDetectionProvider(
   return value;
 }
 
-function requireLocalTunnelBaseUrl(value: unknown): string {
-  const localBaseUrl = requireString(value, "pico config vision.ollama.localBaseUrl");
+function requireLocalBaseUrl(value: unknown, label: string): string {
+  const localBaseUrl = requireString(value, label);
 
   if (!URL.canParse(localBaseUrl)) {
-    throw new Error("pico config vision.ollama.localBaseUrl must be a valid URL");
+    throw new Error(`${label} must be a valid URL`);
   }
 
   const parsedUrl = new URL(localBaseUrl);
 
-  requireHttpUrl(parsedUrl);
-  requireOriginUrl(parsedUrl);
-  requireLocalTunnelUrl(parsedUrl);
+  requireHttpUrl(parsedUrl, label);
+  requireOriginUrl(parsedUrl, label);
+  requireLocalTunnelUrl(parsedUrl, label);
 
   return localBaseUrl;
 }
@@ -946,13 +1064,13 @@ function readOptionalNumber(value: unknown, label: string): number | undefined {
   throw new Error(`${label} must be a number`);
 }
 
-function requireHttpUrl(parsedUrl: URL): void {
+function requireHttpUrl(parsedUrl: URL, label: string): void {
   if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-    throw new Error("pico config vision.ollama.localBaseUrl must use HTTP");
+    throw new Error(`${label} must use HTTP`);
   }
 }
 
-function requireOriginUrl(parsedUrl: URL): void {
+function requireOriginUrl(parsedUrl: URL, label: string): void {
   if (
     parsedUrl.pathname !== "/" ||
     parsedUrl.search !== "" ||
@@ -960,15 +1078,15 @@ function requireOriginUrl(parsedUrl: URL): void {
     parsedUrl.username !== "" ||
     parsedUrl.password !== ""
   ) {
-    throw new Error("pico config vision.ollama.localBaseUrl must be an origin URL");
+    throw new Error(`${label} must be an origin URL`);
   }
 }
 
-function requireLocalTunnelUrl(parsedUrl: URL): void {
+function requireLocalTunnelUrl(parsedUrl: URL, label: string): void {
   const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
   if (!loopbackHosts.has(parsedUrl.hostname)) {
-    throw new Error("pico config vision.ollama.localBaseUrl must use a local SSH tunnel URL");
+    throw new Error(`${label} must use a local SSH tunnel URL`);
   }
 }
 

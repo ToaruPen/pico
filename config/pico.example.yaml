@@ -63,3 +63,20 @@ voice:
       localBaseUrl: http://127.0.0.1:10101
       speakerId: 888753760
       # Optional default text: こんにちは。picoの音声スモークです。
+
+memory:
+  mem0:
+    enabled: false
+    historyDbPath: /var/lib/pico/mem0-history.sqlite
+    vectorStore:
+      provider: qdrant
+      localBaseUrl: http://127.0.0.1:6333
+      collectionName: pico_long_memory
+    llm:
+      provider: ollama
+      localBaseUrl: http://127.0.0.1:11434
+      model: qwen3.5:9b
+    embedder:
+      provider: ollama
+      localBaseUrl: http://127.0.0.1:11434
+      model: nomic-embed-text

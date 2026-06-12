@@ -122,6 +122,10 @@ export const longMemoryModuleMetadata = {
   capabilities: []
 } as const satisfies FuturePicoModuleMetadata;
 
+export function defineSessionMemoryCutoffInput(input: unknown): SessionMemoryCutoffInput {
+  return cloneSessionMemoryCutoffInput(normalizeSessionMemoryCutoffInput(input));
+}
+
 type LongMemoryRow = {
   readonly id: number;
   readonly title: string;
