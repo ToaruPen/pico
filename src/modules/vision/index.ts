@@ -1,5 +1,8 @@
 import type { FuturePicoModuleMetadata } from "../../orchestrator/contracts.js";
-import type { SelectedModelEndpointConfig } from "../local-models/index.js";
+import {
+  buildSelectedModelEndpointAuthHeaders,
+  type SelectedModelEndpointConfig
+} from "../local-models/index.js";
 
 export const visionModuleMetadata = {
   kind: "vision",
@@ -16,7 +19,7 @@ export const visionModuleMetadata = {
 } as const satisfies FuturePicoModuleMetadata;
 
 const BOUNDED_SCENE_PROMPT =
-  "Describe this after-school care scene as bounded JSON. Do not identify children, infer private traits, diagnose, score, or make final safety decisions. Include only visible scene details, uncertainty, and items a human staff member may need to check.";
+  "Return exactly one JSON object and no markdown. The object must have these keys: summary, observedPeople, environment, humanAttention, uncertainty. Each key except summary must be an array of strings. Describe only visible after-school care scene details. Do not identify children, infer private traits, diagnose, score, or make final safety decisions. If a field is unclear, use an empty array or a short uncertainty string.";
 
 const OLLAMA_REQUEST_TIMEOUT_MS = 30_000;
 const visionBoundaryMarkers = [
@@ -137,9 +140,7 @@ async function postOllamaSceneRequest(
     const response = await rejectOnAbort(
       fetchImplementation(buildOllamaChatUrl(request.endpoint), {
         method: "POST",
-        headers: {
-          "content-type": "application/json"
-        },
+        headers: buildOllamaSceneRequestHeaders(request.endpoint),
         body: JSON.stringify(buildOllamaSceneRequestBody(request)),
         signal: abortController.signal
       }),
@@ -160,6 +161,13 @@ async function postOllamaSceneRequest(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function buildOllamaSceneRequestHeaders(endpoint: SelectedModelEndpointConfig): HeadersInit {
+  return {
+    "content-type": "application/json",
+    ...buildSelectedModelEndpointAuthHeaders(endpoint)
+  };
 }
 
 function buildOllamaSceneRequestBody(request: SceneDescriptionRequest): Record<string, unknown> {
@@ -258,10 +266,17 @@ function requireContent(value: unknown): string {
 
 function parseSceneContent(content: string): unknown {
   try {
-    return JSON.parse(content) as unknown;
+    return JSON.parse(stripJsonFence(content)) as unknown;
   } catch {
     throw new Error("pico vision scene response is malformed");
   }
+}
+
+function stripJsonFence(content: string): string {
+  const trimmed = content.trim();
+  const fencedJson = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/iu);
+
+  return fencedJson?.[1] ?? trimmed;
 }
 
 function requireSceneDescription(value: unknown): ParsedSceneDescription {

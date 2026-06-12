@@ -1,8 +1,15 @@
 #!/usr/bin/env jiti
 import { pathToFileURL } from "node:url";
 
-import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
-import { defineSelectedModelEndpoint } from "../../src/modules/local-models/index.js";
+import {
+  loadPicoConfigFromEnvironment,
+  type PicoConfig,
+  type PicoOllamaConfig
+} from "../../src/config/index.js";
+import {
+  buildSelectedModelEndpointAuthHeaders,
+  defineSelectedModelEndpoint
+} from "../../src/modules/local-models/index.js";
 
 const defaultEndpointId = "windows-ollama-qwen3-5";
 const defaultTunnelKind = "tailscale_ssh";
@@ -55,7 +62,12 @@ export async function runOllamaVlmConnectivitySmoke(
   }
 
   const checkedUrl = new URL("/api/tags", plan.endpoint.host.tunnel.localBaseUrl).toString();
-  const tags = await fetchOllamaTags(checkedUrl, plan.timeoutMs, fetchImplementation);
+  const tags = await fetchOllamaTags(
+    checkedUrl,
+    plan.endpoint,
+    plan.timeoutMs,
+    fetchImplementation
+  );
   const hasSelectedModel = tags.models.some((model) => model.name === plan.endpoint.model);
 
   if (!hasSelectedModel) {
@@ -100,10 +112,26 @@ export function buildOllamaVlmSmokePlan(config: PicoConfig): OllamaVlmSmokePlan 
           kind: ollama.tunnel?.kind ?? defaultTunnelKind,
           localBaseUrl: ollama.localBaseUrl,
           sshTarget: ollama.tunnel?.sshTarget ?? defaultSshTarget
-        }
+        },
+        ...defineOllamaEndpointAuth(ollama.auth)
       }
     }),
     timeoutMs: ollama.timeoutMs ?? defaultTimeoutMs
+  };
+}
+
+function defineOllamaEndpointAuth(auth: PicoOllamaConfig["auth"]): {
+  readonly auth?: NonNullable<PicoOllamaConfig["auth"]>;
+} {
+  if (auth === undefined) {
+    return {};
+  }
+
+  return {
+    auth: {
+      ...(auth.headerName === undefined ? {} : { headerName: auth.headerName }),
+      apiKey: auth.apiKey
+    }
   };
 }
 
@@ -113,6 +141,7 @@ export function ollamaVlmSmokeExitCode(report: OllamaVlmSmokeReport): number {
 
 async function fetchOllamaTags(
   url: string,
+  endpoint: ReturnType<typeof defineSelectedModelEndpoint>,
   timeoutMs: number,
   fetchImplementation: typeof fetch
 ): Promise<OllamaTagsResponse> {
@@ -124,6 +153,7 @@ async function fetchOllamaTags(
   try {
     const response = await fetchImplementation(url, {
       method: "GET",
+      headers: buildSelectedModelEndpointAuthHeaders(endpoint),
       signal: abortController.signal
     });
 

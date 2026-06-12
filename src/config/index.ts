@@ -34,6 +34,10 @@ export type PicoTapoConfig = {
 export type PicoOllamaConfig = {
   readonly endpointId?: string;
   readonly localBaseUrl: string;
+  readonly auth?: {
+    readonly headerName?: string;
+    readonly apiKey: string;
+  };
   readonly tunnel?: {
     readonly kind?: string;
     readonly sshTarget?: string;
@@ -190,11 +194,20 @@ function defineTapoConfig(input: Record<string, unknown>): PicoTapoConfig {
 }
 
 function defineOllamaConfig(input: Record<string, unknown>): PicoOllamaConfig {
+  const auth = readOptionalRecord(input.auth, "pico config vision.ollama.auth");
   const tunnel = readOptionalRecord(input.tunnel, "pico config vision.ollama.tunnel");
 
   return {
     ...optionalStringProperty(input, "endpointId", "pico config vision.ollama.endpointId"),
     localBaseUrl: requireLocalTunnelBaseUrl(input.localBaseUrl),
+    ...(auth === undefined
+      ? {}
+      : {
+          auth: {
+            ...optionalHeaderNameProperty(auth, "headerName"),
+            apiKey: requireString(auth.apiKey, "pico config vision.ollama.auth.apiKey")
+          }
+        }),
     ...(tunnel === undefined
       ? {}
       : {
@@ -318,6 +331,27 @@ function optionalProtectedTunnelKindProperty(
   }
 
   return { kind: value };
+}
+
+function optionalHeaderNameProperty(
+  input: Record<string, unknown>,
+  key: string
+): Record<string, string> {
+  const value = readOptionalString(input[key], `pico config vision.ollama.auth.${key}`);
+
+  if (value === undefined) {
+    return {};
+  }
+
+  if (!isHttpHeaderName(value)) {
+    throw new Error(`pico config vision.ollama.auth.${key} must be a valid HTTP header name`);
+  }
+
+  return { [key]: value };
+}
+
+function isHttpHeaderName(value: string): boolean {
+  return /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(value);
 }
 
 function optionalPositiveNumberProperty(

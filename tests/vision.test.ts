@@ -43,7 +43,7 @@ const expectedOllamaSceneRequestBody = {
     {
       role: "user",
       content:
-        "Describe this after-school care scene as bounded JSON. Do not identify children, infer private traits, diagnose, score, or make final safety decisions. Include only visible scene details, uncertainty, and items a human staff member may need to check.",
+        "Return exactly one JSON object and no markdown. The object must have these keys: summary, observedPeople, environment, humanAttention, uncertainty. Each key except summary must be an array of strings. Describe only visible after-school care scene details. Do not identify children, infer private traits, diagnose, score, or make final safety decisions. If a field is unclear, use an empty array or a short uncertainty string.",
       images: ["anBlZy1mcmFtZQ=="]
     }
   ],
@@ -129,6 +129,38 @@ describe("bounded vision scene description", () => {
     });
     expect(request.init?.signal).toBeInstanceOf(AbortSignal);
     expect(request.init?.body).toBe(JSON.stringify(expectedOllamaSceneRequestBody));
+  });
+
+  it("adds configured auth headers to protected Ollama image chat requests", async () => {
+    let recordedRequest: RecordedRequest | undefined;
+    const authenticatedEndpoint = defineSelectedModelEndpoint({
+      ...selectedEndpoint,
+      host: {
+        ...selectedEndpoint.host,
+        auth: {
+          headerName: "x-api-key",
+          apiKey: "local-dev-key"
+        }
+      }
+    });
+    const recordingFetch: typeof fetch = (input, init) => {
+      recordedRequest = { input, init };
+
+      return Promise.resolve(buildOllamaResponse(structuredSceneContent));
+    };
+
+    await describeScene(
+      {
+        ...sceneRequest,
+        endpoint: authenticatedEndpoint
+      },
+      recordingFetch
+    );
+
+    expect(requireRecordedRequest(recordedRequest).init?.headers).toEqual({
+      "content-type": "application/json",
+      "x-api-key": "local-dev-key"
+    });
   });
 
   it("normalizes the Ollama image chat URL when the local tunnel URL has a trailing slash", async () => {
@@ -283,6 +315,30 @@ describe("bounded vision scene description", () => {
         }
       })
     ).toThrow("pico vision scene response content is empty");
+  });
+
+  it("accepts fenced JSON object output from Ollama vision models", () => {
+    expect(
+      parseOllamaSceneDescriptionResponse({
+        message: {
+          content: `\`\`\`json
+{
+  "summary": "A room is visible.",
+  "observedPeople": [],
+  "environment": ["indoor room"],
+  "humanAttention": [],
+  "uncertainty": ["single snapshot"]
+}
+\`\`\``
+        }
+      })
+    ).toEqual({
+      summary: "A room is visible.",
+      observedPeople: [],
+      environment: ["indoor room"],
+      humanAttention: [],
+      uncertainty: ["single snapshot"]
+    });
   });
 
   it("rejects model output that crosses individual child assessment boundaries", () => {

@@ -13,6 +13,10 @@ export type SelectedModelEndpointConfig = {
       readonly localBaseUrl: string;
       readonly sshTarget: string;
     };
+    readonly auth?: {
+      readonly headerName?: string;
+      readonly apiKey: string;
+    };
   };
 };
 
@@ -31,6 +35,20 @@ export function createLocalModelsModule(): PicoModule {
         }
       ]
     }
+  };
+}
+
+export function buildSelectedModelEndpointAuthHeaders(
+  endpoint: SelectedModelEndpointConfig
+): Record<string, string> {
+  const auth = endpoint.host.auth;
+
+  if (auth === undefined) {
+    return {};
+  }
+
+  return {
+    [auth.headerName ?? "x-api-key"]: auth.apiKey
   };
 }
 
@@ -112,6 +130,7 @@ export function defineSelectedModelEndpoint(input: unknown): SelectedModelEndpoi
   const endpoint = requireRecord(input, "pico local model endpoint must be one config object");
   const host = requireRecord(endpoint.host, "pico local model endpoint host is required");
   const tunnel = requireRecord(host.tunnel, "pico local model endpoint tunnel is required");
+  const auth = readOptionalRecord(host.auth, "pico local model endpoint auth");
 
   return {
     id: requireString(endpoint.id, "pico local model endpoint id is required"),
@@ -126,9 +145,42 @@ export function defineSelectedModelEndpoint(input: unknown): SelectedModelEndpoi
           tunnel.sshTarget,
           "pico local model endpoint sshTarget is required"
         )
-      }
+      },
+      ...(auth === undefined
+        ? {}
+        : {
+            auth: {
+              ...optionalHeaderName(auth.headerName),
+              apiKey: requireString(
+                auth.apiKey,
+                "pico local model endpoint auth apiKey is required"
+              )
+            }
+          })
     }
   };
+}
+
+function readOptionalRecord(value: unknown, message: string): Record<string, unknown> | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  return requireRecord(value, message);
+}
+
+function optionalHeaderName(value: unknown): Record<string, string> {
+  if (value === undefined || value === null) {
+    return {};
+  }
+
+  const headerName = requireString(value, "pico local model endpoint auth headerName is required");
+
+  if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(headerName)) {
+    throw new Error("pico local model endpoint auth headerName must be a valid HTTP header name");
+  }
+
+  return { headerName };
 }
 
 function requireOllamaProvider(value: unknown): "ollama" {

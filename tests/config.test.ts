@@ -52,6 +52,9 @@ vision:
   ollama:
     endpointId: windows-qwen
     localBaseUrl: http://127.0.0.1:11434
+    auth:
+      headerName: x-api-key
+      apiKey: local-dev-key
     tunnel:
       kind: tailscale_ssh
       sshTarget: pico-vision-host
@@ -89,7 +92,11 @@ voice:
       vision: {
         ollama: {
           endpointId: "windows-qwen",
-          localBaseUrl: "http://127.0.0.1:11434"
+          localBaseUrl: "http://127.0.0.1:11434",
+          auth: {
+            headerName: "x-api-key",
+            apiKey: "local-dev-key"
+          }
         }
       },
       voice: {
@@ -211,6 +218,22 @@ camera:
         }
       })
     ).toThrow("pico config vision.ollama.tunnel.kind must use a protected SSH tunnel");
+  });
+
+  it("rejects invalid Ollama auth header names at the config boundary", () => {
+    expect(() =>
+      definePicoConfig({
+        vision: {
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434",
+            auth: {
+              headerName: "x api key",
+              apiKey: "local-dev-key"
+            }
+          }
+        }
+      })
+    ).toThrow("pico config vision.ollama.auth.headerName must be a valid HTTP header name");
   });
 
   it("freezes loaded config so smoke callers cannot mutate shared settings", () => {

@@ -35,6 +35,10 @@ describe("Ollama VLM connectivity smoke configuration", () => {
         vision: {
           ollama: {
             localBaseUrl: " http://127.0.0.1:11434 ",
+            auth: {
+              headerName: "x-api-key",
+              apiKey: "local-dev-key"
+            },
             tunnel: {
               kind: "cloudflare_access_ssh",
               sshTarget: "vision-host"
@@ -58,6 +62,10 @@ describe("Ollama VLM connectivity smoke configuration", () => {
             kind: "cloudflare_access_ssh",
             localBaseUrl: "http://127.0.0.1:11434",
             sshTarget: "vision-host"
+          },
+          auth: {
+            headerName: "x-api-key",
+            apiKey: "local-dev-key"
           }
         }
       }
@@ -151,6 +159,38 @@ describe("Ollama VLM connectivity smoke configuration", () => {
       }
     });
     expect(requestedUrls).toEqual(["http://127.0.0.1:11434/api/tags"]);
+  });
+
+  it("sends configured auth headers to protected Ollama tags endpoints", async () => {
+    const requestedHeaders: HeadersInit[] = [];
+    const report = await runOllamaVlmConnectivitySmoke(
+      definePicoConfig({
+        vision: {
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434",
+            auth: {
+              headerName: "x-api-key",
+              apiKey: "local-dev-key"
+            }
+          }
+        }
+      }),
+      (_input, init) => {
+        if (init?.headers === undefined) {
+          throw new Error("expected Ollama tags request headers");
+        }
+        requestedHeaders.push(init.headers);
+
+        return Promise.resolve(tagsResponse(["qwen3.5:9b"]));
+      }
+    );
+
+    expect(report.status).toBe("passed");
+    expect(requestedHeaders).toEqual([
+      {
+        "x-api-key": "local-dev-key"
+      }
+    ]);
   });
 
   it("fails when the selected qwen3.5:9b model is absent", async () => {
