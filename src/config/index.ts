@@ -7,6 +7,7 @@ export type PicoConfig = DeepReadonly<{
   session: PicoSessionConfig;
   camera: {
     tapo?: PicoTapoConfig;
+    personFollow: PicoPersonFollowConfig;
   };
   vision: {
     ollama?: PicoOllamaConfig;
@@ -38,11 +39,22 @@ export type PicoTapoConfig = {
   readonly sourceId?: string;
   readonly host: string;
   readonly port?: number;
+  readonly onvifPort?: number;
   readonly user: string;
   readonly password: string;
   readonly stream?: string;
   readonly timeoutMs?: number;
   readonly maxFrameBytes?: number;
+};
+
+export type PicoPersonFollowConfig = {
+  readonly enabled: boolean;
+  readonly sourceCameraId?: string;
+  readonly deadZone?: number;
+  readonly maxStep?: number;
+  readonly speed?: number;
+  readonly cooldownMs?: number;
+  readonly lostTargetTimeoutMs?: number;
 };
 
 export type PicoOllamaConfig = {
@@ -111,7 +123,11 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
       durationMs: 60_000
     }
   },
-  camera: {},
+  camera: {
+    personFollow: {
+      enabled: false
+    }
+  },
   vision: {},
   voice: {
     stt: {},
@@ -220,9 +236,11 @@ function defineSessionEnding(
 function defineCameraSection(root: Record<string, unknown>): PicoConfig["camera"] {
   const camera = readOptionalRecord(root.camera, "pico config camera");
   const tapo = readOptionalRecord(camera?.tapo, "pico config camera.tapo");
+  const personFollow = readOptionalRecord(camera?.personFollow, "pico config camera.personFollow");
 
   return {
-    ...(tapo === undefined ? {} : { tapo: defineTapoConfig(tapo) })
+    ...(tapo === undefined ? {} : { tapo: defineTapoConfig(tapo) }),
+    personFollow: definePersonFollowConfig(personFollow)
   };
 }
 
@@ -262,6 +280,12 @@ function defineTapoConfig(input: Record<string, unknown>): PicoTapoConfig {
       "pico config camera.tapo.port",
       maxTcpPort
     ),
+    ...optionalBoundedPositiveIntegerProperty(
+      input,
+      "onvifPort",
+      "pico config camera.tapo.onvifPort",
+      maxTcpPort
+    ),
     user: requireString(input.user, "pico config camera.tapo.user"),
     password: requireString(input.password, "pico config camera.tapo.password"),
     ...optionalStringProperty(input, "stream", "pico config camera.tapo.stream"),
@@ -275,6 +299,61 @@ function defineTapoConfig(input: Record<string, unknown>): PicoTapoConfig {
       input,
       "maxFrameBytes",
       "pico config camera.tapo.maxFrameBytes"
+    )
+  };
+}
+
+function definePersonFollowConfig(
+  input: Record<string, unknown> | undefined
+): PicoPersonFollowConfig {
+  if (input === undefined) {
+    return {
+      enabled: false
+    };
+  }
+
+  const enabled =
+    readOptionalBoolean(input.enabled, "pico config camera.personFollow.enabled") ?? false;
+  const sourceCameraId = readOptionalString(
+    input.sourceCameraId,
+    "pico config camera.personFollow.sourceCameraId"
+  );
+  const deadZone = readOptionalDeadZone(input.deadZone);
+  const maxStep = readOptionalUnitPositiveNumber(
+    input.maxStep,
+    "pico config camera.personFollow.maxStep"
+  );
+  const speed = readOptionalUnitPositiveNumber(
+    input.speed,
+    "pico config camera.personFollow.speed"
+  );
+  const cooldownMs = readOptionalBoundedPositiveInteger(
+    input.cooldownMs,
+    "pico config camera.personFollow.cooldownMs",
+    maxNodeTimeoutMs
+  );
+  const lostTargetTimeoutMs = readOptionalBoundedPositiveInteger(
+    input.lostTargetTimeoutMs,
+    "pico config camera.personFollow.lostTargetTimeoutMs",
+    maxNodeTimeoutMs
+  );
+
+  if (!enabled) {
+    return {
+      enabled: false
+    };
+  }
+
+  return {
+    enabled: true,
+    sourceCameraId: requireString(sourceCameraId, "pico config camera.personFollow.sourceCameraId"),
+    deadZone: requireNumber(deadZone, "pico config camera.personFollow.deadZone"),
+    maxStep: requireNumber(maxStep, "pico config camera.personFollow.maxStep"),
+    speed: requireNumber(speed, "pico config camera.personFollow.speed"),
+    cooldownMs: requireNumber(cooldownMs, "pico config camera.personFollow.cooldownMs"),
+    lostTargetTimeoutMs: requireNumber(
+      lostTargetTimeoutMs,
+      "pico config camera.personFollow.lostTargetTimeoutMs"
     )
   };
 }
@@ -456,6 +535,14 @@ function requireString(value: unknown, label: string): string {
   return parsed;
 }
 
+function requireNumber(value: number | undefined, label: string): number {
+  if (value === undefined) {
+    throw new Error(`${label} is required when ${parentLabel(label)} is set`);
+  }
+
+  return value;
+}
+
 function requireLocalTunnelBaseUrl(value: unknown): string {
   const localBaseUrl = requireString(value, "pico config vision.ollama.localBaseUrl");
 
@@ -518,6 +605,34 @@ function readOptionalBoolean(value: unknown, label: string): boolean | undefined
   }
 
   return value;
+}
+
+function readOptionalDeadZone(value: unknown): number | undefined {
+  const parsed = readOptionalNumber(value, "pico config camera.personFollow.deadZone");
+
+  if (parsed === undefined) {
+    return undefined;
+  }
+
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed >= 0.5) {
+    throw new Error("pico config camera.personFollow.deadZone must be >= 0 and < 0.5");
+  }
+
+  return parsed;
+}
+
+function readOptionalUnitPositiveNumber(value: unknown, label: string): number | undefined {
+  const parsed = readOptionalNumber(value, label);
+
+  if (parsed === undefined) {
+    return undefined;
+  }
+
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
+    throw new Error(`${label} must be > 0 and <= 1`);
+  }
+
+  return parsed;
 }
 
 function requireNonNegativeInteger(value: unknown, label: string): number {

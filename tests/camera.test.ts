@@ -3,10 +3,15 @@ import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 
 import {
+  buildPersonFollowMove,
   createFfmpegRtspSnapshotTransport,
+  createOnvifPersonFollowPtzDriver,
+  createPersonFollowController,
   createRtspSnapshotClient,
   defineRtspSnapshotSource,
   type FfmpegRtspSnapshotProcess,
+  type OnvifCameraConstructor,
+  type PersonFollowPtzDriver,
   type RtspSnapshotTransport
 } from "../src/modules/camera/index.js";
 
@@ -17,6 +22,62 @@ const snapshotSourceInput = {
   password: "pa:ss@word",
   stream: "stream2"
 } as const;
+
+const personFollowConfig = {
+  sourceCameraId: "playroom-cam-1",
+  deadZone: 0.1,
+  maxStep: 0.25,
+  speed: 0.4,
+  cooldownMs: 500,
+  lostTargetTimeoutMs: 1500
+} as const;
+
+function personDetectionFrame(
+  capturedAt: string,
+  boundingBox = {
+    xMin: 0.7,
+    yMin: 0.6,
+    xMax: 0.9,
+    yMax: 0.8
+  }
+) {
+  return {
+    sourceId: "playroom-cam-1",
+    capturedAt,
+    detections: [
+      {
+        boundingBox,
+        confidence: 0.9
+      }
+    ]
+  };
+}
+
+function createRecordingPtzDriver(): {
+  readonly driver: PersonFollowPtzDriver;
+  readonly moves: Array<{ readonly pan: number; readonly tilt: number; readonly speed: number }>;
+  readonly stops: number[];
+} {
+  const moves: Array<{ readonly pan: number; readonly tilt: number; readonly speed: number }> = [];
+  const stops: number[] = [];
+
+  return {
+    driver: {
+      relativeMove(command) {
+        moves.push(command);
+
+        return Promise.resolve();
+      },
+      stop() {
+        stops.push(stops.length + 1);
+
+        return Promise.resolve();
+      }
+    },
+    moves,
+    stops
+  };
+}
 
 function createFfmpegProcessHarness(): {
   readonly process: FfmpegRtspSnapshotProcess;
@@ -239,6 +300,238 @@ describe("RTSP snapshot boundary", () => {
       reason: "capture_failed",
       message: "capture constructor failed"
     });
+  });
+});
+
+describe("person-follow PTZ boundary", () => {
+  it("converts a person box center error into a bounded relative move", () => {
+    expect(
+      buildPersonFollowMove({
+        boundingBox: {
+          xMin: 0.7,
+          yMin: 0.6,
+          xMax: 0.9,
+          yMax: 0.8
+        },
+        deadZone: 0.1,
+        maxStep: 0.25,
+        speed: 0.4
+      })
+    ).toEqual({
+      pan: 0.25,
+      tilt: -0.2,
+      speed: 0.4
+    });
+  });
+
+  it("does not move while the person center is inside the dead zone", () => {
+    expect(
+      buildPersonFollowMove({
+        boundingBox: {
+          xMin: 0.45,
+          yMin: 0.45,
+          xMax: 0.55,
+          yMax: 0.55
+        },
+        deadZone: 0.1,
+        maxStep: 0.25,
+        speed: 0.4
+      })
+    ).toBeUndefined();
+  });
+
+  it("enforces cooldown between relative move commands", async () => {
+    const { driver, moves } = createRecordingPtzDriver();
+    const controller = createPersonFollowController({
+      ...personFollowConfig,
+      driver,
+      audit: () => {},
+      nowMs: () => 1_000
+    });
+
+    await controller.processFrame(personDetectionFrame("2026-06-12T09:00:00.000Z"));
+    await controller.processFrame(personDetectionFrame("2026-06-12T09:00:00.250Z"));
+
+    expect(moves).toEqual([
+      {
+        pan: 0.25,
+        tilt: -0.2,
+        speed: 0.4
+      }
+    ]);
+  });
+
+  it("ignores frames from a different camera source", async () => {
+    const { driver, moves } = createRecordingPtzDriver();
+    const controller = createPersonFollowController({
+      ...personFollowConfig,
+      driver,
+      audit: () => {},
+      nowMs: () => 1_000
+    });
+
+    await controller.processFrame({
+      ...personDetectionFrame("2026-06-12T09:00:00.000Z"),
+      sourceId: "other-camera"
+    });
+
+    expect(moves).toEqual([]);
+  });
+
+  it("does not overlap person-follow frame processing", async () => {
+    let releaseMove: (() => void) | undefined;
+    const moveGate = new Promise<void>((resolve) => {
+      releaseMove = resolve;
+    });
+    const moves: Array<{ readonly pan: number; readonly tilt: number; readonly speed: number }> =
+      [];
+    const controller = createPersonFollowController({
+      ...personFollowConfig,
+      driver: {
+        relativeMove(command) {
+          moves.push(command);
+
+          return moveGate;
+        },
+        stop: () => Promise.resolve()
+      },
+      audit: () => {},
+      nowMs: () => 1_000
+    });
+
+    const firstFrame = controller.processFrame(personDetectionFrame("2026-06-12T09:00:00.000Z"));
+    await Promise.resolve();
+    const secondFrame = controller.processFrame(personDetectionFrame("2026-06-12T09:00:00.100Z"));
+    releaseMove?.();
+    await firstFrame;
+    await secondFrame;
+
+    expect(moves).toHaveLength(1);
+  });
+
+  it("stops when the target is lost beyond the configured timeout", async () => {
+    let currentTimeMs = 1_000;
+    const { driver, stops } = createRecordingPtzDriver();
+    const controller = createPersonFollowController({
+      ...personFollowConfig,
+      driver,
+      audit: () => {},
+      nowMs: () => currentTimeMs
+    });
+
+    await controller.processFrame(personDetectionFrame("2026-06-12T09:00:00.000Z"));
+    currentTimeMs = 2_600;
+    await controller.processFrame({
+      sourceId: "playroom-cam-1",
+      capturedAt: "2026-06-12T09:00:01.600Z",
+      detections: []
+    });
+
+    expect(stops).toEqual([1]);
+  });
+
+  it("manual stop prevents later movement and records an audit event", async () => {
+    const { driver, moves, stops } = createRecordingPtzDriver();
+    const auditEvents: string[] = [];
+    const controller = createPersonFollowController({
+      ...personFollowConfig,
+      driver,
+      audit: (event) => {
+        auditEvents.push(event.name);
+      },
+      nowMs: () => 1_000
+    });
+
+    await controller.stop();
+    await controller.processFrame(personDetectionFrame("2026-06-12T09:00:00.000Z"));
+
+    expect(moves).toEqual([]);
+    expect(stops).toEqual([1]);
+    expect(auditEvents).toEqual(["camera.person_follow.stop"]);
+  });
+
+  it("sends ONVIF relative move and stop commands through the live driver boundary", async () => {
+    const calls: unknown[] = [];
+    const Camera: OnvifCameraConstructor = class {
+      constructor(options: unknown) {
+        calls.push({
+          method: "constructor",
+          options
+        });
+      }
+
+      connect() {
+        calls.push({ method: "connect" });
+
+        return Promise.resolve();
+      }
+
+      relativeMove(options: unknown) {
+        calls.push({
+          method: "relativeMove",
+          options
+        });
+
+        return Promise.resolve();
+      }
+
+      stop(options: unknown) {
+        calls.push({
+          method: "stop",
+          options
+        });
+
+        return Promise.resolve();
+      }
+    };
+    const driver = createOnvifPersonFollowPtzDriver(
+      {
+        host: "192.168.10.25",
+        port: 2020,
+        username: "camera-user",
+        password: "camera-passphrase"
+      },
+      { Camera }
+    );
+
+    await driver.relativeMove({
+      pan: 0.2,
+      tilt: -0.1,
+      speed: 0.4
+    });
+    await driver.stop();
+
+    expect(calls).toEqual([
+      {
+        method: "constructor",
+        options: {
+          hostname: "192.168.10.25",
+          port: 2020,
+          username: "camera-user",
+          password: "camera-passphrase"
+        }
+      },
+      { method: "connect" },
+      {
+        method: "relativeMove",
+        options: {
+          x: 0.2,
+          y: -0.1,
+          zoom: 0,
+          speed: {
+            x: 0.4,
+            y: 0.4
+          }
+        }
+      },
+      {
+        method: "stop",
+        options: {
+          panTilt: true,
+          zoom: false
+        }
+      }
+    ]);
   });
 });
 

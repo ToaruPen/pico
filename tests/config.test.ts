@@ -56,11 +56,20 @@ camera:
     sourceId: tapo-main
     host: 192.168.3.25
     port: 554
+    onvifPort: 2020
     user: camera-user
     password: camera-password
     stream: stream2
     timeoutMs: 15000
     maxFrameBytes: 1024
+  personFollow:
+    enabled: true
+    sourceCameraId: tapo-main
+    deadZone: 0.12
+    maxStep: 0.3
+    speed: 0.4
+    cooldownMs: 500
+    lostTargetTimeoutMs: 3000
 vision:
   ollama:
     endpointId: windows-qwen
@@ -110,8 +119,18 @@ voice:
         tapo: {
           sourceId: "tapo-main",
           host: "192.168.3.25",
+          onvifPort: 2020,
           user: "camera-user",
           password: "camera-password"
+        },
+        personFollow: {
+          enabled: true,
+          sourceCameraId: "tapo-main",
+          deadZone: 0.12,
+          maxStep: 0.3,
+          speed: 0.4,
+          cooldownMs: 500,
+          lostTargetTimeoutMs: 3000
         }
       },
       vision: {
@@ -188,6 +207,49 @@ camera:
     ).toThrow("pico config camera.tapo.password is required when camera.tapo is set");
   });
 
+  it("defaults person follow to disabled", () => {
+    expect(definePicoConfig({}).camera.personFollow).toEqual({
+      enabled: false
+    });
+  });
+
+  it("requires a source camera when person follow is enabled", () => {
+    expect(() =>
+      definePicoConfig({
+        camera: {
+          personFollow: {
+            enabled: true,
+            deadZone: 0.12,
+            maxStep: 0.3,
+            speed: 0.4,
+            cooldownMs: 500,
+            lostTargetTimeoutMs: 3000
+          }
+        }
+      })
+    ).toThrow(
+      "pico config camera.personFollow.sourceCameraId is required when camera.personFollow is set"
+    );
+  });
+
+  it("rejects person follow dead zones outside the normalized frame range", () => {
+    expect(() =>
+      definePicoConfig({
+        camera: {
+          personFollow: {
+            enabled: true,
+            sourceCameraId: "tapo-main",
+            deadZone: 0.5,
+            maxStep: 0.3,
+            speed: 0.4,
+            cooldownMs: 500,
+            lostTargetTimeoutMs: 3000
+          }
+        }
+      })
+    ).toThrow("pico config camera.personFollow.deadZone must be >= 0 and < 0.5");
+  });
+
   it("rejects invalid numeric values at the config boundary", () => {
     expect(() =>
       definePicoConfig({
@@ -257,6 +319,21 @@ camera:
         }
       })
     ).toThrow("pico config camera.tapo.port must be a positive integer <= 65535");
+  });
+
+  it("rejects Tapo ONVIF ports outside the TCP port range", () => {
+    expect(() =>
+      definePicoConfig({
+        camera: {
+          tapo: {
+            host: "192.168.3.25",
+            onvifPort: 65_536,
+            user: "camera-user",
+            password: "camera-password"
+          }
+        }
+      })
+    ).toThrow("pico config camera.tapo.onvifPort must be a positive integer <= 65535");
   });
 
   it("rejects non-local Ollama endpoints at the config boundary", () => {
