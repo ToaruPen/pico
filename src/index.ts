@@ -8,6 +8,7 @@ import { futurePicoModules } from "./modules/future.js";
 import { createHandoffModule } from "./modules/handoff/index.js";
 import { createLocalModelsModule } from "./modules/local-models/index.js";
 import { createMemoryModule } from "./modules/memory/index.js";
+import { createSessionModule } from "./modules/session/index.js";
 import { createTransportModule } from "./modules/transport/index.js";
 import { PicoModuleRegistry } from "./orchestrator/registry.js";
 
@@ -16,6 +17,7 @@ export function createPicoRegistry(): PicoModuleRegistry {
 
   registry.register(createContextModule());
   registry.register(createMemoryModule());
+  registry.register(createSessionModule());
   registry.register(createLocalModelsModule());
   registry.register(createHandoffModule());
   registry.register(createAuditModule());

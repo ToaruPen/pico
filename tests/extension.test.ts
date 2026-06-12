@@ -52,6 +52,7 @@ describe("pico extension", () => {
     expect(picoExtensionMetadata.modules.map((module) => module.kind)).toEqual([
       "context",
       "memory",
+      "session",
       "local_models",
       "handoff",
       "audit",

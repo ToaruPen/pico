@@ -1,6 +1,7 @@
 export type PicoModuleKind =
   | "context"
   | "memory"
+  | "session"
   | "local_models"
   | "handoff"
   | "audit"

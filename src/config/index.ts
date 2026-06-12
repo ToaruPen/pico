@@ -4,6 +4,7 @@ import { isAbsolute, resolve } from "node:path";
 import { parse } from "yaml";
 
 export type PicoConfig = DeepReadonly<{
+  session: PicoSessionConfig;
   camera: {
     tapo?: PicoTapoConfig;
   };
@@ -19,6 +20,19 @@ export type PicoConfig = DeepReadonly<{
     };
   };
 }>;
+
+export type PicoSessionConfig = {
+  readonly enabled: boolean;
+  readonly startTriggers: {
+    readonly wakeNames: readonly string[];
+    readonly greetings: readonly string[];
+    readonly candidateTimeoutMs: number;
+  };
+  readonly ending: {
+    readonly mode: "timed";
+    readonly durationMs: number;
+  };
+};
 
 export type PicoTapoConfig = {
   readonly sourceId?: string;
@@ -85,6 +99,18 @@ const maxNodeTimeoutMs = 2_147_483_647;
 const maxTcpPort = 65_535;
 
 export const emptyPicoConfig: PicoConfig = deepFreeze({
+  session: {
+    enabled: true,
+    startTriggers: {
+      wakeNames: [],
+      greetings: [],
+      candidateTimeoutMs: 10_000
+    },
+    ending: {
+      mode: "timed",
+      durationMs: 60_000
+    }
+  },
   camera: {},
   vision: {},
   voice: {
@@ -125,10 +151,70 @@ export function definePicoConfig(input: unknown): PicoConfig {
   const root = input === null || input === undefined ? {} : requireRecord(input, "pico config");
 
   return deepFreeze({
+    session: defineSessionSection(root),
     camera: defineCameraSection(root),
     vision: defineVisionSection(root),
     voice: defineVoiceSection(root)
   });
+}
+
+function defineSessionSection(root: Record<string, unknown>): PicoConfig["session"] {
+  const session = readOptionalRecord(root.session, "pico config session");
+
+  return {
+    enabled: defineSessionEnabled(session),
+    startTriggers: defineSessionStartTriggers(session),
+    ending: defineSessionEnding(readOptionalRecord(session?.ending, "pico config session.ending"))
+  };
+}
+
+function defineSessionEnabled(input: Record<string, unknown> | undefined): boolean {
+  return readOptionalBoolean(input?.enabled, "pico config session.enabled") ?? true;
+}
+
+function defineSessionStartTriggers(
+  input: Record<string, unknown> | undefined
+): PicoSessionConfig["startTriggers"] {
+  const startTriggers = readOptionalRecord(
+    input?.startTriggers,
+    "pico config session.startTriggers"
+  );
+
+  return {
+    wakeNames: readOptionalStringList(
+      startTriggers?.wakeNames,
+      "pico config session.startTriggers.wakeNames"
+    ),
+    greetings: readOptionalStringList(
+      startTriggers?.greetings,
+      "pico config session.startTriggers.greetings"
+    ),
+    candidateTimeoutMs:
+      readOptionalPositiveInteger(
+        startTriggers?.candidateTimeoutMs,
+        "pico config session.startTriggers.candidateTimeoutMs"
+      ) ?? 10_000
+  };
+}
+
+function defineSessionEnding(
+  input: Record<string, unknown> | undefined
+): PicoSessionConfig["ending"] {
+  const mode = readOptionalString(input?.mode, "pico config session.ending.mode") ?? "timed";
+
+  if (mode !== "timed") {
+    throw new Error("pico config session.ending.mode must be timed");
+  }
+
+  return {
+    mode,
+    durationMs:
+      readOptionalBoundedPositiveInteger(
+        input?.durationMs,
+        "pico config session.ending.durationMs",
+        maxNodeTimeoutMs
+      ) ?? 60_000
+  };
 }
 
 function defineCameraSection(root: Record<string, unknown>): PicoConfig["camera"] {
@@ -308,11 +394,7 @@ function optionalBoundedPositiveIntegerProperty(
   label: string,
   maximum: number
 ): Record<string, number> {
-  const value = readOptionalPositiveInteger(input[key], label);
-
-  if (value !== undefined && value > maximum) {
-    throw new Error(`${label} must be a positive integer <= ${maximum}`);
-  }
+  const value = readOptionalBoundedPositiveInteger(input[key], label, maximum);
 
   return value === undefined ? {} : { [key]: value };
 }
@@ -404,6 +486,40 @@ function readOptionalString(value: unknown, label = "pico config value"): string
   return trimmed === "" ? undefined : trimmed;
 }
 
+function readOptionalStringList(value: unknown, label: string): readonly string[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error(`${label} must be a list of strings`);
+  }
+
+  return value
+    .map((item, index) => {
+      const parsed = readOptionalString(item, `${label}.${index}`);
+
+      if (parsed === undefined) {
+        throw new Error(`${label} must be a list of non-empty strings`);
+      }
+
+      return parsed;
+    })
+    .filter((item, index, items) => items.indexOf(item) === index);
+}
+
+function readOptionalBoolean(value: unknown, label: string): boolean | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (typeof value !== "boolean") {
+    throw new Error(`${label} must be a boolean`);
+  }
+
+  return value;
+}
+
 function requireNonNegativeInteger(value: unknown, label: string): number {
   const parsed = readOptionalNumber(value, label);
 
@@ -427,6 +543,20 @@ function readOptionalPositiveInteger(value: unknown, label: string): number | un
 
   if (!Number.isInteger(parsed) || parsed < 1) {
     throw new Error(`${label} must be a positive integer`);
+  }
+
+  return parsed;
+}
+
+function readOptionalBoundedPositiveInteger(
+  value: unknown,
+  label: string,
+  maximum: number
+): number | undefined {
+  const parsed = readOptionalPositiveInteger(value, label);
+
+  if (parsed !== undefined && parsed > maximum) {
+    throw new Error(`${label} must be a positive integer <= ${maximum}`);
   }
 
   return parsed;
