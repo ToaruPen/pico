@@ -795,10 +795,18 @@ function rebuildLongMemoryReviewedTables(database: DatabaseSync): void {
 
     DROP TABLE long_memory_entry_events_legacy;
     DROP TABLE long_memory_entries_legacy;
-
-    PRAGMA foreign_key_check;
-    PRAGMA foreign_keys = ON;
   `);
+
+  const foreignKeyViolations = database.prepare("PRAGMA foreign_key_check").all();
+  database.exec("PRAGMA foreign_keys = ON");
+
+  if (foreignKeyViolations.length > 0) {
+    throw new Error(
+      `pico long memory migration left foreign key violations: ${JSON.stringify(
+        foreignKeyViolations
+      )}`
+    );
+  }
 }
 
 function refreshLongMemorySearchObjects(database: DatabaseSync): void {

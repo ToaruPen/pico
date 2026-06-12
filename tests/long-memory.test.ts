@@ -119,6 +119,30 @@ function createLegacyLongMemoryDatabase(path: string): void {
   }
 }
 
+function insertLegacyDanglingEvent(path: string): void {
+  const database = new DatabaseSync(path);
+
+  try {
+    database.exec("PRAGMA foreign_keys = OFF");
+    database
+      .prepare(
+        `
+          INSERT INTO long_memory_entry_events (
+            memory_id,
+            event_kind,
+            reviewed_by,
+            reviewed_at,
+            snapshot_json
+          )
+          VALUES (?, 'create', 'staff-a', '2026-04-01T09:00:00.000Z', '{}')
+        `
+      )
+      .run(999);
+  } finally {
+    database.close();
+  }
+}
+
 describe("SQLite long memory store", () => {
   it("creates the durable memory schema and FTS index in SQLite", async () => {
     await withLongMemoryDatabase((path) => {
@@ -366,6 +390,17 @@ describe("SQLite long memory store", () => {
       } finally {
         store.close();
       }
+    });
+  });
+
+  it("rejects legacy migration when foreign key violations remain", async () => {
+    await withLongMemoryDatabase((path) => {
+      createLegacyLongMemoryDatabase(path);
+      insertLegacyDanglingEvent(path);
+
+      expect(() => openLongMemoryStore(path)).toThrow(
+        "pico long memory migration left foreign key violations"
+      );
     });
   });
 

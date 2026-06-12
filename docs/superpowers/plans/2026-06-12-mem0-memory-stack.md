@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Local Mem0 Config Boundary
+## Task 1: Local Mem0 Config Boundary
 
 **Files:**
 - Modify: `src/config/index.ts`
@@ -66,7 +66,7 @@ npm run test -- tests/config.test.ts
 
 Expected: PASS.
 
-### Task 2: Mem0 Adapter Contract and Cutoff Mapping
+## Task 2: Mem0 Adapter Contract and Cutoff Mapping
 
 **Files:**
 - Create: `src/modules/long-memory/mem0.ts`
@@ -111,7 +111,7 @@ npm run test -- tests/long-memory-mem0.test.ts
 
 Expected: PASS.
 
-### Task 3: Quality Gate and PR
+## Task 3: Quality Gate and PR
 
 **Files:**
 - Modify only files touched by Tasks 1-2.
