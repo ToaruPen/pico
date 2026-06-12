@@ -11,6 +11,7 @@ export type PicoConfig = DeepReadonly<{
   };
   vision: {
     ollama?: PicoOllamaConfig;
+    personDetection: PicoPersonDetectionConfig;
   };
   voice: {
     stt: {
@@ -71,6 +72,24 @@ export type PicoOllamaConfig = {
   readonly timeoutMs?: number;
 };
 
+export type PicoPersonDetectionConfig = {
+  readonly enabled: boolean;
+  readonly sourceCameraId?: string;
+  readonly modelFamily?: "pinto0309";
+  readonly provider?: PicoPersonDetectionProvider;
+  readonly modelPath?: string;
+  readonly inputWidth?: number;
+  readonly inputHeight?: number;
+  readonly outputLayout?: PicoPersonDetectionOutputLayout;
+  readonly coordinateScale?: PicoPersonDetectionCoordinateScale;
+  readonly frameIntervalMs?: number;
+  readonly confidenceThreshold?: number;
+};
+
+export type PicoPersonDetectionProvider = "onnxruntime" | "tflite" | "openvino";
+export type PicoPersonDetectionOutputLayout = "xyxy_score_class" | "cxcywh_score_class";
+export type PicoPersonDetectionCoordinateScale = "pixel" | "normalized";
+
 export type PicoMlxWhisperConfig = {
   readonly id?: string;
   readonly localBaseUrl: string;
@@ -101,6 +120,19 @@ type DeepReadonly<T> = {
         : T[K];
 };
 
+type OptionalPersonDetectionFields = {
+  readonly sourceCameraId: string | undefined;
+  readonly modelFamily: "pinto0309" | undefined;
+  readonly provider: PicoPersonDetectionProvider | undefined;
+  readonly modelPath: string | undefined;
+  readonly inputWidth: number | undefined;
+  readonly inputHeight: number | undefined;
+  readonly outputLayout: PicoPersonDetectionOutputLayout | undefined;
+  readonly coordinateScale: PicoPersonDetectionCoordinateScale | undefined;
+  readonly frameIntervalMs: number | undefined;
+  readonly confidenceThreshold: number | undefined;
+};
+
 export type LoadPicoConfigOptions = {
   readonly path?: string;
   readonly cwd?: string;
@@ -128,7 +160,11 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
       enabled: false
     }
   },
-  vision: {},
+  vision: {
+    personDetection: {
+      enabled: false
+    }
+  },
   voice: {
     stt: {},
     tts: {}
@@ -247,9 +283,14 @@ function defineCameraSection(root: Record<string, unknown>): PicoConfig["camera"
 function defineVisionSection(root: Record<string, unknown>): PicoConfig["vision"] {
   const vision = readOptionalRecord(root.vision, "pico config vision");
   const ollama = readOptionalRecord(vision?.ollama, "pico config vision.ollama");
+  const personDetection = readOptionalRecord(
+    vision?.personDetection,
+    "pico config vision.personDetection"
+  );
 
   return {
-    ...(ollama === undefined ? {} : { ollama: defineOllamaConfig(ollama) })
+    ...(ollama === undefined ? {} : { ollama: defineOllamaConfig(ollama) }),
+    personDetection: definePersonDetectionConfig(personDetection)
   };
 }
 
@@ -392,6 +433,101 @@ function defineOllamaConfig(input: Record<string, unknown>): PicoOllamaConfig {
       maxNodeTimeoutMs
     )
   };
+}
+
+function definePersonDetectionConfig(
+  input: Record<string, unknown> | undefined
+): PicoPersonDetectionConfig {
+  if (input === undefined) {
+    return {
+      enabled: false
+    };
+  }
+
+  const enabled =
+    readOptionalBoolean(input.enabled, "pico config vision.personDetection.enabled") ?? false;
+  const sourceCameraId = readOptionalString(
+    input.sourceCameraId,
+    "pico config vision.personDetection.sourceCameraId"
+  );
+  const modelFamily = readOptionalPersonDetectionModelFamily(input.modelFamily);
+  const provider = readOptionalPersonDetectionProvider(input.provider);
+  const modelPath = readOptionalString(
+    input.modelPath,
+    "pico config vision.personDetection.modelPath"
+  );
+  const inputWidth = readOptionalPositiveInteger(
+    input.inputWidth,
+    "pico config vision.personDetection.inputWidth"
+  );
+  const inputHeight = readOptionalPositiveInteger(
+    input.inputHeight,
+    "pico config vision.personDetection.inputHeight"
+  );
+  const outputLayout = readOptionalPersonDetectionOutputLayout(input.outputLayout);
+  const coordinateScale = readOptionalPersonDetectionCoordinateScale(input.coordinateScale);
+  const frameIntervalMs = readOptionalBoundedPositiveInteger(
+    input.frameIntervalMs,
+    "pico config vision.personDetection.frameIntervalMs",
+    maxNodeTimeoutMs
+  );
+  const confidenceThreshold = readOptionalConfidenceThreshold(input.confidenceThreshold);
+
+  if (!enabled) {
+    return defineDisabledPersonDetectionConfig({
+      confidenceThreshold,
+      frameIntervalMs,
+      modelFamily,
+      modelPath,
+      inputWidth,
+      inputHeight,
+      outputLayout,
+      coordinateScale,
+      provider,
+      sourceCameraId
+    });
+  }
+
+  return {
+    enabled,
+    sourceCameraId: requireString(
+      sourceCameraId,
+      "pico config vision.personDetection.sourceCameraId"
+    ),
+    modelFamily: requirePersonDetectionModelFamily(modelFamily),
+    provider: requirePersonDetectionProvider(provider),
+    modelPath: requireString(modelPath, "pico config vision.personDetection.modelPath"),
+    inputWidth: requireNumber(inputWidth, "pico config vision.personDetection.inputWidth"),
+    inputHeight: requireNumber(inputHeight, "pico config vision.personDetection.inputHeight"),
+    ...(outputLayout === undefined ? {} : { outputLayout }),
+    ...(coordinateScale === undefined ? {} : { coordinateScale }),
+    frameIntervalMs: requireNumber(
+      frameIntervalMs,
+      "pico config vision.personDetection.frameIntervalMs"
+    ),
+    confidenceThreshold: requireNumber(
+      confidenceThreshold,
+      "pico config vision.personDetection.confidenceThreshold"
+    )
+  };
+}
+
+function defineDisabledPersonDetectionConfig(
+  input: OptionalPersonDetectionFields
+): PicoPersonDetectionConfig {
+  return stripUndefinedProperties({
+    enabled: false,
+    sourceCameraId: input.sourceCameraId,
+    modelFamily: input.modelFamily,
+    provider: input.provider,
+    modelPath: input.modelPath,
+    inputWidth: input.inputWidth,
+    inputHeight: input.inputHeight,
+    outputLayout: input.outputLayout,
+    coordinateScale: input.coordinateScale,
+    frameIntervalMs: input.frameIntervalMs,
+    confidenceThreshold: input.confidenceThreshold
+  }) as PicoPersonDetectionConfig;
 }
 
 function defineMlxWhisperConfig(input: Record<string, unknown>): PicoMlxWhisperConfig {
@@ -543,6 +679,28 @@ function requireNumber(value: number | undefined, label: string): number {
   return value;
 }
 
+function requirePersonDetectionModelFamily(value: "pinto0309" | undefined): "pinto0309" {
+  if (value === undefined) {
+    throw new Error(
+      "pico config vision.personDetection.modelFamily is required when vision.personDetection is set"
+    );
+  }
+
+  return value;
+}
+
+function requirePersonDetectionProvider(
+  value: PicoPersonDetectionProvider | undefined
+): PicoPersonDetectionProvider {
+  if (value === undefined) {
+    throw new Error(
+      "pico config vision.personDetection.provider is required when vision.personDetection is set"
+    );
+  }
+
+  return value;
+}
+
 function requireLocalTunnelBaseUrl(value: unknown): string {
   const localBaseUrl = requireString(value, "pico config vision.ollama.localBaseUrl");
 
@@ -630,6 +788,91 @@ function readOptionalUnitPositiveNumber(value: unknown, label: string): number |
 
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
     throw new Error(`${label} must be > 0 and <= 1`);
+  }
+
+  return parsed;
+}
+
+function readOptionalPersonDetectionModelFamily(value: unknown): "pinto0309" | undefined {
+  const parsed = readOptionalString(value, "pico config vision.personDetection.modelFamily");
+
+  if (parsed === undefined) {
+    return undefined;
+  }
+
+  if (parsed !== "pinto0309") {
+    throw new Error("pico config vision.personDetection.modelFamily must be pinto0309");
+  }
+
+  return parsed;
+}
+
+function readOptionalPersonDetectionProvider(
+  value: unknown
+): PicoPersonDetectionProvider | undefined {
+  const parsed = readOptionalString(value, "pico config vision.personDetection.provider");
+
+  if (parsed === undefined) {
+    return undefined;
+  }
+
+  if (parsed !== "onnxruntime" && parsed !== "tflite" && parsed !== "openvino") {
+    throw new Error(
+      "pico config vision.personDetection.provider must be onnxruntime, tflite, or openvino"
+    );
+  }
+
+  return parsed;
+}
+
+function readOptionalPersonDetectionOutputLayout(
+  value: unknown
+): PicoPersonDetectionOutputLayout | undefined {
+  const parsed = readOptionalString(value, "pico config vision.personDetection.outputLayout");
+
+  if (parsed === undefined) {
+    return undefined;
+  }
+
+  if (parsed !== "xyxy_score_class" && parsed !== "cxcywh_score_class") {
+    throw new Error(
+      "pico config vision.personDetection.outputLayout must be xyxy_score_class or cxcywh_score_class"
+    );
+  }
+
+  return parsed;
+}
+
+function readOptionalPersonDetectionCoordinateScale(
+  value: unknown
+): PicoPersonDetectionCoordinateScale | undefined {
+  const parsed = readOptionalString(value, "pico config vision.personDetection.coordinateScale");
+
+  if (parsed === undefined) {
+    return undefined;
+  }
+
+  if (parsed !== "pixel" && parsed !== "normalized") {
+    throw new Error(
+      "pico config vision.personDetection.coordinateScale must be pixel or normalized"
+    );
+  }
+
+  return parsed;
+}
+
+function readOptionalConfidenceThreshold(value: unknown): number | undefined {
+  const parsed = readOptionalNumber(
+    value,
+    "pico config vision.personDetection.confidenceThreshold"
+  );
+
+  if (parsed === undefined) {
+    return undefined;
+  }
+
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    throw new Error("pico config vision.personDetection.confidenceThreshold must be >= 0 and <= 1");
   }
 
   return parsed;
@@ -751,6 +994,12 @@ function parentLabel(label: string): string {
     .split(".")
     .slice(0, -1)
     .join(".");
+}
+
+function stripUndefinedProperties<T extends Record<string, unknown>>(input: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(input).filter(([, value]) => value !== undefined)
+  ) as Partial<T>;
 }
 
 function deepFreeze<T extends object>(value: T, seen = new WeakSet()): DeepReadonly<T> {

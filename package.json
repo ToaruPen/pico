@@ -22,6 +22,7 @@
     "test": "vitest run",
     "smoke:milestone": "jiti scripts/smoke/milestone-suite.ts",
     "smoke:camera-vlm-scene": "jiti scripts/smoke/camera-vlm-scene.ts",
+    "smoke:person-detection": "jiti scripts/smoke/person-detection.ts",
     "smoke:ollama-vlm": "jiti scripts/smoke/ollama-vlm-connectivity.ts",
     "smoke:camera-tapo": "jiti scripts/smoke/tapo-rtsp-snapshot.ts",
     "smoke:camera-ptz": "jiti scripts/smoke/tapo-person-follow-nudge.ts",
@@ -53,6 +54,8 @@
   },
   "dependencies": {
     "onvif": "^0.8.1",
+    "onnxruntime-node": "^1.26.0",
+    "sharp": "^0.35.1",
     "yaml": "^2.9.0"
   }
 }

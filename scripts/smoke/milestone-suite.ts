@@ -21,6 +21,7 @@ import {
   type OllamaVlmSmokeReport,
   runOllamaVlmConnectivitySmoke
 } from "./ollama-vlm-connectivity.js";
+import { type PersonDetectionSmokeReport, runPersonDetectionSmoke } from "./person-detection.js";
 import {
   runTapoPersonFollowSmoke,
   type TapoPersonFollowSmokeReport
@@ -36,6 +37,7 @@ export type PicoMilestoneSmokeSectionName =
   | "voice_tts"
   | "tapo_snapshot"
   | "tapo_ptz"
+  | "person_detection"
   | "ollama_vlm"
   | "camera_vlm_scene"
   | "memory_candidate"
@@ -68,6 +70,7 @@ export type PicoMilestoneSmokeDependencies = {
     config: PicoConfig,
     env: NodeJS.ProcessEnv
   ) => Promise<TapoPersonFollowSmokeReport>;
+  readonly runPersonDetectionSmoke?: (config: PicoConfig) => Promise<PersonDetectionSmokeReport>;
   readonly runOllamaVlmConnectivitySmoke?: (config: PicoConfig) => Promise<OllamaVlmSmokeReport>;
   readonly runCameraVlmSceneSmoke?: (config: PicoConfig) => Promise<CameraVlmSceneSmokeReport>;
 };
@@ -131,6 +134,14 @@ export async function runPicoMilestoneSmokeSuite(
       toSection(
         "tapo_ptz",
         await (dependencies.runTapoPersonFollowSmoke ?? runTapoPersonFollowSmoke)(config, env)
+      )
+    )
+  );
+  sections.push(
+    await captureSection("person_detection", "tapo-rtsp+onnxruntime", async () =>
+      toSection(
+        "person_detection",
+        await (dependencies.runPersonDetectionSmoke ?? runPersonDetectionSmoke)(config)
       )
     )
   );
@@ -240,6 +251,7 @@ function failedConfigProviderSections(error: unknown): readonly PicoMilestoneSmo
     failedSection("voice_tts", "aivis-speech", reason),
     failedSection("tapo_snapshot", "tapo-rtsp", reason),
     failedSection("tapo_ptz", "tapo-onvif-ptz", reason),
+    failedSection("person_detection", "tapo-rtsp+onnxruntime", reason),
     failedSection("ollama_vlm", "ollama", reason),
     failedSection("camera_vlm_scene", "tapo-rtsp+ollama", reason)
   ];

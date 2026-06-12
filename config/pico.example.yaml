@@ -36,6 +36,21 @@ vision:
     localBaseUrl: http://127.0.0.1:11434
     # Optional defaults: endpointId=windows-ollama-qwen3-5,
     # tunnel.kind=tailscale_ssh, tunnel.sshTarget=pico-vision-host.
+  personDetection:
+    enabled: false
+    sourceCameraId: tapo-rtsp
+    modelFamily: pinto0309
+    # Local providers: onnxruntime, tflite, or openvino.
+    provider: onnxruntime
+    modelPath: /opt/pico/models/pinto0309/yolox_nano_person.onnx
+    inputWidth: 320
+    inputHeight: 320
+    # Output layouts: xyxy_score_class or cxcywh_score_class.
+    outputLayout: xyxy_score_class
+    # Coordinate scales: pixel or normalized.
+    coordinateScale: pixel
+    frameIntervalMs: 500
+    confidenceThreshold: 0.55
 
 voice:
   stt:
