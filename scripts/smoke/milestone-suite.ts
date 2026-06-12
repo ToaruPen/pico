@@ -21,11 +21,11 @@ import {
   type OllamaVlmSmokeReport,
   runOllamaVlmConnectivitySmoke
 } from "./ollama-vlm-connectivity.js";
+import { type PersonDetectionSmokeReport, runPersonDetectionSmoke } from "./person-detection.js";
 import {
   runTapoPersonFollowSmoke,
   type TapoPersonFollowSmokeReport
 } from "./tapo-person-follow-nudge.js";
-import { type PersonDetectionSmokeReport, runPersonDetectionSmoke } from "./person-detection.js";
 import { runTapoRtspSnapshotSmoke, type TapoRtspSmokeReport } from "./tapo-rtsp-snapshot.js";
 import { runVoiceProviderSmoke, type VoiceSmokeReport } from "./voice-providers.js";
 
