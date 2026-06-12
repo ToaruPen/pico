@@ -1,5 +1,20 @@
 # Copy this file to config/pico.local.yaml and fill in local-only values.
 # Do not commit config/pico.local.yaml.
+session:
+  enabled: true
+  startTriggers:
+    wakeNames:
+      - ピコ
+      - pico
+    greetings:
+      - おはよう
+      - こんにちは
+      - ただいま
+    candidateTimeoutMs: 10000
+  ending:
+    mode: timed
+    durationMs: 60000
+
 camera:
   tapo:
     sourceId: tapo-rtsp

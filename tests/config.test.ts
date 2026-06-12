@@ -38,6 +38,19 @@ describe("pico YAML config", () => {
 
   it("loads configured camera, vision, and voice providers from YAML", () => {
     const path = temporaryConfigFile(`
+session:
+  enabled: true
+  startTriggers:
+    wakeNames:
+      - ピコ
+      - pico
+    greetings:
+      - おはよう
+      - こんにちは
+    candidateTimeoutMs: 12000
+  ending:
+    mode: timed
+    durationMs: 90000
 camera:
   tapo:
     sourceId: tapo-main
@@ -81,6 +94,18 @@ voice:
 `);
 
     expect(loadPicoConfig({ path })).toMatchObject({
+      session: {
+        enabled: true,
+        startTriggers: {
+          wakeNames: ["ピコ", "pico"],
+          greetings: ["おはよう", "こんにちは"],
+          candidateTimeoutMs: 12_000
+        },
+        ending: {
+          mode: "timed",
+          durationMs: 90_000
+        }
+      },
       camera: {
         tapo: {
           sourceId: "tapo-main",
@@ -112,6 +137,21 @@ voice:
             text: "こんにちは。"
           }
         }
+      }
+    });
+  });
+
+  it("defaults session ending to one timed minute", () => {
+    expect(definePicoConfig({}).session).toEqual({
+      enabled: true,
+      startTriggers: {
+        wakeNames: [],
+        greetings: [],
+        candidateTimeoutMs: 10_000
+      },
+      ending: {
+        mode: "timed",
+        durationMs: 60_000
       }
     });
   });
@@ -161,6 +201,32 @@ camera:
         }
       })
     ).toThrow("pico config voice.tts.aivis.speakerId must be a non-negative integer");
+  });
+
+  it("rejects invalid timed session durations at the config boundary", () => {
+    expect(() =>
+      definePicoConfig({
+        session: {
+          ending: {
+            mode: "timed",
+            durationMs: 0
+          }
+        }
+      })
+    ).toThrow("pico config session.ending.durationMs must be a positive integer");
+  });
+
+  it("rejects timed session durations beyond Node timer bounds", () => {
+    expect(() =>
+      definePicoConfig({
+        session: {
+          ending: {
+            mode: "timed",
+            durationMs: 2_147_483_648
+          }
+        }
+      })
+    ).toThrow("pico config session.ending.durationMs must be a positive integer <= 2147483647");
   });
 
   it("rejects Tapo timeout values beyond Node timer bounds", () => {
