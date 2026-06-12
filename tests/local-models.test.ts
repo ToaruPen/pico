@@ -114,4 +114,37 @@ describe("selected local model endpoint config", () => {
 
     expect(endpoint).toEqual(protectedEndpoint);
   });
+
+  it("accepts an optional auth header for protected Ollama proxies", () => {
+    const endpoint = defineSelectedModelEndpoint({
+      ...protectedEndpoint,
+      host: {
+        ...protectedEndpoint.host,
+        auth: {
+          headerName: "x-api-key",
+          apiKey: "local-dev-key"
+        }
+      }
+    });
+
+    expect(endpoint.host.auth).toEqual({
+      headerName: "x-api-key",
+      apiKey: "local-dev-key"
+    });
+  });
+
+  it("rejects invalid protected Ollama auth header names", () => {
+    expect(() =>
+      defineSelectedModelEndpoint({
+        ...protectedEndpoint,
+        host: {
+          ...protectedEndpoint.host,
+          auth: {
+            headerName: "x api key",
+            apiKey: "local-dev-key"
+          }
+        }
+      })
+    ).toThrow("pico local model endpoint auth headerName must be a valid HTTP header name");
+  });
 });
