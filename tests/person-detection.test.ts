@@ -250,4 +250,68 @@ describe("streaming person detection", () => {
       vi.useRealTimers();
     }
   });
+
+  it("does not publish a detection captured before a stop and restart", async () => {
+    vi.useFakeTimers();
+    let releaseFirstDetection: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirstDetection = resolve;
+    });
+    const published: unknown[] = [];
+    let detectionCalls = 0;
+    const stream = createPersonDetectionStream({
+      sourceId: "tapo-main",
+      frameIntervalMs: 500,
+      confidenceThreshold: 0.5,
+      frameSize: {
+        width: 200,
+        height: 200
+      },
+      captureFrame: () => Promise.resolve(Buffer.from("frame")),
+      model: {
+        async detect() {
+          detectionCalls += 1;
+
+          if (detectionCalls === 1) {
+            await firstGate;
+          }
+
+          return [
+            {
+              label: "person",
+              confidence: 0.9,
+              box: {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100
+              }
+            }
+          ];
+        }
+      },
+      publish: (frame) => {
+        published.push(frame);
+      },
+      now: () => capturedAt
+    });
+
+    try {
+      stream.start();
+      await vi.advanceTimersByTimeAsync(500);
+      stream.stop();
+      stream.start();
+
+      releaseFirstDetection?.();
+      await Promise.resolve();
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(published).toHaveLength(1);
+      expect(detectionCalls).toBe(2);
+    } finally {
+      stream.stop();
+      vi.useRealTimers();
+    }
+  });
 });

@@ -98,6 +98,7 @@ export function createPersonDetectionStream(
   );
   let timer: NodeJS.Timeout | undefined;
   let inFlight = false;
+  let runToken = 0;
   let stopped = true;
 
   const tick = (): void => {
@@ -106,6 +107,7 @@ export function createPersonDetectionStream(
     }
 
     inFlight = true;
+    const activeRunToken = runToken;
     void Promise.resolve()
       .then(() => options.captureFrame())
       .then(async (frame) => {
@@ -113,15 +115,20 @@ export function createPersonDetectionStream(
           return;
         }
 
+        if (stopped || activeRunToken !== runToken) {
+          return;
+        }
+
+        const capturedAt = (options.now ?? (() => new Date().toISOString()))();
         const detections = await options.model.detect(frame);
-        if (stopped) {
+        if (activeRunToken !== runToken) {
           return;
         }
 
         options.publish(
           normalizePersonDetectionFrame({
             sourceId: options.sourceId,
-            capturedAt: (options.now ?? (() => new Date().toISOString()))(),
+            capturedAt,
             frameSize: options.frameSize,
             confidenceThreshold: options.confidenceThreshold,
             detections
@@ -143,10 +150,12 @@ export function createPersonDetectionStream(
       }
 
       stopped = false;
+      runToken += 1;
       timer = setInterval(tick, frameIntervalMs);
     },
     stop() {
       stopped = true;
+      runToken += 1;
       if (timer !== undefined) {
         clearInterval(timer);
         timer = undefined;
