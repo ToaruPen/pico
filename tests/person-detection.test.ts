@@ -1,14 +1,238 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  createOnnxPersonDetectionModel,
   createPersonDetectionStream,
+  createSharpRgbTensorPreprocessor,
   normalizePersonDetectionFrame,
-  type PersonDetectionModel
+  type OnnxPersonDetectionRuntime,
+  type PersonDetectionModel,
+  type SharpRgbTensorRuntime
 } from "../src/modules/vision/person-detection.js";
 
 const capturedAt = "2026-06-12T09:00:00.000Z";
 
 describe("streaming person detection", () => {
+  it("preprocesses image frames into NCHW RGB float tensors", async () => {
+    const operations: string[] = [];
+    const runtime: SharpRgbTensorRuntime = () => ({
+      rotate() {
+        operations.push("rotate");
+
+        return this;
+      },
+      resize(options) {
+        operations.push(`resize:${options.width}x${options.height}`);
+
+        return this;
+      },
+      removeAlpha() {
+        operations.push("removeAlpha");
+
+        return this;
+      },
+      raw() {
+        operations.push("raw");
+
+        return this;
+      },
+      toBuffer() {
+        return Promise.resolve({
+          data: Buffer.from([0, 127, 255, 255, 0, 127]),
+          info: {
+            width: 2,
+            height: 1,
+            channels: 3
+          }
+        });
+      }
+    });
+    const preprocessFrame = createSharpRgbTensorPreprocessor({
+      inputWidth: 2,
+      inputHeight: 1,
+      runtime
+    });
+
+    const tensor = await preprocessFrame(Buffer.from("jpeg-frame"));
+
+    expect(tensor.dims).toEqual([1, 3, 1, 2]);
+    expect(Array.from(tensor.data)).toEqual(
+      Array.from(Float32Array.of(0, 1, 127 / 255, 0, 1, 127 / 255))
+    );
+    expect(operations).toEqual(["rotate", "resize:2x1", "removeAlpha", "raw"]);
+  });
+
+  it("runs an ONNX Runtime person model and maps xyxy rows to detections", async () => {
+    const createdModels: string[] = [];
+    const createdTensors: unknown[] = [];
+    const runtime: OnnxPersonDetectionRuntime = {
+      Tensor: class {
+        readonly type: string;
+        readonly data: Float32Array;
+        readonly dims: readonly number[];
+
+        constructor(type: string, data: Float32Array, dims: readonly number[]) {
+          this.type = type;
+          this.data = data;
+          this.dims = dims;
+          createdTensors.push({ type, data, dims });
+        }
+      },
+      InferenceSession: {
+        create(modelPath) {
+          createdModels.push(modelPath);
+
+          return Promise.resolve({
+            inputNames: ["images"],
+            outputNames: ["detections"],
+            run(feeds) {
+              expect(Object.keys(feeds)).toEqual(["images"]);
+
+              return Promise.resolve({
+                detections: {
+                  data: Float32Array.of(10, 20, 50, 80, 0.9, 0, 1, 2, 3, 4, 0.95, 2),
+                  dims: [2, 6]
+                }
+              });
+            }
+          });
+        }
+      }
+    };
+
+    const model = await createOnnxPersonDetectionModel({
+      modelPath: "/opt/pico/models/pinto0309/person.onnx",
+      frameSize: {
+        width: 100,
+        height: 100
+      },
+      runtime,
+      preprocessFrame: () =>
+        Promise.resolve({
+          data: Float32Array.of(0, 1, 2),
+          dims: [1, 3, 1, 1]
+        })
+    });
+
+    await expect(model.detect(Buffer.from("frame"))).resolves.toEqual([
+      {
+        label: "person",
+        confidence: 0.9,
+        box: {
+          x: 10,
+          y: 20,
+          width: 40,
+          height: 60
+        }
+      }
+    ]);
+    expect(createdModels).toEqual(["/opt/pico/models/pinto0309/person.onnx"]);
+    expect(createdTensors).toHaveLength(1);
+  });
+
+  it("maps normalized center-size ONNX output rows to pixel boxes", async () => {
+    const runtime: OnnxPersonDetectionRuntime = {
+      Tensor: class {
+        constructor(
+          readonly type: string,
+          readonly data: Float32Array,
+          readonly dims: readonly number[]
+        ) {}
+      },
+      InferenceSession: {
+        create() {
+          return Promise.resolve({
+            inputNames: ["input"],
+            outputNames: ["output"],
+            run() {
+              return Promise.resolve({
+                output: {
+                  data: Float32Array.of(0.5, 0.5, 0.25, 0.5, 0.7, 0),
+                  dims: [1, 1, 6]
+                }
+              });
+            }
+          });
+        }
+      }
+    };
+
+    const model = await createOnnxPersonDetectionModel({
+      modelPath: "/opt/pico/models/pinto0309/person.onnx",
+      frameSize: {
+        width: 640,
+        height: 480
+      },
+      outputLayout: "cxcywh_score_class",
+      coordinateScale: "normalized",
+      runtime,
+      preprocessFrame: () =>
+        Promise.resolve({
+          data: Float32Array.of(0),
+          dims: [1, 3, 1, 1]
+        })
+    });
+
+    await expect(model.detect(Buffer.from("frame"))).resolves.toEqual([
+      {
+        label: "person",
+        confidence: 0.7,
+        box: {
+          x: 240,
+          y: 120,
+          width: 160,
+          height: 240
+        }
+      }
+    ]);
+  });
+
+  it("rejects malformed ONNX person output rows", async () => {
+    const runtime: OnnxPersonDetectionRuntime = {
+      Tensor: class {
+        constructor(
+          readonly type: string,
+          readonly data: Float32Array,
+          readonly dims: readonly number[]
+        ) {}
+      },
+      InferenceSession: {
+        create() {
+          return Promise.resolve({
+            inputNames: ["input"],
+            outputNames: ["output"],
+            run() {
+              return Promise.resolve({
+                output: {
+                  data: Float32Array.of(1, 2, 3, 4, 0.9),
+                  dims: [1, 5]
+                }
+              });
+            }
+          });
+        }
+      }
+    };
+
+    const model = await createOnnxPersonDetectionModel({
+      modelPath: "/opt/pico/models/pinto0309/person.onnx",
+      frameSize: {
+        width: 640,
+        height: 480
+      },
+      runtime,
+      preprocessFrame: () =>
+        Promise.resolve({
+          data: Float32Array.of(0),
+          dims: [1, 3, 1, 1]
+        })
+    });
+
+    await expect(model.detect(Buffer.from("frame"))).rejects.toThrow(
+      "pico person detection ONNX output row must contain at least 6 values"
+    );
+  });
+
   it("normalizes person boxes and filters by confidence threshold", () => {
     expect(
       normalizePersonDetectionFrame({

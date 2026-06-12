@@ -87,6 +87,10 @@ vision:
     modelFamily: pinto0309
     provider: onnxruntime
     modelPath: /opt/pico/models/pinto0309/yolox_nano_person.onnx
+    inputWidth: 320
+    inputHeight: 320
+    outputLayout: cxcywh_score_class
+    coordinateScale: normalized
     frameIntervalMs: 500
     confidenceThreshold: 0.55
 voice:
@@ -156,6 +160,10 @@ voice:
           modelFamily: "pinto0309",
           provider: "onnxruntime",
           modelPath: "/opt/pico/models/pinto0309/yolox_nano_person.onnx",
+          inputWidth: 320,
+          inputHeight: 320,
+          outputLayout: "cxcywh_score_class",
+          coordinateScale: "normalized",
           frameIntervalMs: 500,
           confidenceThreshold: 0.55
         }
@@ -396,6 +404,8 @@ camera:
             modelFamily: "generic-yolo",
             provider: "onnxruntime",
             modelPath: "/opt/pico/models/model.onnx",
+            inputWidth: 320,
+            inputHeight: 320,
             frameIntervalMs: 500,
             confidenceThreshold: 0.55
           }
@@ -414,6 +424,8 @@ camera:
             modelFamily: "pinto0309",
             provider: "cloud",
             modelPath: "/opt/pico/models/model.onnx",
+            inputWidth: 320,
+            inputHeight: 320,
             frameIntervalMs: 500,
             confidenceThreshold: 0.55
           }
@@ -434,12 +446,58 @@ camera:
             modelFamily: "pinto0309",
             provider: "onnxruntime",
             modelPath: "/opt/pico/models/model.onnx",
+            inputWidth: 320,
+            inputHeight: 320,
             frameIntervalMs: 500,
             confidenceThreshold: 1.1
           }
         }
       })
     ).toThrow("pico config vision.personDetection.confidenceThreshold must be >= 0 and <= 1");
+  });
+
+  it("rejects unsupported person detection ONNX output layouts", () => {
+    expect(() =>
+      definePicoConfig({
+        vision: {
+          personDetection: {
+            enabled: true,
+            sourceCameraId: "tapo-main",
+            modelFamily: "pinto0309",
+            provider: "onnxruntime",
+            modelPath: "/opt/pico/models/model.onnx",
+            inputWidth: 320,
+            inputHeight: 320,
+            outputLayout: "named_faces",
+            frameIntervalMs: 500,
+            confidenceThreshold: 0.55
+          }
+        }
+      })
+    ).toThrow(
+      "pico config vision.personDetection.outputLayout must be xyxy_score_class or cxcywh_score_class"
+    );
+  });
+
+  it("rejects unsupported person detection coordinate scales", () => {
+    expect(() =>
+      definePicoConfig({
+        vision: {
+          personDetection: {
+            enabled: true,
+            sourceCameraId: "tapo-main",
+            modelFamily: "pinto0309",
+            provider: "onnxruntime",
+            modelPath: "/opt/pico/models/model.onnx",
+            inputWidth: 320,
+            inputHeight: 320,
+            coordinateScale: "identity_pixels",
+            frameIntervalMs: 500,
+            confidenceThreshold: 0.55
+          }
+        }
+      })
+    ).toThrow("pico config vision.personDetection.coordinateScale must be pixel or normalized");
   });
 
   it("requires person detection source camera when enabled", () => {
@@ -451,6 +509,8 @@ camera:
             modelFamily: "pinto0309",
             provider: "onnxruntime",
             modelPath: "/opt/pico/models/model.onnx",
+            inputWidth: 320,
+            inputHeight: 320,
             frameIntervalMs: 500,
             confidenceThreshold: 0.55
           }

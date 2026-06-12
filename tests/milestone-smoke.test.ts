@@ -50,6 +50,12 @@ function configuredSectionDependencies(): PicoMilestoneSmokeDependencies {
         provider: "tapo-onvif-ptz",
         reason: "Live PTZ nudge is not enabled."
       }),
+    runPersonDetectionSmoke: () =>
+      Promise.resolve({
+        status: "skipped",
+        provider: "tapo-rtsp+onnxruntime",
+        reason: "Person detection config is not configured."
+      }),
     runOllamaVlmConnectivitySmoke: () =>
       Promise.resolve({
         status: "passed",
@@ -77,6 +83,7 @@ function expectMilestoneSectionNames(report: PicoMilestoneSmokeReport): void {
     "voice_tts",
     "tapo_snapshot",
     "tapo_ptz",
+    "person_detection",
     "ollama_vlm",
     "camera_vlm_scene",
     "memory_candidate",
@@ -143,6 +150,11 @@ describe("pico milestone smoke suite", () => {
           Promise.resolve({
             status: "skipped",
             provider: "tapo-onvif-ptz"
+          }),
+        runPersonDetectionSmoke: () =>
+          Promise.resolve({
+            status: "skipped",
+            provider: "tapo-rtsp+onnxruntime"
           }),
         runOllamaVlmConnectivitySmoke: () =>
           Promise.resolve({
@@ -240,6 +252,15 @@ vision:
             provider: "tapo-onvif-ptz"
           });
         },
+        runPersonDetectionSmoke: (config) => {
+          observedConfigs.push(config);
+
+          return Promise.resolve({
+            status: "skipped",
+            provider: "tapo-rtsp+onnxruntime",
+            reason: "Person detection config is not configured."
+          });
+        },
         runOllamaVlmConnectivitySmoke: (config) => {
           observedConfigs.push(config);
 
@@ -261,7 +282,7 @@ vision:
     );
 
     expect(report.status).toBe("skipped");
-    expect(observedConfigs).toHaveLength(5);
+    expect(observedConfigs).toHaveLength(6);
     expect(new Set(observedConfigs).size).toBe(1);
     expect(observedConfigs[0]?.camera.tapo?.host).toBe("192.168.10.25");
     expect(observedConfigs[0]?.vision.ollama?.localBaseUrl).toBe("http://127.0.0.1:11434");
