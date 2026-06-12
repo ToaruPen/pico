@@ -14,6 +14,11 @@ export const visionModuleMetadata = {
     {
       id: "vision.describe_scene",
       description: "Return bounded scene summaries as structured text or JSON."
+    },
+    {
+      id: "vision.detect_person_stream",
+      description:
+        "Run local pinto0309-based streaming person detection without identity recognition."
     }
   ]
 } as const satisfies FuturePicoModuleMetadata;

@@ -11,6 +11,7 @@ export type PicoConfig = DeepReadonly<{
   };
   vision: {
     ollama?: PicoOllamaConfig;
+    personDetection: PicoPersonDetectionConfig;
   };
   voice: {
     stt: {
@@ -71,6 +72,18 @@ export type PicoOllamaConfig = {
   readonly timeoutMs?: number;
 };
 
+export type PicoPersonDetectionConfig = {
+  readonly enabled: boolean;
+  readonly sourceCameraId?: string;
+  readonly modelFamily?: "pinto0309";
+  readonly provider?: PicoPersonDetectionProvider;
+  readonly modelPath?: string;
+  readonly frameIntervalMs?: number;
+  readonly confidenceThreshold?: number;
+};
+
+export type PicoPersonDetectionProvider = "onnxruntime" | "tflite" | "openvino";
+
 export type PicoMlxWhisperConfig = {
   readonly id?: string;
   readonly localBaseUrl: string;
@@ -101,6 +114,15 @@ type DeepReadonly<T> = {
         : T[K];
 };
 
+type OptionalPersonDetectionFields = {
+  readonly sourceCameraId: string | undefined;
+  readonly modelFamily: "pinto0309" | undefined;
+  readonly provider: PicoPersonDetectionProvider | undefined;
+  readonly modelPath: string | undefined;
+  readonly frameIntervalMs: number | undefined;
+  readonly confidenceThreshold: number | undefined;
+};
+
 export type LoadPicoConfigOptions = {
   readonly path?: string;
   readonly cwd?: string;
@@ -128,7 +150,11 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
       enabled: false
     }
   },
-  vision: {},
+  vision: {
+    personDetection: {
+      enabled: false
+    }
+  },
   voice: {
     stt: {},
     tts: {}
@@ -247,9 +273,14 @@ function defineCameraSection(root: Record<string, unknown>): PicoConfig["camera"
 function defineVisionSection(root: Record<string, unknown>): PicoConfig["vision"] {
   const vision = readOptionalRecord(root.vision, "pico config vision");
   const ollama = readOptionalRecord(vision?.ollama, "pico config vision.ollama");
+  const personDetection = readOptionalRecord(
+    vision?.personDetection,
+    "pico config vision.personDetection"
+  );
 
   return {
-    ...(ollama === undefined ? {} : { ollama: defineOllamaConfig(ollama) })
+    ...(ollama === undefined ? {} : { ollama: defineOllamaConfig(ollama) }),
+    personDetection: definePersonDetectionConfig(personDetection)
   };
 }
 
@@ -391,6 +422,81 @@ function defineOllamaConfig(input: Record<string, unknown>): PicoOllamaConfig {
       "pico config vision.ollama.timeoutMs",
       maxNodeTimeoutMs
     )
+  };
+}
+
+function definePersonDetectionConfig(
+  input: Record<string, unknown> | undefined
+): PicoPersonDetectionConfig {
+  if (input === undefined) {
+    return {
+      enabled: false
+    };
+  }
+
+  const enabled =
+    readOptionalBoolean(input.enabled, "pico config vision.personDetection.enabled") ?? false;
+  const sourceCameraId = readOptionalString(
+    input.sourceCameraId,
+    "pico config vision.personDetection.sourceCameraId"
+  );
+  const modelFamily = readOptionalPersonDetectionModelFamily(input.modelFamily);
+  const provider = readOptionalPersonDetectionProvider(input.provider);
+  const modelPath = readOptionalString(
+    input.modelPath,
+    "pico config vision.personDetection.modelPath"
+  );
+  const frameIntervalMs = readOptionalBoundedPositiveInteger(
+    input.frameIntervalMs,
+    "pico config vision.personDetection.frameIntervalMs",
+    maxNodeTimeoutMs
+  );
+  const confidenceThreshold = readOptionalConfidenceThreshold(input.confidenceThreshold);
+
+  if (!enabled) {
+    return defineDisabledPersonDetectionConfig({
+      confidenceThreshold,
+      frameIntervalMs,
+      modelFamily,
+      modelPath,
+      provider,
+      sourceCameraId
+    });
+  }
+
+  return {
+    enabled,
+    sourceCameraId: requireString(
+      sourceCameraId,
+      "pico config vision.personDetection.sourceCameraId"
+    ),
+    modelFamily: requirePersonDetectionModelFamily(modelFamily),
+    provider: requirePersonDetectionProvider(provider),
+    modelPath: requireString(modelPath, "pico config vision.personDetection.modelPath"),
+    frameIntervalMs: requireNumber(
+      frameIntervalMs,
+      "pico config vision.personDetection.frameIntervalMs"
+    ),
+    confidenceThreshold: requireNumber(
+      confidenceThreshold,
+      "pico config vision.personDetection.confidenceThreshold"
+    )
+  };
+}
+
+function defineDisabledPersonDetectionConfig(
+  input: OptionalPersonDetectionFields
+): PicoPersonDetectionConfig {
+  return {
+    enabled: false,
+    ...(input.sourceCameraId === undefined ? {} : { sourceCameraId: input.sourceCameraId }),
+    ...(input.modelFamily === undefined ? {} : { modelFamily: input.modelFamily }),
+    ...(input.provider === undefined ? {} : { provider: input.provider }),
+    ...(input.modelPath === undefined ? {} : { modelPath: input.modelPath }),
+    ...(input.frameIntervalMs === undefined ? {} : { frameIntervalMs: input.frameIntervalMs }),
+    ...(input.confidenceThreshold === undefined
+      ? {}
+      : { confidenceThreshold: input.confidenceThreshold })
   };
 }
 
@@ -543,6 +649,28 @@ function requireNumber(value: number | undefined, label: string): number {
   return value;
 }
 
+function requirePersonDetectionModelFamily(value: "pinto0309" | undefined): "pinto0309" {
+  if (value === undefined) {
+    throw new Error(
+      "pico config vision.personDetection.modelFamily is required when vision.personDetection is set"
+    );
+  }
+
+  return value;
+}
+
+function requirePersonDetectionProvider(
+  value: PicoPersonDetectionProvider | undefined
+): PicoPersonDetectionProvider {
+  if (value === undefined) {
+    throw new Error(
+      "pico config vision.personDetection.provider is required when vision.personDetection is set"
+    );
+  }
+
+  return value;
+}
+
 function requireLocalTunnelBaseUrl(value: unknown): string {
   const localBaseUrl = requireString(value, "pico config vision.ollama.localBaseUrl");
 
@@ -630,6 +758,55 @@ function readOptionalUnitPositiveNumber(value: unknown, label: string): number |
 
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
     throw new Error(`${label} must be > 0 and <= 1`);
+  }
+
+  return parsed;
+}
+
+function readOptionalPersonDetectionModelFamily(value: unknown): "pinto0309" | undefined {
+  const parsed = readOptionalString(value, "pico config vision.personDetection.modelFamily");
+
+  if (parsed === undefined) {
+    return undefined;
+  }
+
+  if (parsed !== "pinto0309") {
+    throw new Error("pico config vision.personDetection.modelFamily must be pinto0309");
+  }
+
+  return parsed;
+}
+
+function readOptionalPersonDetectionProvider(
+  value: unknown
+): PicoPersonDetectionProvider | undefined {
+  const parsed = readOptionalString(value, "pico config vision.personDetection.provider");
+
+  if (parsed === undefined) {
+    return undefined;
+  }
+
+  if (parsed !== "onnxruntime" && parsed !== "tflite" && parsed !== "openvino") {
+    throw new Error(
+      "pico config vision.personDetection.provider must be onnxruntime, tflite, or openvino"
+    );
+  }
+
+  return parsed;
+}
+
+function readOptionalConfidenceThreshold(value: unknown): number | undefined {
+  const parsed = readOptionalNumber(
+    value,
+    "pico config vision.personDetection.confidenceThreshold"
+  );
+
+  if (parsed === undefined) {
+    return undefined;
+  }
+
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    throw new Error("pico config vision.personDetection.confidenceThreshold must be >= 0 and <= 1");
   }
 
   return parsed;
