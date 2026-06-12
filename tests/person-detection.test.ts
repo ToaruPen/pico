@@ -538,4 +538,56 @@ describe("streaming person detection", () => {
       vi.useRealTimers();
     }
   });
+
+  it("timestamps a published detection at frame capture time", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-12T09:00:00.000Z"));
+    const published: Array<{ readonly capturedAt: string }> = [];
+    const stream = createPersonDetectionStream({
+      sourceId: "tapo-main",
+      frameIntervalMs: 500,
+      confidenceThreshold: 0.5,
+      frameSize: {
+        width: 200,
+        height: 200
+      },
+      captureFrame: () => Promise.resolve(Buffer.from("frame")),
+      model: {
+        detect() {
+          vi.setSystemTime(new Date("2026-06-12T09:00:05.000Z"));
+
+          return Promise.resolve([
+            {
+              label: "person",
+              confidence: 0.9,
+              box: {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100
+              }
+            }
+          ]);
+        }
+      },
+      publish: (frame) => {
+        published.push(frame);
+      },
+      now: () => new Date(Date.now()).toISOString()
+    });
+
+    try {
+      stream.start();
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(published).toMatchObject([
+        {
+          capturedAt: "2026-06-12T09:00:00.500Z"
+        }
+      ]);
+    } finally {
+      stream.stop();
+      vi.useRealTimers();
+    }
+  });
 });
