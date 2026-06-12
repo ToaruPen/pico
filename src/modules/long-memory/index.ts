@@ -6,6 +6,7 @@ import type { StructuredAuditLog } from "../audit/index.js";
 export type LongMemoryCategory = "care_continuity" | "facility_knowledge" | "operational_note";
 
 export type LongMemoryStatus = "active";
+export type LongMemoryLifecycleStatus = "active" | "archived" | "deleted";
 
 export type LongMemoryReview = {
   readonly reviewedBy: string;
@@ -21,6 +22,21 @@ export type ReviewedLongMemoryInput = {
   readonly reviewedBy: string;
   readonly reviewedAt: string;
   readonly reviewNote?: string;
+  readonly mem0MemoryId?: string;
+  readonly sourceSessionId?: string;
+  readonly importance?: number;
+  readonly confidence?: number;
+};
+
+export type LongMemoryLifecycleMetadata = {
+  readonly mem0MemoryId: string | undefined;
+  readonly sourceSessionId: string | undefined;
+  readonly importance: number;
+  readonly confidence: number;
+  readonly lastAccessedAt: string | undefined;
+  readonly accessCount: number;
+  readonly decayScore: number;
+  readonly status: LongMemoryLifecycleStatus;
 };
 
 export type LongMemoryRecord = {
@@ -32,14 +48,39 @@ export type LongMemoryRecord = {
   readonly status: LongMemoryStatus;
   readonly correctionOf: number | undefined;
   readonly review: LongMemoryReview;
+  readonly lifecycle: LongMemoryLifecycleMetadata;
 };
 
-export type LongMemorySearchResult = Pick<LongMemoryRecord, "id" | "title" | "category">;
+export type LongMemorySearchResult = Pick<
+  LongMemoryRecord,
+  "id" | "title" | "category" | "lifecycle"
+>;
+
+export type LongMemoryDecayInput = {
+  readonly now: string;
+  readonly archiveThreshold: number;
+  readonly deleteThreshold: number;
+  readonly decayWindowDays: number;
+};
+
+export type LongMemoryDecayResult = {
+  readonly id: number;
+  readonly previousStatus: LongMemoryLifecycleStatus;
+  readonly status: "archived" | "deleted";
+  readonly decayScore: number;
+  readonly mem0MemoryId: string | undefined;
+};
+
+export type LongMemoryStoreOptions = {
+  readonly now?: () => string;
+};
 
 export type LongMemoryStore = {
   readonly writeReviewed: (input: ReviewedLongMemoryInput) => LongMemoryRecord;
   readonly read: (id: number) => LongMemoryRecord | undefined;
+  readonly readLifecycle: (id: number) => LongMemoryLifecycleMetadata | undefined;
   readonly search: (query: string) => LongMemorySearchResult[];
+  readonly runDecay: (input: LongMemoryDecayInput) => readonly LongMemoryDecayResult[];
   readonly correct: (id: number, input: ReviewedLongMemoryInput) => LongMemoryRecord;
   readonly delete: (id: number, review: LongMemoryReview) => void;
   readonly close: () => void;
@@ -136,6 +177,14 @@ type LongMemoryRow = {
   readonly reviewed_by: string;
   readonly reviewed_at: string;
   readonly review_note: string;
+  readonly mem0_memory_id: string;
+  readonly source_session_id: string;
+  readonly importance: number;
+  readonly confidence: number;
+  readonly last_accessed_at: string;
+  readonly access_count: number;
+  readonly decay_score: number;
+  readonly status: string;
 };
 
 type LongMemoryCandidateRow = {
@@ -173,6 +222,10 @@ type NormalizedLongMemoryInput = {
   readonly category: LongMemoryCategory;
   readonly tags: readonly string[];
   readonly review: Required<LongMemoryReview>;
+  readonly mem0MemoryId: string | undefined;
+  readonly sourceSessionId: string | undefined;
+  readonly importance: number;
+  readonly confidence: number;
 };
 
 type NormalizedLongMemoryCandidateDraft = {
@@ -195,7 +248,11 @@ const longMemoryInputKeys = new Set([
   "tags",
   "reviewedBy",
   "reviewedAt",
-  "reviewNote"
+  "reviewNote",
+  "mem0MemoryId",
+  "sourceSessionId",
+  "importance",
+  "confidence"
 ]);
 const longMemoryCandidateDraftKeys = new Set(["title", "body", "category", "tags"]);
 const individualChildTextMarkers = [
@@ -243,9 +300,13 @@ const individualChildFieldMarkers = [
 ];
 const individualChildFieldNames = new Set(["childid", "profile", "tracking", "scoring"]);
 
-export function openLongMemoryStore(path: string): LongMemoryStore {
+export function openLongMemoryStore(
+  path: string,
+  options: LongMemoryStoreOptions = {}
+): LongMemoryStore {
   const database = new DatabaseSync(path);
   initializeLongMemorySchema(database);
+  const now = options.now ?? (() => new Date().toISOString());
 
   return {
     writeReviewed(input) {
@@ -256,8 +317,14 @@ export function openLongMemoryStore(path: string): LongMemoryStore {
     read(id) {
       return readActiveMemory(database, id);
     },
+    readLifecycle(id) {
+      return readMemoryLifecycle(database, id);
+    },
     search(query) {
-      return searchActiveMemories(database, requireSearchQuery(query));
+      return searchActiveMemories(database, requireSearchQuery(query), now());
+    },
+    runDecay(input) {
+      return runInTransaction(database, () => runLongMemoryDecay(database, input));
     },
     correct(id, input) {
       return runInTransaction(database, () => {
@@ -415,7 +482,11 @@ export function openSessionMemoryCandidateStore(
             body: candidate.body,
             category: candidate.category,
             tags: candidate.tags,
-            review: normalizedReview
+            review: normalizedReview,
+            mem0MemoryId: undefined,
+            sourceSessionId: candidate.sessionId,
+            importance: 0.5,
+            confidence: 0.5
           },
           0,
           "create"
@@ -465,11 +536,20 @@ function initializeLongMemorySchema(database: DatabaseSync): void {
         category IN ('care_continuity', 'facility_knowledge', 'operational_note')
       ),
       tags_json TEXT NOT NULL,
-      status TEXT NOT NULL CHECK (status IN ('active', 'superseded', 'deleted')),
+      status TEXT NOT NULL CHECK (status IN ('active', 'archived', 'superseded', 'deleted')),
       correction_of INTEGER NOT NULL DEFAULT 0,
       reviewed_by TEXT NOT NULL,
       reviewed_at TEXT NOT NULL,
       review_note TEXT NOT NULL DEFAULT '',
+      mem0_memory_id TEXT NOT NULL DEFAULT '',
+      source_session_id TEXT NOT NULL DEFAULT '',
+      importance REAL NOT NULL DEFAULT 0.5 CHECK (importance >= 0 AND importance <= 1),
+      confidence REAL NOT NULL DEFAULT 0.5 CHECK (confidence >= 0 AND confidence <= 1),
+      last_accessed_at TEXT NOT NULL DEFAULT '',
+      access_count INTEGER NOT NULL DEFAULT 0 CHECK (access_count >= 0),
+      decay_score REAL NOT NULL DEFAULT 0 CHECK (decay_score >= 0 AND decay_score <= 1),
+      archived_at TEXT NOT NULL DEFAULT '',
+      deleted_at TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -477,7 +557,7 @@ function initializeLongMemorySchema(database: DatabaseSync): void {
     CREATE TABLE IF NOT EXISTS long_memory_entry_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       memory_id INTEGER NOT NULL REFERENCES long_memory_entries(id),
-      event_kind TEXT NOT NULL CHECK (event_kind IN ('create', 'correct', 'delete')),
+      event_kind TEXT NOT NULL CHECK (event_kind IN ('create', 'correct', 'archive', 'delete')),
       reviewed_by TEXT NOT NULL,
       reviewed_at TEXT NOT NULL,
       review_note TEXT NOT NULL DEFAULT '',
@@ -539,6 +619,212 @@ function initializeLongMemorySchema(database: DatabaseSync): void {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
   `);
+  ensureLongMemoryLifecycleColumns(database);
+}
+
+function ensureLongMemoryLifecycleColumns(database: DatabaseSync): void {
+  const columns = new Set(
+    database
+      .prepare("PRAGMA table_info(long_memory_entries)")
+      .all()
+      .map((row) => String((row as { name: unknown }).name))
+  );
+  const migrations: Record<string, string> = {
+    mem0_memory_id:
+      "ALTER TABLE long_memory_entries ADD COLUMN mem0_memory_id TEXT NOT NULL DEFAULT ''",
+    source_session_id:
+      "ALTER TABLE long_memory_entries ADD COLUMN source_session_id TEXT NOT NULL DEFAULT ''",
+    importance: "ALTER TABLE long_memory_entries ADD COLUMN importance REAL NOT NULL DEFAULT 0.5",
+    confidence: "ALTER TABLE long_memory_entries ADD COLUMN confidence REAL NOT NULL DEFAULT 0.5",
+    last_accessed_at:
+      "ALTER TABLE long_memory_entries ADD COLUMN last_accessed_at TEXT NOT NULL DEFAULT ''",
+    access_count:
+      "ALTER TABLE long_memory_entries ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0",
+    decay_score: "ALTER TABLE long_memory_entries ADD COLUMN decay_score REAL NOT NULL DEFAULT 0",
+    archived_at: "ALTER TABLE long_memory_entries ADD COLUMN archived_at TEXT NOT NULL DEFAULT ''",
+    deleted_at: "ALTER TABLE long_memory_entries ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''"
+  };
+
+  for (const [column, statement] of Object.entries(migrations)) {
+    if (!columns.has(column)) {
+      database.exec(statement);
+    }
+  }
+
+  ensureLongMemoryLifecycleConstraints(database);
+}
+
+function ensureLongMemoryLifecycleConstraints(database: DatabaseSync): void {
+  const entriesSql = requireTableSql(database, "long_memory_entries");
+  const eventsSql = requireTableSql(database, "long_memory_entry_events");
+
+  if (entriesSql.includes("'archived'") && eventsSql.includes("'archive'")) {
+    return;
+  }
+
+  rebuildLongMemoryReviewedTables(database);
+  refreshLongMemorySearchObjects(database);
+}
+
+function requireTableSql(database: DatabaseSync, tableName: string): string {
+  const row = database
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(tableName);
+
+  if (row === undefined || typeof (row as { sql: unknown }).sql !== "string") {
+    throw new Error("pico long memory schema is malformed");
+  }
+
+  return (row as { sql: string }).sql;
+}
+
+function rebuildLongMemoryReviewedTables(database: DatabaseSync): void {
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+
+    DROP TRIGGER IF EXISTS long_memory_entries_insert_fts;
+    DROP TRIGGER IF EXISTS long_memory_entries_remove_fts;
+
+    ALTER TABLE long_memory_entry_events RENAME TO long_memory_entry_events_legacy;
+    ALTER TABLE long_memory_entries RENAME TO long_memory_entries_legacy;
+
+    CREATE TABLE long_memory_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      category TEXT NOT NULL CHECK (
+        category IN ('care_continuity', 'facility_knowledge', 'operational_note')
+      ),
+      tags_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('active', 'archived', 'superseded', 'deleted')),
+      correction_of INTEGER NOT NULL DEFAULT 0,
+      reviewed_by TEXT NOT NULL,
+      reviewed_at TEXT NOT NULL,
+      review_note TEXT NOT NULL DEFAULT '',
+      mem0_memory_id TEXT NOT NULL DEFAULT '',
+      source_session_id TEXT NOT NULL DEFAULT '',
+      importance REAL NOT NULL DEFAULT 0.5 CHECK (importance >= 0 AND importance <= 1),
+      confidence REAL NOT NULL DEFAULT 0.5 CHECK (confidence >= 0 AND confidence <= 1),
+      last_accessed_at TEXT NOT NULL DEFAULT '',
+      access_count INTEGER NOT NULL DEFAULT 0 CHECK (access_count >= 0),
+      decay_score REAL NOT NULL DEFAULT 0 CHECK (decay_score >= 0 AND decay_score <= 1),
+      archived_at TEXT NOT NULL DEFAULT '',
+      deleted_at TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE long_memory_entry_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      memory_id INTEGER NOT NULL REFERENCES long_memory_entries(id),
+      event_kind TEXT NOT NULL CHECK (event_kind IN ('create', 'correct', 'archive', 'delete')),
+      reviewed_by TEXT NOT NULL,
+      reviewed_at TEXT NOT NULL,
+      review_note TEXT NOT NULL DEFAULT '',
+      snapshot_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    INSERT INTO long_memory_entries (
+      id,
+      title,
+      body,
+      category,
+      tags_json,
+      status,
+      correction_of,
+      reviewed_by,
+      reviewed_at,
+      review_note,
+      mem0_memory_id,
+      source_session_id,
+      importance,
+      confidence,
+      last_accessed_at,
+      access_count,
+      decay_score,
+      archived_at,
+      deleted_at,
+      created_at,
+      updated_at
+    )
+    SELECT
+      id,
+      title,
+      body,
+      category,
+      tags_json,
+      status,
+      correction_of,
+      reviewed_by,
+      reviewed_at,
+      review_note,
+      mem0_memory_id,
+      source_session_id,
+      importance,
+      confidence,
+      last_accessed_at,
+      access_count,
+      decay_score,
+      archived_at,
+      deleted_at,
+      created_at,
+      updated_at
+    FROM long_memory_entries_legacy;
+
+    INSERT INTO long_memory_entry_events (
+      id,
+      memory_id,
+      event_kind,
+      reviewed_by,
+      reviewed_at,
+      review_note,
+      snapshot_json,
+      created_at
+    )
+    SELECT
+      id,
+      memory_id,
+      event_kind,
+      reviewed_by,
+      reviewed_at,
+      review_note,
+      snapshot_json,
+      created_at
+    FROM long_memory_entry_events_legacy;
+
+    DROP TABLE long_memory_entry_events_legacy;
+    DROP TABLE long_memory_entries_legacy;
+
+    PRAGMA foreign_key_check;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
+function refreshLongMemorySearchObjects(database: DatabaseSync): void {
+  database.exec(`
+    DELETE FROM long_memory_entries_fts;
+
+    INSERT INTO long_memory_entries_fts(rowid, title, body)
+    SELECT id, title, body
+    FROM long_memory_entries
+    WHERE status = 'active';
+
+    CREATE TRIGGER IF NOT EXISTS long_memory_entries_insert_fts
+    AFTER INSERT ON long_memory_entries
+    WHEN new.status = 'active'
+    BEGIN
+      INSERT INTO long_memory_entries_fts(rowid, title, body)
+      VALUES (new.id, new.title, new.body);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS long_memory_entries_remove_fts
+    AFTER UPDATE OF status ON long_memory_entries
+    WHEN old.status = 'active' AND new.status <> 'active'
+    BEGIN
+      DELETE FROM long_memory_entries_fts WHERE rowid = old.id;
+    END;
+  `);
 }
 
 function normalizeLongMemoryInput(input: ReviewedLongMemoryInput): NormalizedLongMemoryInput {
@@ -554,7 +840,11 @@ function normalizeLongMemoryInput(input: ReviewedLongMemoryInput): NormalizedLon
     body,
     category: requireLongMemoryCategory(input.category),
     tags: normalizeTags(input.tags),
-    review: normalizeReview(input.reviewedBy, input.reviewedAt, input.reviewNote)
+    review: normalizeReview(input.reviewedBy, input.reviewedAt, input.reviewNote),
+    mem0MemoryId: normalizeOptionalMetadataText(input.mem0MemoryId),
+    sourceSessionId: normalizeOptionalMetadataText(input.sourceSessionId),
+    importance: normalizeLifecycleScore(input.importance, "pico long memory importance"),
+    confidence: normalizeLifecycleScore(input.confidence, "pico long memory confidence")
   };
 }
 
@@ -592,9 +882,13 @@ function insertReviewedMemory(
         correction_of,
         reviewed_by,
         reviewed_at,
-        review_note
+        review_note,
+        mem0_memory_id,
+        source_session_id,
+        importance,
+        confidence
       )
-      VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     .run(
       input.title,
@@ -604,7 +898,11 @@ function insertReviewedMemory(
       correctionOf,
       input.review.reviewedBy,
       input.review.reviewedAt,
-      input.review.note
+      input.review.note,
+      input.mem0MemoryId ?? "",
+      input.sourceSessionId ?? "",
+      input.importance,
+      input.confidence
     );
   const id = Number(result.lastInsertRowid);
   const record = requireActiveMemory(database, id);
@@ -626,7 +924,15 @@ function readActiveMemory(database: DatabaseSync, id: number): LongMemoryRecord 
         correction_of,
         reviewed_by,
         reviewed_at,
-        review_note
+        review_note,
+        mem0_memory_id,
+        source_session_id,
+        importance,
+        confidence,
+        last_accessed_at,
+        access_count,
+        decay_score,
+        status
       FROM long_memory_entries
       WHERE id = ? AND status = 'active'
     `)
@@ -639,12 +945,30 @@ function readActiveMemory(database: DatabaseSync, id: number): LongMemoryRecord 
   return mapLongMemoryRow(row as LongMemoryRow);
 }
 
-function searchActiveMemories(database: DatabaseSync, query: string): LongMemorySearchResult[] {
-  if (query.length >= minimumTrigramQueryLength) {
-    return searchActiveMemoriesByMatch(database, query);
-  }
+function searchActiveMemories(
+  database: DatabaseSync,
+  query: string,
+  accessedAt: string
+): LongMemorySearchResult[] {
+  const results =
+    query.length >= minimumTrigramQueryLength
+      ? searchActiveMemoriesByMatch(database, query)
+      : searchActiveMemoriesByLike(database, query);
 
-  return searchActiveMemoriesByLike(database, query);
+  recordMemoryAccess(
+    database,
+    results.map((result) => result.id),
+    accessedAt
+  );
+
+  return results.map((result) => ({
+    ...result,
+    lifecycle: Object.freeze({
+      ...result.lifecycle,
+      lastAccessedAt: accessedAt,
+      accessCount: result.lifecycle.accessCount + 1
+    })
+  }));
 }
 
 function searchActiveMemoriesByMatch(
@@ -653,7 +977,18 @@ function searchActiveMemoriesByMatch(
 ): LongMemorySearchResult[] {
   return database
     .prepare(`
-      SELECT e.id, e.title, e.category
+      SELECT
+        e.id,
+        e.title,
+        e.category,
+        e.mem0_memory_id,
+        e.source_session_id,
+        e.importance,
+        e.confidence,
+        e.last_accessed_at,
+        e.access_count,
+        e.decay_score,
+        e.status
       FROM long_memory_entries_fts
       JOIN long_memory_entries AS e ON e.id = long_memory_entries_fts.rowid
       WHERE long_memory_entries_fts MATCH ? AND e.status = 'active'
@@ -671,7 +1006,18 @@ function searchActiveMemoriesByLike(
 
   return database
     .prepare(`
-      SELECT e.id, e.title, e.category
+      SELECT
+        e.id,
+        e.title,
+        e.category,
+        e.mem0_memory_id,
+        e.source_session_id,
+        e.importance,
+        e.confidence,
+        e.last_accessed_at,
+        e.access_count,
+        e.decay_score,
+        e.status
       FROM long_memory_entries_fts
       JOIN long_memory_entries AS e ON e.id = long_memory_entries_fts.rowid
       WHERE e.status = 'active'
@@ -683,6 +1029,206 @@ function searchActiveMemoriesByLike(
     `)
     .all(pattern, pattern)
     .map(mapSearchResult);
+}
+
+function recordMemoryAccess(
+  database: DatabaseSync,
+  ids: readonly number[],
+  accessedAt: string
+): void {
+  if (ids.length === 0) {
+    return;
+  }
+
+  const update = database.prepare(`
+    UPDATE long_memory_entries
+    SET
+      last_accessed_at = ?,
+      access_count = access_count + 1,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND status = 'active'
+  `);
+
+  for (const id of ids) {
+    update.run(accessedAt, id);
+  }
+}
+
+function readMemoryLifecycle(
+  database: DatabaseSync,
+  id: number
+): LongMemoryLifecycleMetadata | undefined {
+  const row = database
+    .prepare(`
+      SELECT
+        mem0_memory_id,
+        source_session_id,
+        importance,
+        confidence,
+        last_accessed_at,
+        access_count,
+        decay_score,
+        status
+      FROM long_memory_entries
+      WHERE id = ?
+    `)
+    .get(id);
+
+  if (row === undefined) {
+    return undefined;
+  }
+
+  if ((row as { status: unknown }).status === "superseded") {
+    return undefined;
+  }
+
+  const lifecycle = mapLifecycle(row as LongMemoryRow);
+
+  return lifecycle;
+}
+
+function runLongMemoryDecay(
+  database: DatabaseSync,
+  input: LongMemoryDecayInput
+): readonly LongMemoryDecayResult[] {
+  const now = requireReviewText(input.now);
+  const archiveThreshold = requireDecayThreshold(input.archiveThreshold, "archiveThreshold");
+  const deleteThreshold = requireDecayThreshold(input.deleteThreshold, "deleteThreshold");
+  const decayWindowDays = requirePositiveNumber(input.decayWindowDays, "decayWindowDays");
+
+  if (deleteThreshold > archiveThreshold) {
+    throw new Error("pico long memory decay delete threshold must be <= archive threshold");
+  }
+
+  return database
+    .prepare(`
+      SELECT
+        id,
+        title,
+        body,
+        category,
+        tags_json,
+        correction_of,
+        reviewed_by,
+        reviewed_at,
+        review_note,
+        mem0_memory_id,
+        source_session_id,
+        importance,
+        confidence,
+        last_accessed_at,
+        access_count,
+        decay_score,
+        status
+      FROM long_memory_entries
+      WHERE status = 'active'
+      ORDER BY id
+    `)
+    .all()
+    .flatMap((row) =>
+      decayMemoryRow(database, row as LongMemoryRow, {
+        now,
+        archiveThreshold,
+        deleteThreshold,
+        decayWindowDays
+      })
+    );
+}
+
+function decayMemoryRow(
+  database: DatabaseSync,
+  row: LongMemoryRow,
+  input: {
+    readonly now: string;
+    readonly archiveThreshold: number;
+    readonly deleteThreshold: number;
+    readonly decayWindowDays: number;
+  }
+): readonly LongMemoryDecayResult[] {
+  const lifecycle = mapLifecycle(row);
+  const decayScore = calculateDecayScore(row, input.now, input.decayWindowDays);
+  const nextStatus =
+    decayScore <= input.deleteThreshold
+      ? "deleted"
+      : decayScore <= input.archiveThreshold
+        ? "archived"
+        : undefined;
+
+  updateDecayScore(database, row.id, decayScore);
+
+  if (nextStatus === undefined) {
+    return [];
+  }
+
+  transitionMemoryLifecycle(database, row, nextStatus, input.now, decayScore);
+
+  return [
+    {
+      id: row.id,
+      previousStatus: lifecycle.status,
+      status: nextStatus,
+      decayScore,
+      mem0MemoryId: lifecycle.mem0MemoryId
+    }
+  ];
+}
+
+function calculateDecayScore(row: LongMemoryRow, now: string, decayWindowDays: number): number {
+  const referenceAt = row.last_accessed_at === "" ? row.reviewed_at : row.last_accessed_at;
+  const elapsedDays = Math.max(0, (Date.parse(now) - Date.parse(referenceAt)) / 86_400_000);
+  const recency = clampUnit(1 - elapsedDays / decayWindowDays);
+  const access = clampUnit(row.access_count / 5);
+  const score = row.importance * 0.25 + row.confidence * 0.4 + recency * 0.25 + access * 0.1;
+
+  return roundLifecycleScore(score);
+}
+
+function updateDecayScore(database: DatabaseSync, id: number, decayScore: number): void {
+  database
+    .prepare(`
+      UPDATE long_memory_entries
+      SET decay_score = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `)
+    .run(decayScore, id);
+}
+
+function transitionMemoryLifecycle(
+  database: DatabaseSync,
+  row: LongMemoryRow,
+  status: "archived" | "deleted",
+  occurredAt: string,
+  decayScore: number
+): void {
+  database
+    .prepare(`
+      UPDATE long_memory_entries
+      SET
+        status = ?,
+        decay_score = ?,
+        archived_at = CASE WHEN ? = 'archived' THEN ? ELSE archived_at END,
+        deleted_at = CASE WHEN ? = 'deleted' THEN ? ELSE deleted_at END,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND status = 'active'
+    `)
+    .run(status, decayScore, status, occurredAt, status, occurredAt, row.id);
+  recordMemoryEvent(
+    database,
+    row.id,
+    status === "archived" ? "archive" : "delete",
+    {
+      reviewedBy: "pico.decay",
+      reviewedAt: occurredAt,
+      note: ""
+    },
+    JSON.stringify({
+      id: row.id,
+      previousStatus: "active",
+      status,
+      decayScore,
+      mem0MemoryId: mapLifecycle(row).mem0MemoryId
+    })
+  );
 }
 
 function requireActiveMemory(database: DatabaseSync, id: number): LongMemoryRecord {
@@ -698,7 +1244,7 @@ function requireActiveMemory(database: DatabaseSync, id: number): LongMemoryReco
 function markMemoryStatus(
   database: DatabaseSync,
   id: number,
-  status: "superseded" | "deleted"
+  status: "superseded" | "archived" | "deleted"
 ): void {
   database
     .prepare(
@@ -710,7 +1256,7 @@ function markMemoryStatus(
 function recordMemoryEvent(
   database: DatabaseSync,
   memoryId: number,
-  eventKind: "create" | "correct" | "delete",
+  eventKind: "create" | "correct" | "archive" | "delete",
   review: Required<LongMemoryReview>,
   snapshotJson: string
 ): void {
@@ -1147,18 +1693,33 @@ function mapLongMemoryRow(row: LongMemoryRow): LongMemoryRecord {
     body: row.body,
     category: requireLongMemoryCategory(row.category),
     tags: Object.freeze(JSON.parse(row.tags_json) as string[]),
-    status: "active",
+    status: "active" as const,
     correctionOf: row.correction_of === 0 ? undefined : row.correction_of,
-    review: normalizeStoredReview(row.reviewed_by, row.reviewed_at, row.review_note)
+    review: normalizeStoredReview(row.reviewed_by, row.reviewed_at, row.review_note),
+    lifecycle: mapLifecycle(row)
   });
 }
 
 function mapSearchResult(row: Record<string, unknown>): LongMemorySearchResult {
-  return {
+  return Object.freeze({
     id: requireRowNumber(row.id),
     title: requireRowString(row.title),
-    category: requireLongMemoryCategory(row.category)
-  };
+    category: requireLongMemoryCategory(row.category),
+    lifecycle: mapLifecycle(row as LongMemoryRow)
+  });
+}
+
+function mapLifecycle(row: LongMemoryRow): LongMemoryLifecycleMetadata {
+  return Object.freeze({
+    mem0MemoryId: normalizeStoredOptionalText(row.mem0_memory_id),
+    sourceSessionId: normalizeStoredOptionalText(row.source_session_id),
+    importance: requireLifecycleUnit(row.importance, "pico long memory row is malformed"),
+    confidence: requireLifecycleUnit(row.confidence, "pico long memory row is malformed"),
+    lastAccessedAt: normalizeStoredOptionalText(row.last_accessed_at),
+    accessCount: requireNonNegativeInteger(row.access_count),
+    decayScore: requireLifecycleUnit(row.decay_score, "pico long memory row is malformed"),
+    status: requireLongMemoryLifecycleStatus(row.status)
+  });
 }
 
 function normalizeReview(
@@ -1174,6 +1735,28 @@ function normalizeReview(
     reviewedAt: requireReviewText(reviewedAt),
     note: normalizedNote
   };
+}
+
+function normalizeOptionalMetadataText(value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return requireReviewText(value);
+}
+
+function normalizeStoredOptionalText(value: unknown): string | undefined {
+  const text = requireStoredText(value);
+
+  return text === "" ? undefined : text;
+}
+
+function normalizeLifecycleScore(value: unknown, label: string): number {
+  if (value === undefined) {
+    return 0.5;
+  }
+
+  return requireLifecycleUnit(value, label);
 }
 
 function normalizeStoredReview(
@@ -1280,6 +1863,14 @@ function requireSessionMemoryCandidateJobStatus(value: unknown): SessionMemoryCa
   throw new Error("pico session memory candidate job row is malformed");
 }
 
+function requireLongMemoryLifecycleStatus(value: unknown): LongMemoryLifecycleStatus {
+  if (value === "active" || value === "archived" || value === "deleted") {
+    return value;
+  }
+
+  throw new Error("pico long memory row is malformed");
+}
+
 function requireMemoryText(value: unknown): string {
   return requireNonEmptyTrimmedString(value, "pico long memory text is required");
 }
@@ -1318,6 +1909,42 @@ function requireSearchQuery(value: unknown): string {
   }
 
   return query;
+}
+
+function requireDecayThreshold(value: unknown, label: string): number {
+  return requireLifecycleUnit(value, `pico long memory decay ${label} is invalid`);
+}
+
+function requirePositiveNumber(value: unknown, label: string): number {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+
+  throw new Error(`pico long memory decay ${label} is invalid`);
+}
+
+function requireLifecycleUnit(value: unknown, message: string): number {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1) {
+    return value;
+  }
+
+  throw new Error(message);
+}
+
+function requireNonNegativeInteger(value: unknown): number {
+  if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+    return value;
+  }
+
+  throw new Error("pico long memory row is malformed");
+}
+
+function clampUnit(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+function roundLifecycleScore(value: number): number {
+  return Math.round(value * 10_000) / 10_000;
 }
 
 function quoteFtsQuery(query: string): string {
