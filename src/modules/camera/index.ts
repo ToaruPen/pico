@@ -7,7 +7,12 @@ export const cameraModuleMetadata = {
   kind: "camera",
   status: "planned",
   summary: "Snapshot-oriented camera access through RTSP, with ONVIF only when PTZ is needed.",
-  capabilities: []
+  capabilities: [
+    {
+      id: "camera.person_follow",
+      description: "Keep a detected person near frame center with bounded relative PTZ nudges."
+    }
+  ]
 } as const satisfies FuturePicoModuleMetadata;
 
 export type RtspSnapshotSourceInput = {
@@ -73,6 +78,68 @@ export type RtspSnapshotResult =
 
 export type RtspSnapshotClient = {
   readonly captureSnapshot: () => Promise<RtspSnapshotResult>;
+};
+
+export type PersonFollowBoundingBox = {
+  readonly xMin: number;
+  readonly yMin: number;
+  readonly xMax: number;
+  readonly yMax: number;
+};
+
+export type PersonFollowDetection = {
+  readonly boundingBox: PersonFollowBoundingBox;
+  readonly confidence: number;
+};
+
+export type PersonFollowFrame = {
+  readonly sourceId: string;
+  readonly capturedAt: string;
+  readonly detections: readonly PersonFollowDetection[];
+};
+
+export type PersonFollowMoveInput = {
+  readonly boundingBox: PersonFollowBoundingBox;
+  readonly deadZone: number;
+  readonly maxStep: number;
+  readonly speed: number;
+};
+
+export type PersonFollowPtzMoveCommand = {
+  readonly pan: number;
+  readonly tilt: number;
+  readonly speed: number;
+};
+
+export type PersonFollowPtzDriver = {
+  readonly relativeMove: (command: PersonFollowPtzMoveCommand) => Promise<void>;
+  readonly stop: () => Promise<void>;
+};
+
+export type PersonFollowAuditEvent = {
+  readonly name: "camera.person_follow.move" | "camera.person_follow.stop";
+  readonly sourceId: string;
+  readonly occurredAt: string;
+  readonly summary: string;
+  readonly attributes: Readonly<Record<string, number | string>>;
+};
+
+export type PersonFollowControllerInput = {
+  readonly sourceCameraId: string;
+  readonly deadZone: number;
+  readonly maxStep: number;
+  readonly speed: number;
+  readonly cooldownMs: number;
+  readonly lostTargetTimeoutMs: number;
+  readonly driver: PersonFollowPtzDriver;
+  readonly audit?: (event: PersonFollowAuditEvent) => void;
+  readonly nowMs?: () => number;
+  readonly nowIso?: () => string;
+};
+
+export type PersonFollowController = {
+  readonly processFrame: (frame: PersonFollowFrame) => Promise<void>;
+  readonly stop: () => Promise<void>;
 };
 
 type RtspUrlParts = {
@@ -176,6 +243,145 @@ export function createFfmpegRtspSnapshotTransport(
         url,
         spawnProcess
       });
+    }
+  };
+}
+
+export function buildPersonFollowMove(
+  input: PersonFollowMoveInput
+): PersonFollowPtzMoveCommand | undefined {
+  const box = normalizePersonFollowBox(input.boundingBox);
+  const deadZone = requireDeadZone(input.deadZone);
+  const maxStep = requireUnitPositiveNumber(input.maxStep, "pico person follow max step");
+  const speed = requireUnitPositiveNumber(input.speed, "pico person follow speed");
+  const horizontalError = (box.xMin + box.xMax) / 2 - 0.5;
+  const verticalError = (box.yMin + box.yMax) / 2 - 0.5;
+  const pan = Math.abs(horizontalError) <= deadZone ? 0 : clamp(horizontalError, maxStep);
+  const tilt = Math.abs(verticalError) <= deadZone ? 0 : clamp(-verticalError, maxStep);
+
+  if (pan === 0 && tilt === 0) {
+    return undefined;
+  }
+
+  return Object.freeze({
+    pan: roundPtzStep(pan),
+    tilt: roundPtzStep(tilt),
+    speed
+  });
+}
+
+export function createPersonFollowController(
+  input: PersonFollowControllerInput
+): PersonFollowController {
+  const sourceCameraId = requireString(
+    input.sourceCameraId,
+    "pico person follow source camera id is required"
+  );
+  const deadZone = requireDeadZone(input.deadZone);
+  const maxStep = requireUnitPositiveNumber(input.maxStep, "pico person follow max step");
+  const speed = requireUnitPositiveNumber(input.speed, "pico person follow speed");
+  const cooldownMs = requirePositiveInteger(input.cooldownMs, "pico person follow cooldownMs");
+  const lostTargetTimeoutMs = requirePositiveInteger(
+    input.lostTargetTimeoutMs,
+    "pico person follow lostTargetTimeoutMs"
+  );
+  const nowMs = input.nowMs ?? (() => Date.now());
+  const nowIso = input.nowIso ?? (() => new Date().toISOString());
+  let stopped = false;
+  let inFlightFrame = false;
+  let lastMoveAtMs: number | undefined;
+  let lastSeenAtMs: number | undefined;
+  let lostStopSent = false;
+
+  const recordAudit = (
+    name: PersonFollowAuditEvent["name"],
+    summary: string,
+    attributes: Record<string, number | string>
+  ): void => {
+    input.audit?.(
+      Object.freeze({
+        name,
+        sourceId: sourceCameraId,
+        occurredAt: nowIso(),
+        summary,
+        attributes: Object.freeze(attributes)
+      })
+    );
+  };
+
+  const stopDriver = async (reason: string): Promise<void> => {
+    await input.driver.stop();
+    recordAudit("camera.person_follow.stop", "Stopped person-follow camera movement.", {
+      reason
+    });
+  };
+
+  const stopIfTargetLost = async (currentTimeMs: number): Promise<void> => {
+    if (
+      lastSeenAtMs !== undefined &&
+      currentTimeMs - lastSeenAtMs >= lostTargetTimeoutMs &&
+      !lostStopSent
+    ) {
+      await stopDriver("target_lost");
+      lostStopSent = true;
+    }
+  };
+
+  const issueMove = async (target: PersonFollowDetection, currentTimeMs: number): Promise<void> => {
+    const move = buildPersonFollowMove({
+      boundingBox: target.boundingBox,
+      deadZone,
+      maxStep,
+      speed
+    });
+
+    if (move === undefined || isCoolingDown(lastMoveAtMs, currentTimeMs, cooldownMs)) {
+      return;
+    }
+
+    await input.driver.relativeMove(move);
+    lastMoveAtMs = currentTimeMs;
+    recordAudit("camera.person_follow.move", "Issued person-follow relative PTZ move.", {
+      pan: move.pan,
+      tilt: move.tilt,
+      speed: move.speed
+    });
+  };
+
+  return {
+    async processFrame(frame) {
+      if (stopped || inFlightFrame || frame.sourceId !== sourceCameraId) {
+        return;
+      }
+
+      inFlightFrame = true;
+      try {
+        const currentTimeMs = requireNonNegativeFiniteNumber(
+          nowMs(),
+          "pico person follow current time"
+        );
+        const target = selectPersonFollowTarget(frame.detections);
+
+        if (target === undefined) {
+          await stopIfTargetLost(currentTimeMs);
+          return;
+        }
+
+        lastSeenAtMs = currentTimeMs;
+        lostStopSent = false;
+
+        await issueMove(target, currentTimeMs);
+      } finally {
+        inFlightFrame = false;
+      }
+    },
+    async stop() {
+      if (stopped) {
+        return;
+      }
+
+      stopped = true;
+      await stopDriver("manual_stop");
     }
   };
 }
@@ -488,6 +694,90 @@ function requirePort(value: unknown): number {
   }
 
   return value;
+}
+
+function selectPersonFollowTarget(
+  detections: readonly PersonFollowDetection[]
+): PersonFollowDetection | undefined {
+  return detections.reduce<PersonFollowDetection | undefined>((selected, detection) => {
+    if (selected === undefined || detection.confidence > selected.confidence) {
+      return detection;
+    }
+
+    return selected;
+  }, undefined);
+}
+
+function isCoolingDown(
+  lastMoveAtMs: number | undefined,
+  currentTimeMs: number,
+  cooldownMs: number
+): boolean {
+  return lastMoveAtMs !== undefined && currentTimeMs - lastMoveAtMs < cooldownMs;
+}
+
+function normalizePersonFollowBox(box: PersonFollowBoundingBox): PersonFollowBoundingBox {
+  const xMin = requireNormalizedCoordinate(box.xMin, "pico person follow box xMin");
+  const yMin = requireNormalizedCoordinate(box.yMin, "pico person follow box yMin");
+  const xMax = requireNormalizedCoordinate(box.xMax, "pico person follow box xMax");
+  const yMax = requireNormalizedCoordinate(box.yMax, "pico person follow box yMax");
+
+  if (xMax <= xMin || yMax <= yMin) {
+    throw new Error("pico person follow box must have positive area");
+  }
+
+  return Object.freeze({
+    xMin,
+    yMin,
+    xMax,
+    yMax
+  });
+}
+
+function requireNormalizedCoordinate(value: unknown, label: string): number {
+  const parsed = requireNonNegativeFiniteNumber(value, label);
+
+  if (parsed > 1) {
+    throw new Error(`${label} must be >= 0 and <= 1`);
+  }
+
+  return parsed;
+}
+
+function requireDeadZone(value: unknown): number {
+  const parsed = requireNonNegativeFiniteNumber(value, "pico person follow dead zone");
+
+  if (parsed >= 0.5) {
+    throw new Error("pico person follow dead zone must be >= 0 and < 0.5");
+  }
+
+  return parsed;
+}
+
+function requireUnitPositiveNumber(value: unknown, label: string): number {
+  const parsed = requireNonNegativeFiniteNumber(value, label);
+
+  if (parsed <= 0 || parsed > 1) {
+    throw new Error(`${label} must be > 0 and <= 1`);
+  }
+
+  return parsed;
+}
+
+function requireNonNegativeFiniteNumber(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${label} must be a non-negative finite number`);
+  }
+
+  return value;
+}
+
+function clamp(value: number, maximumMagnitude: number): number {
+  return Math.max(-maximumMagnitude, Math.min(maximumMagnitude, value));
+}
+
+function roundPtzStep(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
 }
 
 function requirePositiveInteger(value: unknown, label: string): number {

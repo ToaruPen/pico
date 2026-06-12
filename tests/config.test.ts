@@ -61,6 +61,14 @@ camera:
     stream: stream2
     timeoutMs: 15000
     maxFrameBytes: 1024
+  personFollow:
+    enabled: true
+    sourceCameraId: tapo-main
+    deadZone: 0.12
+    maxStep: 0.3
+    speed: 0.4
+    cooldownMs: 500
+    lostTargetTimeoutMs: 3000
 vision:
   ollama:
     endpointId: windows-qwen
@@ -112,6 +120,15 @@ voice:
           host: "192.168.3.25",
           user: "camera-user",
           password: "camera-password"
+        },
+        personFollow: {
+          enabled: true,
+          sourceCameraId: "tapo-main",
+          deadZone: 0.12,
+          maxStep: 0.3,
+          speed: 0.4,
+          cooldownMs: 500,
+          lostTargetTimeoutMs: 3000
         }
       },
       vision: {
@@ -186,6 +203,49 @@ camera:
         }
       })
     ).toThrow("pico config camera.tapo.password is required when camera.tapo is set");
+  });
+
+  it("defaults person follow to disabled", () => {
+    expect(definePicoConfig({}).camera.personFollow).toEqual({
+      enabled: false
+    });
+  });
+
+  it("requires a source camera when person follow is enabled", () => {
+    expect(() =>
+      definePicoConfig({
+        camera: {
+          personFollow: {
+            enabled: true,
+            deadZone: 0.12,
+            maxStep: 0.3,
+            speed: 0.4,
+            cooldownMs: 500,
+            lostTargetTimeoutMs: 3000
+          }
+        }
+      })
+    ).toThrow(
+      "pico config camera.personFollow.sourceCameraId is required when camera.personFollow is set"
+    );
+  });
+
+  it("rejects person follow dead zones outside the normalized frame range", () => {
+    expect(() =>
+      definePicoConfig({
+        camera: {
+          personFollow: {
+            enabled: true,
+            sourceCameraId: "tapo-main",
+            deadZone: 0.5,
+            maxStep: 0.3,
+            speed: 0.4,
+            cooldownMs: 500,
+            lostTargetTimeoutMs: 3000
+          }
+        }
+      })
+    ).toThrow("pico config camera.personFollow.deadZone must be >= 0 and < 0.5");
   });
 
   it("rejects invalid numeric values at the config boundary", () => {

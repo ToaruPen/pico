@@ -22,6 +22,14 @@ camera:
     user: your-camera-user
     password: your-camera-password
     # Optional runtime defaults: port=554, stream=stream2.
+  personFollow:
+    enabled: false
+    sourceCameraId: tapo-rtsp
+    deadZone: 0.1
+    maxStep: 0.25
+    speed: 0.4
+    cooldownMs: 500
+    lostTargetTimeoutMs: 1500
 
 vision:
   ollama:
