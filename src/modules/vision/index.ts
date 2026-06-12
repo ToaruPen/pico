@@ -19,7 +19,7 @@ export const visionModuleMetadata = {
 } as const satisfies FuturePicoModuleMetadata;
 
 const BOUNDED_SCENE_PROMPT =
-  "Return exactly one JSON object and no markdown. The object must have these keys: summary, observedPeople, environment, humanAttention, uncertainty. Each key except summary must be an array of strings. Describe only visible after-school care scene details. Do not identify children, infer private traits, diagnose, score, or make final safety decisions. If a field is unclear, use an empty array or a short uncertainty string.";
+  "Return exactly one JSON object and no markdown. The object must have these keys: summary, observedPeople, environment, humanAttention, uncertainty. Each key except summary must be an array of strings. Describe only visible after-school care scene details. Do not identify children, infer private traits, diagnose, score, or make final safety decisions. If no people, attention items, or uncertainties are visible, use an empty array. Uncertainty must be an array of short strings.";
 
 const OLLAMA_REQUEST_TIMEOUT_MS = 30_000;
 const visionBoundaryMarkers = [
@@ -165,8 +165,8 @@ async function postOllamaSceneRequest(
 
 function buildOllamaSceneRequestHeaders(endpoint: SelectedModelEndpointConfig): HeadersInit {
   return {
-    "content-type": "application/json",
-    ...buildSelectedModelEndpointAuthHeaders(endpoint)
+    ...buildSelectedModelEndpointAuthHeaders(endpoint),
+    "content-type": "application/json"
   };
 }
 
