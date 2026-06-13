@@ -534,10 +534,20 @@ function parseYoloxCocoRawPersonDetectionRow(
     return undefined;
   }
 
+  const box = clampBoxToFrame(
+    parseCxcywhBox(centerX, centerY, width, height, options),
+    options.frameWidth,
+    options.frameHeight
+  );
+
+  if (box === undefined) {
+    return undefined;
+  }
+
   return {
     label: "person",
     confidence,
-    box: parseCxcywhBox(centerX, centerY, width, height, options)
+    box
   };
 }
 
@@ -654,6 +664,30 @@ function boxIou(left: PersonDetectionBoxInput, right: PersonDetectionBoxInput): 
   const unionArea = leftArea + rightArea - intersectionArea;
 
   return unionArea <= 0 ? 0 : intersectionArea / unionArea;
+}
+
+function clampBoxToFrame(
+  box: PersonDetectionBoxInput,
+  frameWidth: number,
+  frameHeight: number
+): PersonDetectionBoxInput | undefined {
+  const xMin = Math.max(0, box.x);
+  const yMin = Math.max(0, box.y);
+  const xMax = Math.min(frameWidth, box.x + box.width);
+  const yMax = Math.min(frameHeight, box.y + box.height);
+  const width = xMax - xMin;
+  const height = yMax - yMin;
+
+  if (width <= 0 || height <= 0) {
+    return undefined;
+  }
+
+  return {
+    x: xMin,
+    y: yMin,
+    width,
+    height
+  };
 }
 
 function scaleCoordinate(

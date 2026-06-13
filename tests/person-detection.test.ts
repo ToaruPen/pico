@@ -421,6 +421,52 @@ describe("streaming person detection", () => {
     ]);
   });
 
+  it("clamps raw YOLOX COCO boxes to the frame", async () => {
+    const runtime = createOneOutputRuntime(
+      Float32Array.from(
+        yoloxCocoRow({
+          centerX: 10,
+          centerY: 230,
+          width: 40,
+          height: 40,
+          objectness: 0.9,
+          personScore: 0.8
+        })
+      ),
+      [1, 1, 85]
+    );
+
+    const model = await createOnnxPersonDetectionModel({
+      modelPath: "/opt/pico/models/pinto0309/yolox_nano_320x320.onnx",
+      frameSize: {
+        width: 320,
+        height: 240
+      },
+      outputLayout: "yolox_coco_raw",
+      coordinateScale: "pixel",
+      runtime,
+      preprocessFrame: () =>
+        Promise.resolve({
+          data: Float32Array.of(0),
+          dims: [1, 3, 320, 320]
+        }),
+      confidenceThreshold: 0.5
+    });
+
+    await expect(model.detect(Buffer.from("frame"))).resolves.toEqual([
+      {
+        label: "person",
+        confidence: 0.72,
+        box: {
+          x: 0,
+          y: 210,
+          width: 30,
+          height: 30
+        }
+      }
+    ]);
+  });
+
   it("identifies malformed YOLOX objectness scores", async () => {
     const runtime = createOneOutputRuntime(
       Float32Array.from(
