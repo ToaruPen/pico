@@ -222,4 +222,47 @@ describe("Mem0 runtime smoke", () => {
       vi.useRealTimers();
     }
   });
+
+  it("cleans up memories when Mem0 add resolves after the smoke timeout", async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    let resolveAdd: ((response: Mem0AddResponse) => void) | undefined;
+
+    try {
+      const report = runMem0RuntimeSmoke(enabledConfig(), {
+        createClient: () => ({
+          add: () =>
+            new Promise<Mem0AddResponse>((resolve) => {
+              resolveAdd = resolve;
+            }),
+          search: () => Promise.resolve({ memories: [] }),
+          delete: (memoryId) => {
+            calls.push(`delete:${memoryId}`);
+
+            return Promise.resolve();
+          }
+        }),
+        createRunId: () => "test-run",
+        timeoutMs: 25
+      });
+
+      await vi.advanceTimersByTimeAsync(25);
+
+      await expect(report).resolves.toEqual({
+        status: "failed",
+        provider: "mem0-oss",
+        reason: "pico Mem0 runtime smoke failed: Mem0 add timed out after 25 ms"
+      });
+
+      resolveAdd?.({
+        memories: [{ id: "mem0-late-1" }, { id: "mem0-late-2" }]
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(calls).toEqual(["delete:mem0-late-1", "delete:mem0-late-2"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

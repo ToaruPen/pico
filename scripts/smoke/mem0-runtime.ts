@@ -8,7 +8,11 @@ import {
   toOpenTelemetryLogRecord
 } from "../../src/modules/audit/index.js";
 import type { SessionMemoryCutoffInput } from "../../src/modules/long-memory/index.js";
-import { createMem0MemoryProvider, type Mem0Client } from "../../src/modules/long-memory/mem0.js";
+import {
+  createMem0MemoryProvider,
+  type Mem0Client,
+  type Mem0SessionAddResult
+} from "../../src/modules/long-memory/mem0.js";
 import { createMem0OssClient } from "../../src/modules/long-memory/mem0-runtime.js";
 
 export type Mem0RuntimeSmokeReport =
@@ -76,7 +80,8 @@ export async function runMem0RuntimeSmoke(
       scopeId,
       audit
     });
-    const added = await withTimeout(provider.addSessionCutoff(smokeSession), "Mem0 add", timeoutMs);
+    const addOperation = provider.addSessionCutoff(smokeSession);
+    const added = await addSessionCutoffWithLateCleanup(addOperation, provider, timeoutMs);
     let searchResultCount: number;
 
     try {
@@ -117,6 +122,35 @@ export async function runMem0RuntimeSmoke(
     if (!searchedMemoryIds.some((id) => addedMemoryIds.includes(id))) {
       throw new Error("Mem0 search did not return a memory created by this smoke run");
     }
+  }
+}
+
+async function addSessionCutoffWithLateCleanup(
+  addOperation: Promise<Mem0SessionAddResult>,
+  provider: ReturnType<typeof createMem0MemoryProvider>,
+  timeoutMs: number
+): Promise<Mem0SessionAddResult> {
+  try {
+    return await withTimeout(addOperation, "Mem0 add", timeoutMs);
+  } catch (error) {
+    cleanupLateAddedMemories(addOperation, provider, timeoutMs).catch(() => undefined);
+
+    throw error;
+  }
+}
+
+async function cleanupLateAddedMemories(
+  addOperation: Promise<Mem0SessionAddResult>,
+  provider: ReturnType<typeof createMem0MemoryProvider>,
+  timeoutMs: number
+): Promise<void> {
+  try {
+    const added = await addOperation;
+
+    await cleanupAddedMemories(provider, added.memoryIds, timeoutMs);
+  } catch {
+    // The smoke already failed on the original add path. This guard prevents
+    // late completion or cleanup failures from becoming unhandled rejections.
   }
 }
 

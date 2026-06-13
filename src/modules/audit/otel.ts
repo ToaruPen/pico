@@ -158,6 +158,7 @@ type PendingExportResult = {
   readonly resolve: (result: ExportResult) => void;
   readonly reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout> | undefined;
+  exportStarted: boolean;
   settled: boolean;
 };
 
@@ -175,6 +176,7 @@ class ReportingLogExporter implements LogRecordExporter {
         resolve,
         reject,
         timer: undefined,
+        exportStarted: false,
         settled: false
       };
 
@@ -194,16 +196,30 @@ class ReportingLogExporter implements LogRecordExporter {
   }
 
   export(records: ReadableLogRecord[], resultCallback: (result: ExportResult) => void): void {
-    const pending = this.pendingResults.shift();
+    const pending = this.pendingResults.find((result) => !result.exportStarted);
 
-    this.delegate.export(records, (result) => {
-      if (pending !== undefined && !pending.settled) {
-        pending.settled = true;
-        this.clearPendingTimer(pending);
-        pending.resolve(result);
+    if (pending !== undefined) {
+      pending.exportStarted = true;
+    }
+
+    try {
+      this.delegate.export(records, (result) => {
+        if (pending !== undefined) {
+          this.resolvePendingResult(pending, result);
+        }
+        resultCallback(result);
+      });
+    } catch (error) {
+      const failedResult = {
+        code: ExportResultCode.FAILED,
+        error: error instanceof Error ? error : new Error(String(error))
+      };
+
+      if (pending !== undefined) {
+        this.resolvePendingResult(pending, failedResult);
       }
-      resultCallback(result);
-    });
+      resultCallback(failedResult);
+    }
   }
 
   rejectPending(error: Error): void {
@@ -222,6 +238,17 @@ class ReportingLogExporter implements LogRecordExporter {
     return this.delegate.shutdown();
   }
 
+  private resolvePendingResult(pending: PendingExportResult, result: ExportResult): void {
+    if (pending.settled) {
+      return;
+    }
+
+    pending.settled = true;
+    this.clearPendingTimer(pending);
+    this.removePendingResult(pending);
+    pending.resolve(result);
+  }
+
   private rejectPendingResult(pending: PendingExportResult, error: Error): void {
     if (pending.settled) {
       return;
@@ -229,13 +256,16 @@ class ReportingLogExporter implements LogRecordExporter {
 
     pending.settled = true;
     this.clearPendingTimer(pending);
+    this.removePendingResult(pending);
+    pending.reject(error);
+  }
+
+  private removePendingResult(pending: PendingExportResult): void {
     const index = this.pendingResults.indexOf(pending);
 
     if (index !== -1) {
       this.pendingResults.splice(index, 1);
     }
-
-    pending.reject(error);
   }
 
   private clearPendingTimer(pending: PendingExportResult): void {

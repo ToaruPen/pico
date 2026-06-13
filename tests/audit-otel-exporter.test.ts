@@ -41,6 +41,49 @@ class DeferredLogExporter implements LogRecordExporter {
   }
 }
 
+class ThrowingLogExporter implements LogRecordExporter {
+  export(): void {
+    throw new Error("delegate export crashed");
+  }
+
+  forceFlush(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  shutdown(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+
+type PromiseOutcome =
+  | {
+      readonly state: "pending" | "resolved";
+    }
+  | {
+      readonly state: "rejected";
+      readonly message: string;
+    };
+
+async function promiseOutcome(promise: Promise<unknown>): Promise<PromiseOutcome> {
+  let outcome: PromiseOutcome = { state: "pending" };
+
+  void promise.then(
+    () => {
+      outcome = { state: "resolved" };
+    },
+    (error: unknown) => {
+      outcome = {
+        state: "rejected",
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
+  );
+  await Promise.resolve();
+  await Promise.resolve();
+
+  return outcome;
+}
+
 describe("OpenTelemetry audit exporter", () => {
   it("exports local audit events through the official logs SDK", async () => {
     const audit = createStructuredAuditLog();
@@ -168,6 +211,56 @@ describe("OpenTelemetry audit exporter", () => {
     await otel.shutdown();
 
     await expect(otel.export(event)).rejects.toThrow("pico audit OTel exporter is shut down");
+  });
+
+  it("rejects in-flight exports when shutdown happens before delegate callback", async () => {
+    const audit = createStructuredAuditLog();
+    const exporter = new DeferredLogExporter();
+    const otel = createOpenTelemetryAuditExporter({
+      exporter,
+      serviceName: "pico-test"
+    });
+    const event = audit.record({
+      category: "memory_write",
+      name: "long_memory.mem0.in_flight_shutdown",
+      severity: "info",
+      occurredAt: "2026-06-10T09:00:00.000Z",
+      summary: "In-flight export shutdown.",
+      attributes: {}
+    });
+    const exportResult = otel.export(event);
+
+    expect(exporter.callbacks).toHaveLength(1);
+
+    await otel.shutdown();
+
+    await expect(promiseOutcome(exportResult)).resolves.toEqual({
+      state: "rejected",
+      message: "pico audit OTel exporter is shut down"
+    });
+  });
+
+  it("rejects when the underlying log exporter throws synchronously", async () => {
+    const audit = createStructuredAuditLog();
+    const otel = createOpenTelemetryAuditExporter({
+      exporter: new ThrowingLogExporter(),
+      serviceName: "pico-test"
+    });
+    const event = audit.record({
+      category: "memory_write",
+      name: "long_memory.mem0.sync_throw",
+      severity: "info",
+      occurredAt: "2026-06-10T09:00:00.000Z",
+      summary: "Synchronous exporter failure.",
+      attributes: {}
+    });
+    const exportResult = otel.export(event);
+
+    await expect(promiseOutcome(exportResult)).resolves.toEqual({
+      state: "rejected",
+      message: "pico audit OTel export failed"
+    });
+    await otel.shutdown();
   });
 
   it("times out if the underlying log exporter never reports a result", async () => {
