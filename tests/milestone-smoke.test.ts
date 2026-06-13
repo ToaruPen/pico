@@ -72,6 +72,12 @@ function configuredSectionDependencies(): PicoMilestoneSmokeDependencies {
         status: "skipped",
         provider: "tapo-rtsp+ollama",
         reason: "Camera config is not configured."
+      }),
+    runMem0RuntimeSmoke: () =>
+      Promise.resolve({
+        status: "skipped",
+        provider: "mem0-oss",
+        reason: "Mem0 runtime is not configured."
       })
   };
 }
@@ -86,6 +92,7 @@ function expectMilestoneSectionNames(report: PicoMilestoneSmokeReport): void {
     "person_detection",
     "ollama_vlm",
     "camera_vlm_scene",
+    "mem0_runtime",
     "memory_candidate",
     "audit_otel"
   ]);
@@ -167,6 +174,12 @@ describe("pico milestone smoke suite", () => {
             status: "skipped",
             provider: "tapo-rtsp+ollama",
             reason: "Camera config is not configured."
+          }),
+        runMem0RuntimeSmoke: () =>
+          Promise.resolve({
+            status: "skipped",
+            provider: "mem0-oss",
+            reason: "Mem0 runtime is not configured."
           })
       }
     );
@@ -277,12 +290,21 @@ vision:
             provider: "tapo-rtsp+ollama",
             reason: "Camera config is not configured."
           });
+        },
+        runMem0RuntimeSmoke: (config) => {
+          observedConfigs.push(config);
+
+          return Promise.resolve({
+            status: "skipped",
+            provider: "mem0-oss",
+            reason: "Mem0 runtime is not configured."
+          });
         }
       }
     );
 
     expect(report.status).toBe("skipped");
-    expect(observedConfigs).toHaveLength(6);
+    expect(observedConfigs).toHaveLength(7);
     expect(new Set(observedConfigs).size).toBe(1);
     expect(observedConfigs[0]?.camera.tapo?.host).toBe("192.168.10.25");
     expect(observedConfigs[0]?.vision.ollama?.localBaseUrl).toBe("http://127.0.0.1:11434");
@@ -353,6 +375,66 @@ vision:
     });
   });
 
+  it("exports audit records to the configured OTel Collector path", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-milestone-audit-otel-"));
+    const configPath = join(directory, "pico.local.yaml");
+    writeFileSync(
+      configPath,
+      `
+audit:
+  otel:
+    enabled: true
+    endpoint: http://127.0.0.1:4318/v1/logs
+    serviceName: pico-test
+    timeoutMs: 500
+`
+    );
+    const exportedEvents: string[] = [];
+    let shutdownCalled = false;
+
+    const report = await runPicoMilestoneSmokeSuite(
+      { PICO_CONFIG_PATH: configPath },
+      {
+        ...configuredSectionDependencies(),
+        createAuditOtelExporter: (config) => {
+          expect(config).toMatchObject({
+            endpoint: "http://127.0.0.1:4318/v1/logs",
+            serviceName: "pico-test",
+            timeoutMs: 500
+          });
+
+          return {
+            export: (event) => {
+              exportedEvents.push(event.name);
+
+              return Promise.resolve();
+            },
+            shutdown: () => {
+              shutdownCalled = true;
+
+              return Promise.resolve();
+            }
+          };
+        }
+      }
+    );
+    const auditSection = requireSection(report, "audit_otel");
+
+    expect(auditSection.status).toBe("passed");
+    expect(auditSection.provider).toBe("structured-audit+otel");
+    expect(auditSection.details).toMatchObject({
+      eventCount: 4,
+      exportedOtelRecordCount: 4
+    });
+    expect(exportedEvents).toEqual([
+      "long_memory.candidate_job.enqueued",
+      "long_memory.candidate.created",
+      "long_memory.candidate_job.processed",
+      "long_memory.candidate.promoted"
+    ]);
+    expect(shutdownCalled).toBe(true);
+  });
+
   it("classifies missing Pi Agent model credentials as an actionable skip", async () => {
     const report = await runPicoMilestoneSmokeSuite(
       {},
@@ -394,6 +476,12 @@ vision:
             status: "skipped",
             provider: "tapo-rtsp+ollama",
             reason: "Camera config is not configured."
+          }),
+        runMem0RuntimeSmoke: () =>
+          Promise.resolve({
+            status: "skipped",
+            provider: "mem0-oss",
+            reason: "Mem0 runtime is not configured."
           })
       }
     );

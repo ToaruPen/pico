@@ -115,6 +115,7 @@ voice:
 memory:
   mem0:
     enabled: true
+    infer: false
     historyDbPath: /var/lib/pico/mem0-history.sqlite
     vectorStore:
       provider: qdrant
@@ -128,6 +129,13 @@ memory:
       provider: ollama
       localBaseUrl: http://127.0.0.1:11434
       model: nomic-embed-text
+      embeddingDims: 768
+audit:
+  otel:
+    enabled: true
+    endpoint: http://127.0.0.1:4318/v1/logs
+    serviceName: pico
+    timeoutMs: 5000
 `);
 
     expect(loadPicoConfig({ path })).toMatchObject({
@@ -201,6 +209,7 @@ memory:
       memory: {
         mem0: {
           enabled: true,
+          infer: false,
           historyDbPath: "/var/lib/pico/mem0-history.sqlite",
           vectorStore: {
             provider: "qdrant",
@@ -215,8 +224,17 @@ memory:
           embedder: {
             provider: "ollama",
             localBaseUrl: "http://127.0.0.1:11434",
-            model: "nomic-embed-text"
+            model: "nomic-embed-text",
+            embeddingDims: 768
           }
+        }
+      },
+      audit: {
+        otel: {
+          enabled: true,
+          endpoint: "http://127.0.0.1:4318/v1/logs",
+          serviceName: "pico",
+          timeoutMs: 5000
         }
       }
     });
@@ -240,8 +258,26 @@ memory:
         mem0: {
           enabled: false
         }
+      },
+      audit: {
+        otel: {
+          enabled: false
+        }
       }
     });
+  });
+
+  it("rejects non-local audit OTel Collector endpoints", () => {
+    expect(() =>
+      definePicoConfig({
+        audit: {
+          otel: {
+            enabled: true,
+            endpoint: "https://otel.example.com/v1/logs"
+          }
+        }
+      })
+    ).toThrow("pico config audit.otel.endpoint must use a local Collector URL");
   });
 
   it("uses PICO_CONFIG_PATH as the only config environment selector", () => {

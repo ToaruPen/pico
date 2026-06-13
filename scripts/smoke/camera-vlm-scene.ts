@@ -26,6 +26,7 @@ export type CameraVlmSceneSmokeReport =
         readonly mimeType: "image/jpeg";
         readonly endpointId: string;
         readonly model: "qwen3.5:9b";
+        readonly timeoutMs: number;
         readonly scene: SceneDescription;
       };
     }
@@ -97,6 +98,7 @@ export async function runCameraVlmSceneSmoke(
       mimeType: captured.mimeType,
       endpointId: scene.source.endpointId,
       model: scene.source.model,
+      timeoutMs: plan.vlm.timeoutMs,
       scene
     }
   };
@@ -182,7 +184,8 @@ async function describeSceneFrame(
       endpoint: plan.vlm.endpoint,
       image: frame,
       mimeType: "image/jpeg",
-      purpose: "staff_requested_snapshot"
+      purpose: "staff_requested_snapshot",
+      timeoutMs: plan.vlm.timeoutMs
     });
   } catch (error) {
     throw new CameraVlmSceneSmokeError(

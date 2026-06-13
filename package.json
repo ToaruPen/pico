@@ -23,6 +23,7 @@
     "smoke:milestone": "jiti scripts/smoke/milestone-suite.ts",
     "smoke:camera-vlm-scene": "jiti scripts/smoke/camera-vlm-scene.ts",
     "smoke:person-detection": "jiti scripts/smoke/person-detection.ts",
+    "smoke:mem0-runtime": "jiti scripts/smoke/mem0-runtime.ts",
     "smoke:ollama-vlm": "jiti scripts/smoke/ollama-vlm-connectivity.ts",
     "smoke:camera-tapo": "jiti scripts/smoke/tapo-rtsp-snapshot.ts",
     "smoke:camera-ptz": "jiti scripts/smoke/tapo-person-follow-nudge.ts",
@@ -53,9 +54,21 @@
     "vitest": "^4.1.8"
   },
   "dependencies": {
-    "onvif": "^0.8.1",
+    "@opentelemetry/api-logs": "^0.219.0",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.219.0",
+    "@opentelemetry/resources": "^2.8.0",
+    "@opentelemetry/sdk-logs": "^0.219.0",
+    "@opentelemetry/semantic-conventions": "^1.41.1",
+    "@qdrant/js-client-rest": "^1.18.0",
+    "better-sqlite3": "^12.10.0",
+    "mem0ai": "^3.0.7",
+    "ollama": "^0.5.18",
     "onnxruntime-node": "^1.26.0",
+    "onvif": "^0.8.1",
     "sharp": "^0.35.1",
     "yaml": "^2.9.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }

@@ -34,7 +34,8 @@ function configuredPicoConfig(): PicoConfig {
     },
     vision: {
       ollama: {
-        localBaseUrl: "http://127.0.0.1:11434"
+        localBaseUrl: "http://127.0.0.1:11434",
+        timeoutMs: 45_000
       }
     }
   });
@@ -52,6 +53,7 @@ describe("camera to VLM scene smoke", () => {
 
   it("captures one camera frame and sends it to the selected VLM endpoint", async () => {
     const describedImages: Uint8Array[] = [];
+    const observedTimeouts: number[] = [];
     const report = await runCameraVlmSceneSmoke(configuredPicoConfig(), {
       captureFrame: () =>
         Promise.resolve({
@@ -61,12 +63,17 @@ describe("camera to VLM scene smoke", () => {
         }),
       describeFrame: (request) => {
         describedImages.push(request.image);
+        if (request.timeoutMs === undefined) {
+          throw new Error("expected camera VLM smoke to pass the configured timeout");
+        }
+        observedTimeouts.push(request.timeoutMs);
 
         return Promise.resolve(scene);
       }
     });
 
     expect(describedImages).toEqual([jpegFrame]);
+    expect(observedTimeouts).toEqual([45_000]);
     expect(report).toEqual({
       status: "passed",
       provider: "tapo-rtsp+ollama",
@@ -76,6 +83,7 @@ describe("camera to VLM scene smoke", () => {
         mimeType: "image/jpeg",
         endpointId: "windows-ollama-qwen3-5",
         model: "qwen3.5:9b",
+        timeoutMs: 45_000,
         scene
       }
     });

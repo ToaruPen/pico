@@ -84,6 +84,7 @@ export type SceneDescriptionRequest = {
   readonly image: Uint8Array;
   readonly mimeType: "image/jpeg" | "image/png";
   readonly purpose: "motion_followup" | "staff_requested_snapshot";
+  readonly timeoutMs?: number;
 };
 
 export type SceneDescription = {
@@ -136,10 +137,11 @@ async function postOllamaSceneRequest(
   request: SceneDescriptionRequest,
   fetchImplementation: typeof fetch
 ): Promise<unknown> {
+  const timeoutMs = request.timeoutMs ?? OLLAMA_REQUEST_TIMEOUT_MS;
   const abortController = new AbortController();
   const timeout = setTimeout(() => {
     abortController.abort();
-  }, OLLAMA_REQUEST_TIMEOUT_MS);
+  }, timeoutMs);
 
   try {
     const response = await rejectOnAbort(
@@ -159,7 +161,9 @@ async function postOllamaSceneRequest(
     return await rejectOnAbort(response.json() as Promise<unknown>, abortController.signal);
   } catch (error) {
     if (isAbortError(error)) {
-      throw new Error("pico vision Ollama request timed out", { cause: error });
+      throw new Error(`pico vision Ollama request timed out after ${timeoutMs} ms`, {
+        cause: error
+      });
     }
 
     throw error;
