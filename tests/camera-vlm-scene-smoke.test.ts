@@ -41,6 +41,8 @@ function configuredPicoConfig(): PicoConfig {
   });
 }
 
+const passThroughFrame = (frame: Uint8Array): Promise<Uint8Array> => Promise.resolve(frame);
+
 describe("camera to VLM scene smoke", () => {
   it("skips when camera and VLM configuration are absent", async () => {
     await expect(runCameraVlmSceneSmoke(definePicoConfig({}))).resolves.toEqual({
@@ -61,6 +63,7 @@ describe("camera to VLM scene smoke", () => {
           mimeType: "image/jpeg",
           frame: jpegFrame
         }),
+      prepareFrame: passThroughFrame,
       describeFrame: (request) => {
         describedImages.push(request.image);
         if (request.timeoutMs === undefined) {
@@ -80,6 +83,7 @@ describe("camera to VLM scene smoke", () => {
       details: {
         sourceId: "tapo-rtsp",
         frameBytes: 4,
+        vlmFrameBytes: 4,
         mimeType: "image/jpeg",
         endpointId: "windows-ollama-qwen3-5",
         model: "qwen3.5:9b",
@@ -90,9 +94,64 @@ describe("camera to VLM scene smoke", () => {
     expect(JSON.stringify(report)).not.toContain(Buffer.from(jpegFrame).toString("base64"));
   });
 
+  it("bounds captured frames before sending them to the VLM endpoint", async () => {
+    const capturedFrame = new Uint8Array([0xff, 0xd8, 0x01, 0xff, 0xd9]);
+    const preparedFrame = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+    const describedImages: Uint8Array[] = [];
+
+    const report = await runCameraVlmSceneSmoke(
+      definePicoConfig({
+        camera: {
+          tapo: {
+            host: "192.168.10.25",
+            user: "camera-user",
+            password: "camera-passphrase",
+            stream: "stream2"
+          }
+        },
+        vision: {
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434",
+            maxImageEdgePixels: 512
+          }
+        }
+      }),
+      {
+        captureFrame: () =>
+          Promise.resolve({
+            sourceId: "tapo-rtsp",
+            mimeType: "image/jpeg",
+            frame: capturedFrame
+          }),
+        prepareFrame: (frame, maxImageEdgePixels) => {
+          expect(frame).toBe(capturedFrame);
+          expect(maxImageEdgePixels).toBe(512);
+
+          return Promise.resolve(preparedFrame);
+        },
+        describeFrame: (request) => {
+          describedImages.push(request.image);
+
+          return Promise.resolve(scene);
+        }
+      }
+    );
+
+    expect(describedImages).toEqual([preparedFrame]);
+    expect(report).toMatchObject({
+      status: "passed",
+      provider: "tapo-rtsp+ollama",
+      details: {
+        frameBytes: 5,
+        vlmFrameBytes: 4
+      }
+    });
+  });
+
   it("fails clearly when camera capture fails", async () => {
     const report = await runCameraVlmSceneSmoke(configuredPicoConfig(), {
       captureFrame: () => Promise.reject(new Error("camera capture failed")),
+      prepareFrame: passThroughFrame,
       describeFrame: () => Promise.resolve(scene)
     });
 
@@ -112,6 +171,7 @@ describe("camera to VLM scene smoke", () => {
             "rtsp://camera-user:camera-passphrase@192.168.10.25:554/stream2 camera-passphrase"
           )
         ),
+      prepareFrame: passThroughFrame,
       describeFrame: () => Promise.resolve(scene)
     });
     const reportText = JSON.stringify(report);
@@ -130,6 +190,7 @@ describe("camera to VLM scene smoke", () => {
           mimeType: "image/jpeg",
           frame: jpegFrame
         }),
+      prepareFrame: passThroughFrame,
       describeFrame: () => Promise.reject(new Error("VLM request failed"))
     });
 

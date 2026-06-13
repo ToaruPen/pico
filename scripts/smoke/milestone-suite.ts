@@ -443,13 +443,7 @@ async function exportAuditOtelSection(
     dependencies.createAuditOtelExporter?.(requiredOtelConfig) ??
     createOpenTelemetryAuditExporter(requiredOtelConfig);
 
-  try {
-    for (const event of auditEntries) {
-      await exporter.export(event);
-    }
-  } finally {
-    await exporter.shutdown();
-  }
+  await exportAuditEvents(exporter, auditEntries);
 
   return {
     name: "audit_otel",
@@ -461,6 +455,47 @@ async function exportAuditOtelSection(
       exportedOtelRecordCount: auditEntries.length
     }
   };
+}
+
+async function exportAuditEvents(
+  exporter: OpenTelemetryAuditExporter,
+  auditEntries: readonly AuditEvent[]
+): Promise<void> {
+  let primaryError: Error | undefined;
+
+  try {
+    for (const event of auditEntries) {
+      await exporter.export(event);
+    }
+  } catch (error) {
+    primaryError = toError(error);
+  }
+
+  const shutdownError = await shutdownAuditExporterSafely(exporter);
+
+  if (primaryError !== undefined) {
+    if (shutdownError !== undefined) {
+      throw errorWithSecondary(primaryError, "shutdown", shutdownError);
+    }
+
+    throw primaryError;
+  }
+
+  if (shutdownError !== undefined) {
+    throw shutdownError;
+  }
+}
+
+async function shutdownAuditExporterSafely(
+  exporter: OpenTelemetryAuditExporter
+): Promise<Error | undefined> {
+  try {
+    await exporter.shutdown();
+
+    return undefined;
+  } catch (error) {
+    return toError(error);
+  }
 }
 
 function requireAuditOtelEndpoint(value: string | undefined): string {
@@ -573,6 +608,16 @@ function summarizeStatus(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function errorWithSecondary(primary: Error, label: string, secondary: Error): Error {
+  return new Error(`${primary.message}; ${label} also failed: ${secondary.message}`, {
+    cause: primary
+  });
 }
 
 function isDirectExecution(): boolean {

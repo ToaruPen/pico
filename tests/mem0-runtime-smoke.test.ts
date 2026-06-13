@@ -159,6 +159,42 @@ describe("Mem0 runtime smoke", () => {
     expect(calls).toEqual(["delete:mem0-smoke-1"]);
   });
 
+  it("preserves the primary search failure when cleanup also fails", async () => {
+    const calls: string[] = [];
+    const report = await runMem0RuntimeSmoke(enabledConfig(), {
+      createClient: () => ({
+        add: () =>
+          Promise.resolve({
+            memories: [{ id: "mem0-smoke-1" }]
+          }),
+        search: () =>
+          Promise.resolve({
+            memories: [
+              {
+                id: "stale-memory",
+                content: "stale memory",
+                score: 0.9
+              }
+            ]
+          }),
+        delete: (memoryId) => {
+          calls.push(`delete:${memoryId}`);
+
+          return Promise.reject(new Error("delete failed"));
+        }
+      }),
+      createRunId: () => "test-run"
+    });
+
+    expect(calls).toEqual(["delete:mem0-smoke-1"]);
+    expect(report).toEqual({
+      status: "failed",
+      provider: "mem0-oss",
+      reason:
+        "pico Mem0 runtime smoke failed: Mem0 search did not return a memory created by this smoke run; cleanup also failed: Mem0 cleanup failed for 1 memory id(s): mem0-smoke-1: delete failed"
+    });
+  });
+
   it("attempts to delete every memory created by a failed smoke run", async () => {
     const calls: string[] = [];
     const report = await runMem0RuntimeSmoke(enabledConfig(), {
@@ -223,6 +259,28 @@ describe("Mem0 runtime smoke", () => {
     }
   });
 
+  it("fails instead of hanging when Mem0 client startup does not settle", async () => {
+    vi.useFakeTimers();
+
+    try {
+      const report = runMem0RuntimeSmoke(enabledConfig(), {
+        createClient: () => new Promise<Mem0Client>(() => undefined),
+        createRunId: () => "test-run",
+        timeoutMs: 25
+      });
+
+      await vi.advanceTimersByTimeAsync(25);
+
+      await expect(report).resolves.toEqual({
+        status: "failed",
+        provider: "mem0-oss",
+        reason: "pico Mem0 runtime smoke failed: Mem0 client startup timed out after 25 ms"
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("cleans up memories when Mem0 add resolves after the smoke timeout", async () => {
     vi.useFakeTimers();
     const calls: string[] = [];
@@ -264,5 +322,19 @@ describe("Mem0 runtime smoke", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("reports config load failures as smoke failures", async () => {
+    await expect(
+      runMem0RuntimeSmoke(undefined, {
+        loadConfig: () => {
+          throw new Error("invalid local config");
+        }
+      })
+    ).resolves.toEqual({
+      status: "failed",
+      provider: "mem0-oss",
+      reason: "pico Mem0 runtime smoke failed: invalid local config"
+    });
   });
 });

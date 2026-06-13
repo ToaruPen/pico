@@ -58,6 +58,7 @@ vision:
       kind: tailscale_ssh
       sshTarget: pico-vision-host
     timeoutMs: 15000
+    maxImageEdgePixels: 512
 
 voice:
   stt:

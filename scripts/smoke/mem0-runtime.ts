@@ -34,7 +34,10 @@ export type Mem0RuntimeSmokeReport =
     };
 
 export type Mem0RuntimeSmokeDependencies = {
-  readonly createClient?: (config: PicoConfig["memory"]["mem0"]) => Mem0Client;
+  readonly createClient?: (
+    config: PicoConfig["memory"]["mem0"]
+  ) => Mem0Client | Promise<Mem0Client>;
+  readonly loadConfig?: () => PicoConfig;
   readonly createRunId?: () => string;
   readonly timeoutMs?: number;
 };
@@ -42,20 +45,21 @@ export type Mem0RuntimeSmokeDependencies = {
 const defaultMem0SmokeTimeoutMs = 30_000;
 
 export async function runMem0RuntimeSmoke(
-  config: PicoConfig = loadPicoConfigFromEnvironment(),
+  config?: PicoConfig,
   dependencies: Mem0RuntimeSmokeDependencies = {}
 ): Promise<Mem0RuntimeSmokeReport> {
-  const mem0 = config.memory.mem0;
-
-  if (!mem0.enabled) {
-    return {
-      status: "skipped",
-      provider: "mem0-oss",
-      reason: "Set memory.mem0.enabled=true to run the Mem0 runtime smoke."
-    };
-  }
-
   try {
+    const resolvedConfig = config ?? dependencies.loadConfig?.() ?? loadPicoConfigFromEnvironment();
+    const mem0 = resolvedConfig.memory.mem0;
+
+    if (!mem0.enabled) {
+      return {
+        status: "skipped",
+        provider: "mem0-oss",
+        reason: "Set memory.mem0.enabled=true to run the Mem0 runtime smoke."
+      };
+    }
+
     return await executeMem0RuntimeSmoke(mem0, dependencies);
   } catch (error) {
     return {
@@ -70,8 +74,15 @@ export async function runMem0RuntimeSmoke(
     dependencies: Mem0RuntimeSmokeDependencies
   ): Promise<Mem0RuntimeSmokeReport> {
     const audit = createStructuredAuditLog();
-    const client = dependencies.createClient?.(mem0) ?? createMem0OssClient(mem0);
     const timeoutMs = dependencies.timeoutMs ?? defaultMem0SmokeTimeoutMs;
+    const client = await withTimeout(
+      Promise.resolve(
+        dependencies.createClient?.(mem0) ??
+          createMem0OssClient(mem0, { modelPreflightTimeoutMs: timeoutMs })
+      ),
+      "Mem0 client startup",
+      timeoutMs
+    );
     const runId = (dependencies.createRunId ?? randomUUID)();
     const scopeId = `pico-smoke-${runId}`;
     const smokeSession = createSmokeSession(runId);
@@ -82,19 +93,12 @@ export async function runMem0RuntimeSmoke(
     });
     const addOperation = provider.addSessionCutoff(smokeSession);
     const added = await addSessionCutoffWithLateCleanup(addOperation, provider, timeoutMs);
-    let searchResultCount: number;
-
-    try {
-      const searchResults = await withTimeout(provider.search(runId), "Mem0 search", timeoutMs);
-      searchResultCount = searchResults.length;
-
-      requireMem0SmokeResults(
-        added.memoryIds,
-        searchResults.map((memory) => memory.id)
-      );
-    } finally {
-      await cleanupAddedMemories(provider, added.memoryIds, timeoutMs);
-    }
+    const searchResultCount = await searchCreatedMemories(
+      provider,
+      runId,
+      added.memoryIds,
+      timeoutMs
+    );
 
     const auditEvents = audit.entries();
 
@@ -110,19 +114,54 @@ export async function runMem0RuntimeSmoke(
       }
     };
   }
+}
 
-  function requireMem0SmokeResults(
-    addedMemoryIds: readonly string[],
-    searchedMemoryIds: readonly string[]
-  ): void {
-    if (addedMemoryIds.length === 0) {
-      throw new Error("Mem0 did not return any memory ids");
-    }
-
-    if (!searchedMemoryIds.some((id) => addedMemoryIds.includes(id))) {
-      throw new Error("Mem0 search did not return a memory created by this smoke run");
-    }
+function requireMem0SmokeResults(
+  addedMemoryIds: readonly string[],
+  searchedMemoryIds: readonly string[]
+): void {
+  if (addedMemoryIds.length === 0) {
+    throw new Error("Mem0 did not return any memory ids");
   }
+
+  if (!searchedMemoryIds.some((id) => addedMemoryIds.includes(id))) {
+    throw new Error("Mem0 search did not return a memory created by this smoke run");
+  }
+}
+
+async function searchCreatedMemories(
+  provider: ReturnType<typeof createMem0MemoryProvider>,
+  runId: string,
+  addedMemoryIds: readonly string[],
+  timeoutMs: number
+): Promise<number> {
+  let searchResultCount = 0;
+  let primaryError: Error | undefined;
+
+  try {
+    const searchResults = await withTimeout(provider.search(runId), "Mem0 search", timeoutMs);
+    searchResultCount = searchResults.length;
+    requireMem0SmokeResults(
+      addedMemoryIds,
+      searchResults.map((memory) => memory.id)
+    );
+  } catch (error) {
+    primaryError = toError(error);
+  }
+
+  const cleanupError = await cleanupAddedMemoriesSafely(provider, addedMemoryIds, timeoutMs);
+
+  if (primaryError !== undefined) {
+    throw cleanupError === undefined
+      ? primaryError
+      : errorWithSecondary(primaryError, "cleanup", cleanupError);
+  }
+
+  if (cleanupError !== undefined) {
+    throw cleanupError;
+  }
+
+  return searchResultCount;
 }
 
 async function addSessionCutoffWithLateCleanup(
@@ -179,6 +218,20 @@ async function cleanupAddedMemories(
   }
 }
 
+async function cleanupAddedMemoriesSafely(
+  provider: ReturnType<typeof createMem0MemoryProvider>,
+  memoryIds: readonly string[],
+  timeoutMs: number
+): Promise<Error | undefined> {
+  try {
+    await cleanupAddedMemories(provider, memoryIds, timeoutMs);
+
+    return undefined;
+  } catch (error) {
+    return toError(error);
+  }
+}
+
 function withTimeout<T>(operation: Promise<T>, label: string, timeoutMs: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -225,6 +278,16 @@ export function mem0RuntimeSmokeExitCode(report: Mem0RuntimeSmokeReport): number
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function errorWithSecondary(primary: Error, label: string, secondary: Error): Error {
+  return new Error(`${primary.message}; ${label} also failed: ${secondary.message}`, {
+    cause: primary
+  });
 }
 
 function isDirectExecution(): boolean {

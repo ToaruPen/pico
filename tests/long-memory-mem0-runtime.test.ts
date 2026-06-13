@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { definePicoConfig } from "../src/config/index.js";
 import type { buildMem0OssConfig } from "../src/modules/long-memory/mem0-runtime.js";
@@ -34,13 +34,40 @@ function mem0EnabledConfig() {
   }).memory.mem0;
 }
 
+function mem0EnabledConfigWithoutInfer() {
+  return definePicoConfig({
+    memory: {
+      mem0: {
+        enabled: true,
+        historyDbPath: "/var/lib/pico/mem0-history.sqlite",
+        vectorStore: {
+          provider: "qdrant",
+          localBaseUrl: "http://127.0.0.1:6333",
+          collectionName: "pico_long_memory"
+        },
+        llm: {
+          provider: "ollama",
+          localBaseUrl: "http://127.0.0.1:11434",
+          model: "qwen3.5:9b"
+        },
+        embedder: {
+          provider: "ollama",
+          localBaseUrl: "http://127.0.0.1:11434",
+          model: "nomic-embed-text",
+          embeddingDims: 768
+        }
+      }
+    }
+  }).memory.mem0;
+}
+
 describe("Mem0 OSS runtime client", () => {
-  it("disables Mem0 OSS telemetry before constructing the runtime", () => {
+  it("disables Mem0 OSS telemetry before constructing the runtime", async () => {
     const previousTelemetry = process.env.MEM0_TELEMETRY;
     delete process.env.MEM0_TELEMETRY;
 
     try {
-      createMem0OssClient(mem0EnabledConfig(), {
+      await createMem0OssClient(mem0EnabledConfig(), {
         createMemory: () => {
           expect(process.env.MEM0_TELEMETRY).toBe("false");
 
@@ -62,7 +89,7 @@ describe("Mem0 OSS runtime client", () => {
 
   it("builds a local-only Mem0 OSS configuration from pico config", async () => {
     let capturedConfig: CapturedMem0Config | undefined;
-    const client = createMem0OssClient(mem0EnabledConfig(), {
+    const client = await createMem0OssClient(mem0EnabledConfig(), {
       createMemory: (config) => {
         capturedConfig = config;
 
@@ -116,7 +143,7 @@ describe("Mem0 OSS runtime client", () => {
 
   it("adapts add, search, and delete to the existing Mem0 client contract", async () => {
     const calls: string[] = [];
-    const client = createMem0OssClient(mem0EnabledConfig(), {
+    const client = await createMem0OssClient(mem0EnabledConfig(), {
       createMemory: () => ({
         add: (messages, options) => {
           const sourceSessionId = options.metadata?.source_session_id;
@@ -204,13 +231,75 @@ describe("Mem0 OSS runtime client", () => {
     ]);
   });
 
-  it("rejects disabled Mem0 config before constructing a runtime client", () => {
-    expect(() =>
+  it("defaults Mem0 inference to false when config does not opt in", async () => {
+    const calls: string[] = [];
+    const client = await createMem0OssClient(mem0EnabledConfigWithoutInfer(), {
+      createMemory: () => ({
+        add: (_messages, options) => {
+          calls.push(`infer:${String(options.infer)}`);
+
+          return Promise.resolve({
+            results: [{ id: "mem0-1", memory: "工作セットを準備する。" }]
+          });
+        },
+        search: () => Promise.resolve({ results: [] }),
+        delete: () => Promise.resolve({ message: "deleted" })
+      })
+    });
+
+    await client.add({
+      messages: [{ role: "user", content: "工作セットを準備する。" }],
+      scopeId: "pico-facility",
+      metadata: {
+        source_session_id: "session-1",
+        source_entry_ids: ["entry-1"],
+        cutoff_at: "2026-06-10T18:30:00.000Z",
+        requested_by: "pico"
+      }
+    });
+
+    expect(calls).toEqual(["infer:false"]);
+  });
+
+  it("rejects missing local Ollama models before constructing the default runtime", async () => {
+    await expect(
+      createMem0OssClient(mem0EnabledConfig(), {
+        fetchOllamaTags: () =>
+          Promise.resolve({
+            models: [{ name: "qwen3.5:9b" }]
+          })
+      })
+    ).rejects.toThrow(
+      "pico Mem0 runtime requires local Ollama model nomic-embed-text to be available before Mem0 startup"
+    );
+  });
+
+  it("times out local Ollama model preflight when the model endpoint does not settle", async () => {
+    vi.useFakeTimers();
+
+    try {
+      const client = createMem0OssClient(mem0EnabledConfig(), {
+        fetchOllamaTags: () => new Promise<unknown>(() => undefined),
+        modelPreflightTimeoutMs: 25
+      });
+      const expectedRejection = expect(client).rejects.toThrow(
+        "pico Mem0 runtime Ollama model list for qwen3.5:9b timed out after 25 ms"
+      );
+
+      await vi.advanceTimersByTimeAsync(25);
+      await expectedRejection;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects disabled Mem0 config before constructing a runtime client", async () => {
+    await expect(
       createMem0OssClient(definePicoConfig({}).memory.mem0, {
         createMemory: () => {
           throw new Error("should not construct Mem0");
         }
       })
-    ).toThrow("pico Mem0 runtime requires memory.mem0.enabled=true");
+    ).rejects.toThrow("pico Mem0 runtime requires memory.mem0.enabled=true");
   });
 });

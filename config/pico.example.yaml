@@ -34,6 +34,7 @@ camera:
 vision:
   ollama:
     localBaseUrl: http://127.0.0.1:11434
+    maxImageEdgePixels: 512
     # Optional defaults: endpointId=windows-ollama-qwen3-5,
     # tunnel.kind=tailscale_ssh, tunnel.sshTarget=pico-vision-host.
   personDetection:

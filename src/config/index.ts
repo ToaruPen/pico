@@ -105,6 +105,7 @@ export type PicoOllamaConfig = {
     readonly sshTarget?: string;
   };
   readonly timeoutMs?: number;
+  readonly maxImageEdgePixels?: number;
 };
 
 export type PicoPersonDetectionConfig = {
@@ -184,6 +185,7 @@ export type LoadPicoConfigOptions = {
 const defaultConfigPath = "config/pico.local.yaml";
 const maxNodeTimeoutMs = 2_147_483_647;
 const maxTcpPort = 65_535;
+const maxOllamaImageEdgePixels = 4096;
 
 export const emptyPicoConfig: PicoConfig = deepFreeze({
   session: {
@@ -631,6 +633,12 @@ function defineOllamaConfig(input: Record<string, unknown>): PicoOllamaConfig {
       "timeoutMs",
       "pico config vision.ollama.timeoutMs",
       maxNodeTimeoutMs
+    ),
+    ...optionalBoundedPositiveIntegerProperty(
+      input,
+      "maxImageEdgePixels",
+      "pico config vision.ollama.maxImageEdgePixels",
+      maxOllamaImageEdgePixels
     )
   };
 }

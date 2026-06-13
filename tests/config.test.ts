@@ -81,6 +81,7 @@ vision:
       kind: tailscale_ssh
       sshTarget: pico-vision-host
     timeoutMs: 12000
+    maxImageEdgePixels: 512
   personDetection:
     enabled: true
     sourceCameraId: tapo-main
@@ -176,7 +177,8 @@ audit:
           auth: {
             headerName: "x-api-key",
             apiKey: "local-dev-key"
-          }
+          },
+          maxImageEdgePixels: 512
         },
         personDetection: {
           enabled: true,
@@ -537,6 +539,30 @@ camera:
         }
       })
     ).toThrow("pico config vision.ollama.localBaseUrl must use a local SSH tunnel URL");
+  });
+
+  it("rejects invalid Ollama image edge bounds at the config boundary", () => {
+    expect(() =>
+      definePicoConfig({
+        vision: {
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434",
+            maxImageEdgePixels: 0
+          }
+        }
+      })
+    ).toThrow("pico config vision.ollama.maxImageEdgePixels must be a positive integer");
+
+    expect(() =>
+      definePicoConfig({
+        vision: {
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434",
+            maxImageEdgePixels: 4097
+          }
+        }
+      })
+    ).toThrow("pico config vision.ollama.maxImageEdgePixels must be a positive integer <= 4096");
   });
 
   it("rejects unprotected Ollama tunnel kinds at the config boundary", () => {

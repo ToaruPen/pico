@@ -1,6 +1,8 @@
 #!/usr/bin/env jiti
 import { pathToFileURL } from "node:url";
 
+import sharp from "sharp";
+
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
 import {
   createFfmpegRtspSnapshotTransport,
@@ -23,6 +25,7 @@ export type CameraVlmSceneSmokeReport =
       readonly details: {
         readonly sourceId: string;
         readonly frameBytes: number;
+        readonly vlmFrameBytes: number;
         readonly mimeType: "image/jpeg";
         readonly endpointId: string;
         readonly model: "qwen3.5:9b";
@@ -39,6 +42,7 @@ export type CameraVlmSceneSmokeReport =
 type CameraVlmSceneSmokePlan = {
   readonly camera: Extract<ReturnType<typeof buildTapoRtspSmokePlan>, { readonly status: "run" }>;
   readonly vlm: Extract<ReturnType<typeof buildOllamaVlmSmokePlan>, { readonly status: "run" }>;
+  readonly maxImageEdgePixels: number;
   readonly sensitiveValues: readonly string[];
 };
 
@@ -50,8 +54,11 @@ type CapturedFrame = {
 
 export type CameraVlmSceneSmokeDependencies = {
   readonly captureFrame?: (plan: CameraVlmSceneSmokePlan) => Promise<CapturedFrame>;
+  readonly prepareFrame?: (frame: Uint8Array, maxImageEdgePixels: number) => Promise<Uint8Array>;
   readonly describeFrame?: (request: SceneDescriptionRequest) => Promise<SceneDescription>;
 };
+
+const defaultMaxImageEdgePixels = 512;
 
 export async function runCameraVlmSceneSmoke(
   config: PicoConfig = loadPicoConfigFromEnvironment(),
@@ -68,25 +75,20 @@ export async function runCameraVlmSceneSmoke(
   }
 
   const captureFrame = dependencies.captureFrame ?? captureFrameWithRtsp;
+  const prepareFrame = dependencies.prepareFrame ?? resizeJpegForVlm;
   const describeFrame =
     dependencies.describeFrame ?? createOllamaSceneDescriptionClient().describeScene;
 
   let captured: CapturedFrame;
+  let preparedFrame: Uint8Array;
   let scene: SceneDescription;
 
   try {
     captured = await captureSceneFrame(plan, captureFrame);
-    scene = await describeSceneFrame(plan, captured.frame, describeFrame);
+    preparedFrame = await prepareSceneFrame(plan, captured.frame, prepareFrame);
+    scene = await describeSceneFrame(plan, preparedFrame, describeFrame);
   } catch (error) {
-    if (error instanceof CameraVlmSceneSmokeError) {
-      return {
-        status: "failed",
-        provider: "tapo-rtsp+ollama",
-        reason: error.message
-      };
-    }
-
-    throw error;
+    return cameraVlmSceneFailureReport(error);
   }
 
   return {
@@ -95,6 +97,7 @@ export async function runCameraVlmSceneSmoke(
     details: {
       sourceId: captured.sourceId,
       frameBytes: captured.frame.byteLength,
+      vlmFrameBytes: preparedFrame.byteLength,
       mimeType: captured.mimeType,
       endpointId: scene.source.endpointId,
       model: scene.source.model,
@@ -102,6 +105,18 @@ export async function runCameraVlmSceneSmoke(
       scene
     }
   };
+}
+
+function cameraVlmSceneFailureReport(error: unknown): CameraVlmSceneSmokeReport {
+  if (error instanceof CameraVlmSceneSmokeError) {
+    return {
+      status: "failed",
+      provider: "tapo-rtsp+ollama",
+      reason: error.message
+    };
+  }
+
+  throw error;
 }
 
 export function cameraVlmSceneSmokeExitCode(report: CameraVlmSceneSmokeReport): number {
@@ -115,12 +130,7 @@ export function formatCameraVlmSceneSmokeFatalError(error: unknown, config?: Pic
 }
 
 function buildCameraVlmSceneSmokePlan(config: PicoConfig):
-  | {
-      readonly status: "run";
-      readonly camera: CameraVlmSceneSmokePlan["camera"];
-      readonly vlm: CameraVlmSceneSmokePlan["vlm"];
-      readonly sensitiveValues: readonly string[];
-    }
+  | ({ readonly status: "run" } & CameraVlmSceneSmokePlan)
   | {
       readonly status: "skip";
       readonly reason: string;
@@ -154,6 +164,7 @@ function buildCameraVlmSceneSmokePlan(config: PicoConfig):
     status: "run",
     camera: cameraPlan,
     vlm: vlmPlan,
+    maxImageEdgePixels: config.vision.ollama?.maxImageEdgePixels ?? defaultMaxImageEdgePixels,
     sensitiveValues: readSensitiveValues(config, cameraPlan.source.url)
   };
 }
@@ -167,6 +178,23 @@ async function captureSceneFrame(
   } catch (error) {
     throw new CameraVlmSceneSmokeError(
       `pico camera to VLM scene smoke capture failed: ${sanitizeMessage(
+        errorMessage(error),
+        plan.sensitiveValues
+      )}`
+    );
+  }
+}
+
+async function prepareSceneFrame(
+  plan: CameraVlmSceneSmokePlan,
+  frame: Uint8Array,
+  prepareFrame: (frame: Uint8Array, maxImageEdgePixels: number) => Promise<Uint8Array>
+): Promise<Uint8Array> {
+  try {
+    return await prepareFrame(frame, plan.maxImageEdgePixels);
+  } catch (error) {
+    throw new CameraVlmSceneSmokeError(
+      `pico camera to VLM scene smoke frame preparation failed: ${sanitizeMessage(
         errorMessage(error),
         plan.sensitiveValues
       )}`
@@ -195,6 +223,22 @@ async function describeSceneFrame(
       )}`
     );
   }
+}
+
+async function resizeJpegForVlm(
+  frame: Uint8Array,
+  maxImageEdgePixels: number
+): Promise<Uint8Array> {
+  return await sharp(frame)
+    .rotate()
+    .resize({
+      width: maxImageEdgePixels,
+      height: maxImageEdgePixels,
+      fit: "inside",
+      withoutEnlargement: true
+    })
+    .jpeg({ quality: 85 })
+    .toBuffer();
 }
 
 async function captureFrameWithRtsp(plan: CameraVlmSceneSmokePlan): Promise<CapturedFrame> {

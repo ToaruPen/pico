@@ -566,6 +566,40 @@ audit:
     });
   });
 
+  it("preserves audit OTel export failures when shutdown also fails", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-milestone-audit-otel-dual-failure-"));
+    const configPath = join(directory, "pico.local.yaml");
+    writeFileSync(
+      configPath,
+      `
+audit:
+  otel:
+    enabled: true
+    endpoint: http://127.0.0.1:4318/v1/logs
+`
+    );
+
+    const report = await runPicoMilestoneSmokeSuite(
+      { PICO_CONFIG_PATH: configPath },
+      {
+        ...configuredSectionDependencies(),
+        createAuditOtelExporter: () => ({
+          export: () => Promise.reject(new Error("collector unavailable")),
+          shutdown: () => Promise.reject(new Error("shutdown failed"))
+        })
+      }
+    );
+
+    expect(report.status).toBe("failed");
+    expect(requireSection(report, "memory_candidate").status).toBe("passed");
+    expect(requireSection(report, "audit_otel")).toEqual({
+      name: "audit_otel",
+      status: "failed",
+      provider: "structured-audit+otel",
+      reason: "collector unavailable; shutdown also failed: shutdown failed"
+    });
+  });
+
   it("classifies missing Pi Agent model credentials as an actionable skip", async () => {
     const report = await runPicoMilestoneSmokeSuite(
       {},
