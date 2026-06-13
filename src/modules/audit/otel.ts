@@ -114,8 +114,10 @@ class ReportingLogExporter implements LogRecordExporter {
   }
 
   export(records: ReadableLogRecord[], resultCallback: (result: ExportResult) => void): void {
+    const resolvePending = this.pendingResults.shift();
+
     this.delegate.export(records, (result) => {
-      this.pendingResults.shift()?.(result);
+      resolvePending?.(result);
       resultCallback(result);
     });
   }

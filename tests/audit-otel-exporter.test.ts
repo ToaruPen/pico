@@ -25,6 +25,22 @@ class RecordingLogExporter implements LogRecordExporter {
   }
 }
 
+class DeferredLogExporter implements LogRecordExporter {
+  readonly callbacks: ((result: ExportResult) => void)[] = [];
+
+  export(_records: ReadableLogRecord[], resultCallback: (result: ExportResult) => void): void {
+    this.callbacks.push(resultCallback);
+  }
+
+  forceFlush(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  shutdown(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+
 describe("OpenTelemetry audit exporter", () => {
   it("exports local audit events through the official logs SDK", async () => {
     const audit = createStructuredAuditLog();
@@ -92,5 +108,44 @@ describe("OpenTelemetry audit exporter", () => {
     await otel.shutdown();
 
     expect(audit.entries()).toEqual([event]);
+  });
+
+  it("matches concurrent export results to the originating audit event", async () => {
+    const audit = createStructuredAuditLog();
+    const exporter = new DeferredLogExporter();
+    const otel = createOpenTelemetryAuditExporter({
+      exporter,
+      serviceName: "pico-test"
+    });
+    const firstEvent = audit.record({
+      category: "memory_write",
+      name: "long_memory.mem0.first",
+      severity: "info",
+      occurredAt: "2026-06-10T09:00:00.000Z",
+      summary: "First export.",
+      attributes: {}
+    });
+    const secondEvent = audit.record({
+      category: "memory_write",
+      name: "long_memory.mem0.second",
+      severity: "info",
+      occurredAt: "2026-06-10T09:00:01.000Z",
+      summary: "Second export.",
+      attributes: {}
+    });
+
+    const firstExport = otel.export(firstEvent);
+    const secondExport = otel.export(secondEvent);
+
+    expect(exporter.callbacks).toHaveLength(2);
+    exporter.callbacks[1]?.({ code: ExportResultCode.SUCCESS });
+    exporter.callbacks[0]?.({
+      code: ExportResultCode.FAILED,
+      error: new Error("first export failed")
+    });
+
+    await expect(firstExport).rejects.toThrow("pico audit OTel export failed");
+    await expect(secondExport).resolves.toBeUndefined();
+    await otel.shutdown();
   });
 });

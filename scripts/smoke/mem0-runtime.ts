@@ -1,4 +1,5 @@
 #!/usr/bin/env jiti
+import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
@@ -30,27 +31,8 @@ export type Mem0RuntimeSmokeReport =
 
 export type Mem0RuntimeSmokeDependencies = {
   readonly createClient?: (config: PicoConfig["memory"]["mem0"]) => Mem0Client;
+  readonly createRunId?: () => string;
 };
-
-const scopeId = "pico-smoke";
-const smokeSession = {
-  sessionId: "mem0-smoke-session-2026-06-13",
-  cutoffAt: "2026-06-13T09:00:00.000Z",
-  sourceEntryIds: ["mem0-smoke-entry-1", "mem0-smoke-entry-2"],
-  entries: [
-    {
-      id: "mem0-smoke-entry-1",
-      role: "staff",
-      content: "雨の日は工作セットを早めに準備すると活動へ入りやすい。"
-    },
-    {
-      id: "mem0-smoke-entry-2",
-      role: "assistant",
-      content: "次の雨の日も工作セットを先に準備する候補として扱う。"
-    }
-  ],
-  requestedBy: "pico"
-} as const satisfies SessionMemoryCutoffInput;
 
 export async function runMem0RuntimeSmoke(
   config: PicoConfig = loadPicoConfigFromEnvironment(),
@@ -82,6 +64,9 @@ export async function runMem0RuntimeSmoke(
   ): Promise<Mem0RuntimeSmokeReport> {
     const audit = createStructuredAuditLog();
     const client = dependencies.createClient?.(mem0) ?? createMem0OssClient(mem0);
+    const runId = (dependencies.createRunId ?? randomUUID)();
+    const scopeId = `pico-smoke-${runId}`;
+    const smokeSession = createSmokeSession(runId);
     const provider = createMem0MemoryProvider({
       client,
       scopeId,
@@ -91,10 +76,13 @@ export async function runMem0RuntimeSmoke(
     let searchResultCount: number;
 
     try {
-      const searchResults = await provider.search("工作セット");
+      const searchResults = await provider.search(runId);
       searchResultCount = searchResults.length;
 
-      requireMem0SmokeResults(added.memoryIds.length, searchResultCount);
+      requireMem0SmokeResults(
+        added.memoryIds,
+        searchResults.map((memory) => memory.id)
+      );
     } finally {
       for (const memoryId of added.memoryIds) {
         await provider.delete(memoryId);
@@ -116,15 +104,39 @@ export async function runMem0RuntimeSmoke(
     };
   }
 
-  function requireMem0SmokeResults(memoryCount: number, searchResultCount: number): void {
-    if (memoryCount === 0) {
+  function requireMem0SmokeResults(
+    addedMemoryIds: readonly string[],
+    searchedMemoryIds: readonly string[]
+  ): void {
+    if (addedMemoryIds.length === 0) {
       throw new Error("Mem0 did not return any memory ids");
     }
 
-    if (searchResultCount === 0) {
-      throw new Error("Mem0 search returned no memories");
+    if (!searchedMemoryIds.some((id) => addedMemoryIds.includes(id))) {
+      throw new Error("Mem0 search did not return a memory created by this smoke run");
     }
   }
+}
+
+function createSmokeSession(runId: string): SessionMemoryCutoffInput {
+  return {
+    sessionId: `mem0-smoke-session-${runId}`,
+    cutoffAt: "2026-06-13T09:00:00.000Z",
+    sourceEntryIds: [`mem0-smoke-entry-1-${runId}`, `mem0-smoke-entry-2-${runId}`],
+    entries: [
+      {
+        id: `mem0-smoke-entry-1-${runId}`,
+        role: "staff",
+        content: `雨の日は工作セットを早めに準備すると活動へ入りやすい。 run:${runId}`
+      },
+      {
+        id: `mem0-smoke-entry-2-${runId}`,
+        role: "assistant",
+        content: `次の雨の日も工作セットを先に準備する候補として扱う。 run:${runId}`
+      }
+    ],
+    requestedBy: "pico"
+  };
 }
 
 export function mem0RuntimeSmokeExitCode(report: Mem0RuntimeSmokeReport): number {

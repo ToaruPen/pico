@@ -51,6 +51,10 @@ describe("Mem0 runtime smoke", () => {
     const client: Mem0Client = {
       add: (request: Mem0AddRequest): Promise<Mem0AddResponse> => {
         calls.push(`add:${request.scopeId}:${request.messages.length}`);
+        expect(request.metadata.source_session_id).toBe("mem0-smoke-session-test-run");
+        expect(request.messages.every((message) => message.content.includes("test-run"))).toBe(
+          true
+        );
 
         return Promise.resolve({
           memories: [{ id: "mem0-smoke-1" }]
@@ -77,14 +81,15 @@ describe("Mem0 runtime smoke", () => {
     };
 
     const report = await runMem0RuntimeSmoke(enabledConfig(), {
-      createClient: () => client
+      createClient: () => client,
+      createRunId: () => "test-run"
     });
 
     expect(report).toEqual({
       status: "passed",
       provider: "mem0-oss",
       details: {
-        scopeId: "pico-smoke",
+        scopeId: "pico-smoke-test-run",
         memoryCount: 1,
         searchResultCount: 1,
         auditEventCount: 3,
@@ -92,8 +97,8 @@ describe("Mem0 runtime smoke", () => {
       }
     });
     expect(calls).toEqual([
-      "add:pico-smoke:2",
-      "search:pico-smoke:工作セット",
+      "add:pico-smoke-test-run:2",
+      "search:pico-smoke-test-run:test-run",
       "delete:mem0-smoke-1"
     ]);
     expect(JSON.stringify(report)).not.toContain("雨の日は工作セット");
@@ -106,7 +111,8 @@ describe("Mem0 runtime smoke", () => {
         add: () => Promise.reject(new Error("qdrant unavailable")),
         search: () => Promise.resolve({ memories: [] }),
         delete: () => Promise.resolve()
-      })
+      }),
+      createRunId: () => "test-run"
     });
 
     expect(report).toEqual({
@@ -117,7 +123,7 @@ describe("Mem0 runtime smoke", () => {
     expect(mem0RuntimeSmokeExitCode(report)).toBe(1);
   });
 
-  it("deletes added smoke memories when search validation fails", async () => {
+  it("fails when search does not return a memory created by this run", async () => {
     const calls: string[] = [];
     const report = await runMem0RuntimeSmoke(enabledConfig(), {
       createClient: () => ({
@@ -125,19 +131,30 @@ describe("Mem0 runtime smoke", () => {
           Promise.resolve({
             memories: [{ id: "mem0-smoke-1" }]
           }),
-        search: () => Promise.resolve({ memories: [] }),
+        search: () =>
+          Promise.resolve({
+            memories: [
+              {
+                id: "stale-memory",
+                content: "stale memory",
+                score: 0.9
+              }
+            ]
+          }),
         delete: (memoryId) => {
           calls.push(`delete:${memoryId}`);
 
           return Promise.resolve();
         }
-      })
+      }),
+      createRunId: () => "test-run"
     });
 
     expect(report).toEqual({
       status: "failed",
       provider: "mem0-oss",
-      reason: "pico Mem0 runtime smoke failed: Mem0 search returned no memories"
+      reason:
+        "pico Mem0 runtime smoke failed: Mem0 search did not return a memory created by this smoke run"
     });
     expect(calls).toEqual(["delete:mem0-smoke-1"]);
   });

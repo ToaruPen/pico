@@ -323,30 +323,35 @@ async function runMemoryAndAuditSections(
         reviewedAt: "2026-06-10T18:35:00.000Z",
         note: "Milestone smoke reviewed memory candidate."
       });
-      const auditEntries = audit.entries();
-      const otelRecords = auditEntries.map(toOpenTelemetryLogRecord);
-      const firstOtelRecord = validateAuditOtelRecords(auditEntries.length, otelRecords);
-      const auditOtelSection = await buildAuditOtelSection(
-        config,
-        dependencies,
-        auditEntries,
-        otelRecords,
-        firstOtelRecord
-      );
       assertPromotedMemorySearch(path);
+      const memoryCandidateSection: PicoMilestoneSmokeSectionReport = {
+        name: "memory_candidate",
+        status: "passed",
+        provider: "sqlite",
+        details: {
+          promotedMemoryId: promoted.id,
+          category: promoted.category
+        }
+      };
+      const auditEntries = audit.entries();
+      const auditOtelSection = await captureSection(
+        "audit_otel",
+        auditOtelProviderName(config),
+        async () => {
+          const otelRecords = auditEntries.map(toOpenTelemetryLogRecord);
+          const firstOtelRecord = validateAuditOtelRecords(auditEntries.length, otelRecords);
 
-      return [
-        {
-          name: "memory_candidate",
-          status: "passed",
-          provider: "sqlite",
-          details: {
-            promotedMemoryId: promoted.id,
-            category: promoted.category
-          }
-        },
-        auditOtelSection
-      ];
+          return buildAuditOtelSection(
+            config,
+            dependencies,
+            auditEntries,
+            otelRecords,
+            firstOtelRecord
+          );
+        }
+      );
+
+      return [memoryCandidateSection, auditOtelSection];
     } finally {
       candidates.close();
     }
@@ -391,6 +396,12 @@ function passedStructuredAuditSection(
     provider: "structured-audit",
     details
   };
+}
+
+function auditOtelProviderName(
+  config: PicoConfig | undefined
+): "structured-audit" | "structured-audit+otel" {
+  return config?.audit.otel.enabled === true ? "structured-audit+otel" : "structured-audit";
 }
 
 async function exportAuditOtelSection(
