@@ -148,6 +148,26 @@ describe("camera to VLM scene smoke", () => {
     });
   });
 
+  it("fails clearly when VLM frame preparation fails", async () => {
+    const report = await runCameraVlmSceneSmoke(configuredPicoConfig(), {
+      captureFrame: () =>
+        Promise.resolve({
+          sourceId: "tapo-rtsp",
+          mimeType: "image/jpeg",
+          frame: jpegFrame
+        }),
+      prepareFrame: () => Promise.reject(new Error("prepareFrame failed")),
+      describeFrame: () => Promise.resolve(scene)
+    });
+
+    expect(report).toEqual({
+      status: "failed",
+      provider: "tapo-rtsp+ollama",
+      reason: "pico camera to VLM scene smoke frame preparation failed: prepareFrame failed"
+    });
+    expect(cameraVlmSceneSmokeExitCode(report)).toBe(1);
+  });
+
   it("fails clearly when camera capture fails", async () => {
     const report = await runCameraVlmSceneSmoke(configuredPicoConfig(), {
       captureFrame: () => Promise.reject(new Error("camera capture failed")),

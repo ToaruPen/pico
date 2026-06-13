@@ -95,16 +95,18 @@ async function assertLocalOllamaModelsAvailable(
   fetchTags: (localBaseUrl: string, signal: AbortSignal) => Promise<unknown>,
   timeoutMs: number
 ): Promise<void> {
-  await assertLocalOllamaModelAvailable(
-    requireMem0Model(config.llm, "memory.mem0.llm"),
-    fetchTags,
-    timeoutMs
-  );
-  await assertLocalOllamaModelAvailable(
-    requireMem0Model(config.embedder, "memory.mem0.embedder"),
-    fetchTags,
-    timeoutMs
-  );
+  await Promise.all([
+    assertLocalOllamaModelAvailable(
+      requireMem0Model(config.llm, "memory.mem0.llm"),
+      fetchTags,
+      timeoutMs
+    ),
+    assertLocalOllamaModelAvailable(
+      requireMem0Model(config.embedder, "memory.mem0.embedder"),
+      fetchTags,
+      timeoutMs
+    )
+  ]);
 }
 
 async function assertLocalOllamaModelAvailable(
