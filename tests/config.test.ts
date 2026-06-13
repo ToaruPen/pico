@@ -81,6 +81,7 @@ vision:
       kind: tailscale_ssh
       sshTarget: pico-vision-host
     timeoutMs: 12000
+    maxImageEdgePixels: 512
   personDetection:
     enabled: true
     sourceCameraId: tapo-main
@@ -115,6 +116,7 @@ voice:
 memory:
   mem0:
     enabled: true
+    infer: false
     historyDbPath: /var/lib/pico/mem0-history.sqlite
     vectorStore:
       provider: qdrant
@@ -128,6 +130,13 @@ memory:
       provider: ollama
       localBaseUrl: http://127.0.0.1:11434
       model: nomic-embed-text
+      embeddingDims: 768
+audit:
+  otel:
+    enabled: true
+    endpoint: http://127.0.0.1:4318/v1/logs
+    serviceName: pico
+    timeoutMs: 5000
 `);
 
     expect(loadPicoConfig({ path })).toMatchObject({
@@ -168,7 +177,8 @@ memory:
           auth: {
             headerName: "x-api-key",
             apiKey: "local-dev-key"
-          }
+          },
+          maxImageEdgePixels: 512
         },
         personDetection: {
           enabled: true,
@@ -201,6 +211,7 @@ memory:
       memory: {
         mem0: {
           enabled: true,
+          infer: false,
           historyDbPath: "/var/lib/pico/mem0-history.sqlite",
           vectorStore: {
             provider: "qdrant",
@@ -215,8 +226,17 @@ memory:
           embedder: {
             provider: "ollama",
             localBaseUrl: "http://127.0.0.1:11434",
-            model: "nomic-embed-text"
+            model: "nomic-embed-text",
+            embeddingDims: 768
           }
+        }
+      },
+      audit: {
+        otel: {
+          enabled: true,
+          endpoint: "http://127.0.0.1:4318/v1/logs",
+          serviceName: "pico",
+          timeoutMs: 5000
         }
       }
     });
@@ -240,8 +260,26 @@ memory:
         mem0: {
           enabled: false
         }
+      },
+      audit: {
+        otel: {
+          enabled: false
+        }
       }
     });
+  });
+
+  it("rejects non-local audit OTel Collector endpoints", () => {
+    expect(() =>
+      definePicoConfig({
+        audit: {
+          otel: {
+            enabled: true,
+            endpoint: "https://otel.example.com/v1/logs"
+          }
+        }
+      })
+    ).toThrow("pico config audit.otel.endpoint must use a local Collector URL");
   });
 
   it("uses PICO_CONFIG_PATH as the only config environment selector", () => {
@@ -501,6 +539,30 @@ camera:
         }
       })
     ).toThrow("pico config vision.ollama.localBaseUrl must use a local SSH tunnel URL");
+  });
+
+  it("rejects invalid Ollama image edge bounds at the config boundary", () => {
+    expect(() =>
+      definePicoConfig({
+        vision: {
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434",
+            maxImageEdgePixels: 0
+          }
+        }
+      })
+    ).toThrow("pico config vision.ollama.maxImageEdgePixels must be a positive integer");
+
+    expect(() =>
+      definePicoConfig({
+        vision: {
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434",
+            maxImageEdgePixels: 4097
+          }
+        }
+      })
+    ).toThrow("pico config vision.ollama.maxImageEdgePixels must be a positive integer <= 4096");
   });
 
   it("rejects unprotected Ollama tunnel kinds at the config boundary", () => {

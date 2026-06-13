@@ -72,6 +72,12 @@ function configuredSectionDependencies(): PicoMilestoneSmokeDependencies {
         status: "skipped",
         provider: "tapo-rtsp+ollama",
         reason: "Camera config is not configured."
+      }),
+    runMem0RuntimeSmoke: () =>
+      Promise.resolve({
+        status: "skipped",
+        provider: "mem0-oss",
+        reason: "Mem0 runtime is not configured."
       })
   };
 }
@@ -86,6 +92,7 @@ function expectMilestoneSectionNames(report: PicoMilestoneSmokeReport): void {
     "person_detection",
     "ollama_vlm",
     "camera_vlm_scene",
+    "mem0_runtime",
     "memory_candidate",
     "audit_otel"
   ]);
@@ -167,6 +174,12 @@ describe("pico milestone smoke suite", () => {
             status: "skipped",
             provider: "tapo-rtsp+ollama",
             reason: "Camera config is not configured."
+          }),
+        runMem0RuntimeSmoke: () =>
+          Promise.resolve({
+            status: "skipped",
+            provider: "mem0-oss",
+            reason: "Mem0 runtime is not configured."
           })
       }
     );
@@ -277,12 +290,21 @@ vision:
             provider: "tapo-rtsp+ollama",
             reason: "Camera config is not configured."
           });
+        },
+        runMem0RuntimeSmoke: (config) => {
+          observedConfigs.push(config);
+
+          return Promise.resolve({
+            status: "skipped",
+            provider: "mem0-oss",
+            reason: "Mem0 runtime is not configured."
+          });
         }
       }
     );
 
     expect(report.status).toBe("skipped");
-    expect(observedConfigs).toHaveLength(6);
+    expect(observedConfigs).toHaveLength(7);
     expect(new Set(observedConfigs).size).toBe(1);
     expect(observedConfigs[0]?.camera.tapo?.host).toBe("192.168.10.25");
     expect(observedConfigs[0]?.vision.ollama?.localBaseUrl).toBe("http://127.0.0.1:11434");
@@ -320,6 +342,96 @@ vision:
     expectMemoryAndAuditEvidence(report);
   });
 
+  it("reports audit OTel config load failures as audit_otel failures", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-milestone-invalid-audit-config-"));
+    const configPath = join(directory, "pico.local.yaml");
+    writeFileSync(
+      configPath,
+      `
+audit:
+  otel:
+    enabled: true
+    endpoint: https://otel.example.com/v1/logs
+`
+    );
+
+    const report = await runPicoMilestoneSmokeSuite(
+      { PICO_CONFIG_PATH: configPath },
+      {
+        ...configuredSectionDependencies(),
+        runPiRuntimeCommand: () => piPassed
+      }
+    );
+
+    const reason =
+      "pico config load failed: pico config audit.otel.endpoint must use a local Collector URL";
+    expect(report.status).toBe("failed");
+    expect(requireSection(report, "memory_candidate").status).toBe("passed");
+    expect(requireSection(report, "audit_otel")).toEqual({
+      name: "audit_otel",
+      status: "failed",
+      provider: "structured-audit+otel",
+      reason
+    });
+  });
+
+  it("maps a passing Mem0 runtime smoke section into the milestone report", async () => {
+    const report = await runPicoMilestoneSmokeSuite(
+      {},
+      {
+        ...configuredSectionDependencies(),
+        runMem0RuntimeSmoke: () =>
+          Promise.resolve({
+            status: "passed",
+            provider: "mem0-oss",
+            details: {
+              scopeId: "pico-smoke-test",
+              memoryCount: 1,
+              searchResultCount: 1,
+              auditEventCount: 3,
+              otelRecordCount: 3
+            }
+          })
+      }
+    );
+
+    expect(requireSection(report, "mem0_runtime")).toEqual({
+      name: "mem0_runtime",
+      status: "passed",
+      provider: "mem0-oss",
+      details: {
+        scopeId: "pico-smoke-test",
+        memoryCount: 1,
+        searchResultCount: 1,
+        auditEventCount: 3,
+        otelRecordCount: 3
+      }
+    });
+  });
+
+  it("maps a failed Mem0 runtime smoke section into the milestone report status", async () => {
+    const report = await runPicoMilestoneSmokeSuite(
+      {},
+      {
+        ...configuredSectionDependencies(),
+        runMem0RuntimeSmoke: () =>
+          Promise.resolve({
+            status: "failed",
+            provider: "mem0-oss",
+            reason: "qdrant unavailable"
+          })
+      }
+    );
+
+    expect(report.status).toBe("failed");
+    expect(requireSection(report, "mem0_runtime")).toEqual({
+      name: "mem0_runtime",
+      status: "failed",
+      provider: "mem0-oss",
+      reason: "qdrant unavailable"
+    });
+  });
+
   it("normalizes thrown Pi runtime errors into a failed section", async () => {
     const report = await runPicoMilestoneSmokeSuite(
       {},
@@ -350,6 +462,141 @@ vision:
       eventName: "long_memory.candidate_job.enqueued",
       eventCount: 4,
       otelRecordCount: 4
+    });
+  });
+
+  it("exports audit records to the configured OTel Collector path", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-milestone-audit-otel-"));
+    const configPath = join(directory, "pico.local.yaml");
+    writeFileSync(
+      configPath,
+      `
+audit:
+  otel:
+    enabled: true
+    endpoint: http://127.0.0.1:4318/v1/logs
+    serviceName: pico-test
+    timeoutMs: 500
+`
+    );
+    const exportedEvents: string[] = [];
+    let shutdownCalled = false;
+
+    const report = await runPicoMilestoneSmokeSuite(
+      { PICO_CONFIG_PATH: configPath },
+      {
+        ...configuredSectionDependencies(),
+        createAuditOtelExporter: (config) => {
+          expect(config).toMatchObject({
+            endpoint: "http://127.0.0.1:4318/v1/logs",
+            serviceName: "pico-test",
+            timeoutMs: 500
+          });
+
+          return {
+            export: (event) => {
+              exportedEvents.push(event.name);
+
+              return Promise.resolve();
+            },
+            shutdown: () => {
+              shutdownCalled = true;
+
+              return Promise.resolve();
+            }
+          };
+        }
+      }
+    );
+    const auditSection = requireSection(report, "audit_otel");
+
+    expect(auditSection.status).toBe("passed");
+    expect(auditSection.provider).toBe("structured-audit+otel");
+    expect(auditSection.details).toMatchObject({
+      eventCount: 4,
+      exportedOtelRecordCount: 4
+    });
+    expect(exportedEvents).toEqual([
+      "long_memory.candidate_job.enqueued",
+      "long_memory.candidate.created",
+      "long_memory.candidate_job.processed",
+      "long_memory.candidate.promoted"
+    ]);
+    expect(shutdownCalled).toBe(true);
+  });
+
+  it("keeps the memory candidate section passed when OTel export fails", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-milestone-audit-otel-failure-"));
+    const configPath = join(directory, "pico.local.yaml");
+    writeFileSync(
+      configPath,
+      `
+audit:
+  otel:
+    enabled: true
+    endpoint: http://127.0.0.1:4318/v1/logs
+`
+    );
+
+    const report = await runPicoMilestoneSmokeSuite(
+      { PICO_CONFIG_PATH: configPath },
+      {
+        ...configuredSectionDependencies(),
+        createAuditOtelExporter: () => ({
+          export: () => Promise.reject(new Error("collector unavailable")),
+          shutdown: () => Promise.resolve()
+        })
+      }
+    );
+
+    expect(report.status).toBe("failed");
+    expect(requireSection(report, "memory_candidate")).toMatchObject({
+      status: "passed",
+      provider: "sqlite",
+      details: {
+        promotedMemoryId: 1,
+        category: "care_continuity"
+      }
+    });
+    expect(requireSection(report, "audit_otel")).toEqual({
+      name: "audit_otel",
+      status: "failed",
+      provider: "structured-audit+otel",
+      reason: "collector unavailable"
+    });
+  });
+
+  it("preserves audit OTel export failures when shutdown also fails", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-milestone-audit-otel-dual-failure-"));
+    const configPath = join(directory, "pico.local.yaml");
+    writeFileSync(
+      configPath,
+      `
+audit:
+  otel:
+    enabled: true
+    endpoint: http://127.0.0.1:4318/v1/logs
+`
+    );
+
+    const report = await runPicoMilestoneSmokeSuite(
+      { PICO_CONFIG_PATH: configPath },
+      {
+        ...configuredSectionDependencies(),
+        createAuditOtelExporter: () => ({
+          export: () => Promise.reject(new Error("collector unavailable")),
+          shutdown: () => Promise.reject(new Error("shutdown failed"))
+        })
+      }
+    );
+
+    expect(report.status).toBe("failed");
+    expect(requireSection(report, "memory_candidate").status).toBe("passed");
+    expect(requireSection(report, "audit_otel")).toEqual({
+      name: "audit_otel",
+      status: "failed",
+      provider: "structured-audit+otel",
+      reason: "collector unavailable; shutdown also failed: shutdown failed"
     });
   });
 
@@ -394,6 +641,12 @@ vision:
             status: "skipped",
             provider: "tapo-rtsp+ollama",
             reason: "Camera config is not configured."
+          }),
+        runMem0RuntimeSmoke: () =>
+          Promise.resolve({
+            status: "skipped",
+            provider: "mem0-oss",
+            reason: "Mem0 runtime is not configured."
           })
       }
     );

@@ -8,6 +8,9 @@ export type PicoConfig = DeepReadonly<{
   memory: {
     mem0: PicoMem0Config;
   };
+  audit: {
+    otel: PicoAuditOtelConfig;
+  };
   camera: {
     tapo?: PicoTapoConfig;
     personFollow: PicoPersonFollowConfig;
@@ -41,6 +44,7 @@ export type PicoSessionConfig = {
 
 export type PicoMem0Config = {
   readonly enabled: boolean;
+  readonly infer?: boolean;
   readonly historyDbPath?: string;
   readonly vectorStore?: PicoMem0VectorStoreConfig;
   readonly llm?: PicoMem0ModelConfig;
@@ -57,6 +61,14 @@ export type PicoMem0ModelConfig = {
   readonly provider: "ollama";
   readonly localBaseUrl: string;
   readonly model: string;
+  readonly embeddingDims?: number;
+};
+
+export type PicoAuditOtelConfig = {
+  readonly enabled: boolean;
+  readonly endpoint?: string;
+  readonly serviceName?: string;
+  readonly timeoutMs?: number;
 };
 
 export type PicoTapoConfig = {
@@ -93,6 +105,7 @@ export type PicoOllamaConfig = {
     readonly sshTarget?: string;
   };
   readonly timeoutMs?: number;
+  readonly maxImageEdgePixels?: number;
 };
 
 export type PicoPersonDetectionConfig = {
@@ -172,6 +185,7 @@ export type LoadPicoConfigOptions = {
 const defaultConfigPath = "config/pico.local.yaml";
 const maxNodeTimeoutMs = 2_147_483_647;
 const maxTcpPort = 65_535;
+const maxOllamaImageEdgePixels = 4096;
 
 export const emptyPicoConfig: PicoConfig = deepFreeze({
   session: {
@@ -188,6 +202,11 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
   },
   memory: {
     mem0: {
+      enabled: false
+    }
+  },
+  audit: {
+    otel: {
       enabled: false
     }
   },
@@ -241,6 +260,7 @@ export function definePicoConfig(input: unknown): PicoConfig {
   return deepFreeze({
     session: defineSessionSection(root),
     memory: defineMemorySection(root),
+    audit: defineAuditSection(root),
     camera: defineCameraSection(root),
     vision: defineVisionSection(root),
     voice: defineVoiceSection(root)
@@ -334,6 +354,7 @@ function defineMem0Config(input: Record<string, unknown> | undefined): PicoMem0C
   if (enabled) {
     return {
       enabled,
+      ...optionalBooleanProperty(input, "infer", "pico config memory.mem0.infer"),
       historyDbPath: requireString(historyDatabasePath, "pico config memory.mem0.historyDbPath"),
       vectorStore: defineMem0VectorStore(
         requireRecord(vectorStore, "pico config memory.mem0.vectorStore")
@@ -348,6 +369,7 @@ function defineMem0Config(input: Record<string, unknown> | undefined): PicoMem0C
 
   return {
     enabled,
+    ...optionalBooleanProperty(input, "infer", "pico config memory.mem0.infer"),
     ...(historyDatabasePath === undefined ? {} : { historyDbPath: historyDatabasePath }),
     ...(vectorStore === undefined ? {} : { vectorStore: defineMem0VectorStore(vectorStore) }),
     ...(llm === undefined ? {} : { llm: defineMem0Model(llm, "llm") }),
@@ -391,7 +413,61 @@ function defineMem0Model(
       input.localBaseUrl,
       `pico config memory.mem0.${key}.localBaseUrl`
     ),
-    model: requireString(input.model, `pico config memory.mem0.${key}.model`)
+    model: requireString(input.model, `pico config memory.mem0.${key}.model`),
+    ...(key === "embedder"
+      ? optionalPositiveIntegerProperty(
+          input,
+          "embeddingDims",
+          "pico config memory.mem0.embedder.embeddingDims"
+        )
+      : {})
+  };
+}
+
+function defineAuditSection(root: Record<string, unknown>): PicoConfig["audit"] {
+  const audit = readOptionalRecord(root.audit, "pico config audit");
+  const otel = readOptionalRecord(audit?.otel, "pico config audit.otel");
+
+  return {
+    otel: defineAuditOtelConfig(otel)
+  };
+}
+
+function defineAuditOtelConfig(input: Record<string, unknown> | undefined): PicoAuditOtelConfig {
+  if (input === undefined) {
+    return {
+      enabled: false
+    };
+  }
+
+  const enabled = readOptionalBoolean(input.enabled, "pico config audit.otel.enabled") ?? false;
+  const endpoint = readOptionalAuditOtelEndpoint(input.endpoint);
+
+  if (enabled) {
+    return {
+      enabled,
+      endpoint: requireString(endpoint, "pico config audit.otel.endpoint"),
+      serviceName:
+        readOptionalString(input.serviceName, "pico config audit.otel.serviceName") ?? "pico",
+      ...optionalBoundedPositiveIntegerProperty(
+        input,
+        "timeoutMs",
+        "pico config audit.otel.timeoutMs",
+        maxNodeTimeoutMs
+      )
+    };
+  }
+
+  return {
+    enabled,
+    ...(endpoint === undefined ? {} : { endpoint }),
+    ...optionalStringProperty(input, "serviceName", "pico config audit.otel.serviceName"),
+    ...optionalBoundedPositiveIntegerProperty(
+      input,
+      "timeoutMs",
+      "pico config audit.otel.timeoutMs",
+      maxNodeTimeoutMs
+    )
   };
 }
 
@@ -557,6 +633,12 @@ function defineOllamaConfig(input: Record<string, unknown>): PicoOllamaConfig {
       "timeoutMs",
       "pico config vision.ollama.timeoutMs",
       maxNodeTimeoutMs
+    ),
+    ...optionalBoundedPositiveIntegerProperty(
+      input,
+      "maxImageEdgePixels",
+      "pico config vision.ollama.maxImageEdgePixels",
+      maxOllamaImageEdgePixels
     )
   };
 }
@@ -751,6 +833,16 @@ function optionalStringProperty(
   return value === undefined ? {} : { [key]: value };
 }
 
+function optionalBooleanProperty(
+  input: Record<string, unknown>,
+  key: string,
+  label: string
+): Record<string, boolean> {
+  const value = readOptionalBoolean(input[key], label);
+
+  return value === undefined ? {} : { [key]: value };
+}
+
 function optionalPositiveIntegerProperty(
   input: Record<string, unknown>,
   key: string,
@@ -873,6 +965,49 @@ function requireLocalBaseUrl(value: unknown, label: string): string {
   requireLocalTunnelUrl(parsedUrl, label);
 
   return localBaseUrl;
+}
+
+function readOptionalAuditOtelEndpoint(value: unknown): string | undefined {
+  const endpoint = readOptionalString(value, "pico config audit.otel.endpoint");
+
+  if (endpoint === undefined) {
+    return undefined;
+  }
+
+  if (!URL.canParse(endpoint)) {
+    throw new Error("pico config audit.otel.endpoint must be a valid URL");
+  }
+
+  const parsedUrl = new URL(endpoint);
+
+  requireHttpUrl(parsedUrl, "pico config audit.otel.endpoint");
+  requireAuditOtelEndpointShape(parsedUrl);
+
+  return endpoint;
+}
+
+function requireAuditOtelEndpointShape(parsedUrl: URL): void {
+  if (parsedUrl.username !== "" || parsedUrl.password !== "") {
+    throw new Error("pico config audit.otel.endpoint must not include credentials");
+  }
+
+  if (parsedUrl.pathname !== "/v1/logs") {
+    throw new Error("pico config audit.otel.endpoint must end with /v1/logs");
+  }
+
+  if (parsedUrl.search !== "" || parsedUrl.hash !== "") {
+    throw new Error("pico config audit.otel.endpoint must not include query or fragment");
+  }
+
+  requireAuditOtelLoopbackHost(parsedUrl.hostname);
+}
+
+function requireAuditOtelLoopbackHost(hostname: string): void {
+  const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+  if (!loopbackHosts.has(hostname)) {
+    throw new Error("pico config audit.otel.endpoint must use a local Collector URL");
+  }
 }
 
 function readOptionalString(value: unknown, label = "pico config value"): string | undefined {

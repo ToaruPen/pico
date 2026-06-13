@@ -218,6 +218,34 @@ describe("bounded vision scene description", () => {
     }
   });
 
+  it("uses the request timeout when one is provided", async () => {
+    vi.useFakeTimers();
+    let abortObserved = false;
+    const slowFetch: typeof fetch = (_input, init) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          abortObserved = true;
+          reject(new DOMException("aborted", "AbortError"));
+        });
+      });
+
+    try {
+      const resultPromise = describeScene({ ...sceneRequest, timeoutMs: 45_000 }, slowFetch);
+      const rejectionExpectation = expect(resultPromise).rejects.toThrow(
+        "pico vision Ollama request timed out after 45000 ms"
+      );
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(abortObserved).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(abortObserved).toBe(true);
+      await rejectionExpectation;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects Ollama scene requests on timeout even when the fetch adapter ignores abort", async () => {
     vi.useFakeTimers();
     const ignoringFetch: typeof fetch = () => new Promise<Response>(() => undefined);
@@ -231,7 +259,7 @@ describe("bounded vision scene description", () => {
       await vi.advanceTimersByTimeAsync(30_000);
       await Promise.resolve();
 
-      expect(settled).toHaveBeenCalledWith("pico vision Ollama request timed out");
+      expect(settled).toHaveBeenCalledWith("pico vision Ollama request timed out after 30000 ms");
     } finally {
       vi.useRealTimers();
     }
@@ -252,7 +280,7 @@ describe("bounded vision scene description", () => {
       await vi.advanceTimersByTimeAsync(30_000);
       await Promise.resolve();
 
-      expect(settled).toHaveBeenCalledWith("pico vision Ollama request timed out");
+      expect(settled).toHaveBeenCalledWith("pico vision Ollama request timed out after 30000 ms");
     } finally {
       vi.useRealTimers();
     }
@@ -278,7 +306,7 @@ describe("bounded vision scene description", () => {
       await vi.advanceTimersByTimeAsync(31_000);
       await Promise.resolve();
 
-      expect(settled).toHaveBeenCalledWith("pico vision Ollama request timed out");
+      expect(settled).toHaveBeenCalledWith("pico vision Ollama request timed out after 30000 ms");
     } finally {
       vi.useRealTimers();
     }
