@@ -97,11 +97,14 @@ export type OnnxPersonDetectionSession = {
 export type OnnxPersonDetectionRuntime = {
   readonly Tensor: new (type: "float32", data: Float32Array, dims: readonly number[]) => unknown;
   readonly InferenceSession: {
-    readonly create: (modelPath: string) => Promise<OnnxPersonDetectionSession>;
+    readonly create: (modelPath: string, options?: unknown) => Promise<OnnxPersonDetectionSession>;
   };
 };
 
-export type OnnxPersonDetectionOutputLayout = "xyxy_score_class" | "cxcywh_score_class";
+export type OnnxPersonDetectionOutputLayout =
+  | "xyxy_score_class"
+  | "cxcywh_score_class"
+  | "yolox_coco_raw";
 
 export type OnnxPersonDetectionCoordinateScale = "pixel" | "normalized";
 
@@ -116,6 +119,15 @@ export type OnnxPersonDetectionModelOptions = {
   readonly coordinateScale?: OnnxPersonDetectionCoordinateScale;
   readonly confidenceThreshold?: number;
   readonly personClassId?: number;
+  readonly nmsIouThreshold?: number;
+  readonly sessionOptions?: unknown;
+};
+
+export type CoremlPersonDetectionModelOptions = Omit<
+  OnnxPersonDetectionModelOptions,
+  "outputLayout" | "sessionOptions"
+> & {
+  readonly coremlFlags?: number;
 };
 
 type ResolvedOnnxPersonDetectionOptions = {
@@ -126,6 +138,7 @@ type ResolvedOnnxPersonDetectionOptions = {
   readonly coordinateScale: OnnxPersonDetectionCoordinateScale;
   readonly confidenceThreshold: number;
   readonly personClassId: number;
+  readonly nmsIouThreshold: number;
 };
 
 type OnnxDetectionRow = {
@@ -155,13 +168,14 @@ export type PersonDetectionStream = {
 };
 
 const nodeRequire = createRequire(import.meta.url);
+const defaultCoremlFlags = 18;
 
 export async function createOnnxPersonDetectionModel(
   options: OnnxPersonDetectionModelOptions
 ): Promise<PersonDetectionModel> {
   const resolved = resolveOnnxPersonDetectionOptions(options);
   const runtime = options.runtime ?? loadOnnxRuntime();
-  const session = await runtime.InferenceSession.create(resolved.modelPath);
+  const session = await runtime.InferenceSession.create(resolved.modelPath, options.sessionOptions);
   const inputName = resolveSessionName(
     options.inputName,
     session.inputNames,
@@ -190,6 +204,29 @@ export async function createOnnxPersonDetectionModel(
   };
 }
 
+export function createCoremlPersonDetectionModel(
+  options: CoremlPersonDetectionModelOptions
+): Promise<PersonDetectionModel> {
+  const coremlFlags = requireNonNegativeInteger(
+    options.coremlFlags ?? defaultCoremlFlags,
+    "pico person detection CoreML flags"
+  );
+
+  return createOnnxPersonDetectionModel({
+    ...options,
+    outputLayout: "yolox_coco_raw",
+    coordinateScale: options.coordinateScale ?? "pixel",
+    sessionOptions: {
+      executionProviders: [
+        {
+          name: "coreml",
+          coreMlFlags: coremlFlags
+        }
+      ]
+    }
+  });
+}
+
 function resolveOnnxPersonDetectionOptions(
   options: OnnxPersonDetectionModelOptions
 ): ResolvedOnnxPersonDetectionOptions {
@@ -209,8 +246,10 @@ function resolveOnnxPersonDetectionOptions(
   const coordinateScale = options.coordinateScale ?? "pixel";
   const confidenceThreshold = options.confidenceThreshold ?? 0;
   const personClassId = options.personClassId ?? 0;
+  const nmsIouThreshold = options.nmsIouThreshold ?? 0.45;
   requireConfidenceThreshold(confidenceThreshold);
   requireNonNegativeInteger(personClassId, "pico person detection ONNX person class id");
+  requireNmsIouThreshold(nmsIouThreshold);
 
   return {
     modelPath,
@@ -219,7 +258,8 @@ function resolveOnnxPersonDetectionOptions(
     outputLayout,
     coordinateScale,
     confidenceThreshold,
-    personClassId
+    personClassId,
+    nmsIouThreshold
   };
 }
 
@@ -399,12 +439,16 @@ function parseOnnxPersonDetections(input: {
   readonly frameHeight: number;
   readonly personClassId: number;
   readonly confidenceThreshold: number;
+  readonly nmsIouThreshold: number;
 }): readonly PersonDetectionInput[] {
   const rows = toOnnxRows(input.output);
-
-  return rows
+  const detections = rows
     .map((row) => parseOnnxPersonDetectionRow(row, input))
     .filter((detection): detection is PersonDetectionInput => detection !== undefined);
+
+  return input.outputLayout === "yolox_coco_raw"
+    ? suppressOverlappingDetections(detections, input.nmsIouThreshold)
+    : detections;
 }
 
 function toOnnxRows(output: OnnxPersonDetectionTensor): readonly (readonly number[])[] {
@@ -439,6 +483,10 @@ function parseOnnxPersonDetectionRow(
     readonly confidenceThreshold: number;
   }
 ): PersonDetectionInput | undefined {
+  if (options.outputLayout === "yolox_coco_raw") {
+    return parseYoloxCocoRawPersonDetectionRow(row, options);
+  }
+
   const parsed = readOnnxDetectionRow(row);
   const confidence = roundDetectionScore(requireConfidenceThreshold(parsed.score));
 
@@ -453,6 +501,53 @@ function parseOnnxPersonDetectionRow(
       options.outputLayout === "xyxy_score_class"
         ? parseXyxyBox(parsed.first, parsed.second, parsed.third, parsed.fourth, options)
         : parseCxcywhBox(parsed.first, parsed.second, parsed.third, parsed.fourth, options)
+  };
+}
+
+function parseYoloxCocoRawPersonDetectionRow(
+  row: readonly number[],
+  options: {
+    readonly coordinateScale: OnnxPersonDetectionCoordinateScale;
+    readonly frameWidth: number;
+    readonly frameHeight: number;
+    readonly personClassId: number;
+    readonly confidenceThreshold: number;
+  }
+): PersonDetectionInput | undefined {
+  if (row.length !== 85) {
+    throw new Error("pico person detection YOLOX COCO output row must contain 85 values");
+  }
+
+  const centerX = requireNumber(row[0], "pico person detection YOLOX center x");
+  const centerY = requireNumber(row[1], "pico person detection YOLOX center y");
+  const width = requireNumber(row[2], "pico person detection YOLOX box width");
+  const height = requireNumber(row[3], "pico person detection YOLOX box height");
+  const objectness = requireConfidenceThreshold(row[4], "pico person detection YOLOX objectness");
+  const personScoreIndex = 5 + options.personClassId;
+  const personScore = requireConfidenceThreshold(
+    row[personScoreIndex],
+    "pico person detection YOLOX person score"
+  );
+  const confidence = roundDetectionScore(objectness * personScore);
+
+  if (confidence < options.confidenceThreshold) {
+    return undefined;
+  }
+
+  const box = clampBoxToFrame(
+    parseCxcywhBox(centerX, centerY, width, height, options),
+    options.frameWidth,
+    options.frameHeight
+  );
+
+  if (box === undefined) {
+    return undefined;
+  }
+
+  return {
+    label: "person",
+    confidence,
+    box
   };
 }
 
@@ -535,6 +630,63 @@ function parseCxcywhBox(
     y: scaledCenterY - scaledHeight / 2,
     width: requirePositiveDimension(scaledWidth, "pico person detection ONNX box width"),
     height: requirePositiveDimension(scaledHeight, "pico person detection ONNX box height")
+  };
+}
+
+function suppressOverlappingDetections(
+  detections: readonly PersonDetectionInput[],
+  nmsIouThreshold: number
+): readonly PersonDetectionInput[] {
+  const kept: PersonDetectionInput[] = [];
+  const sorted = [...detections].sort((left, right) => right.confidence - left.confidence);
+
+  for (const detection of sorted) {
+    if (
+      kept.every((keptDetection) => boxIou(detection.box, keptDetection.box) <= nmsIouThreshold)
+    ) {
+      kept.push(detection);
+    }
+  }
+
+  return kept;
+}
+
+function boxIou(left: PersonDetectionBoxInput, right: PersonDetectionBoxInput): number {
+  const leftXMax = left.x + left.width;
+  const leftYMax = left.y + left.height;
+  const rightXMax = right.x + right.width;
+  const rightYMax = right.y + right.height;
+  const intersectionWidth = Math.max(0, Math.min(leftXMax, rightXMax) - Math.max(left.x, right.x));
+  const intersectionHeight = Math.max(0, Math.min(leftYMax, rightYMax) - Math.max(left.y, right.y));
+  const intersectionArea = intersectionWidth * intersectionHeight;
+  const leftArea = left.width * left.height;
+  const rightArea = right.width * right.height;
+  const unionArea = leftArea + rightArea - intersectionArea;
+
+  return unionArea <= 0 ? 0 : intersectionArea / unionArea;
+}
+
+function clampBoxToFrame(
+  box: PersonDetectionBoxInput,
+  frameWidth: number,
+  frameHeight: number
+): PersonDetectionBoxInput | undefined {
+  const xMin = Math.max(0, box.x);
+  const yMin = Math.max(0, box.y);
+  const xMax = Math.min(frameWidth, box.x + box.width);
+  const yMax = Math.min(frameHeight, box.y + box.height);
+  const width = xMax - xMin;
+  const height = yMax - yMin;
+
+  if (width <= 0 || height <= 0) {
+    return undefined;
+  }
+
+  return {
+    x: xMin,
+    y: yMin,
+    width,
+    height
   };
 }
 
@@ -669,11 +821,24 @@ function requireNonNegativeInteger(value: unknown, label: string): number {
   return parsed;
 }
 
-function requireConfidenceThreshold(value: unknown): number {
-  const parsed = requireNumber(value, "pico person detection confidence");
+function requireConfidenceThreshold(
+  value: unknown,
+  label = "pico person detection confidence"
+): number {
+  const parsed = requireNumber(value, label);
 
   if (parsed < 0 || parsed > 1) {
-    throw new Error("pico person detection confidence must be >= 0 and <= 1");
+    throw new Error(`${label} must be >= 0 and <= 1`);
+  }
+
+  return parsed;
+}
+
+function requireNmsIouThreshold(value: unknown): number {
+  const parsed = requireNumber(value, "pico person detection NMS IoU threshold");
+
+  if (parsed <= 0 || parsed > 1) {
+    throw new Error("pico person detection NMS IoU threshold must be > 0 and <= 1");
   }
 
   return parsed;
