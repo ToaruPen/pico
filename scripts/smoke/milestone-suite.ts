@@ -121,7 +121,9 @@ export async function runPicoMilestoneSmokeSuite(
     config = loadPicoConfigFromEnvironment(env);
   } catch (error) {
     sections.push(...failedConfigProviderSections(error));
-    sections.push(...(await runMemoryAndAuditSections()));
+    sections.push(
+      ...auditConfigAwareMemoryAndAuditSections(await runMemoryAndAuditSections(), error)
+    );
 
     return {
       status: summarizeStatus(sections),
@@ -275,6 +277,27 @@ function failedConfigProviderSections(error: unknown): readonly PicoMilestoneSmo
     failedSection("camera_vlm_scene", "tapo-rtsp+ollama", reason),
     failedSection("mem0_runtime", "mem0-oss", reason)
   ];
+}
+
+function auditConfigAwareMemoryAndAuditSections(
+  sections: readonly PicoMilestoneSmokeSectionReport[],
+  error: unknown
+): readonly PicoMilestoneSmokeSectionReport[] {
+  if (!isAuditOtelConfigError(error)) {
+    return sections;
+  }
+
+  const reason = `pico config load failed: ${errorMessage(error)}`;
+
+  return sections.map((section) =>
+    section.name === "audit_otel"
+      ? failedSection("audit_otel", "structured-audit+otel", reason)
+      : section
+  );
+}
+
+function isAuditOtelConfigError(error: unknown): boolean {
+  return errorMessage(error).includes("pico config audit.otel.");
 }
 
 async function runVoiceSections(

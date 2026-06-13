@@ -35,6 +35,31 @@ function mem0EnabledConfig() {
 }
 
 describe("Mem0 OSS runtime client", () => {
+  it("disables Mem0 OSS telemetry before constructing the runtime", () => {
+    const previousTelemetry = process.env.MEM0_TELEMETRY;
+    delete process.env.MEM0_TELEMETRY;
+
+    try {
+      createMem0OssClient(mem0EnabledConfig(), {
+        createMemory: () => {
+          expect(process.env.MEM0_TELEMETRY).toBe("false");
+
+          return {
+            add: () => Promise.resolve({ results: [] }),
+            search: () => Promise.resolve({ results: [] }),
+            delete: () => Promise.resolve({ message: "deleted" })
+          };
+        }
+      });
+    } finally {
+      if (previousTelemetry === undefined) {
+        delete process.env.MEM0_TELEMETRY;
+      } else {
+        process.env.MEM0_TELEMETRY = previousTelemetry;
+      }
+    }
+  });
+
   it("builds a local-only Mem0 OSS configuration from pico config", async () => {
     let capturedConfig: CapturedMem0Config | undefined;
     const client = createMem0OssClient(mem0EnabledConfig(), {

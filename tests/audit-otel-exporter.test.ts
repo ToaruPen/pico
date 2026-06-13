@@ -1,7 +1,7 @@
 import type { ExportResult } from "@opentelemetry/core";
 import { ExportResultCode } from "@opentelemetry/core";
 import type { LogRecordExporter, ReadableLogRecord } from "@opentelemetry/sdk-logs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createStructuredAuditLog } from "../src/modules/audit/index.js";
 import { createOpenTelemetryAuditExporter } from "../src/modules/audit/otel.js";
@@ -147,5 +147,68 @@ describe("OpenTelemetry audit exporter", () => {
     await expect(firstExport).rejects.toThrow("pico audit OTel export failed");
     await expect(secondExport).resolves.toBeUndefined();
     await otel.shutdown();
+  });
+
+  it("rejects exports after shutdown instead of leaving callers pending", async () => {
+    const audit = createStructuredAuditLog();
+    const exporter = new DeferredLogExporter();
+    const otel = createOpenTelemetryAuditExporter({
+      exporter,
+      serviceName: "pico-test"
+    });
+    const event = audit.record({
+      category: "memory_write",
+      name: "long_memory.mem0.after_shutdown",
+      severity: "info",
+      occurredAt: "2026-06-10T09:00:00.000Z",
+      summary: "Export after shutdown.",
+      attributes: {}
+    });
+
+    await otel.shutdown();
+
+    await expect(otel.export(event)).rejects.toThrow("pico audit OTel exporter is shut down");
+  });
+
+  it("times out if the underlying log exporter never reports a result", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    const exporter = new DeferredLogExporter();
+    const otel = createOpenTelemetryAuditExporter({
+      exporter,
+      serviceName: "pico-test",
+      timeoutMs: 25
+    });
+    const event = audit.record({
+      category: "memory_write",
+      name: "long_memory.mem0.timeout",
+      severity: "info",
+      occurredAt: "2026-06-10T09:00:00.000Z",
+      summary: "Export timeout.",
+      attributes: {}
+    });
+
+    try {
+      const result = otel.export(event);
+      const expectation = expect(result).rejects.toThrow(
+        "pico audit OTel export timed out after 25 ms"
+      );
+
+      await vi.advanceTimersByTimeAsync(25);
+
+      await expectation;
+    } finally {
+      vi.useRealTimers();
+      await otel.shutdown();
+    }
+  });
+
+  it("rejects non-local OTLP log endpoints at the exporter boundary", () => {
+    expect(() =>
+      createOpenTelemetryAuditExporter({
+        endpoint: "https://otel.example.com/v1/logs",
+        serviceName: "pico-test"
+      })
+    ).toThrow("pico audit OTel endpoint must use a local Collector URL");
   });
 });

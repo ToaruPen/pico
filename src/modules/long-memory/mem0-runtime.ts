@@ -1,4 +1,6 @@
-import { Memory, type MemoryConfig, type Message, type SearchResult } from "mem0ai/oss";
+import { createRequire } from "node:module";
+
+import type { MemoryConfig, Message, SearchResult } from "mem0ai/oss";
 
 import type { PicoMem0Config } from "../../config/index.js";
 import type { Mem0AddRequest, Mem0AddResponse, Mem0Client, Mem0SearchResponse } from "./mem0.js";
@@ -26,12 +28,21 @@ export type Mem0OssClientFactoryOptions = {
   readonly createMemory?: (config: MemoryConfig) => Mem0OssRuntime;
 };
 
+type Mem0OssModule = {
+  readonly Memory: {
+    readonly fromConfig: (config: MemoryConfig) => Mem0OssRuntime;
+  };
+};
+
+const require = createRequire(import.meta.url);
+
 export function createMem0OssClient(
   config: PicoMem0Config,
   options: Mem0OssClientFactoryOptions = {}
 ): Mem0Client {
   const runtimeConfig = buildMem0OssConfig(config);
-  const memory = options.createMemory?.(runtimeConfig) ?? Memory.fromConfig(runtimeConfig);
+  disableMem0Telemetry();
+  const memory = options.createMemory?.(runtimeConfig) ?? createDefaultMem0Runtime(runtimeConfig);
 
   return {
     async add(request) {
@@ -59,6 +70,16 @@ export function createMem0OssClient(
       await memory.delete(memoryId);
     }
   };
+}
+
+function createDefaultMem0Runtime(config: MemoryConfig): Mem0OssRuntime {
+  const { Memory } = require("mem0ai/oss") as Mem0OssModule;
+
+  return Memory.fromConfig(config);
+}
+
+function disableMem0Telemetry(): void {
+  process.env.MEM0_TELEMETRY = "false";
 }
 
 export function buildMem0OssConfig(config: PicoMem0Config): MemoryConfig {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { mem0RuntimeSmokeExitCode, runMem0RuntimeSmoke } from "../scripts/smoke/mem0-runtime.js";
 import { definePicoConfig } from "../src/config/index.js";
@@ -157,5 +157,69 @@ describe("Mem0 runtime smoke", () => {
         "pico Mem0 runtime smoke failed: Mem0 search did not return a memory created by this smoke run"
     });
     expect(calls).toEqual(["delete:mem0-smoke-1"]);
+  });
+
+  it("attempts to delete every memory created by a failed smoke run", async () => {
+    const calls: string[] = [];
+    const report = await runMem0RuntimeSmoke(enabledConfig(), {
+      createClient: () => ({
+        add: () =>
+          Promise.resolve({
+            memories: [{ id: "mem0-smoke-1" }, { id: "mem0-smoke-2" }]
+          }),
+        search: () =>
+          Promise.resolve({
+            memories: [
+              {
+                id: "mem0-smoke-1",
+                content: "first memory",
+                score: 0.9
+              }
+            ]
+          }),
+        delete: (memoryId) => {
+          calls.push(`delete:${memoryId}`);
+
+          return memoryId === "mem0-smoke-1"
+            ? Promise.reject(new Error("delete failed"))
+            : Promise.resolve();
+        }
+      }),
+      createRunId: () => "test-run"
+    });
+
+    expect(calls).toEqual(["delete:mem0-smoke-1", "delete:mem0-smoke-2"]);
+    expect(report).toEqual({
+      status: "failed",
+      provider: "mem0-oss",
+      reason:
+        "pico Mem0 runtime smoke failed: Mem0 cleanup failed for 1 memory id(s): mem0-smoke-1: delete failed"
+    });
+  });
+
+  it("fails instead of hanging when Mem0 operations do not settle", async () => {
+    vi.useFakeTimers();
+
+    try {
+      const report = runMem0RuntimeSmoke(enabledConfig(), {
+        createClient: () => ({
+          add: () => new Promise<Mem0AddResponse>(() => undefined),
+          search: () => Promise.resolve({ memories: [] }),
+          delete: () => Promise.resolve()
+        }),
+        createRunId: () => "test-run",
+        timeoutMs: 25
+      });
+
+      await vi.advanceTimersByTimeAsync(25);
+
+      await expect(report).resolves.toEqual({
+        status: "failed",
+        provider: "mem0-oss",
+        reason: "pico Mem0 runtime smoke failed: Mem0 add timed out after 25 ms"
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

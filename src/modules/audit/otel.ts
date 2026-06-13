@@ -31,8 +31,10 @@ export type OpenTelemetryAuditExporter = {
 export function createOpenTelemetryAuditExporter(
   options: OpenTelemetryAuditExporterOptions
 ): OpenTelemetryAuditExporter {
+  validateOtelEndpointOption(options);
   const reportingExporter = new ReportingLogExporter(
-    options.exporter ?? createOtlpHttpLogExporter(options)
+    options.exporter ?? createOtlpHttpLogExporter(options),
+    options.timeoutMs
   );
   const provider = new LoggerProvider({
     resource: resourceFromAttributes({
@@ -41,9 +43,14 @@ export function createOpenTelemetryAuditExporter(
     processors: [new SimpleLogRecordProcessor(reportingExporter)]
   });
   const logger = provider.getLogger("pico.audit");
+  let shutdown = false;
 
   return {
     async export(event) {
+      if (shutdown) {
+        throw new Error("pico audit OTel exporter is shut down");
+      }
+
       const record = toOpenTelemetryLogRecord(event);
       const exportResult = reportingExporter.nextExportResult();
 
@@ -64,17 +71,62 @@ export function createOpenTelemetryAuditExporter(
         throw new Error("pico audit OTel export failed", { cause: result.error });
       }
     },
-    shutdown() {
-      return provider.shutdown();
+    async shutdown() {
+      shutdown = true;
+      reportingExporter.rejectPending(new Error("pico audit OTel exporter is shut down"));
+      await provider.shutdown();
     }
   };
 }
 
 function createOtlpHttpLogExporter(options: OpenTelemetryAuditExporterOptions): LogRecordExporter {
+  if (options.endpoint === undefined) {
+    throw new Error("pico audit OTel endpoint is required");
+  }
+
   return new OTLPLogExporter({
-    ...(options.endpoint === undefined ? {} : { url: options.endpoint }),
+    url: options.endpoint,
     ...(options.timeoutMs === undefined ? {} : { timeoutMillis: options.timeoutMs })
   });
+}
+
+function validateOtelEndpointOption(options: OpenTelemetryAuditExporterOptions): void {
+  if (options.endpoint === undefined) {
+    return;
+  }
+
+  if (!URL.canParse(options.endpoint)) {
+    throw new Error("pico audit OTel endpoint must be a valid URL");
+  }
+
+  const parsedUrl = new URL(options.endpoint);
+
+  requireOtelEndpointShape(parsedUrl);
+  requireLocalOtelEndpoint(parsedUrl);
+}
+
+function requireOtelEndpointShape(parsedUrl: URL): void {
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    throw new Error("pico audit OTel endpoint must use HTTP");
+  }
+
+  if (parsedUrl.username !== "" || parsedUrl.password !== "") {
+    throw new Error("pico audit OTel endpoint must not include credentials");
+  }
+
+  if (parsedUrl.pathname !== "/v1/logs") {
+    throw new Error("pico audit OTel endpoint must end with /v1/logs");
+  }
+
+  if (parsedUrl.search !== "" || parsedUrl.hash !== "") {
+    throw new Error("pico audit OTel endpoint must not include query or fragment");
+  }
+}
+
+function requireLocalOtelEndpoint(parsedUrl: URL): void {
+  if (!new Set(["127.0.0.1", "localhost", "[::1]"]).has(parsedUrl.hostname)) {
+    throw new Error("pico audit OTel endpoint must use a local Collector URL");
+  }
 }
 
 function optionalLogContext(event: AuditEvent): Record<"context", Context> | Record<string, never> {
@@ -102,24 +154,64 @@ function toOtelSeverityNumber(severityNumber: 9 | 13 | 17): SeverityNumber {
   }
 }
 
-class ReportingLogExporter implements LogRecordExporter {
-  private readonly pendingResults: ((result: ExportResult) => void)[] = [];
+type PendingExportResult = {
+  readonly resolve: (result: ExportResult) => void;
+  readonly reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout> | undefined;
+  settled: boolean;
+};
 
-  constructor(private readonly delegate: LogRecordExporter) {}
+class ReportingLogExporter implements LogRecordExporter {
+  private readonly pendingResults: PendingExportResult[] = [];
+
+  constructor(
+    private readonly delegate: LogRecordExporter,
+    private readonly timeoutMs: number | undefined
+  ) {}
 
   nextExportResult(): Promise<ExportResult> {
-    return new Promise<ExportResult>((resolve) => {
-      this.pendingResults.push(resolve);
+    return new Promise<ExportResult>((resolve, reject) => {
+      const pending: PendingExportResult = {
+        resolve,
+        reject,
+        timer: undefined,
+        settled: false
+      };
+
+      const timeoutMs = this.timeoutMs;
+
+      if (timeoutMs !== undefined) {
+        pending.timer = setTimeout(() => {
+          this.rejectPendingResult(
+            pending,
+            new Error(`pico audit OTel export timed out after ${timeoutMs} ms`)
+          );
+        }, timeoutMs);
+      }
+
+      this.pendingResults.push(pending);
     });
   }
 
   export(records: ReadableLogRecord[], resultCallback: (result: ExportResult) => void): void {
-    const resolvePending = this.pendingResults.shift();
+    const pending = this.pendingResults.shift();
 
     this.delegate.export(records, (result) => {
-      resolvePending?.(result);
+      if (pending !== undefined && !pending.settled) {
+        pending.settled = true;
+        this.clearPendingTimer(pending);
+        pending.resolve(result);
+      }
       resultCallback(result);
     });
+  }
+
+  rejectPending(error: Error): void {
+    const pendingResults = this.pendingResults.splice(0);
+
+    for (const pending of pendingResults) {
+      this.rejectPendingResult(pending, error);
+    }
   }
 
   forceFlush(): Promise<void> {
@@ -128,5 +220,28 @@ class ReportingLogExporter implements LogRecordExporter {
 
   shutdown(): Promise<void> {
     return this.delegate.shutdown();
+  }
+
+  private rejectPendingResult(pending: PendingExportResult, error: Error): void {
+    if (pending.settled) {
+      return;
+    }
+
+    pending.settled = true;
+    this.clearPendingTimer(pending);
+    const index = this.pendingResults.indexOf(pending);
+
+    if (index !== -1) {
+      this.pendingResults.splice(index, 1);
+    }
+
+    pending.reject(error);
+  }
+
+  private clearPendingTimer(pending: PendingExportResult): void {
+    if (pending.timer !== undefined) {
+      clearTimeout(pending.timer);
+      pending.timer = undefined;
+    }
   }
 }

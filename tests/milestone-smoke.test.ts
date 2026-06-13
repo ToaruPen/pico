@@ -342,6 +342,96 @@ vision:
     expectMemoryAndAuditEvidence(report);
   });
 
+  it("reports audit OTel config load failures as audit_otel failures", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-milestone-invalid-audit-config-"));
+    const configPath = join(directory, "pico.local.yaml");
+    writeFileSync(
+      configPath,
+      `
+audit:
+  otel:
+    enabled: true
+    endpoint: https://otel.example.com/v1/logs
+`
+    );
+
+    const report = await runPicoMilestoneSmokeSuite(
+      { PICO_CONFIG_PATH: configPath },
+      {
+        ...configuredSectionDependencies(),
+        runPiRuntimeCommand: () => piPassed
+      }
+    );
+
+    const reason =
+      "pico config load failed: pico config audit.otel.endpoint must use a local Collector URL";
+    expect(report.status).toBe("failed");
+    expect(requireSection(report, "memory_candidate").status).toBe("passed");
+    expect(requireSection(report, "audit_otel")).toEqual({
+      name: "audit_otel",
+      status: "failed",
+      provider: "structured-audit+otel",
+      reason
+    });
+  });
+
+  it("maps a passing Mem0 runtime smoke section into the milestone report", async () => {
+    const report = await runPicoMilestoneSmokeSuite(
+      {},
+      {
+        ...configuredSectionDependencies(),
+        runMem0RuntimeSmoke: () =>
+          Promise.resolve({
+            status: "passed",
+            provider: "mem0-oss",
+            details: {
+              scopeId: "pico-smoke-test",
+              memoryCount: 1,
+              searchResultCount: 1,
+              auditEventCount: 3,
+              otelRecordCount: 3
+            }
+          })
+      }
+    );
+
+    expect(requireSection(report, "mem0_runtime")).toEqual({
+      name: "mem0_runtime",
+      status: "passed",
+      provider: "mem0-oss",
+      details: {
+        scopeId: "pico-smoke-test",
+        memoryCount: 1,
+        searchResultCount: 1,
+        auditEventCount: 3,
+        otelRecordCount: 3
+      }
+    });
+  });
+
+  it("maps a failed Mem0 runtime smoke section into the milestone report status", async () => {
+    const report = await runPicoMilestoneSmokeSuite(
+      {},
+      {
+        ...configuredSectionDependencies(),
+        runMem0RuntimeSmoke: () =>
+          Promise.resolve({
+            status: "failed",
+            provider: "mem0-oss",
+            reason: "qdrant unavailable"
+          })
+      }
+    );
+
+    expect(report.status).toBe("failed");
+    expect(requireSection(report, "mem0_runtime")).toEqual({
+      name: "mem0_runtime",
+      status: "failed",
+      provider: "mem0-oss",
+      reason: "qdrant unavailable"
+    });
+  });
+
   it("normalizes thrown Pi runtime errors into a failed section", async () => {
     const report = await runPicoMilestoneSmokeSuite(
       {},
