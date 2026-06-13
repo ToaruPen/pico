@@ -33,6 +33,34 @@ const configured = definePicoConfig({
   }
 });
 
+const configuredCoreml = definePicoConfig({
+  camera: {
+    tapo: {
+      sourceId: "tapo-main",
+      host: "192.168.3.212",
+      user: "camera-user",
+      password: "camera-password"
+    }
+  },
+  vision: {
+    personDetection: {
+      enabled: true,
+      sourceCameraId: "tapo-main",
+      modelFamily: "pinto0309",
+      provider: "coreml",
+      modelPath: "/opt/pico/models/pinto0309/yolox_nano_320x320.onnx",
+      inputWidth: 320,
+      inputHeight: 320,
+      outputLayout: "yolox_coco_raw",
+      coordinateScale: "pixel",
+      frameIntervalMs: 500,
+      confidenceThreshold: 0.55,
+      coremlFlags: 18,
+      nmsIouThreshold: 0.45
+    }
+  }
+});
+
 describe("person detection smoke", () => {
   it("skips when person detection is disabled", () => {
     expect(buildPersonDetectionSmokePlan(definePicoConfig({}))).toEqual({
@@ -86,6 +114,48 @@ describe("person detection smoke", () => {
     ).resolves.toEqual({
       status: "passed",
       provider: "tapo-rtsp+onnxruntime",
+      details: {
+        sourceId: "tapo-main",
+        frameBytes: 10,
+        detectedPeople: 1,
+        capturedAt: "2026-06-12T09:00:00.000Z"
+      }
+    });
+  });
+
+  it("runs Tapo snapshot through the configured CoreML detector once", async () => {
+    const model: PersonDetectionModel = {
+      detect: () =>
+        Promise.resolve([
+          {
+            label: "person",
+            confidence: 0.92,
+            box: {
+              x: 64,
+              y: 48,
+              width: 128,
+              height: 192
+            }
+          }
+        ])
+    };
+
+    await expect(
+      runPersonDetectionSmoke(configuredCoreml, {
+        pathExists: () => true,
+        captureFrame: () =>
+          Promise.resolve({
+            ok: true,
+            sourceId: "tapo-main",
+            mimeType: "image/jpeg",
+            frame: Buffer.from("jpeg-frame")
+          }),
+        createModel: () => Promise.resolve(model),
+        now: () => "2026-06-12T09:00:00.000Z"
+      })
+    ).resolves.toMatchObject({
+      status: "passed",
+      provider: "tapo-rtsp+coreml",
       details: {
         sourceId: "tapo-main",
         frameBytes: 10,

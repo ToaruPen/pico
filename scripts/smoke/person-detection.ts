@@ -10,6 +10,7 @@ import {
   type RtspSnapshotResult
 } from "../../src/modules/camera/index.js";
 import {
+  createCoremlPersonDetectionModel,
   createOnnxPersonDetectionModel,
   createSharpRgbTensorPreprocessor,
   normalizePersonDetectionFrame,
@@ -22,10 +23,11 @@ const defaultTimeoutMs = 10_000;
 const defaultMaxFrameBytes = 5 * 1024 * 1024;
 
 export type PersonDetectionSmokeStatus = "passed" | "failed" | "skipped";
+export type PersonDetectionSmokeProvider = "tapo-rtsp+onnxruntime" | "tapo-rtsp+coreml";
 
 export type PersonDetectionSmokeReport = {
   readonly status: PersonDetectionSmokeStatus;
-  readonly provider: "tapo-rtsp+onnxruntime";
+  readonly provider: PersonDetectionSmokeProvider;
   readonly reason?: string;
   readonly details?: {
     readonly sourceId: string;
@@ -52,18 +54,20 @@ export type PersonDetectionSmokeDependencies = {
   readonly now?: () => string;
 };
 
-type EnabledOnnxPersonDetectionConfig = {
+type EnabledPersonDetectionConfig = {
   readonly enabled: true;
   readonly sourceCameraId: string;
   readonly modelFamily: "pinto0309";
-  readonly provider: "onnxruntime";
+  readonly provider: "onnxruntime" | "coreml";
   readonly modelPath: string;
   readonly inputWidth: number;
   readonly inputHeight: number;
-  readonly outputLayout?: "xyxy_score_class" | "cxcywh_score_class";
+  readonly outputLayout?: "xyxy_score_class" | "cxcywh_score_class" | "yolox_coco_raw";
   readonly coordinateScale?: "pixel" | "normalized";
   readonly frameIntervalMs: number;
   readonly confidenceThreshold: number;
+  readonly coremlFlags?: number;
+  readonly nmsIouThreshold?: number;
 };
 
 export async function runPersonDetectionSmoke(
@@ -75,27 +79,28 @@ export async function runPersonDetectionSmoke(
   if (plan.status === "skip") {
     return {
       status: "skipped",
-      provider: "tapo-rtsp+onnxruntime",
+      provider: smokeProvider(config),
       reason: plan.reason
     };
   }
 
   const captureFrame = dependencies.captureFrame ?? captureTapoFrame;
-  const createModel = dependencies.createModel ?? createConfiguredOnnxModel;
+  const createModel = dependencies.createModel ?? createConfiguredModel;
   const capturedAt = (dependencies.now ?? (() => new Date().toISOString()))();
   const snapshot = await captureFrame(plan.config);
+  const provider = smokeProvider(plan.config);
 
   if (!snapshot.ok) {
     return {
       status: "failed",
-      provider: "tapo-rtsp+onnxruntime",
+      provider,
       reason: `pico person detection smoke capture failed: ${snapshot.reason}: ${snapshot.message}`
     };
   }
 
   const model = await createModel(plan.config);
   const rawDetections = await model.detect(snapshot.frame);
-  const detectorConfig = requireEnabledOnnxDetector(plan.config);
+  const detectorConfig = requireEnabledDetector(plan.config);
   const normalized = normalizePersonDetectionFrame({
     sourceId: snapshot.sourceId,
     capturedAt,
@@ -109,7 +114,7 @@ export async function runPersonDetectionSmoke(
 
   return {
     status: "passed",
-    provider: "tapo-rtsp+onnxruntime",
+    provider,
     details: {
       sourceId: normalized.sourceId,
       frameBytes: snapshot.frame.byteLength,
@@ -132,10 +137,10 @@ export function buildPersonDetectionSmokePlan(
     };
   }
 
-  if (detector.provider !== "onnxruntime") {
+  if (detector.provider !== "onnxruntime" && detector.provider !== "coreml") {
     return {
       status: "skip",
-      reason: "pico person detection smoke currently supports provider=onnxruntime."
+      reason: "pico person detection smoke currently supports provider=onnxruntime or coreml."
     };
   }
 
@@ -146,12 +151,12 @@ export function buildPersonDetectionSmokePlan(
     };
   }
 
-  const onnxDetector = requireEnabledOnnxDetector(config);
+  const detectorConfig = requireEnabledDetector(config);
   const pathExists = dependencies.pathExists ?? existsSync;
-  if (!pathExists(onnxDetector.modelPath)) {
+  if (!pathExists(detectorConfig.modelPath)) {
     return {
       status: "skip",
-      reason: `pico person detection smoke model file not found: ${onnxDetector.modelPath}`
+      reason: `pico person detection smoke model file not found: ${detectorConfig.modelPath}`
     };
   }
 
@@ -167,7 +172,7 @@ export function personDetectionSmokeExitCode(report: PersonDetectionSmokeReport)
 
 async function captureTapoFrame(config: PicoConfig): Promise<RtspSnapshotResult> {
   const tapo = config.camera.tapo;
-  const detector = requireEnabledOnnxDetector(config);
+  const detector = requireEnabledDetector(config);
 
   if (tapo === undefined) {
     throw new Error("pico person detection smoke requires camera.tapo config");
@@ -191,58 +196,94 @@ async function captureTapoFrame(config: PicoConfig): Promise<RtspSnapshotResult>
   return client.captureSnapshot();
 }
 
-function createConfiguredOnnxModel(config: PicoConfig): Promise<PersonDetectionModel> {
-  const detector = requireEnabledOnnxDetector(config);
-
-  return createOnnxPersonDetectionModel({
+function createConfiguredModel(config: PicoConfig): Promise<PersonDetectionModel> {
+  const detector = requireEnabledDetector(config);
+  const commonOptions = {
     modelPath: detector.modelPath,
     frameSize: {
       width: detector.inputWidth,
       height: detector.inputHeight
     },
     confidenceThreshold: detector.confidenceThreshold,
-    ...(detector.outputLayout === undefined ? {} : { outputLayout: detector.outputLayout }),
     ...(detector.coordinateScale === undefined
       ? {}
       : { coordinateScale: detector.coordinateScale }),
+    ...(detector.nmsIouThreshold === undefined
+      ? {}
+      : { nmsIouThreshold: detector.nmsIouThreshold }),
     preprocessFrame: createSharpRgbTensorPreprocessor({
       inputWidth: detector.inputWidth,
       inputHeight: detector.inputHeight
     })
+  };
+
+  if (detector.provider === "coreml") {
+    return createCoremlPersonDetectionModel({
+      ...commonOptions,
+      ...(detector.coremlFlags === undefined ? {} : { coremlFlags: detector.coremlFlags })
+    });
+  }
+
+  return createOnnxPersonDetectionModel({
+    ...commonOptions,
+    ...(detector.outputLayout === undefined ? {} : { outputLayout: detector.outputLayout })
   });
 }
 
-function requireEnabledOnnxDetector(config: PicoConfig): EnabledOnnxPersonDetectionConfig {
+function requireEnabledDetector(config: PicoConfig): EnabledPersonDetectionConfig {
   const detector = config.vision.personDetection;
 
-  if (
-    !detector.enabled ||
-    detector.modelFamily !== "pinto0309" ||
-    detector.provider !== "onnxruntime"
-  ) {
-    throw new Error("pico person detection smoke requires a complete ONNX detector config");
+  if (!isRunnablePersonDetector(detector)) {
+    throw new Error("pico person detection smoke requires a complete person detector config");
   }
 
   return {
     enabled: true,
     sourceCameraId: requireDetectorString(detector.sourceCameraId),
     modelFamily: "pinto0309",
-    provider: "onnxruntime",
+    provider: detector.provider,
     modelPath: requireDetectorString(detector.modelPath),
     inputWidth: requireDetectorNumber(detector.inputWidth),
     inputHeight: requireDetectorNumber(detector.inputHeight),
+    frameIntervalMs: requireDetectorNumber(detector.frameIntervalMs),
+    confidenceThreshold: requireDetectorNumber(detector.confidenceThreshold),
+    ...optionalDetectorFields(detector)
+  };
+}
+
+function isRunnablePersonDetector(
+  detector: PicoConfig["vision"]["personDetection"]
+): detector is PicoConfig["vision"]["personDetection"] & {
+  readonly enabled: true;
+  readonly modelFamily: "pinto0309";
+  readonly provider: "onnxruntime" | "coreml";
+} {
+  return (
+    detector.enabled &&
+    detector.modelFamily === "pinto0309" &&
+    (detector.provider === "onnxruntime" || detector.provider === "coreml")
+  );
+}
+
+function optionalDetectorFields(
+  detector: PicoConfig["vision"]["personDetection"]
+): Pick<
+  EnabledPersonDetectionConfig,
+  "outputLayout" | "coordinateScale" | "coremlFlags" | "nmsIouThreshold"
+> {
+  return {
     ...(detector.outputLayout === undefined ? {} : { outputLayout: detector.outputLayout }),
     ...(detector.coordinateScale === undefined
       ? {}
       : { coordinateScale: detector.coordinateScale }),
-    frameIntervalMs: requireDetectorNumber(detector.frameIntervalMs),
-    confidenceThreshold: requireDetectorNumber(detector.confidenceThreshold)
+    ...(detector.coremlFlags === undefined ? {} : { coremlFlags: detector.coremlFlags }),
+    ...(detector.nmsIouThreshold === undefined ? {} : { nmsIouThreshold: detector.nmsIouThreshold })
   };
 }
 
 function requireDetectorString(value: string | undefined): string {
   if (value === undefined) {
-    throw new Error("pico person detection smoke requires a complete ONNX detector config");
+    throw new Error("pico person detection smoke requires a complete person detector config");
   }
 
   return value;
@@ -250,10 +291,16 @@ function requireDetectorString(value: string | undefined): string {
 
 function requireDetectorNumber(value: number | undefined): number {
   if (value === undefined) {
-    throw new Error("pico person detection smoke requires a complete ONNX detector config");
+    throw new Error("pico person detection smoke requires a complete person detector config");
   }
 
   return value;
+}
+
+function smokeProvider(config: PicoConfig): PersonDetectionSmokeProvider {
+  return config.vision.personDetection.provider === "coreml"
+    ? "tapo-rtsp+coreml"
+    : "tapo-rtsp+onnxruntime";
 }
 
 function errorMessage(error: unknown): string {

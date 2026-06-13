@@ -562,8 +562,101 @@ camera:
         }
       })
     ).toThrow(
-      "pico config vision.personDetection.provider must be onnxruntime, tflite, or openvino"
+      "pico config vision.personDetection.provider must be onnxruntime, coreml, tflite, or openvino"
     );
+  });
+
+  it("loads CoreML person detection defaults for pinto YOLOX raw output", () => {
+    expect(
+      definePicoConfig({
+        vision: {
+          personDetection: {
+            enabled: true,
+            sourceCameraId: "tapo-main",
+            modelFamily: "pinto0309",
+            provider: "coreml",
+            modelPath: "/opt/pico/models/pinto0309/yolox_nano_320x320.onnx",
+            inputWidth: 320,
+            inputHeight: 320,
+            outputLayout: "yolox_coco_raw",
+            coordinateScale: "pixel",
+            frameIntervalMs: 500,
+            confidenceThreshold: 0.55
+          }
+        }
+      }).vision.personDetection
+    ).toMatchObject({
+      enabled: true,
+      provider: "coreml",
+      outputLayout: "yolox_coco_raw",
+      coremlFlags: 18,
+      nmsIouThreshold: 0.45
+    });
+  });
+
+  it("requires YOLOX raw output for CoreML person detection", () => {
+    expect(() =>
+      definePicoConfig({
+        vision: {
+          personDetection: {
+            enabled: true,
+            sourceCameraId: "tapo-main",
+            modelFamily: "pinto0309",
+            provider: "coreml",
+            modelPath: "/opt/pico/models/pinto0309/yolox_nano_320x320.onnx",
+            inputWidth: 320,
+            inputHeight: 320,
+            outputLayout: "xyxy_score_class",
+            frameIntervalMs: 500,
+            confidenceThreshold: 0.55
+          }
+        }
+      })
+    ).toThrow(
+      "pico config vision.personDetection.outputLayout must be yolox_coco_raw when provider is coreml"
+    );
+  });
+
+  it("rejects invalid CoreML person detection flags and NMS thresholds", () => {
+    expect(() =>
+      definePicoConfig({
+        vision: {
+          personDetection: {
+            enabled: true,
+            sourceCameraId: "tapo-main",
+            modelFamily: "pinto0309",
+            provider: "coreml",
+            modelPath: "/opt/pico/models/pinto0309/yolox_nano_320x320.onnx",
+            inputWidth: 320,
+            inputHeight: 320,
+            outputLayout: "yolox_coco_raw",
+            frameIntervalMs: 500,
+            confidenceThreshold: 0.55,
+            coremlFlags: -1
+          }
+        }
+      })
+    ).toThrow("pico config vision.personDetection.coremlFlags must be a non-negative integer");
+
+    expect(() =>
+      definePicoConfig({
+        vision: {
+          personDetection: {
+            enabled: true,
+            sourceCameraId: "tapo-main",
+            modelFamily: "pinto0309",
+            provider: "coreml",
+            modelPath: "/opt/pico/models/pinto0309/yolox_nano_320x320.onnx",
+            inputWidth: 320,
+            inputHeight: 320,
+            outputLayout: "yolox_coco_raw",
+            frameIntervalMs: 500,
+            confidenceThreshold: 0.55,
+            nmsIouThreshold: 0
+          }
+        }
+      })
+    ).toThrow("pico config vision.personDetection.nmsIouThreshold must be > 0 and <= 1");
   });
 
   it("rejects invalid person detection thresholds", () => {
@@ -605,7 +698,7 @@ camera:
         }
       })
     ).toThrow(
-      "pico config vision.personDetection.outputLayout must be xyxy_score_class or cxcywh_score_class"
+      "pico config vision.personDetection.outputLayout must be xyxy_score_class, cxcywh_score_class, or yolox_coco_raw"
     );
   });
 

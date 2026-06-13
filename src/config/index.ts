@@ -107,10 +107,15 @@ export type PicoPersonDetectionConfig = {
   readonly coordinateScale?: PicoPersonDetectionCoordinateScale;
   readonly frameIntervalMs?: number;
   readonly confidenceThreshold?: number;
+  readonly coremlFlags?: number;
+  readonly nmsIouThreshold?: number;
 };
 
-export type PicoPersonDetectionProvider = "onnxruntime" | "tflite" | "openvino";
-export type PicoPersonDetectionOutputLayout = "xyxy_score_class" | "cxcywh_score_class";
+export type PicoPersonDetectionProvider = "onnxruntime" | "coreml" | "tflite" | "openvino";
+export type PicoPersonDetectionOutputLayout =
+  | "xyxy_score_class"
+  | "cxcywh_score_class"
+  | "yolox_coco_raw";
 export type PicoPersonDetectionCoordinateScale = "pixel" | "normalized";
 
 export type PicoMlxWhisperConfig = {
@@ -144,6 +149,7 @@ type DeepReadonly<T> = {
 };
 
 type OptionalPersonDetectionFields = {
+  readonly enabled: boolean;
   readonly sourceCameraId: string | undefined;
   readonly modelFamily: "pinto0309" | undefined;
   readonly provider: PicoPersonDetectionProvider | undefined;
@@ -154,6 +160,8 @@ type OptionalPersonDetectionFields = {
   readonly coordinateScale: PicoPersonDetectionCoordinateScale | undefined;
   readonly frameIntervalMs: number | undefined;
   readonly confidenceThreshold: number | undefined;
+  readonly coremlFlags: number | undefined;
+  readonly nmsIouThreshold: number | undefined;
 };
 
 export type LoadPicoConfigOptions = {
@@ -562,72 +570,102 @@ function definePersonDetectionConfig(
     };
   }
 
+  const fields = readPersonDetectionFields(input);
+
+  return fields.enabled
+    ? defineEnabledPersonDetectionConfig(fields)
+    : defineDisabledPersonDetectionConfig(fields);
+}
+
+function readPersonDetectionFields(input: Record<string, unknown>): OptionalPersonDetectionFields {
   const enabled =
     readOptionalBoolean(input.enabled, "pico config vision.personDetection.enabled") ?? false;
-  const sourceCameraId = readOptionalString(
-    input.sourceCameraId,
-    "pico config vision.personDetection.sourceCameraId"
-  );
-  const modelFamily = readOptionalPersonDetectionModelFamily(input.modelFamily);
-  const provider = readOptionalPersonDetectionProvider(input.provider);
-  const modelPath = readOptionalString(
-    input.modelPath,
-    "pico config vision.personDetection.modelPath"
-  );
-  const inputWidth = readOptionalPositiveInteger(
-    input.inputWidth,
-    "pico config vision.personDetection.inputWidth"
-  );
-  const inputHeight = readOptionalPositiveInteger(
-    input.inputHeight,
-    "pico config vision.personDetection.inputHeight"
-  );
-  const outputLayout = readOptionalPersonDetectionOutputLayout(input.outputLayout);
-  const coordinateScale = readOptionalPersonDetectionCoordinateScale(input.coordinateScale);
-  const frameIntervalMs = readOptionalBoundedPositiveInteger(
-    input.frameIntervalMs,
-    "pico config vision.personDetection.frameIntervalMs",
-    maxNodeTimeoutMs
-  );
-  const confidenceThreshold = readOptionalConfidenceThreshold(input.confidenceThreshold);
-
-  if (!enabled) {
-    return defineDisabledPersonDetectionConfig({
-      confidenceThreshold,
-      frameIntervalMs,
-      modelFamily,
-      modelPath,
-      inputWidth,
-      inputHeight,
-      outputLayout,
-      coordinateScale,
-      provider,
-      sourceCameraId
-    });
-  }
 
   return {
     enabled,
-    sourceCameraId: requireString(
-      sourceCameraId,
+    sourceCameraId: readOptionalString(
+      input.sourceCameraId,
       "pico config vision.personDetection.sourceCameraId"
     ),
-    modelFamily: requirePersonDetectionModelFamily(modelFamily),
-    provider: requirePersonDetectionProvider(provider),
-    modelPath: requireString(modelPath, "pico config vision.personDetection.modelPath"),
-    inputWidth: requireNumber(inputWidth, "pico config vision.personDetection.inputWidth"),
-    inputHeight: requireNumber(inputHeight, "pico config vision.personDetection.inputHeight"),
-    ...(outputLayout === undefined ? {} : { outputLayout }),
-    ...(coordinateScale === undefined ? {} : { coordinateScale }),
+    modelFamily: readOptionalPersonDetectionModelFamily(input.modelFamily),
+    provider: readOptionalPersonDetectionProvider(input.provider),
+    modelPath: readOptionalString(input.modelPath, "pico config vision.personDetection.modelPath"),
+    inputWidth: readOptionalPositiveInteger(
+      input.inputWidth,
+      "pico config vision.personDetection.inputWidth"
+    ),
+    inputHeight: readOptionalPositiveInteger(
+      input.inputHeight,
+      "pico config vision.personDetection.inputHeight"
+    ),
+    outputLayout: readOptionalPersonDetectionOutputLayout(input.outputLayout),
+    coordinateScale: readOptionalPersonDetectionCoordinateScale(input.coordinateScale),
+    frameIntervalMs: readOptionalBoundedPositiveInteger(
+      input.frameIntervalMs,
+      "pico config vision.personDetection.frameIntervalMs",
+      maxNodeTimeoutMs
+    ),
+    confidenceThreshold: readOptionalConfidenceThreshold(input.confidenceThreshold),
+    coremlFlags: readOptionalNonNegativeInteger(
+      input.coremlFlags,
+      "pico config vision.personDetection.coremlFlags"
+    ),
+    nmsIouThreshold: readOptionalUnitPositiveNumber(
+      input.nmsIouThreshold,
+      "pico config vision.personDetection.nmsIouThreshold"
+    )
+  };
+}
+
+function defineEnabledPersonDetectionConfig(
+  input: OptionalPersonDetectionFields
+): PicoPersonDetectionConfig {
+  const resolvedProvider = requirePersonDetectionProvider(input.provider);
+  if (resolvedProvider === "coreml" && input.outputLayout !== "yolox_coco_raw") {
+    throw new Error(
+      "pico config vision.personDetection.outputLayout must be yolox_coco_raw when provider is coreml"
+    );
+  }
+  const resolvedNmsIouThreshold = resolvePersonDetectionNmsIouThreshold(
+    resolvedProvider,
+    input.outputLayout,
+    input.nmsIouThreshold
+  );
+
+  return {
+    enabled: true,
+    sourceCameraId: requireString(
+      input.sourceCameraId,
+      "pico config vision.personDetection.sourceCameraId"
+    ),
+    modelFamily: requirePersonDetectionModelFamily(input.modelFamily),
+    provider: resolvedProvider,
+    modelPath: requireString(input.modelPath, "pico config vision.personDetection.modelPath"),
+    inputWidth: requireNumber(input.inputWidth, "pico config vision.personDetection.inputWidth"),
+    inputHeight: requireNumber(input.inputHeight, "pico config vision.personDetection.inputHeight"),
+    ...(input.outputLayout === undefined ? {} : { outputLayout: input.outputLayout }),
+    ...(input.coordinateScale === undefined ? {} : { coordinateScale: input.coordinateScale }),
     frameIntervalMs: requireNumber(
-      frameIntervalMs,
+      input.frameIntervalMs,
       "pico config vision.personDetection.frameIntervalMs"
     ),
     confidenceThreshold: requireNumber(
-      confidenceThreshold,
+      input.confidenceThreshold,
       "pico config vision.personDetection.confidenceThreshold"
-    )
+    ),
+    ...(resolvedProvider === "coreml" ? { coremlFlags: input.coremlFlags ?? 18 } : {}),
+    ...(resolvedNmsIouThreshold === undefined ? {} : { nmsIouThreshold: resolvedNmsIouThreshold })
   };
+}
+
+function resolvePersonDetectionNmsIouThreshold(
+  provider: PicoPersonDetectionProvider,
+  outputLayout: PicoPersonDetectionOutputLayout | undefined,
+  nmsIouThreshold: number | undefined
+): number | undefined {
+  return provider === "coreml" || outputLayout === "yolox_coco_raw"
+    ? (nmsIouThreshold ?? 0.45)
+    : nmsIouThreshold;
 }
 
 function defineDisabledPersonDetectionConfig(
@@ -644,7 +682,9 @@ function defineDisabledPersonDetectionConfig(
     outputLayout: input.outputLayout,
     coordinateScale: input.coordinateScale,
     frameIntervalMs: input.frameIntervalMs,
-    confidenceThreshold: input.confidenceThreshold
+    confidenceThreshold: input.confidenceThreshold,
+    coremlFlags: input.coremlFlags,
+    nmsIouThreshold: input.nmsIouThreshold
   }) as PicoPersonDetectionConfig;
 }
 
@@ -934,9 +974,14 @@ function readOptionalPersonDetectionProvider(
     return undefined;
   }
 
-  if (parsed !== "onnxruntime" && parsed !== "tflite" && parsed !== "openvino") {
+  if (
+    parsed !== "onnxruntime" &&
+    parsed !== "coreml" &&
+    parsed !== "tflite" &&
+    parsed !== "openvino"
+  ) {
     throw new Error(
-      "pico config vision.personDetection.provider must be onnxruntime, tflite, or openvino"
+      "pico config vision.personDetection.provider must be onnxruntime, coreml, tflite, or openvino"
     );
   }
 
@@ -952,9 +997,13 @@ function readOptionalPersonDetectionOutputLayout(
     return undefined;
   }
 
-  if (parsed !== "xyxy_score_class" && parsed !== "cxcywh_score_class") {
+  if (
+    parsed !== "xyxy_score_class" &&
+    parsed !== "cxcywh_score_class" &&
+    parsed !== "yolox_coco_raw"
+  ) {
     throw new Error(
-      "pico config vision.personDetection.outputLayout must be xyxy_score_class or cxcywh_score_class"
+      "pico config vision.personDetection.outputLayout must be xyxy_score_class, cxcywh_score_class, or yolox_coco_raw"
     );
   }
 
@@ -1001,6 +1050,20 @@ function requireNonNegativeInteger(value: unknown, label: string): number {
 
   if (parsed === undefined) {
     throw new Error(`${label} is required when ${parentLabel(label)} is set`);
+  }
+
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${label} must be a non-negative integer`);
+  }
+
+  return parsed;
+}
+
+function readOptionalNonNegativeInteger(value: unknown, label: string): number | undefined {
+  const parsed = readOptionalNumber(value, label);
+
+  if (parsed === undefined) {
+    return undefined;
   }
 
   if (!Number.isInteger(parsed) || parsed < 0) {

@@ -4,7 +4,7 @@
 
 **Goal:** Add an explicit CoreML-accelerated pinto0309 person-detection path using ONNX Runtime CoreML EP, YOLOX raw COCO decode, and live smoke support.
 
-**Architecture:** Keep the current TypeScript `PersonDetectionModel` boundary. `provider: coreml` creates an ONNX Runtime session with a single CoreML execution provider and no CPU fallback; ONNX Runtime owns graph execution while pico owns config, preprocessing, raw YOLOX decode, NMS, and smoke reporting.
+**Architecture:** Keep the current TypeScript `PersonDetectionModel` boundary. `provider: coreml` creates an ONNX Runtime session with a single CoreML execution provider and no CPU secondary provider; ONNX Runtime owns graph execution while pico owns config, preprocessing, raw YOLOX decode, NMS, and smoke reporting.
 
 **Tech Stack:** TypeScript, Vitest, `onnxruntime-node`, `sharp`, YAML config, Tapo RTSP smoke scripts.
 
@@ -155,7 +155,7 @@ Expected: PASS.
 Add tests to `tests/person-detection.test.ts` after the existing ONNX model tests:
 
 ```ts
-it("creates a CoreML ONNX Runtime session without adding a CPU fallback provider", async () => {
+it("creates a CoreML ONNX Runtime session without adding a CPU secondary provider", async () => {
   const createCalls: unknown[] = [];
   const runtime: OnnxPersonDetectionRuntime = {
     Tensor: class {
@@ -471,6 +471,6 @@ Commit the implementation, push `codex/coreml-person-detection`, and create a re
 
 ## Self-Review
 
-- Spec coverage: Config provider, CoreML EP session options, no CPU fallback, YOLOX raw decode, NMS, smoke support, and local gates all map to tasks above.
-- Placeholder scan: No `TBD`, `TODO`, or unresolved implementation slots remain.
+- Spec coverage: Config provider, CoreML EP session options, no CPU secondary provider, YOLOX raw decode, NMS, smoke support, and local gates all map to tasks above.
+- Placeholder scan: No unresolved implementation slots remain.
 - Type consistency: Provider names, config field names, output layout names, and smoke provider labels are consistent across tasks.
