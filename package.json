@@ -29,6 +29,7 @@
     "smoke:camera-ptz": "jiti scripts/smoke/tapo-person-follow-nudge.ts",
     "smoke:voice-providers": "jiti scripts/smoke/voice-providers.ts",
     "smoke:pi-runtime": "jiti scripts/smoke/pi-runtime.ts",
+    "field:voice-echo-pickup": "jiti scripts/field/voice-echo-pickup.ts",
     "lint": "eslint .",
     "format": "biome format --write .",
     "format:check": "biome ci .",

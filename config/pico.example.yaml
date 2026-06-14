@@ -54,6 +54,17 @@ vision:
     confidenceThreshold: 0.55
 
 voice:
+  echoControl:
+    enabled: false
+    mode: aec
+    provider: web_rtc_aec3
+    providerEndpoint: http://127.0.0.1:8770
+    sampleRateHz: 16000
+    channels: 1
+    frameMs: 10
+    tailMuteMs: 700
+    diagnostics:
+      enabled: true
   stt:
     mlxWhisper:
       localBaseUrl: http://127.0.0.1:8765

@@ -124,7 +124,7 @@ export function createSessionLifecycle(options: SessionLifecycleOptions): Sessio
         cleanupTimeout: undefined
       };
       nextSessionId += 1;
-      session.timeout = setTimeout(() => {
+      session.timeout = scheduleSessionTimer(() => {
         endSession(session, sessions, options.audit, endedSessionRetentionMs);
       }, durationMs);
       sessions.set(session.id, session);
@@ -193,9 +193,16 @@ function endSession(
   session.state = "ended";
   session.endedAt = nowIso();
   recordSessionAudit(audit, "session.ended", session.endedAt, session);
-  session.cleanupTimeout = setTimeout(() => {
+  session.cleanupTimeout = scheduleSessionTimer(() => {
     sessions.delete(session.id);
   }, endedSessionRetentionMs);
+}
+
+function scheduleSessionTimer(callback: () => void, durationMs: number): NodeJS.Timeout {
+  const timeout = setTimeout(callback, durationMs);
+  timeout.unref();
+
+  return timeout;
 }
 
 function clearSessionCleanup(session: ManagedSession): void {
