@@ -33,6 +33,9 @@ smoke-voice-providers:
 smoke-pi-runtime:
   npm run smoke:pi-runtime
 
+field-voice-echo-pickup:
+  npm run field:voice-echo-pickup
+
 ast:
   npm run ast:test
   npm run ast

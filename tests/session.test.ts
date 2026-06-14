@@ -146,6 +146,40 @@ describe("session lifecycle", () => {
     }
   });
 
+  it("does not keep short-lived Pi Agent print-mode processes alive with session timers", () => {
+    const timers: NodeJS.Timeout[] = [];
+    const originalSetTimeout = globalThis.setTimeout;
+    const captureSetTimeout = (handler: TimerHandler, timeout?: number): NodeJS.Timeout => {
+      const timer = originalSetTimeout(handler, timeout) as unknown as NodeJS.Timeout;
+      timers.push(timer);
+
+      return timer;
+    };
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(captureSetTimeout);
+
+    try {
+      const lifecycle = createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      });
+      lifecycle.start({
+        kind: "greeting",
+        label: "おはよう",
+        source: "field-test"
+      });
+
+      expect(timers[0]?.hasRef()).toBe(false);
+    } finally {
+      for (const timer of timers) {
+        clearTimeout(timer);
+      }
+
+      timeoutSpy.mockRestore();
+    }
+  });
+
   it("isolates audit failures from session state changes and timer callbacks", () => {
     vi.useFakeTimers();
 

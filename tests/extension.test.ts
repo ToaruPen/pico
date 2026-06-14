@@ -5,7 +5,8 @@ import {
   type BeforeAgentStartEventResult,
   discoverAndLoadExtensions,
   type Extension,
-  type ExtensionContext
+  type ExtensionContext,
+  type ToolDefinition
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
@@ -15,6 +16,29 @@ type PicoBeforeAgentStartHandler = (
   event: BeforeAgentStartEvent,
   context: ExtensionContext
 ) => BeforeAgentStartEventResult;
+
+type CapturedExtensionApi = {
+  readonly handlers: Map<string, unknown[]>;
+  readonly tools: ToolDefinition[];
+};
+
+function createCapturedExtensionApi(): CapturedExtensionApi {
+  return {
+    handlers: new Map(),
+    tools: []
+  };
+}
+
+function extensionApiFromCapture(capture: CapturedExtensionApi) {
+  return {
+    on(event: string, handler: unknown) {
+      capture.handlers.set(event, [...(capture.handlers.get(event) ?? []), handler]);
+    },
+    registerTool(tool: ToolDefinition) {
+      capture.tools.push(tool);
+    }
+  };
+}
 
 async function loadPicoExtension(): Promise<Extension> {
   const result = await discoverAndLoadExtensions(["./src/index.ts"], process.cwd());
@@ -107,4 +131,97 @@ describe("pico extension", () => {
       "vision: Bounded scene understanding through Qwen/Qwen3.5-9B"
     );
   });
+
+  it("registers a runtime session tool for field interaction tests", async () => {
+    const capture = createCapturedExtensionApi();
+
+    picoExtension(extensionApiFromCapture(capture) as never);
+
+    const sessionTool = capture.tools.find((tool) => tool.name === "pico_session");
+    if (sessionTool === undefined) {
+      throw new Error("pico_session tool was not registered");
+    }
+
+    const started = await sessionTool.execute(
+      "tool-call-1",
+      {
+        action: "start",
+        triggerKind: "greeting",
+        label: "おはよう",
+        source: "field-test"
+      },
+      undefined,
+      undefined,
+      {} as ExtensionContext
+    );
+    expect(extractToolJson(started)).toMatchObject({
+      action: "start",
+      session: {
+        id: "session-1",
+        state: "active",
+        trigger: {
+          kind: "greeting",
+          label: "おはよう",
+          source: "field-test"
+        }
+      }
+    });
+
+    const appended = await sessionTool.execute(
+      "tool-call-2",
+      {
+        action: "append",
+        sessionId: "session-1",
+        role: "staff",
+        content: "今日は折り紙をします。"
+      },
+      undefined,
+      undefined,
+      {} as ExtensionContext
+    );
+    expect(extractToolJson(appended)).toEqual({
+      action: "append",
+      entry: {
+        id: "session-1-entry-1",
+        role: "staff",
+        content: "今日は折り紙をします。"
+      }
+    });
+
+    const read = await sessionTool.execute(
+      "tool-call-3",
+      {
+        action: "read",
+        sessionId: "session-1"
+      },
+      undefined,
+      undefined,
+      {} as ExtensionContext
+    );
+    expect(extractToolJson(read)).toMatchObject({
+      action: "read",
+      session: {
+        id: "session-1",
+        state: "active",
+        entries: [
+          {
+            id: "session-1-entry-1",
+            role: "staff",
+            content: "今日は折り紙をします。"
+          }
+        ]
+      }
+    });
+  });
 });
+
+function extractToolJson(result: unknown): unknown {
+  const content = (result as { content?: readonly { type: string; text?: string }[] }).content;
+  const text = content?.find((item) => item.type === "text")?.text;
+
+  if (text === undefined) {
+    throw new Error("pico_session tool did not return text content");
+  }
+
+  return JSON.parse(text) as unknown;
+}

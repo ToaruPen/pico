@@ -20,6 +20,7 @@ export type PicoConfig = DeepReadonly<{
     personDetection: PicoPersonDetectionConfig;
   };
   voice: {
+    echoControl: PicoEchoControlConfig;
     stt: {
       mlxWhisper?: PicoMlxWhisperConfig;
     };
@@ -131,6 +132,27 @@ export type PicoPersonDetectionOutputLayout =
   | "yolox_coco_raw";
 export type PicoPersonDetectionCoordinateScale = "pixel" | "normalized";
 
+export type PicoEchoControlMode = "aec" | "platform_voice_processing" | "half_duplex";
+export type PicoEchoControlProvider =
+  | "web_rtc_aec3"
+  | "platform_voice_processing"
+  | "speexdsp"
+  | "half_duplex";
+
+export type PicoEchoControlConfig = {
+  readonly enabled: boolean;
+  readonly mode: PicoEchoControlMode;
+  readonly provider?: PicoEchoControlProvider;
+  readonly providerEndpoint?: string;
+  readonly sampleRateHz: number;
+  readonly channels: number;
+  readonly frameMs: number;
+  readonly tailMuteMs: number;
+  readonly diagnostics: {
+    readonly enabled: boolean;
+  };
+};
+
 export type PicoMlxWhisperConfig = {
   readonly id?: string;
   readonly localBaseUrl: string;
@@ -221,6 +243,17 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
     }
   },
   voice: {
+    echoControl: {
+      enabled: false,
+      mode: "half_duplex",
+      sampleRateHz: 16_000,
+      channels: 1,
+      frameMs: 10,
+      tailMuteMs: 700,
+      diagnostics: {
+        enabled: false
+      }
+    },
     stt: {},
     tts: {}
   }
@@ -498,18 +531,110 @@ function defineVisionSection(root: Record<string, unknown>): PicoConfig["vision"
 
 function defineVoiceSection(root: Record<string, unknown>): PicoConfig["voice"] {
   const voice = readOptionalRecord(root.voice, "pico config voice");
+  const echoControl = readOptionalRecord(voice?.echoControl, "pico config voice.echoControl");
   const stt = readOptionalRecord(voice?.stt, "pico config voice.stt");
   const tts = readOptionalRecord(voice?.tts, "pico config voice.tts");
   const mlxWhisper = readOptionalRecord(stt?.mlxWhisper, "pico config voice.stt.mlxWhisper");
   const aivis = readOptionalRecord(tts?.aivis, "pico config voice.tts.aivis");
 
   return {
+    echoControl: defineEchoControlConfig(echoControl),
     stt: {
       ...(mlxWhisper === undefined ? {} : { mlxWhisper: defineMlxWhisperConfig(mlxWhisper) })
     },
     tts: {
       ...(aivis === undefined ? {} : { aivis: defineAivisConfig(aivis) })
     }
+  };
+}
+
+function defineEchoControlConfig(
+  input: Record<string, unknown> | undefined
+): PicoEchoControlConfig {
+  if (input === undefined) {
+    return emptyPicoConfig.voice.echoControl;
+  }
+
+  const resolved = readEchoControlConfigFields(input);
+
+  if (resolved.enabled && resolved.mode === "platform_voice_processing") {
+    throw new Error(
+      "pico config voice.echoControl.mode platform_voice_processing is not implemented"
+    );
+  }
+
+  return resolved.enabled && resolved.mode === "aec"
+    ? defineAecEchoControlConfig(resolved)
+    : resolved;
+}
+
+function readEchoControlConfigFields(input: Record<string, unknown>): PicoEchoControlConfig {
+  const enabled =
+    readOptionalBoolean(input.enabled, "pico config voice.echoControl.enabled") ?? false;
+  const mode = readOptionalEchoControlMode(input.mode) ?? "half_duplex";
+  const provider = readOptionalEchoControlProvider(input.provider);
+  const providerEndpoint = readOptionalEchoControlProviderEndpoint(input.providerEndpoint);
+  const config: PicoEchoControlConfig = {
+    enabled,
+    mode,
+    sampleRateHz: readEchoControlSampleRate(input.sampleRateHz),
+    channels: readEchoControlChannels(input.channels),
+    frameMs: readEchoControlFrameMs(input.frameMs),
+    tailMuteMs: readEchoControlTailMuteMs(input.tailMuteMs),
+    diagnostics: readEchoControlDiagnostics(input.diagnostics)
+  };
+
+  return withOptionalEchoControlProvider(config, provider, providerEndpoint);
+}
+
+function readEchoControlSampleRate(value: unknown): number {
+  return readOptionalPositiveInteger(value, "pico config voice.echoControl.sampleRateHz") ?? 16_000;
+}
+
+function readEchoControlChannels(value: unknown): number {
+  return readOptionalPositiveInteger(value, "pico config voice.echoControl.channels") ?? 1;
+}
+
+function readEchoControlFrameMs(value: unknown): number {
+  return readOptionalPositiveInteger(value, "pico config voice.echoControl.frameMs") ?? 10;
+}
+
+function readEchoControlTailMuteMs(value: unknown): number {
+  return readOptionalNonNegativeInteger(value, "pico config voice.echoControl.tailMuteMs") ?? 700;
+}
+
+function readEchoControlDiagnostics(value: unknown): PicoEchoControlConfig["diagnostics"] {
+  const diagnostics = readOptionalRecord(value, "pico config voice.echoControl.diagnostics");
+
+  return {
+    enabled:
+      readOptionalBoolean(
+        diagnostics?.enabled,
+        "pico config voice.echoControl.diagnostics.enabled"
+      ) ?? false
+  };
+}
+
+function withOptionalEchoControlProvider(
+  config: PicoEchoControlConfig,
+  provider: PicoEchoControlProvider | undefined,
+  providerEndpoint: string | undefined
+): PicoEchoControlConfig {
+  return {
+    ...config,
+    ...(provider === undefined ? {} : { provider }),
+    ...(providerEndpoint === undefined ? {} : { providerEndpoint })
+  };
+}
+
+function defineAecEchoControlConfig(input: PicoEchoControlConfig): PicoEchoControlConfig {
+  return {
+    ...input,
+    provider: requireAecEchoControlProvider(input.provider),
+    providerEndpoint: requireString(
+      input.providerEndpoint,
+      "pico config voice.echoControl.providerEndpoint"
+    )
   };
 }
 
@@ -986,6 +1111,26 @@ function readOptionalAuditOtelEndpoint(value: unknown): string | undefined {
   return endpoint;
 }
 
+function readOptionalEchoControlProviderEndpoint(value: unknown): string | undefined {
+  const endpoint = readOptionalString(value, "pico config voice.echoControl.providerEndpoint");
+
+  if (endpoint === undefined) {
+    return undefined;
+  }
+
+  if (!URL.canParse(endpoint)) {
+    throw new Error("pico config voice.echoControl.providerEndpoint must be a valid URL");
+  }
+
+  const parsedUrl = new URL(endpoint);
+
+  requireHttpUrl(parsedUrl, "pico config voice.echoControl.providerEndpoint");
+  requireOriginUrl(parsedUrl, "pico config voice.echoControl.providerEndpoint");
+  requireVoiceEchoControlLoopbackHost(parsedUrl.hostname);
+
+  return endpoint;
+}
+
 function requireAuditOtelEndpointShape(parsedUrl: URL): void {
   if (parsedUrl.username !== "" || parsedUrl.password !== "") {
     throw new Error("pico config audit.otel.endpoint must not include credentials");
@@ -1007,6 +1152,14 @@ function requireAuditOtelLoopbackHost(hostname: string): void {
 
   if (!loopbackHosts.has(hostname)) {
     throw new Error("pico config audit.otel.endpoint must use a local Collector URL");
+  }
+}
+
+function requireVoiceEchoControlLoopbackHost(hostname: string): void {
+  const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+  if (!loopbackHosts.has(hostname)) {
+    throw new Error("pico config voice.echoControl.providerEndpoint must use a local URL");
   }
 }
 
@@ -1161,6 +1314,61 @@ function readOptionalPersonDetectionCoordinateScale(
   }
 
   return parsed;
+}
+
+function readOptionalEchoControlMode(value: unknown): PicoEchoControlMode | undefined {
+  const parsed = readOptionalString(value, "pico config voice.echoControl.mode");
+
+  if (parsed === undefined) {
+    return undefined;
+  }
+
+  if (parsed !== "aec" && parsed !== "platform_voice_processing" && parsed !== "half_duplex") {
+    throw new Error(
+      "pico config voice.echoControl.mode must be aec, platform_voice_processing, or half_duplex"
+    );
+  }
+
+  return parsed;
+}
+
+function readOptionalEchoControlProvider(value: unknown): PicoEchoControlProvider | undefined {
+  const parsed = readOptionalString(value, "pico config voice.echoControl.provider");
+
+  if (parsed === undefined) {
+    return undefined;
+  }
+
+  if (
+    parsed !== "web_rtc_aec3" &&
+    parsed !== "platform_voice_processing" &&
+    parsed !== "speexdsp" &&
+    parsed !== "half_duplex"
+  ) {
+    throw new Error(
+      "pico config voice.echoControl.provider must be web_rtc_aec3, platform_voice_processing, speexdsp, or half_duplex"
+    );
+  }
+
+  return parsed;
+}
+
+function requireAecEchoControlProvider(
+  value: PicoEchoControlProvider | undefined
+): PicoEchoControlProvider {
+  if (value === undefined) {
+    throw new Error(
+      "pico config voice.echoControl.provider is required when voice.echoControl is set"
+    );
+  }
+
+  if (value !== "web_rtc_aec3" && value !== "speexdsp") {
+    throw new Error(
+      "pico config voice.echoControl.provider must be web_rtc_aec3 or speexdsp when voice.echoControl.mode is aec"
+    );
+  }
+
+  return value;
 }
 
 function readOptionalConfidenceThreshold(value: unknown): number | undefined {

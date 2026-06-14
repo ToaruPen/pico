@@ -29,8 +29,10 @@ just ci
 ```
 
 Run the milestone smoke suite after local credentials and hardware/provider
-sidecars are configured. Missing optional provider configuration is reported as
-an explicit skipped section; failed configured sections make the command fail.
+sidecars are configured. Smoke commands are regression and readiness gates, not
+completion evidence for real-world validation. Missing optional provider
+configuration is reported as an explicit skipped section; failed configured
+sections make the command fail.
 
 ```bash
 just smoke-milestone
@@ -51,8 +53,8 @@ cp config/pico.example.yaml config/pico.local.yaml
 PICO_CONFIG_PATH=/path/to/pico.local.yaml just smoke-milestone
 ```
 
-For full real-world validation, run the deterministic gate first, prepare the
-voice sample if the STT smoke is enabled, then run the milestone suite:
+Before field validation, run the deterministic gate first, prepare the voice
+sample if the STT smoke is enabled, then run the milestone suite:
 
 ```bash
 just check
@@ -71,6 +73,15 @@ ffmpeg -y -hide_banner -loglevel error \
 # curl -s http://127.0.0.1:10101/speakers
 just smoke-milestone
 ```
+
+Field validation must be performed against the actual resident-agent operating
+path, not only the smoke scripts. A field report should include the date,
+operator, hardware used, config path, Pi Agent launch method, spoken session
+steps, audible TTS confirmation, Tapo camera observation, VLM scene summary,
+session cutoff, Mem0/long-memory result, OTel/audit evidence, and any follow-up
+issues created from failures.
+
+Field test reports live under `docs/field-tests/`.
 
 Run the authenticated Pi Agent runtime smoke after `pi` is configured with model
 credentials:

@@ -95,6 +95,17 @@ vision:
     frameIntervalMs: 500
     confidenceThreshold: 0.55
 voice:
+  echoControl:
+    enabled: true
+    mode: aec
+    provider: web_rtc_aec3
+    providerEndpoint: http://127.0.0.1:8770
+    sampleRateHz: 16000
+    channels: 1
+    frameMs: 10
+    tailMuteMs: 700
+    diagnostics:
+      enabled: true
   stt:
     mlxWhisper:
       id: local-mlx
@@ -195,6 +206,19 @@ audit:
         }
       },
       voice: {
+        echoControl: {
+          enabled: true,
+          mode: "aec",
+          provider: "web_rtc_aec3",
+          providerEndpoint: "http://127.0.0.1:8770",
+          sampleRateHz: 16_000,
+          channels: 1,
+          frameMs: 10,
+          tailMuteMs: 700,
+          diagnostics: {
+            enabled: true
+          }
+        },
         stt: {
           mlxWhisper: {
             samplePcm16lePath: "/tmp/pico-known-ja.pcm",
@@ -265,8 +289,83 @@ audit:
         otel: {
           enabled: false
         }
+      },
+      voice: {
+        echoControl: {
+          enabled: false,
+          mode: "half_duplex",
+          sampleRateHz: 16_000,
+          channels: 1,
+          frameMs: 10,
+          tailMuteMs: 700,
+          diagnostics: {
+            enabled: false
+          }
+        }
       }
     });
+  });
+
+  it("requires local voice echo control provider endpoints when AEC is enabled", () => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          echoControl: {
+            enabled: true,
+            mode: "aec",
+            provider: "web_rtc_aec3",
+            providerEndpoint: "https://aec.example.com"
+          }
+        }
+      })
+    ).toThrow("pico config voice.echoControl.providerEndpoint must use a local URL");
+  });
+
+  it("rejects unsupported voice echo control providers", () => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          echoControl: {
+            enabled: true,
+            mode: "aec",
+            provider: "cloud_aec",
+            providerEndpoint: "http://127.0.0.1:8770"
+          }
+        }
+      })
+    ).toThrow(
+      "pico config voice.echoControl.provider must be web_rtc_aec3, platform_voice_processing, speexdsp, or half_duplex"
+    );
+  });
+
+  it("rejects non-AEC echo control providers in AEC mode", () => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          echoControl: {
+            enabled: true,
+            mode: "aec",
+            provider: "half_duplex",
+            providerEndpoint: "http://127.0.0.1:8770"
+          }
+        }
+      })
+    ).toThrow(
+      "pico config voice.echoControl.provider must be web_rtc_aec3 or speexdsp when voice.echoControl.mode is aec"
+    );
+  });
+
+  it("rejects platform voice processing until a provider boundary is implemented", () => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          echoControl: {
+            enabled: true,
+            mode: "platform_voice_processing"
+          }
+        }
+      })
+    ).toThrow("pico config voice.echoControl.mode platform_voice_processing is not implemented");
   });
 
   it("rejects non-local audit OTel Collector endpoints", () => {
