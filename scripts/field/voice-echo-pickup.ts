@@ -421,7 +421,7 @@ async function recordMicrophoneWhilePlaying(input: {
   });
 
   if (playback.status !== 0) {
-    ffmpeg.kill("SIGTERM");
+    await terminateProcess(ffmpeg);
     throw new Error(
       `pico voice echo pickup playback failed with ${input.playbackCommand.command}: ${playback.stderr.trim()}`
     );
@@ -562,6 +562,22 @@ function waitForProcess(process_: ReturnType<typeof spawn>, message: string): Pr
 
       reject(new Error(`${message}: ${stderr.trim()}`));
     });
+  });
+}
+
+function terminateProcess(process_: ReturnType<typeof spawn>): Promise<void> {
+  if (process_.exitCode !== null || process_.signalCode !== null) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    process_.once("close", () => {
+      resolve();
+    });
+
+    if (!process_.kill("SIGTERM")) {
+      resolve();
+    }
   });
 }
 
