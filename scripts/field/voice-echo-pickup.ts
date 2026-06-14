@@ -1,7 +1,7 @@
 #!/usr/bin/env jiti
 import { spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
@@ -17,7 +17,8 @@ import {
   createMlxWhisperSttClient,
   defineAivisSpeechService,
   defineMlxWhisperSidecar,
-  type SttTranscriptionRequest
+  type SttTranscriptionRequest,
+  type TtsAudioChunk
 } from "../../src/modules/voice/index.js";
 
 export type VoiceEchoPickupFieldReport =
@@ -72,8 +73,10 @@ const defaultTimeoutMs = 30_000;
 const defaultWarmupAudioSeconds = 0.25;
 const defaultText = "おはようピコ。これはエコー拾い込み確認です。";
 const defaultArtifactDirectory = ".pico-local/field-voice";
-const defaultMicrophoneDevice = ":0";
+const defaultMacMicrophoneDevice = ":0";
+const defaultLinuxMicrophoneDevice = "default";
 const defaultRecordSeconds = 4;
+const defaultPlaybackDelayMs = 500;
 
 export function buildVoiceEchoPickupFieldPlan(config: PicoConfig): VoiceEchoPickupFieldPlan {
   const echoControl = config.voice.echoControl;
@@ -182,7 +185,9 @@ async function captureVoiceEchoPickup(
   readonly echoResult: EchoControlResult;
   readonly resumeAudio: Uint8Array;
 }> {
-  const artifactDirectory = process.env.PICO_FIELD_VOICE_ARTIFACT_DIR ?? defaultArtifactDirectory;
+  const artifactDirectory = resolveFieldArtifactDirectory(
+    process.env.PICO_FIELD_VOICE_ARTIFACT_DIR
+  );
   await mkdir(artifactDirectory, { recursive: true });
 
   const timestamp = new Date().toISOString().replaceAll(":", "-");
@@ -193,20 +198,27 @@ async function captureVoiceEchoPickup(
   await writeFile(ttsPath, encodePcm16leWav(tts.audio, tts.sampleRateHz, tts.channels));
 
   const recordSeconds =
-    readPositiveInteger(process.env.PICO_FIELD_RECORD_SECONDS) ?? defaultRecordSeconds;
+    readPositiveInteger(process.env.PICO_FIELD_RECORD_SECONDS, "PICO_FIELD_RECORD_SECONDS") ??
+    defaultRecordSeconds;
+  const playbackDelayMs =
+    readPositiveInteger(process.env.PICO_FIELD_PLAYBACK_DELAY_MS, "PICO_FIELD_PLAYBACK_DELAY_MS") ??
+    defaultPlaybackDelayMs;
+  const microphoneInput = resolveMicrophoneInput();
   const playbackStartedAt = await recordMicrophoneWhilePlaying({
-    ttsPath,
     micPath,
     recordSeconds,
-    microphoneDevice: process.env.PICO_FIELD_MIC_DEVICE ?? defaultMicrophoneDevice,
+    playbackDelayMs,
+    microphoneInput,
+    playbackCommand: resolvePlaybackCommand(ttsPath, microphoneInput),
     sampleRateHz: plan.echoControl.sampleRateHz,
     channels: plan.echoControl.channels
   });
   await delay(plan.echoControl.tailMuteMs);
   await recordMicrophone({
     micPath: resumePath,
-    recordSeconds: readPositiveInteger(process.env.PICO_FIELD_RESUME_SECONDS) ?? 2,
-    microphoneDevice: process.env.PICO_FIELD_MIC_DEVICE ?? defaultMicrophoneDevice,
+    recordSeconds:
+      readPositiveInteger(process.env.PICO_FIELD_RESUME_SECONDS, "PICO_FIELD_RESUME_SECONDS") ?? 2,
+    microphoneInput,
     sampleRateHz: plan.echoControl.sampleRateHz,
     channels: plan.echoControl.channels
   });
@@ -272,10 +284,10 @@ async function transcribeAllowedEchoFrame(
 }
 
 function includesTriggerPhrase(text: string, triggerPhrases: readonly string[]): boolean {
-  const normalized = text.toLocaleLowerCase();
+  const normalized = text.toLowerCase();
 
   return triggerPhrases.some((phrase) => {
-    const trigger = phrase.trim().toLocaleLowerCase();
+    const trigger = phrase.trim().toLowerCase();
     return trigger !== "" && normalized.includes(trigger);
   });
 }
@@ -343,11 +355,7 @@ async function synthesizeFieldPrompt(
     throw new Error("pico voice echo pickup TTS produced no audio");
   }
 
-  const first = result.chunks[0];
-
-  if (first === undefined) {
-    throw new Error("pico voice echo pickup TTS produced no audio");
-  }
+  const [first] = result.chunks as readonly [TtsAudioChunk, ...TtsAudioChunk[]];
 
   const audio = concatenateAudio(result.chunks.map((chunk) => chunk.audio));
 
@@ -396,24 +404,27 @@ function buildSttRequest(
 }
 
 async function recordMicrophoneWhilePlaying(input: {
-  readonly ttsPath: string;
   readonly micPath: string;
   readonly recordSeconds: number;
-  readonly microphoneDevice: string;
+  readonly playbackDelayMs: number;
+  readonly microphoneInput: MicrophoneInput;
+  readonly playbackCommand: PlaybackCommand;
   readonly sampleRateHz: number;
   readonly channels: number;
 }): Promise<string> {
   const ffmpeg = spawnMicrophoneRecorder(input);
 
-  await delay(500);
+  await delay(input.playbackDelayMs);
   const playbackStartedAt = new Date().toISOString();
-  const playback = spawnSync("afplay", [input.ttsPath], {
+  const playback = spawnSync(input.playbackCommand.command, input.playbackCommand.args, {
     encoding: "utf8"
   });
 
   if (playback.status !== 0) {
     ffmpeg.kill("SIGTERM");
-    throw new Error(`pico voice echo pickup playback failed: ${playback.stderr.trim()}`);
+    throw new Error(
+      `pico voice echo pickup playback failed with ${input.playbackCommand.command}: ${playback.stderr.trim()}`
+    );
   }
 
   await waitForProcess(ffmpeg, "pico voice echo pickup microphone recording failed");
@@ -424,7 +435,7 @@ async function recordMicrophoneWhilePlaying(input: {
 async function recordMicrophone(input: {
   readonly micPath: string;
   readonly recordSeconds: number;
-  readonly microphoneDevice: string;
+  readonly microphoneInput: MicrophoneInput;
   readonly sampleRateHz: number;
   readonly channels: number;
 }): Promise<void> {
@@ -437,7 +448,7 @@ async function recordMicrophone(input: {
 function spawnMicrophoneRecorder(input: {
   readonly micPath: string;
   readonly recordSeconds: number;
-  readonly microphoneDevice: string;
+  readonly microphoneInput: MicrophoneInput;
   readonly sampleRateHz: number;
   readonly channels: number;
 }): ReturnType<typeof spawn> {
@@ -449,9 +460,9 @@ function spawnMicrophoneRecorder(input: {
       "error",
       "-y",
       "-f",
-      "avfoundation",
+      input.microphoneInput.format,
       "-i",
-      input.microphoneDevice,
+      input.microphoneInput.device,
       "-t",
       String(input.recordSeconds),
       "-ac",
@@ -466,6 +477,74 @@ function spawnMicrophoneRecorder(input: {
       stdio: ["ignore", "pipe", "pipe"]
     }
   );
+}
+
+type MicrophoneInput = {
+  readonly format: "alsa" | "avfoundation" | "pulse";
+  readonly device: string;
+};
+
+type PlaybackCommand = {
+  readonly command: "afplay" | "aplay" | "paplay";
+  readonly args: readonly string[];
+};
+
+function resolveMicrophoneInput(): MicrophoneInput {
+  if (process.platform === "darwin") {
+    return {
+      format: "avfoundation",
+      device: process.env.PICO_FIELD_MIC_DEVICE ?? defaultMacMicrophoneDevice
+    };
+  }
+
+  if (process.platform === "linux") {
+    return {
+      format: readLinuxMicrophoneFormat(process.env.PICO_FIELD_MIC_FORMAT),
+      device: process.env.PICO_FIELD_MIC_DEVICE ?? defaultLinuxMicrophoneDevice
+    };
+  }
+
+  throw new Error(`pico voice echo pickup unsupported platform: ${process.platform}`);
+}
+
+function resolvePlaybackCommand(
+  ttsPath: string,
+  microphoneInput: MicrophoneInput
+): PlaybackCommand {
+  if (process.platform === "darwin") {
+    return {
+      command: "afplay",
+      args: [ttsPath]
+    };
+  }
+
+  if (process.platform === "linux" && microphoneInput.format === "pulse") {
+    return {
+      command: "paplay",
+      args: [ttsPath]
+    };
+  }
+
+  if (process.platform === "linux") {
+    return {
+      command: "aplay",
+      args: [ttsPath]
+    };
+  }
+
+  throw new Error(`pico voice echo pickup unsupported platform: ${process.platform}`);
+}
+
+function readLinuxMicrophoneFormat(value: string | undefined): "alsa" | "pulse" {
+  if (value === undefined || value === "alsa") {
+    return "alsa";
+  }
+
+  if (value === "pulse") {
+    return "pulse";
+  }
+
+  throw new Error("PICO_FIELD_MIC_FORMAT must be alsa or pulse");
 }
 
 function waitForProcess(process_: ReturnType<typeof spawn>, message: string): Promise<void> {
@@ -520,7 +599,7 @@ function concatenateAudio(chunks: readonly Uint8Array[]): Uint8Array {
   return output;
 }
 
-function readPositiveInteger(value: string | undefined): number | undefined {
+function readPositiveInteger(value: string | undefined, variableName: string): number | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -528,10 +607,22 @@ function readPositiveInteger(value: string | undefined): number | undefined {
   const parsed = Number.parseInt(value, 10);
 
   if (!Number.isInteger(parsed) || parsed < 1) {
-    throw new Error("PICO_FIELD_RECORD_SECONDS must be a positive integer");
+    throw new Error(`${variableName} must be a positive integer`);
   }
 
   return parsed;
+}
+
+function resolveFieldArtifactDirectory(value: string | undefined): string {
+  const directory = resolve(value ?? defaultArtifactDirectory);
+  const privateRoot = resolve(".pico-local");
+  const relativePath = relative(privateRoot, directory);
+
+  if (relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath))) {
+    return directory;
+  }
+
+  throw new Error("PICO_FIELD_VOICE_ARTIFACT_DIR must be inside .pico-local");
 }
 
 function delay(ms: number): Promise<void> {

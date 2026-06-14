@@ -62,14 +62,22 @@ export type HttpEchoControlProviderOptions = {
   readonly fetchImplementation?: typeof fetch;
 };
 
-type HttpEchoControlResponse = {
-  readonly action: "pass" | "suppress";
-  readonly reason: "aec_processed" | "provider_suppressed";
-  readonly audioBase64?: string;
-  readonly diagnostics: {
-    readonly residualEchoProbability: number;
-    readonly voiceActivity: boolean;
-  };
+type HttpEchoControlResponse =
+  | {
+      readonly action: "pass";
+      readonly reason: "aec_processed";
+      readonly audioBase64: string;
+      readonly diagnostics: HttpEchoControlDiagnostics;
+    }
+  | {
+      readonly action: "suppress";
+      readonly reason: "provider_suppressed";
+      readonly diagnostics: HttpEchoControlDiagnostics;
+    };
+
+type HttpEchoControlDiagnostics = {
+  readonly residualEchoProbability: number;
+  readonly voiceActivity: boolean;
 };
 
 export function createHalfDuplexEchoControl(
@@ -272,27 +280,33 @@ function parseHttpEchoControlResponse(input: unknown): HttpEchoControlResponse {
   );
   const action = requireEchoControlAction(response.action);
 
+  const parsedDiagnostics = {
+    residualEchoProbability: requireUnitNumber(
+      diagnostics.residualEchoProbability,
+      "pico echo-control provider residualEchoProbability is malformed"
+    ),
+    voiceActivity: requireBoolean(
+      diagnostics.voiceActivity,
+      "pico echo-control provider voiceActivity is malformed"
+    )
+  };
+
+  if (action === "pass") {
+    return {
+      action,
+      reason: "aec_processed",
+      audioBase64: requireText(
+        response.audioBase64,
+        "pico echo-control provider audioBase64 is required"
+      ),
+      diagnostics: parsedDiagnostics
+    };
+  }
+
   return {
     action,
-    reason: action === "pass" ? "aec_processed" : "provider_suppressed",
-    ...(response.audioBase64 === undefined
-      ? {}
-      : {
-          audioBase64: requireText(
-            response.audioBase64,
-            "pico echo-control provider audioBase64 is malformed"
-          )
-        }),
-    diagnostics: {
-      residualEchoProbability: requireUnitNumber(
-        diagnostics.residualEchoProbability,
-        "pico echo-control provider residualEchoProbability is malformed"
-      ),
-      voiceActivity: requireBoolean(
-        diagnostics.voiceActivity,
-        "pico echo-control provider voiceActivity is malformed"
-      )
-    }
+    reason: "provider_suppressed",
+    diagnostics: parsedDiagnostics
   };
 }
 
@@ -379,6 +393,14 @@ function requireEchoControlAction(value: unknown): "pass" | "suppress" {
   return value;
 }
 
+function requireUnitNumber(value: unknown, message: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error(message);
+  }
+
+  return value;
+}
+
 function requireBoolean(value: unknown, message: string): boolean {
   if (typeof value !== "boolean") {
     throw new Error(message);
@@ -387,12 +409,12 @@ function requireBoolean(value: unknown, message: string): boolean {
   return value;
 }
 
-function requireUnitNumber(value: unknown, message: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+function requireRecord(value: unknown, message: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(message);
   }
 
-  return value;
+  return value as Record<string, unknown>;
 }
 
 function requirePositiveInteger(value: unknown, message: string): number {
@@ -439,14 +461,6 @@ function requireProviderEndpointLocalHost(hostname: string): void {
   if (!loopbackHosts.has(hostname)) {
     throw new Error("pico echo-control providerEndpoint must use a local URL");
   }
-}
-
-function requireRecord(value: unknown, message: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(message);
-  }
-
-  return value as Record<string, unknown>;
 }
 
 function requireNonNegativeInteger(value: unknown, message: string): number {

@@ -3,12 +3,11 @@
 ## Scope
 
 Verify that pico's configured timed session ending can end a Pi Agent runtime
-session and allow a cutoff payload to be produced through the `pico_session`
-tool.
+session and return a cutoff payload through the `pico_session` tool.
 
-This validates the Pi Agent runtime path for timed session cutoff. It does not
-validate live microphone STT, audible TTS, camera, VLM, long-memory processing,
-or OTel export.
+This validates the Pi Agent runtime path for session timeout and cutoff
+production. It does not validate entry-bearing cutoff payloads, live microphone
+STT, audible TTS, camera, VLM, long-memory processing, or OTel export.
 
 ## Environment
 
@@ -50,7 +49,9 @@ turn.
 
 ## Verdict
 
-Passed for configured timed session cutoff.
+Passed for session termination timing and cutoff result production. The observed
+`sourceEntryIds: 0` means entry-bearing cutoff payload validation remains
+unverified in this run.
 
 ## Follow-Up
 

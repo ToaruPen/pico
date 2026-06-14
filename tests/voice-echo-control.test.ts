@@ -206,4 +206,45 @@ describe("voice echo control", () => {
       "http://127.0.0.1:8770/v1/echo-control/near-end"
     ]);
   });
+
+  it("rejects HTTP AEC pass responses that omit processed audio", async () => {
+    const provider = createHttpEchoControlProvider({
+      provider: "web_rtc_aec3",
+      mode: "aec",
+      providerEndpoint: "http://127.0.0.1:8770",
+      fetchImplementation: () =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              action: "pass",
+              reason: "aec_processed",
+              diagnostics: {
+                residualEchoProbability: 0.2,
+                voiceActivity: true
+              }
+            }),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/json"
+              }
+            }
+          )
+        )
+    });
+    const nearEnd = defineVoicePcmFrame({
+      id: "mic-frame-1",
+      direction: "near_end",
+      audio: new Uint8Array([4, 5, 6]),
+      encoding: "pcm16le",
+      sampleRateHz: 16_000,
+      channels: 1,
+      capturedAt: "2026-06-14T10:00:00.400Z",
+      durationMs: 100
+    });
+
+    await expect(provider.processNearEnd(nearEnd)).rejects.toThrow(
+      "pico echo-control provider audioBase64 is required"
+    );
+  });
 });
