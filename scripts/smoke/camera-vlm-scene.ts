@@ -289,11 +289,11 @@ function isDirectExecution(): boolean {
 }
 
 if (isDirectExecution()) {
-  let directExecutionConfig: PicoConfig | undefined;
+  let config: PicoConfig | undefined;
 
   try {
-    directExecutionConfig = loadPicoConfigFromEnvironment();
-    const report = await runCameraVlmSceneSmoke(directExecutionConfig);
+    config = loadPicoConfigFromEnvironment();
+    const report = await runCameraVlmSceneSmoke(config);
     process.stdout.write(`${JSON.stringify(report, undefined, 2)}\n`);
     process.exitCode = cameraVlmSceneSmokeExitCode(report);
   } catch (error) {
@@ -311,9 +311,7 @@ if (isDirectExecution()) {
       );
       process.exitCode = 1;
     } else {
-      process.stderr.write(
-        `${formatCameraVlmSceneSmokeFatalError(error, directExecutionConfig)}\n`
-      );
+      process.stderr.write(`${formatCameraVlmSceneSmokeFatalError(error, config)}\n`);
       process.exitCode = 2;
     }
   }

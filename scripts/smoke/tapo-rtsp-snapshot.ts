@@ -66,10 +66,22 @@ export async function runTapoRtspSnapshotSmoke(
     };
   }
 
-  const result =
-    dependencies.captureSnapshot === undefined
-      ? await captureSnapshotWithRtsp(plan.source, plan.timeoutMs, plan.maxFrameBytes)
-      : await dependencies.captureSnapshot(plan.source, plan.timeoutMs, plan.maxFrameBytes);
+  let result: TapoRtspSnapshotResult;
+  try {
+    result =
+      dependencies.captureSnapshot === undefined
+        ? await captureSnapshotWithRtsp(plan.source, plan.timeoutMs, plan.maxFrameBytes)
+        : await dependencies.captureSnapshot(plan.source, plan.timeoutMs, plan.maxFrameBytes);
+  } catch (error) {
+    return {
+      status: "failed",
+      provider: "tapo-rtsp",
+      reason: `pico Tapo RTSP smoke failed: capture_exception: ${redactRtspSensitiveValues(
+        errorMessage(error),
+        plan.sensitiveValues
+      )}`
+    };
+  }
 
   if (!result.ok) {
     return {

@@ -123,6 +123,37 @@ describe("Tapo RTSP snapshot smoke configuration", () => {
     expect(reportText).not.toContain("camera-passphrase");
   });
 
+  it("redacts RTSP URLs and camera credentials when snapshot capture throws", async () => {
+    const report = await runTapoRtspSnapshotSmoke(
+      definePicoConfig({
+        camera: {
+          tapo: {
+            host: "192.168.10.25",
+            user: "camera-user",
+            password: "camera-passphrase",
+            streams: {
+              scene: "stream1"
+            }
+          }
+        }
+      }),
+      {
+        captureSnapshot: () =>
+          Promise.reject(
+            new Error(
+              "rtsp://camera-user:camera-passphrase@192.168.10.25:554/stream1 camera-passphrase"
+            )
+          )
+      }
+    );
+    const reportText = JSON.stringify(report);
+
+    expect(report.status).toBe("failed");
+    expect(reportText).not.toContain("rtsp://");
+    expect(reportText).not.toContain("camera-user");
+    expect(reportText).not.toContain("camera-passphrase");
+  });
+
   it("returns a failing process code only for failed smoke reports", () => {
     expect(
       tapoRtspSmokeExitCode({

@@ -208,6 +208,26 @@ describe("bounded vision scene description", () => {
     );
   });
 
+  it("truncates oversized Ollama error bodies in scene request failures", async () => {
+    const oversizedBody = "x".repeat(620);
+    const failingFetch: typeof fetch = () =>
+      Promise.resolve(new Response(oversizedBody, { status: 500 }));
+
+    let thrown: unknown;
+    try {
+      await describeScene(sceneRequest, failingFetch);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    const message = (thrown as Error).message;
+    expect(message).toContain(
+      `pico vision Ollama request failed with status 500: ${oversizedBody.slice(0, 500)}...`
+    );
+    expect(message).not.toContain(oversizedBody.slice(0, 501));
+  });
+
   it("includes the network failure cause when the scene request cannot reach Ollama", async () => {
     const socketError = new Error("other side closed");
     socketError.name = "SocketError";
