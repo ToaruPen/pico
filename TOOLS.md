@@ -29,7 +29,9 @@ instructions.
 - Vitest: `vitest.config.ts` and `tests/`.
 - npm package and Pi extension metadata: `package.json`.
 - GitHub Actions CI: `.github/workflows/ci.yml`.
-- CI parallel gate runner: `scripts/ci/run-quality-gates.sh`.
+- CI parallel gate runner: `scripts/ci/run-quality-gates.sh`; it runs local
+  tool binaries directly and prints a per-gate timing summary for CI scaling
+  decisions.
 
 ## Project-Specific Checks
 
