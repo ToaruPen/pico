@@ -1364,7 +1364,7 @@ Expected: the response reports a scene summary from the configured VLM path.
 
 Create `docs/field-tests/2026-06-15-pi-agent-perception-tools.md`:
 
-```markdown
+````markdown
 # 2026-06-15 Pi Agent Perception Tools Field Test
 
 ## Scope
@@ -1405,7 +1405,7 @@ Passed or failed based on the observed commands above.
 ## Follow-Up
 
 Create focused issues for any failed field milestone.
-```
+````
 
 Replace the Observed Result bullets with the actual command outputs before committing.
 
@@ -1450,7 +1450,7 @@ gh pr create \
 
 Use this PR body:
 
-```markdown
+````markdown
 ## Summary
 
 - Adds actual Pi Agent tools for Tapo scene snapshot, person detection, and camera-to-VLM scene description.
@@ -1468,7 +1468,7 @@ Closes #61
 - [ ] Pi Agent field test for `pico_camera_snapshot`
 - [ ] Pi Agent field test for `pico_person_detection`
 - [ ] Pi Agent field test for `pico_camera_scene_description`
-```
+````
 
 - [ ] **Step 4: Run CodeRabbit/CI convergence**
 
