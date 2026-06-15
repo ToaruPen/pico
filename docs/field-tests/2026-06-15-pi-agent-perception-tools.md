@@ -34,10 +34,10 @@ PICO_CONFIG_PATH=config/pico.local.yaml node_modules/.bin/pi --approve --no-sess
 
 ## Automated Verification
 
-- Focused runtime and smoke tests: passed, 6 files / 49 tests.
+- Focused runtime and smoke tests: passed, 6 files / 52 tests.
 - Full project gate: passed.
 - `just check`: typecheck, lint, ast rule tests, ast scan, format check, and full
-  Vitest suite passed, 31 files / 335 tests.
+  Vitest suite passed, 31 files / 338 tests.
 
 ## Provider Readiness
 
@@ -82,8 +82,8 @@ PICO_CONFIG_PATH=config/pico.local.yaml node_modules/.bin/pi --approve --no-sess
 - Status: passed
 - Source ID: `tapo-rtsp`
 - Stream purpose: `scene`
-- Frame bytes: `111183`
-- Captured at: `2026-06-15T02:01:43.741Z`
+- Frame bytes: `113515`
+- Captured at: `2026-06-15T02:33:04.232Z`
 
 ### `pico_person_detection`
 
@@ -91,15 +91,15 @@ PICO_CONFIG_PATH=config/pico.local.yaml node_modules/.bin/pi --approve --no-sess
 - Source ID: `tapo-rtsp`
 - Stream purpose: `detection`
 - Detected people: `0`
-- Captured at: `2026-06-15T02:02:15.648Z`
+- Captured at: `2026-06-15T02:33:19.865Z`
 
 ### `pico_camera_scene_description`
 
 - Status: passed
-- Summary: `机上の物品が見えます。`
+- Summary: `放課後施設の机周りの場面です。`
 - Observed people count: `0`
 - Environment count: `9`
-- Uncertainty count: `3`
+- Uncertainty count: `2`
 
 ## Verdict
 
