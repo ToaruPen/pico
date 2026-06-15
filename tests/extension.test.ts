@@ -137,6 +137,13 @@ describe("pico extension", () => {
 
     picoExtension(extensionApiFromCapture(capture) as never);
 
+    expect(capture.tools.map((tool) => tool.name).sort()).toEqual([
+      "pico_camera_scene_description",
+      "pico_camera_snapshot",
+      "pico_person_detection",
+      "pico_session"
+    ]);
+
     const sessionTool = capture.tools.find((tool) => tool.name === "pico_session");
     if (sessionTool === undefined) {
       throw new Error("pico_session tool was not registered");

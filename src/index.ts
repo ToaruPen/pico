@@ -11,6 +11,11 @@ import { createMemoryModule } from "./modules/memory/index.js";
 import { createSessionModule } from "./modules/session/index.js";
 import { createTransportModule } from "./modules/transport/index.js";
 import { PicoModuleRegistry } from "./orchestrator/registry.js";
+import {
+  createPicoCameraSceneDescriptionTool,
+  createPicoCameraSnapshotTool,
+  createPicoPersonDetectionTool
+} from "./runtime/perception-tool.js";
 import { createPicoSessionTool } from "./runtime/session-tool.js";
 
 export function createPicoRegistry(): PicoModuleRegistry {
@@ -69,6 +74,9 @@ export function buildPicoExtensionSystemPrompt(baseSystemPrompt: string): string
 
 export default function registerPicoExtension(pi: ExtensionAPI): void {
   pi.registerTool(createPicoSessionTool());
+  pi.registerTool(createPicoCameraSnapshotTool());
+  pi.registerTool(createPicoPersonDetectionTool());
+  pi.registerTool(createPicoCameraSceneDescriptionTool());
   pi.on("before_agent_start", (event: BeforeAgentStartEvent) => ({
     systemPrompt: buildPicoExtensionSystemPrompt(event.systemPrompt)
   }));
