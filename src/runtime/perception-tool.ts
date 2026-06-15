@@ -14,7 +14,7 @@ export type PicoPerceptionToolOptions = {
 export function createPicoCameraSnapshotTool(
   options: PicoPerceptionToolOptions = {}
 ): ToolDefinition<typeof emptyParameters> {
-  const service = resolveService(options);
+  const getService = createLazyServiceResolver(options);
 
   return {
     name: "pico_camera_snapshot",
@@ -28,6 +28,8 @@ export function createPicoCameraSnapshotTool(
     parameters: emptyParameters,
     executionMode: "sequential",
     async execute() {
+      const service = getService();
+
       return textResult({
         tool: "pico_camera_snapshot",
         result: await service.captureSceneSnapshot()
@@ -39,7 +41,7 @@ export function createPicoCameraSnapshotTool(
 export function createPicoPersonDetectionTool(
   options: PicoPerceptionToolOptions = {}
 ): ToolDefinition<typeof emptyParameters> {
-  const service = resolveService(options);
+  const getService = createLazyServiceResolver(options);
 
   return {
     name: "pico_person_detection",
@@ -53,6 +55,8 @@ export function createPicoPersonDetectionTool(
     parameters: emptyParameters,
     executionMode: "sequential",
     async execute() {
+      const service = getService();
+
       return textResult({
         tool: "pico_person_detection",
         result: await service.detectPeople()
@@ -64,7 +68,7 @@ export function createPicoPersonDetectionTool(
 export function createPicoCameraSceneDescriptionTool(
   options: PicoPerceptionToolOptions = {}
 ): ToolDefinition<typeof emptyParameters> {
-  const service = resolveService(options);
+  const getService = createLazyServiceResolver(options);
 
   return {
     name: "pico_camera_scene_description",
@@ -78,11 +82,25 @@ export function createPicoCameraSceneDescriptionTool(
     parameters: emptyParameters,
     executionMode: "sequential",
     async execute() {
+      const service = getService();
+
       return textResult({
         tool: "pico_camera_scene_description",
         result: await service.describeCameraScene()
       });
     }
+  };
+}
+
+function createLazyServiceResolver(
+  options: PicoPerceptionToolOptions
+): () => PicoPerceptionService {
+  let service: PicoPerceptionService | undefined;
+
+  return () => {
+    service ??= resolveService(options);
+
+    return service;
   };
 }
 

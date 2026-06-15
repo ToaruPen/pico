@@ -13,9 +13,8 @@ person detection, and Ollama VLM paths.
 
 ## Environment
 
-- Repository: `/Users/monsoon/Dev/pico`
-- Branch: `codex/pi-agent-perception-tools`
-- Pi Agent CLI: `node_modules/.bin/pi`
+- Repository: `<repo-root>`
+- Pi Agent CLI: project-local `node_modules/.bin/pi`
 - Extension: `./src/index.ts`
 - Config: `config/pico.local.yaml`
 - Secrets: not recorded

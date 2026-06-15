@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
+import { definePicoConfig } from "../src/config/index.js";
 import {
   createPicoCameraSceneDescriptionTool,
   createPicoCameraSnapshotTool,
@@ -19,6 +20,46 @@ function extractToolJson(result: unknown): unknown {
 }
 
 describe("pico perception tools", () => {
+  it("defers config loading until first tool execution and reuses the service", async () => {
+    let loadCalls = 0;
+    const tool = createPicoCameraSnapshotTool({
+      loadConfig: () => {
+        loadCalls += 1;
+
+        return definePicoConfig({});
+      }
+    });
+
+    expect(loadCalls).toBe(0);
+
+    await expect(
+      tool
+        .execute("tool-call-1", {}, undefined, undefined, {} as ExtensionContext)
+        .then(extractToolJson)
+    ).resolves.toEqual({
+      tool: "pico_camera_snapshot",
+      result: {
+        status: "failed",
+        reason: "camera.tapo is required to use pico_camera_snapshot"
+      }
+    });
+    await tool.execute("tool-call-2", {}, undefined, undefined, {} as ExtensionContext);
+
+    expect(loadCalls).toBe(1);
+  });
+
+  it("reports config loading failures during tool execution instead of construction", async () => {
+    const tool = createPicoCameraSnapshotTool({
+      loadConfig: () => {
+        throw new Error("config load failed");
+      }
+    });
+
+    await expect(
+      tool.execute("tool-call-1", {}, undefined, undefined, {} as ExtensionContext)
+    ).rejects.toThrow("config load failed");
+  });
+
   it("returns camera snapshot metadata without image content", async () => {
     const tool = createPicoCameraSnapshotTool({
       service: {

@@ -15,15 +15,15 @@ detection uses the lower-cost detection stream:
 
 ## Non-Goals
 
-- No LINE integration.
-- No PTZ movement or person-follow control.
-- No persistent person-detection daemon.
-- No automatic long-memory writes.
-- No provider fallback chain.
-- No alternate VLM provider selection.
-- No exposed inbound model ports.
-- No child identification, tracking, scoring, profiling, diagnosis, or final
-  safety decision making.
+- LINE integration remains outside this issue.
+- PTZ movement and person-follow control are excluded.
+- Persistent person-detection daemons are not part of this slice.
+- Automatic long-memory writes stay out of scope.
+- Provider fallback chains are intentionally not added.
+- Alternate VLM provider selection remains a future choice.
+- Exposed inbound model ports are not allowed.
+- Child identification, tracking, scoring, profiling, diagnosis, and final
+  safety decision-making are excluded.
 
 ## Runtime Tools
 

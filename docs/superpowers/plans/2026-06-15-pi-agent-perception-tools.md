@@ -1364,7 +1364,7 @@ Expected: the response reports a scene summary from the configured VLM path.
 
 Create `docs/field-tests/2026-06-15-pi-agent-perception-tools.md`:
 
-```md
+```markdown
 # 2026-06-15 Pi Agent Perception Tools Field Test
 
 ## Scope
@@ -1450,7 +1450,7 @@ gh pr create \
 
 Use this PR body:
 
-```md
+```markdown
 ## Summary
 
 - Adds actual Pi Agent tools for Tapo scene snapshot, person detection, and camera-to-VLM scene description.
