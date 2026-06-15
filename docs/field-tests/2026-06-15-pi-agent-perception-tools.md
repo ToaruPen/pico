@@ -34,10 +34,10 @@ PICO_CONFIG_PATH=config/pico.local.yaml node_modules/.bin/pi --approve --no-sess
 
 ## Automated Verification
 
-- Focused runtime and smoke tests: passed, 6 files / 52 tests.
+- Focused runtime and smoke tests: passed, 6 files / 53 tests.
 - Full project gate: passed.
 - `just check`: typecheck, lint, ast rule tests, ast scan, format check, and full
-  Vitest suite passed, 31 files / 338 tests.
+  Vitest suite passed, 31 files / 339 tests.
 
 ## Provider Readiness
 
