@@ -15,7 +15,7 @@ or proactive speech prompts.
 ## Command
 
 ```sh
-PICO_CONFIG_PATH=/Users/monsoon/Dev/pico/config/pico.local.yaml \
+PICO_CONFIG_PATH=config/pico.local.yaml \
 PICO_ENABLE_LIVE_PERSON_FOLLOW=1 \
 PICO_PERSON_FOLLOW_SMOKE_DURATION_MS=3000 \
 PICO_PERSON_FOLLOW_SMOKE_MAX_FRAMES=3 \

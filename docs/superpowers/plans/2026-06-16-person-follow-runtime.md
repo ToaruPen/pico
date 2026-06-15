@@ -14,7 +14,7 @@ CoreML/ONNX person detection modules, jiti smoke scripts.
 
 ---
 
-### Task 1: Runtime Wiring
+## Task 1: Runtime Wiring
 
 **Files:**
 
@@ -30,7 +30,7 @@ CoreML/ONNX person detection modules, jiti smoke scripts.
       capture, and controller dependencies.
 - [x] Re-run the focused test and verify it passes.
 
-### Task 2: Smoke Command
+## Task 2: Smoke Command
 
 **Files:**
 
@@ -47,7 +47,7 @@ CoreML/ONNX person detection modules, jiti smoke scripts.
 - [x] Add `smoke:person-follow-runtime` to `package.json`.
 - [x] Re-run the focused tests and verify they pass.
 
-### Task 3: Local Gates
+## Task 3: Local Gates
 
 **Files:**
 
@@ -60,7 +60,7 @@ CoreML/ONNX person detection modules, jiti smoke scripts.
 - [x] Run formatting if needed:
       `just format`
 
-### Task 4: Field Test
+## Task 4: Field Test
 
 **Files:**
 
