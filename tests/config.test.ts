@@ -59,7 +59,9 @@ camera:
     onvifPort: 2020
     user: camera-user
     password: camera-password
-    stream: stream2
+    streams:
+      scene: stream1
+      detection: stream2
     timeoutMs: 15000
     maxFrameBytes: 1024
   personFollow:
@@ -167,9 +169,16 @@ audit:
         tapo: {
           sourceId: "tapo-main",
           host: "192.168.3.25",
+          port: 554,
           onvifPort: 2020,
           user: "camera-user",
-          password: "camera-password"
+          password: "camera-password",
+          streams: {
+            scene: "stream1",
+            detection: "stream2"
+          },
+          timeoutMs: 15_000,
+          maxFrameBytes: 1024
         },
         personFollow: {
           enabled: true,
@@ -411,6 +420,23 @@ camera:
         }
       })
     ).toThrow("pico config camera.tapo.password is required when camera.tapo is set");
+  });
+
+  it("rejects deprecated singular Tapo stream config at the config boundary", () => {
+    expect(() =>
+      definePicoConfig({
+        camera: {
+          tapo: {
+            host: "192.168.3.25",
+            user: "camera-user",
+            password: "camera-password",
+            stream: "stream2"
+          }
+        }
+      })
+    ).toThrow(
+      "pico config camera.tapo.stream is deprecated; use camera.tapo.streams.scene and/or camera.tapo.streams.detection"
+    );
   });
 
   it("defaults person follow to disabled", () => {

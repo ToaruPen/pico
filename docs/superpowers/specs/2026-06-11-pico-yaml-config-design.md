@@ -46,7 +46,9 @@ camera:
     port: 554
     user: camera-user
     password: camera-password
-    stream: stream2
+    streams:
+      scene: stream1
+      detection: stream2
     timeoutMs: 15000
     maxFrameBytes: 5242880
 
@@ -84,6 +86,13 @@ voice:
 ## Error Handling
 
 Invalid configured values fail fast with field-specific errors. Missing optional provider sections do not fail; they produce skipped smoke plans. Partial provider sections fail because they are actionable configuration mistakes.
+
+Tapo stream selection is purpose-specific. `camera.tapo.streams.scene` is used
+for high-quality single-frame scene understanding and defaults to `stream1`.
+`camera.tapo.streams.detection` is used for person detection/follow loops and
+defaults to `stream2` to keep latency and compute load bounded.
+The deprecated singular `camera.tapo.stream` key fails fast at config load so
+old local configs do not silently switch to the new defaults.
 
 ## Testing
 

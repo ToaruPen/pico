@@ -7,7 +7,8 @@ import {
   createFfmpegRtspSnapshotTransport,
   createRtspSnapshotClient,
   defineRtspSnapshotSource,
-  type RtspSnapshotResult
+  type RtspSnapshotResult,
+  type RtspSnapshotSource
 } from "../../src/modules/camera/index.js";
 import {
   createCoremlPersonDetectionModel,
@@ -16,8 +17,9 @@ import {
   normalizePersonDetectionFrame,
   type PersonDetectionModel
 } from "../../src/modules/vision/person-detection.js";
+import { readRtspSensitiveValues, redactRtspSensitiveValues } from "./rtsp-redaction.js";
 
-const defaultTapoStream = "stream2";
+const defaultTapoDetectionStream = "stream2";
 const defaultTapoPort = 554;
 const defaultTimeoutMs = 10_000;
 const defaultMaxFrameBytes = 5 * 1024 * 1024;
@@ -49,7 +51,10 @@ export type PersonDetectionSmokePlan =
 
 export type PersonDetectionSmokeDependencies = {
   readonly pathExists?: (path: string) => boolean;
-  readonly captureFrame?: (config: PicoConfig) => Promise<RtspSnapshotResult>;
+  readonly captureFrame?: (
+    config: PicoConfig,
+    source: RtspSnapshotSource
+  ) => Promise<RtspSnapshotResult>;
   readonly createModel?: (config: PicoConfig) => Promise<PersonDetectionModel>;
   readonly now?: () => string;
 };
@@ -87,15 +92,17 @@ export async function runPersonDetectionSmoke(
   const captureFrame = dependencies.captureFrame ?? captureTapoFrame;
   const createModel = dependencies.createModel ?? createConfiguredModel;
   const capturedAt = (dependencies.now ?? (() => new Date().toISOString()))();
-  const snapshot = await captureFrame(plan.config);
+  const source = buildPersonDetectionSnapshotSource(plan.config);
   const provider = smokeProvider(plan.config);
+  const snapshot = await capturePersonDetectionFrame({
+    config: plan.config,
+    source,
+    captureFrame,
+    provider
+  });
 
   if (!snapshot.ok) {
-    return {
-      status: "failed",
-      provider,
-      reason: `pico person detection smoke capture failed: ${snapshot.reason}: ${snapshot.message}`
-    };
+    return snapshot.report;
   }
 
   const model = await createModel(plan.config);
@@ -122,6 +129,51 @@ export async function runPersonDetectionSmoke(
       capturedAt: normalized.capturedAt
     }
   };
+}
+
+async function capturePersonDetectionFrame(input: {
+  readonly config: PicoConfig;
+  readonly source: RtspSnapshotSource;
+  readonly captureFrame: NonNullable<PersonDetectionSmokeDependencies["captureFrame"]>;
+  readonly provider: PersonDetectionSmokeProvider;
+}): Promise<
+  | Extract<RtspSnapshotResult, { readonly ok: true }>
+  | {
+      readonly ok: false;
+      readonly report: PersonDetectionSmokeReport;
+    }
+> {
+  try {
+    const snapshot = await input.captureFrame(input.config, input.source);
+
+    if (snapshot.ok) {
+      return snapshot;
+    }
+
+    return {
+      ok: false,
+      report: {
+        status: "failed",
+        provider: input.provider,
+        reason: `pico person detection smoke capture failed: ${
+          snapshot.reason
+        }: ${sanitizeCaptureMessage(snapshot.message, input.config, input.source)}`
+      }
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      report: {
+        status: "failed",
+        provider: input.provider,
+        reason: `pico person detection smoke capture failed: ${sanitizeCaptureMessage(
+          errorMessage(error),
+          input.config,
+          input.source
+        )}`
+      }
+    };
+  }
 }
 
 export function buildPersonDetectionSmokePlan(
@@ -170,23 +222,13 @@ export function personDetectionSmokeExitCode(report: PersonDetectionSmokeReport)
   return report.status === "failed" ? 1 : 0;
 }
 
-async function captureTapoFrame(config: PicoConfig): Promise<RtspSnapshotResult> {
-  const tapo = config.camera.tapo;
-  const detector = requireEnabledDetector(config);
-
-  if (tapo === undefined) {
-    throw new Error("pico person detection smoke requires camera.tapo config");
-  }
-
+async function captureTapoFrame(
+  config: PicoConfig,
+  source: RtspSnapshotSource
+): Promise<RtspSnapshotResult> {
+  const tapo = requireTapoConfig(config);
   const client = createRtspSnapshotClient(
-    defineRtspSnapshotSource({
-      id: detector.sourceCameraId,
-      host: tapo.host,
-      username: tapo.user,
-      password: tapo.password,
-      stream: tapo.stream ?? defaultTapoStream,
-      port: tapo.port ?? defaultTapoPort
-    }),
+    source,
     createFfmpegRtspSnapshotTransport({
       timeoutMs: tapo.timeoutMs ?? defaultTimeoutMs,
       maxFrameBytes: tapo.maxFrameBytes ?? defaultMaxFrameBytes
@@ -194,6 +236,47 @@ async function captureTapoFrame(config: PicoConfig): Promise<RtspSnapshotResult>
   );
 
   return client.captureSnapshot();
+}
+
+export function buildPersonDetectionSnapshotSource(config: PicoConfig): RtspSnapshotSource {
+  const tapo = requireTapoConfig(config);
+  const detector = requireEnabledDetector(config);
+
+  return defineRtspSnapshotSource({
+    id: detector.sourceCameraId,
+    host: tapo.host,
+    username: tapo.user,
+    password: tapo.password,
+    stream: tapo.streams?.detection ?? defaultTapoDetectionStream,
+    port: tapo.port ?? defaultTapoPort
+  });
+}
+
+function requireTapoConfig(config: PicoConfig): NonNullable<PicoConfig["camera"]["tapo"]> {
+  const tapo = config.camera.tapo;
+
+  if (tapo === undefined) {
+    throw new Error("pico person detection smoke requires camera.tapo config");
+  }
+
+  return tapo;
+}
+
+function sanitizeCaptureMessage(
+  message: string,
+  config: PicoConfig,
+  source: RtspSnapshotSource
+): string {
+  const tapo = requireTapoConfig(config);
+
+  return redactRtspSensitiveValues(
+    message,
+    readRtspSensitiveValues({
+      username: tapo.user,
+      password: tapo.password,
+      rtspUrl: source.url
+    })
+  );
 }
 
 function createConfiguredModel(config: PicoConfig): Promise<PersonDetectionModel> {

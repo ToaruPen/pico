@@ -116,6 +116,12 @@ Configure these sections in `config/pico.local.yaml` as needed:
 - `vision.ollama` for `qwen3.5:9b` through the protected local tunnel.
 - `camera.tapo` plus `vision.ollama` for camera-to-VLM scene smoke.
 
+For the protected Windows GPU vision host, keep the Ubuntu WSL distro resident
+while `ollama.service` serves the tunneled endpoint. The validated field setup
+uses a Windows Task Scheduler task named `PicoWslOllamaKeepAlive` that runs
+`wsl.exe -d Ubuntu-24.04 --exec sh -lc "while true; do sleep 86400; done"` at
+logon.
+
 See:
 
 - `AGENTS.md` for agent-facing repository guidance.
