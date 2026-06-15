@@ -192,6 +192,37 @@ describe("bounded vision scene description", () => {
     expect(requireRecordedRequest(recordedRequest).input).toBe("http://127.0.0.1:11434/api/chat");
   });
 
+  it("includes a bounded Ollama error body when the scene request fails", async () => {
+    const failingFetch: typeof fetch = () =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            error: "model failed to load, check ollama server logs for details"
+          }),
+          { status: 500 }
+        )
+      );
+
+    await expect(describeScene(sceneRequest, failingFetch)).rejects.toThrow(
+      'pico vision Ollama request failed with status 500: {"error":"model failed to load, check ollama server logs for details"}'
+    );
+  });
+
+  it("includes the network failure cause when the scene request cannot reach Ollama", async () => {
+    const socketError = new Error("other side closed");
+    socketError.name = "SocketError";
+    const failingFetch: typeof fetch = () =>
+      Promise.reject(
+        new TypeError("fetch failed", {
+          cause: socketError
+        })
+      );
+
+    await expect(describeScene(sceneRequest, failingFetch)).rejects.toThrow(
+      "pico vision Ollama request failed: fetch failed: SocketError: other side closed"
+    );
+  });
+
   it("aborts Ollama scene requests after the bounded request timeout", async () => {
     vi.useFakeTimers();
     let abortObserved = false;

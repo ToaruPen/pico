@@ -14,6 +14,7 @@ import {
   type SceneDescriptionRequest
 } from "../../src/modules/vision/index.js";
 import { buildOllamaVlmSmokePlan } from "./ollama-vlm-connectivity.js";
+import { readRtspSensitiveValues, redactRtspSensitiveValues } from "./rtsp-redaction.js";
 import { buildTapoRtspSmokePlan } from "./tapo-rtsp-snapshot.js";
 
 export type CameraVlmSceneSmokeStatus = "passed" | "failed" | "skipped";
@@ -126,7 +127,7 @@ export function cameraVlmSceneSmokeExitCode(report: CameraVlmSceneSmokeReport): 
 export function formatCameraVlmSceneSmokeFatalError(error: unknown, config?: PicoConfig): string {
   const sensitiveValues = config === undefined ? [] : readDirectExecutionSensitiveValues(config);
 
-  return sanitizeMessage(errorMessage(error), sensitiveValues);
+  return redactRtspSensitiveValues(errorMessage(error), sensitiveValues);
 }
 
 function buildCameraVlmSceneSmokePlan(config: PicoConfig):
@@ -177,7 +178,7 @@ async function captureSceneFrame(
     return await captureFrame(plan);
   } catch (error) {
     throw new CameraVlmSceneSmokeError(
-      `pico camera to VLM scene smoke capture failed: ${sanitizeMessage(
+      `pico camera to VLM scene smoke capture failed: ${redactRtspSensitiveValues(
         errorMessage(error),
         plan.sensitiveValues
       )}`
@@ -194,7 +195,7 @@ async function prepareSceneFrame(
     return await prepareFrame(frame, plan.maxImageEdgePixels);
   } catch (error) {
     throw new CameraVlmSceneSmokeError(
-      `pico camera to VLM scene smoke frame preparation failed: ${sanitizeMessage(
+      `pico camera to VLM scene smoke frame preparation failed: ${redactRtspSensitiveValues(
         errorMessage(error),
         plan.sensitiveValues
       )}`
@@ -217,7 +218,7 @@ async function describeSceneFrame(
     });
   } catch (error) {
     throw new CameraVlmSceneSmokeError(
-      `pico camera to VLM scene smoke description failed: ${sanitizeMessage(
+      `pico camera to VLM scene smoke description failed: ${redactRtspSensitiveValues(
         errorMessage(error),
         plan.sensitiveValues
       )}`
@@ -265,29 +266,18 @@ async function captureFrameWithRtsp(plan: CameraVlmSceneSmokePlan): Promise<Capt
 class CameraVlmSceneSmokeError extends Error {}
 
 function readSensitiveValues(config: PicoConfig, rtspUrl: string): readonly string[] {
-  const values = [config.camera.tapo?.user, config.camera.tapo?.password, rtspUrl].flatMap(
-    (value) => (value === undefined ? [] : [value, encodeURIComponent(value)])
-  );
-
-  return [...new Set(values.filter((value) => value.trim() !== ""))];
+  return readRtspSensitiveValues({
+    username: config.camera.tapo?.user,
+    password: config.camera.tapo?.password,
+    rtspUrl
+  });
 }
 
 function readDirectExecutionSensitiveValues(config: PicoConfig): readonly string[] {
-  const values = [config.camera.tapo?.user, config.camera.tapo?.password].flatMap((value) =>
-    value === undefined ? [] : [value, encodeURIComponent(value)]
-  );
-
-  return [...new Set(values.filter((value) => value.trim() !== ""))];
-}
-
-function sanitizeMessage(message: string, sensitiveValues: readonly string[]): string {
-  let sanitized = message.replaceAll(/rtsp:\/\/\S+/gu, "[redacted-rtsp-url]");
-
-  for (const value of sensitiveValues) {
-    sanitized = sanitized.replaceAll(value, "[redacted]");
-  }
-
-  return sanitized;
+  return readRtspSensitiveValues({
+    username: config.camera.tapo?.user,
+    password: config.camera.tapo?.password
+  });
 }
 
 function errorMessage(error: unknown): string {

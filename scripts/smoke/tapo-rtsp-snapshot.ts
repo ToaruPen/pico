@@ -7,8 +7,9 @@ import {
   createRtspSnapshotClient,
   defineRtspSnapshotSource
 } from "../../src/modules/camera/index.js";
+import { readRtspSensitiveValues, redactRtspSensitiveValues } from "./rtsp-redaction.js";
 
-const defaultTapoStream = "stream2";
+const defaultTapoSceneStream = "stream1";
 const defaultTapoPort = 554;
 const defaultTimeoutMs = 10_000;
 const defaultMaxFrameBytes = 5 * 1024 * 1024;
@@ -26,12 +27,25 @@ export type TapoRtspSmokeReport = {
   };
 };
 
+type TapoRtspSnapshotResult = Awaited<
+  ReturnType<ReturnType<typeof createRtspSnapshotClient>["captureSnapshot"]>
+>;
+
+export type TapoRtspSmokeDependencies = {
+  readonly captureSnapshot?: (
+    source: ReturnType<typeof defineRtspSnapshotSource>,
+    timeoutMs: number,
+    maxFrameBytes: number
+  ) => Promise<TapoRtspSnapshotResult>;
+};
+
 type TapoRtspSmokePlan =
   | {
       readonly status: "run";
       readonly source: ReturnType<typeof defineRtspSnapshotSource>;
       readonly timeoutMs: number;
       readonly maxFrameBytes: number;
+      readonly sensitiveValues: readonly string[];
     }
   | {
       readonly status: "skip";
@@ -39,7 +53,8 @@ type TapoRtspSmokePlan =
     };
 
 export async function runTapoRtspSnapshotSmoke(
-  config: PicoConfig = loadPicoConfigFromEnvironment()
+  config: PicoConfig = loadPicoConfigFromEnvironment(),
+  dependencies: TapoRtspSmokeDependencies = {}
 ): Promise<TapoRtspSmokeReport> {
   const plan = buildTapoRtspSmokePlan(config);
 
@@ -51,20 +66,19 @@ export async function runTapoRtspSnapshotSmoke(
     };
   }
 
-  const client = createRtspSnapshotClient(
-    plan.source,
-    createFfmpegRtspSnapshotTransport({
-      timeoutMs: plan.timeoutMs,
-      maxFrameBytes: plan.maxFrameBytes
-    })
-  );
-  const result = await client.captureSnapshot();
+  const result =
+    dependencies.captureSnapshot === undefined
+      ? await captureSnapshotWithRtsp(plan.source, plan.timeoutMs, plan.maxFrameBytes)
+      : await dependencies.captureSnapshot(plan.source, plan.timeoutMs, plan.maxFrameBytes);
 
   if (!result.ok) {
     return {
       status: "failed",
       provider: "tapo-rtsp",
-      reason: `pico Tapo RTSP smoke failed: ${result.reason}: ${result.message}`
+      reason: `pico Tapo RTSP smoke failed: ${result.reason}: ${redactRtspSensitiveValues(
+        result.message,
+        plan.sensitiveValues
+      )}`
     };
   }
 
@@ -96,12 +110,32 @@ export function buildTapoRtspSmokePlan(config: PicoConfig): TapoRtspSmokePlan {
       host: tapo.host,
       username: tapo.user,
       password: tapo.password,
-      stream: tapo.stream ?? defaultTapoStream,
+      stream: tapo.streams?.scene ?? defaultTapoSceneStream,
       port: tapo.port ?? defaultTapoPort
     }),
     timeoutMs: tapo.timeoutMs ?? defaultTimeoutMs,
-    maxFrameBytes: tapo.maxFrameBytes ?? defaultMaxFrameBytes
+    maxFrameBytes: tapo.maxFrameBytes ?? defaultMaxFrameBytes,
+    sensitiveValues: readRtspSensitiveValues({
+      username: tapo.user,
+      password: tapo.password
+    })
   };
+}
+
+async function captureSnapshotWithRtsp(
+  source: ReturnType<typeof defineRtspSnapshotSource>,
+  timeoutMs: number,
+  maxFrameBytes: number
+): Promise<TapoRtspSnapshotResult> {
+  const client = createRtspSnapshotClient(
+    source,
+    createFfmpegRtspSnapshotTransport({
+      timeoutMs,
+      maxFrameBytes
+    })
+  );
+
+  return client.captureSnapshot();
 }
 
 export function tapoRtspSmokeExitCode(report: TapoRtspSmokeReport): number {

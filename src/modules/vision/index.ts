@@ -27,6 +27,7 @@ const BOUNDED_SCENE_PROMPT =
   "Return exactly one JSON object and no markdown. The object must have these keys: summary, observedPeople, environment, humanAttention, uncertainty. Each key except summary must be an array of strings. Describe only visible after-school care scene details. Do not identify children, infer private traits, diagnose, score, or make final safety decisions. If no people, attention items, or uncertainties are visible, use an empty array. Uncertainty must be an array of short strings.";
 
 const OLLAMA_REQUEST_TIMEOUT_MS = 30_000;
+const OLLAMA_ERROR_BODY_MAX_CHARS = 500;
 const visionBoundaryMarkers = [
   "childid",
   "childevaluation",
@@ -155,7 +156,7 @@ async function postOllamaSceneRequest(
     );
 
     if (!response.ok) {
-      throw new Error(`pico vision Ollama request failed with status ${response.status}`);
+      throw new Error(await buildOllamaFailureMessage(response, abortController.signal));
     }
 
     return await rejectOnAbort(response.json() as Promise<unknown>, abortController.signal);
@@ -166,9 +167,41 @@ async function postOllamaSceneRequest(
       });
     }
 
-    throw error;
+    if (isOllamaStatusFailure(error)) {
+      throw error;
+    }
+
+    throw new Error(`pico vision Ollama request failed: ${describeErrorWithCause(error)}`, {
+      cause: error
+    });
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+async function buildOllamaFailureMessage(response: Response, signal: AbortSignal): Promise<string> {
+  const body = await readBoundedOllamaErrorBody(response, signal);
+  const baseMessage = `pico vision Ollama request failed with status ${response.status}`;
+
+  return body === undefined ? baseMessage : `${baseMessage}: ${body}`;
+}
+
+async function readBoundedOllamaErrorBody(
+  response: Response,
+  signal: AbortSignal
+): Promise<string | undefined> {
+  try {
+    const body = (await rejectOnAbort(response.text(), signal)).trim();
+
+    if (body === "") {
+      return undefined;
+    }
+
+    return body.length > OLLAMA_ERROR_BODY_MAX_CHARS
+      ? `${body.slice(0, OLLAMA_ERROR_BODY_MAX_CHARS)}...`
+      : body;
+  } catch {
+    return undefined;
   }
 }
 
@@ -201,6 +234,47 @@ function buildOllamaSceneRequestBody(request: SceneDescriptionRequest): Record<s
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+function isOllamaStatusFailure(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.startsWith("pico vision Ollama request failed with status ")
+  );
+}
+
+function describeErrorWithCause(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+
+  const cause = describeErrorCause(error.cause);
+
+  return cause === undefined ? error.message : `${error.message}: ${cause}`;
+}
+
+function describeErrorCause(cause: unknown): string | undefined {
+  if (cause === undefined) {
+    return undefined;
+  }
+
+  if (cause instanceof Error) {
+    const nestedCause = describeErrorCause(cause.cause);
+
+    return nestedCause === undefined
+      ? `${cause.name}: ${cause.message}`
+      : `${cause.name}: ${cause.message}: ${nestedCause}`;
+  }
+
+  if (typeof cause === "string") {
+    return cause;
+  }
+
+  if (typeof cause === "number" || typeof cause === "boolean" || typeof cause === "bigint") {
+    return cause.toString();
+  }
+
+  return "non-error cause";
 }
 
 function rejectOnAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {

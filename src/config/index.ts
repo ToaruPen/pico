@@ -79,7 +79,10 @@ export type PicoTapoConfig = {
   readonly onvifPort?: number;
   readonly user: string;
   readonly password: string;
-  readonly stream?: string;
+  readonly streams?: {
+    readonly scene?: string;
+    readonly detection?: string;
+  };
   readonly timeoutMs?: number;
   readonly maxFrameBytes?: number;
 };
@@ -656,7 +659,7 @@ function defineTapoConfig(input: Record<string, unknown>): PicoTapoConfig {
     ),
     user: requireString(input.user, "pico config camera.tapo.user"),
     password: requireString(input.password, "pico config camera.tapo.password"),
-    ...optionalStringProperty(input, "stream", "pico config camera.tapo.stream"),
+    ...optionalTapoStreamsProperty(input.streams),
     ...optionalBoundedPositiveIntegerProperty(
       input,
       "timeoutMs",
@@ -668,6 +671,27 @@ function defineTapoConfig(input: Record<string, unknown>): PicoTapoConfig {
       "maxFrameBytes",
       "pico config camera.tapo.maxFrameBytes"
     )
+  };
+}
+
+function optionalTapoStreamsProperty(value: unknown): Pick<PicoTapoConfig, "streams"> {
+  const streams = readOptionalRecord(value, "pico config camera.tapo.streams");
+
+  if (streams === undefined) {
+    return {};
+  }
+
+  const scene = readOptionalString(streams.scene, "pico config camera.tapo.streams.scene");
+  const detection = readOptionalString(
+    streams.detection,
+    "pico config camera.tapo.streams.detection"
+  );
+
+  return {
+    streams: {
+      ...(scene === undefined ? {} : { scene }),
+      ...(detection === undefined ? {} : { detection })
+    }
   };
 }
 

@@ -11,7 +11,7 @@ const configured = definePicoConfig({
   camera: {
     tapo: {
       sourceId: "tapo-main",
-      host: "192.168.3.212",
+      host: "192.168.10.25",
       user: "camera-user",
       password: "camera-password"
     }
@@ -37,7 +37,7 @@ const configuredCoreml = definePicoConfig({
   camera: {
     tapo: {
       sourceId: "tapo-main",
-      host: "192.168.3.212",
+      host: "192.168.10.25",
       user: "camera-user",
       password: "camera-password"
     }
@@ -120,6 +120,93 @@ describe("person detection smoke", () => {
         detectedPeople: 1,
         capturedAt: "2026-06-12T09:00:00.000Z"
       }
+    });
+  });
+
+  it("uses the high-frame-rate Tapo detection stream by default", async () => {
+    const observedUrls: string[] = [];
+    const model: PersonDetectionModel = {
+      detect: () => Promise.resolve([])
+    };
+
+    await runPersonDetectionSmoke(configured, {
+      pathExists: () => true,
+      captureFrame: (_config, source) => {
+        observedUrls.push(source.url);
+
+        return Promise.resolve({
+          ok: true,
+          sourceId: "tapo-main",
+          mimeType: "image/jpeg",
+          frame: Buffer.from("jpeg-frame")
+        });
+      },
+      createModel: () => Promise.resolve(model),
+      now: () => "2026-06-12T09:00:00.000Z"
+    });
+
+    expect(observedUrls).toEqual(["rtsp://camera-user:camera-password@192.168.10.25:554/stream2"]);
+  });
+
+  it("uses an explicit Tapo detection stream when configured", async () => {
+    const observedUrls: string[] = [];
+    const model: PersonDetectionModel = {
+      detect: () => Promise.resolve([])
+    };
+
+    await runPersonDetectionSmoke(
+      definePicoConfig({
+        camera: {
+          tapo: {
+            sourceId: "tapo-main",
+            host: "192.168.10.25",
+            user: "camera-user",
+            password: "camera-password",
+            streams: {
+              detection: "stream7"
+            }
+          }
+        },
+        vision: configured.vision
+      }),
+      {
+        pathExists: () => true,
+        captureFrame: (_config, source) => {
+          observedUrls.push(source.url);
+
+          return Promise.resolve({
+            ok: true,
+            sourceId: "tapo-main",
+            mimeType: "image/jpeg",
+            frame: Buffer.from("jpeg-frame")
+          });
+        },
+        createModel: () => Promise.resolve(model),
+        now: () => "2026-06-12T09:00:00.000Z"
+      }
+    );
+
+    expect(observedUrls).toEqual(["rtsp://camera-user:camera-password@192.168.10.25:554/stream7"]);
+  });
+
+  it("redacts RTSP credentials from failed Tapo capture reports", async () => {
+    const report = await runPersonDetectionSmoke(configured, {
+      pathExists: () => true,
+      captureFrame: (_config, source) =>
+        Promise.resolve({
+          ok: false,
+          sourceId: "tapo-main",
+          reason: "capture_failed",
+          message: `${source.url} camera-password Unauthorized`
+        }),
+      now: () => "2026-06-12T09:00:00.000Z"
+    });
+
+    expect(report).toEqual({
+      status: "failed",
+      provider: "tapo-rtsp+onnxruntime",
+      reason:
+        "pico person detection smoke capture failed: capture_failed: [redacted-rtsp-url] [redacted] Unauthorized"
     });
   });
 

@@ -21,7 +21,12 @@ camera:
     host: 192.168.10.25
     user: your-camera-user
     password: your-camera-password
-    # Optional runtime defaults: port=554, onvifPort=2020, stream=stream2.
+    # Optional runtime defaults: port=554, onvifPort=2020.
+    streams:
+      # VLM scene understanding uses the high-quality stream by default.
+      scene: stream1
+      # Person detection/follow uses the lower-cost stream by default.
+      detection: stream2
   personFollow:
     enabled: false
     sourceCameraId: tapo-rtsp

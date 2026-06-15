@@ -29,7 +29,9 @@ function configuredPicoConfig(): PicoConfig {
         host: "192.168.10.25",
         user: "camera-user",
         password: "camera-passphrase",
-        stream: "stream2"
+        streams: {
+          scene: "stream1"
+        }
       }
     },
     vision: {
@@ -106,7 +108,9 @@ describe("camera to VLM scene smoke", () => {
             host: "192.168.10.25",
             user: "camera-user",
             password: "camera-passphrase",
-            stream: "stream2"
+            streams: {
+              scene: "stream1"
+            }
           }
         },
         vision: {

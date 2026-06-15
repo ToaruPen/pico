@@ -59,7 +59,9 @@ camera:
     onvifPort: 2020
     user: camera-user
     password: camera-password
-    stream: stream2
+    streams:
+      scene: stream1
+      detection: stream2
     timeoutMs: 15000
     maxFrameBytes: 1024
   personFollow:
@@ -167,9 +169,16 @@ audit:
         tapo: {
           sourceId: "tapo-main",
           host: "192.168.3.25",
+          port: 554,
           onvifPort: 2020,
           user: "camera-user",
-          password: "camera-password"
+          password: "camera-password",
+          streams: {
+            scene: "stream1",
+            detection: "stream2"
+          },
+          timeoutMs: 15_000,
+          maxFrameBytes: 1024
         },
         personFollow: {
           enabled: true,
