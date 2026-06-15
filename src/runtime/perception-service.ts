@@ -1,5 +1,7 @@
 import { existsSync } from "node:fs";
 
+import sharp from "sharp";
+
 import type { PicoConfig } from "../config/index.js";
 import {
   createFfmpegRtspSnapshotTransport,
@@ -8,6 +10,12 @@ import {
   type RtspSnapshotResult,
   type RtspSnapshotSource
 } from "../modules/camera/index.js";
+import { defineSelectedModelEndpoint } from "../modules/local-models/index.js";
+import {
+  createOllamaSceneDescriptionClient,
+  type SceneDescription,
+  type SceneDescriptionRequest
+} from "../modules/vision/index.js";
 import {
   createCoremlPersonDetectionModel,
   createOnnxPersonDetectionModel,
@@ -22,6 +30,11 @@ const defaultTapoDetectionStream = "stream2";
 const defaultTapoPort = 554;
 const defaultTimeoutMs = 10_000;
 const defaultMaxFrameBytes = 5 * 1024 * 1024;
+const defaultOllamaEndpointId = "windows-ollama-qwen3-5";
+const defaultOllamaTunnelKind = "tailscale_ssh";
+const defaultOllamaSshTarget = "pico-vision-host";
+const defaultOllamaTimeoutMs = 10_000;
+const defaultOllamaMaxImageEdgePixels = 512;
 
 export type PicoCameraSnapshotResult =
   | {
@@ -52,10 +65,21 @@ export type PicoPersonDetectionResult =
       readonly reason: string;
     };
 
-export type PicoCameraSceneDescriptionResult = {
-  readonly status: "failed";
-  readonly reason: string;
-};
+export type PicoCameraSceneDescriptionResult =
+  | {
+      readonly status: "passed";
+      readonly sourceId: string;
+      readonly streamPurpose: "scene";
+      readonly frameBytes: number;
+      readonly vlmFrameBytes: number;
+      readonly mimeType: "image/jpeg";
+      readonly capturedAt: string;
+      readonly scene: SceneDescription;
+    }
+  | {
+      readonly status: "failed";
+      readonly reason: string;
+    };
 
 export type PicoPerceptionService = {
   readonly captureSceneSnapshot: () => Promise<PicoCameraSnapshotResult>;
@@ -71,6 +95,11 @@ export type PicoPerceptionServiceDependencies = {
   ) => Promise<RtspSnapshotResult>;
   readonly pathExists?: (path: string) => boolean;
   readonly createPersonDetectionModel?: (config: PicoConfig) => Promise<PersonDetectionModel>;
+  readonly prepareFrameForVlm?: (
+    frame: Uint8Array,
+    maxImageEdgePixels: number
+  ) => Promise<Uint8Array>;
+  readonly describeFrame?: (request: SceneDescriptionRequest) => Promise<SceneDescription>;
   readonly now?: () => string;
 };
 
@@ -80,12 +109,13 @@ export function createPicoPerceptionService(
 ): PicoPerceptionService {
   const now = dependencies.now ?? (() => new Date().toISOString());
   const inFlightCapturePurposes = new Set<"scene" | "detection">();
+  let cameraSceneDescriptionInFlight = false;
 
   return {
     async captureSceneSnapshot() {
       let source: RtspSnapshotSource;
       try {
-        source = buildTapoSceneSnapshotSource(config);
+        source = buildTapoSceneSnapshotSource(config, "pico_camera_snapshot");
       } catch (error: unknown) {
         return {
           status: "failed",
@@ -202,17 +232,70 @@ export function createPicoPerceptionService(
         };
       }
     },
-    describeCameraScene() {
-      return Promise.resolve({
-        status: "failed",
-        reason: "pico camera scene description is not implemented yet"
-      });
+    async describeCameraScene() {
+      let endpoint: SceneDescriptionRequest["endpoint"];
+      let source: RtspSnapshotSource;
+
+      try {
+        endpoint = requireOllamaEndpoint(config);
+        source = buildTapoSceneSnapshotSource(config, "pico_camera_scene_description");
+      } catch (error: unknown) {
+        return {
+          status: "failed",
+          reason: sanitizeRtspMessage(errorMessage(error), config)
+        };
+      }
+
+      if (cameraSceneDescriptionInFlight) {
+        return {
+          status: "failed",
+          reason:
+            "pico camera scene description failed: in_flight: previous camera scene description is still in flight"
+        };
+      }
+
+      cameraSceneDescriptionInFlight = true;
+
+      try {
+        const snapshot = await captureSnapshotSafely(
+          config,
+          source,
+          "scene",
+          inFlightCapturePurposes,
+          dependencies
+        );
+
+        if (!snapshot.ok) {
+          return {
+            status: "failed",
+            reason: `pico camera scene description failed: ${snapshot.reason}: ${sanitizeRtspMessage(
+              snapshot.message,
+              config,
+              source
+            )}`
+          };
+        }
+
+        return await describeSnapshotScene({
+          config,
+          dependencies,
+          endpoint,
+          source,
+          snapshot,
+          now
+        });
+      } finally {
+        cameraSceneDescriptionInFlight = false;
+      }
     }
   };
 }
 
-function buildTapoSceneSnapshotSource(config: PicoConfig): RtspSnapshotSource {
-  const tapo = requireTapoConfig(config, "pico_camera_snapshot");
+function buildTapoSceneSnapshotSource(
+  config: PicoConfig,
+  toolName: "pico_camera_snapshot" | "pico_camera_scene_description"
+): RtspSnapshotSource {
+  const tapo = requireTapoConfig(config, toolName);
 
   return defineRtspSnapshotSource({
     id: tapo.sourceId ?? "tapo-rtsp",
@@ -242,7 +325,7 @@ function buildTapoDetectionSnapshotSource(
 
 function requireTapoConfig(
   config: PicoConfig,
-  toolName: "pico_camera_snapshot" | "pico_person_detection"
+  toolName: "pico_camera_snapshot" | "pico_person_detection" | "pico_camera_scene_description"
 ): NonNullable<PicoConfig["camera"]["tapo"]> {
   const tapo = config.camera.tapo;
 
@@ -355,6 +438,137 @@ function createConfiguredPersonDetectionModel(config: PicoConfig): Promise<Perso
   });
 }
 
+async function resizeJpegForVlm(
+  frame: Uint8Array,
+  maxImageEdgePixels: number
+): Promise<Uint8Array> {
+  return await sharp(frame)
+    .rotate()
+    .resize({
+      width: maxImageEdgePixels,
+      height: maxImageEdgePixels,
+      fit: "inside",
+      withoutEnlargement: true
+    })
+    .jpeg({ quality: 85 })
+    .toBuffer();
+}
+
+type DescribeSnapshotSceneInput = {
+  readonly config: PicoConfig;
+  readonly dependencies: PicoPerceptionServiceDependencies;
+  readonly endpoint: SceneDescriptionRequest["endpoint"];
+  readonly source: RtspSnapshotSource;
+  readonly snapshot: Extract<RtspSnapshotResult, { readonly ok: true }>;
+  readonly now: () => string;
+};
+
+async function describeSnapshotScene({
+  config,
+  dependencies,
+  endpoint,
+  source,
+  snapshot,
+  now
+}: DescribeSnapshotSceneInput): Promise<PicoCameraSceneDescriptionResult> {
+  let preparedFrame: Uint8Array | undefined;
+
+  try {
+    const maxImageEdgePixels =
+      config.vision.ollama?.maxImageEdgePixels ?? defaultOllamaMaxImageEdgePixels;
+    const prepareFrame = dependencies.prepareFrameForVlm ?? resizeJpegForVlm;
+    const describeFrame =
+      dependencies.describeFrame ?? createOllamaSceneDescriptionClient().describeScene;
+    preparedFrame = await prepareFrame(snapshot.frame, maxImageEdgePixels);
+    const scene = await describeFrame({
+      endpoint,
+      image: preparedFrame,
+      mimeType: "image/jpeg",
+      purpose: "staff_requested_snapshot",
+      timeoutMs: config.vision.ollama?.timeoutMs ?? defaultOllamaTimeoutMs
+    });
+    const imageSensitiveValues = readImageSensitiveValues(snapshot.frame, preparedFrame);
+
+    return {
+      status: "passed",
+      sourceId: snapshot.sourceId,
+      streamPurpose: "scene",
+      frameBytes: snapshot.frame.byteLength,
+      vlmFrameBytes: preparedFrame.byteLength,
+      mimeType: snapshot.mimeType,
+      capturedAt: now(),
+      scene: sanitizeSceneDescription(scene, config, source, imageSensitiveValues)
+    };
+  } catch (error: unknown) {
+    return {
+      status: "failed",
+      reason: `pico camera scene description failed: ${sanitizeRtspMessage(
+        errorMessage(error),
+        config,
+        source,
+        readImageSensitiveValues(snapshot.frame, preparedFrame)
+      )}`
+    };
+  }
+}
+
+function sanitizeSceneDescription(
+  scene: SceneDescription,
+  config: PicoConfig,
+  source: RtspSnapshotSource,
+  imageSensitiveValues: readonly string[]
+): SceneDescription {
+  const sanitizeText = (text: string) =>
+    sanitizeRtspMessage(text, config, source, imageSensitiveValues);
+
+  return {
+    summary: sanitizeText(scene.summary),
+    observedPeople: scene.observedPeople.map(sanitizeText),
+    environment: scene.environment.map(sanitizeText),
+    humanAttention: scene.humanAttention.map(sanitizeText),
+    uncertainty: scene.uncertainty.map(sanitizeText),
+    source: scene.source
+  };
+}
+
+function requireOllamaEndpoint(config: PicoConfig): SceneDescriptionRequest["endpoint"] {
+  const ollama = config.vision.ollama;
+
+  if (ollama === undefined) {
+    throw new Error("vision.ollama is required to use pico_camera_scene_description");
+  }
+
+  return defineSelectedModelEndpoint({
+    id: ollama.endpointId ?? defaultOllamaEndpointId,
+    provider: "ollama",
+    model: "qwen3.5:9b",
+    host: {
+      platform: "windows",
+      tunnel: {
+        kind: ollama.tunnel?.kind ?? defaultOllamaTunnelKind,
+        localBaseUrl: ollama.localBaseUrl,
+        sshTarget: ollama.tunnel?.sshTarget ?? defaultOllamaSshTarget
+      },
+      ...defineOllamaEndpointAuth(ollama.auth)
+    }
+  });
+}
+
+function defineOllamaEndpointAuth(auth: NonNullable<PicoConfig["vision"]["ollama"]>["auth"]): {
+  readonly auth?: NonNullable<SceneDescriptionRequest["endpoint"]["host"]["auth"]>;
+} {
+  if (auth === undefined) {
+    return {};
+  }
+
+  return {
+    auth: {
+      ...(auth.headerName === undefined ? {} : { headerName: auth.headerName }),
+      apiKey: auth.apiKey
+    }
+  };
+}
+
 function requireString(value: string | undefined, message: string): string {
   if (value === undefined || value.trim() === "") {
     throw new Error(message);
@@ -428,15 +642,41 @@ function captureSnapshotWithRtsp(
 function sanitizeRtspMessage(
   message: string,
   config: PicoConfig,
-  source?: RtspSnapshotSource
+  source?: RtspSnapshotSource,
+  imageSensitiveValues: readonly string[] = []
 ): string {
-  let sanitized = message.replaceAll(/rtsp:\/\/\S+/gu, "[redacted-rtsp-url]");
+  let sanitized = message
+    .replaceAll(/rtsp:\/\/\S+/gu, "[redacted-rtsp-url]")
+    .replaceAll(/data:image\/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+/gu, "[redacted-image]");
 
   for (const value of rtspSensitiveValues(config, source)) {
     sanitized = sanitized.replaceAll(value, "[redacted]");
   }
 
-  return sanitized;
+  for (const value of imageSensitiveValues) {
+    sanitized = sanitized.replaceAll(value, "[redacted-image]");
+  }
+
+  return redactKnownImageBase64Tokens(sanitized, imageSensitiveValues);
+}
+
+function redactKnownImageBase64Tokens(
+  message: string,
+  imageSensitiveValues: readonly string[]
+): string {
+  return message.replaceAll(/[A-Za-z0-9+/]{32,}={0,2}/gu, (candidate) =>
+    imageSensitiveValues.some((value) => value.startsWith(candidate))
+      ? "[redacted-image]"
+      : candidate
+  );
+}
+
+function readImageSensitiveValues(
+  ...frames: readonly (Uint8Array | undefined)[]
+): readonly string[] {
+  return frames.flatMap((frame) =>
+    frame === undefined || frame.byteLength === 0 ? [] : [Buffer.from(frame).toString("base64")]
+  );
 }
 
 function rtspSensitiveValues(config: PicoConfig, source?: RtspSnapshotSource): readonly string[] {
@@ -451,6 +691,7 @@ function rtspSensitiveValues(config: PicoConfig, source?: RtspSnapshotSource): r
   }
 
   appendSensitiveValue(values, config.vision.personDetection.modelPath);
+  appendSensitiveValue(values, config.vision.ollama?.auth?.apiKey);
 
   return values;
 }
