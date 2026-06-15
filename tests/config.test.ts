@@ -422,6 +422,23 @@ camera:
     ).toThrow("pico config camera.tapo.password is required when camera.tapo is set");
   });
 
+  it("rejects deprecated singular Tapo stream config at the config boundary", () => {
+    expect(() =>
+      definePicoConfig({
+        camera: {
+          tapo: {
+            host: "192.168.3.25",
+            user: "camera-user",
+            password: "camera-password",
+            stream: "stream2"
+          }
+        }
+      })
+    ).toThrow(
+      "pico config camera.tapo.stream is deprecated; use camera.tapo.streams.scene and/or camera.tapo.streams.detection"
+    );
+  });
+
   it("defaults person follow to disabled", () => {
     expect(definePicoConfig({}).camera.personFollow).toEqual({
       enabled: false

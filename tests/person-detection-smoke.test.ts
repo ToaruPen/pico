@@ -210,6 +210,22 @@ describe("person detection smoke", () => {
     });
   });
 
+  it("redacts RTSP credentials when Tapo capture rejects", async () => {
+    const report = await runPersonDetectionSmoke(configured, {
+      pathExists: () => true,
+      captureFrame: (_config, source) =>
+        Promise.reject(new Error(`${source.url} camera-password Unauthorized`)),
+      now: () => "2026-06-12T09:00:00.000Z"
+    });
+
+    expect(report).toEqual({
+      status: "failed",
+      provider: "tapo-rtsp+onnxruntime",
+      reason:
+        "pico person detection smoke capture failed: [redacted-rtsp-url] [redacted] Unauthorized"
+    });
+  });
+
   it("runs Tapo snapshot through the configured CoreML detector once", async () => {
     const model: PersonDetectionModel = {
       detect: () =>

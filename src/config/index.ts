@@ -642,6 +642,12 @@ function defineAecEchoControlConfig(input: PicoEchoControlConfig): PicoEchoContr
 }
 
 function defineTapoConfig(input: Record<string, unknown>): PicoTapoConfig {
+  if (input.stream !== undefined) {
+    throw new Error(
+      "pico config camera.tapo.stream is deprecated; use camera.tapo.streams.scene and/or camera.tapo.streams.detection"
+    );
+  }
+
   return {
     ...optionalStringProperty(input, "sourceId", "pico config camera.tapo.sourceId"),
     host: requireString(input.host, "pico config camera.tapo.host"),

@@ -93,17 +93,16 @@ export async function runPersonDetectionSmoke(
   const createModel = dependencies.createModel ?? createConfiguredModel;
   const capturedAt = (dependencies.now ?? (() => new Date().toISOString()))();
   const source = buildPersonDetectionSnapshotSource(plan.config);
-  const snapshot = await captureFrame(plan.config, source);
   const provider = smokeProvider(plan.config);
+  const snapshot = await capturePersonDetectionFrame({
+    config: plan.config,
+    source,
+    captureFrame,
+    provider
+  });
 
   if (!snapshot.ok) {
-    return {
-      status: "failed",
-      provider,
-      reason: `pico person detection smoke capture failed: ${
-        snapshot.reason
-      }: ${sanitizeCaptureMessage(snapshot.message, plan.config, source)}`
-    };
+    return snapshot.report;
   }
 
   const model = await createModel(plan.config);
@@ -130,6 +129,51 @@ export async function runPersonDetectionSmoke(
       capturedAt: normalized.capturedAt
     }
   };
+}
+
+async function capturePersonDetectionFrame(input: {
+  readonly config: PicoConfig;
+  readonly source: RtspSnapshotSource;
+  readonly captureFrame: NonNullable<PersonDetectionSmokeDependencies["captureFrame"]>;
+  readonly provider: PersonDetectionSmokeProvider;
+}): Promise<
+  | Extract<RtspSnapshotResult, { readonly ok: true }>
+  | {
+      readonly ok: false;
+      readonly report: PersonDetectionSmokeReport;
+    }
+> {
+  try {
+    const snapshot = await input.captureFrame(input.config, input.source);
+
+    if (snapshot.ok) {
+      return snapshot;
+    }
+
+    return {
+      ok: false,
+      report: {
+        status: "failed",
+        provider: input.provider,
+        reason: `pico person detection smoke capture failed: ${
+          snapshot.reason
+        }: ${sanitizeCaptureMessage(snapshot.message, input.config, input.source)}`
+      }
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      report: {
+        status: "failed",
+        provider: input.provider,
+        reason: `pico person detection smoke capture failed: ${sanitizeCaptureMessage(
+          errorMessage(error),
+          input.config,
+          input.source
+        )}`
+      }
+    };
+  }
 }
 
 export function buildPersonDetectionSmokePlan(
