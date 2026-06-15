@@ -27,6 +27,7 @@
     "smoke:ollama-vlm": "jiti scripts/smoke/ollama-vlm-connectivity.ts",
     "smoke:camera-tapo": "jiti scripts/smoke/tapo-rtsp-snapshot.ts",
     "smoke:camera-ptz": "jiti scripts/smoke/tapo-person-follow-nudge.ts",
+    "smoke:person-follow-runtime": "jiti scripts/smoke/person-follow-runtime.ts",
     "smoke:voice-providers": "jiti scripts/smoke/voice-providers.ts",
     "smoke:pi-runtime": "jiti scripts/smoke/pi-runtime.ts",
     "field:voice-echo-pickup": "jiti scripts/field/voice-echo-pickup.ts",

@@ -689,6 +689,49 @@ describe("streaming person detection", () => {
     }
   });
 
+  it("drains an in-flight capture error after stop", async () => {
+    vi.useFakeTimers();
+    const captureError = new Error("capture failed after stop");
+    let rejectCapture: (() => void) | undefined;
+    const reported: Error[] = [];
+    const stream = createPersonDetectionStream({
+      sourceId: "tapo-main",
+      frameIntervalMs: 500,
+      confidenceThreshold: 0.5,
+      frameSize: {
+        width: 200,
+        height: 200
+      },
+      captureFrame: () =>
+        new Promise<Uint8Array>((_resolve, reject) => {
+          rejectCapture = () => {
+            reject(captureError);
+          };
+        }),
+      model: {
+        detect: () => Promise.resolve([])
+      },
+      publish: () => {},
+      reportError: (error) => {
+        reported.push(error);
+      },
+      now: () => capturedAt
+    });
+
+    try {
+      stream.start();
+      await vi.advanceTimersByTimeAsync(500);
+      stream.stop();
+      rejectCapture?.();
+      await stream.drain();
+
+      expect(reported).toEqual([captureError]);
+    } finally {
+      stream.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it("does not publish an in-flight detection after the stream stops", async () => {
     vi.useFakeTimers();
     let releaseDetection: (() => void) | undefined;

@@ -163,6 +163,7 @@ export type PersonDetectionStreamOptions = {
 };
 
 export type PersonDetectionStream = {
+  readonly drain: () => Promise<void>;
   readonly start: () => void;
   readonly stop: () => void;
 };
@@ -345,6 +346,7 @@ export function createPersonDetectionStream(
   );
   let timer: NodeJS.Timeout | undefined;
   let inFlight = false;
+  let activeTick: Promise<void> | undefined;
   let runToken = 0;
   let stopped = true;
 
@@ -355,7 +357,7 @@ export function createPersonDetectionStream(
 
     inFlight = true;
     const activeRunToken = runToken;
-    void Promise.resolve()
+    const tickPromise = Promise.resolve()
       .then(() => options.captureFrame())
       .then(async (frame) => {
         if (frame === undefined) {
@@ -387,10 +389,17 @@ export function createPersonDetectionStream(
       })
       .finally(() => {
         inFlight = false;
+        if (activeTick === tickPromise) {
+          activeTick = undefined;
+        }
       });
+    activeTick = tickPromise;
   };
 
   return {
+    async drain() {
+      await activeTick;
+    },
     start() {
       if (timer !== undefined) {
         return;
