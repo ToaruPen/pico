@@ -665,9 +665,7 @@ function redactKnownImageBase64Tokens(
   imageSensitiveValues: readonly string[]
 ): string {
   return message.replaceAll(/[A-Za-z0-9+/]{32,}={0,2}/gu, (candidate) =>
-    imageSensitiveValues.some((value) => value.startsWith(candidate))
-      ? "[redacted-image]"
-      : candidate
+    imageSensitiveValues.some((value) => value.includes(candidate)) ? "[redacted-image]" : candidate
   );
 }
 

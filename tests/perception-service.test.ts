@@ -778,6 +778,50 @@ describe("pico perception service", () => {
     expect(text).not.toContain(preparedFrameBase64Prefix);
   });
 
+  it("redacts middle image payload slices from camera scene description failures", async () => {
+    const preparedFrame = Uint8Array.from({ length: 180 }, (_, index) => index % 251);
+    const preparedFrameBase64Middle = Buffer.from(preparedFrame).toString("base64").slice(48, 168);
+    const service = createPicoPerceptionService(
+      definePicoConfig({
+        camera: {
+          tapo: {
+            sourceId: "tapo-main",
+            host: "192.168.10.25",
+            user: "camera-user",
+            password: "camera-password"
+          }
+        },
+        vision: {
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434"
+          }
+        }
+      }),
+      {
+        captureSnapshot: () =>
+          Promise.resolve({
+            ok: true,
+            sourceId: "tapo-main",
+            mimeType: "image/jpeg",
+            frame: jpegFrame
+          }),
+        prepareFrameForVlm: () => Promise.resolve(preparedFrame),
+        describeFrame: () =>
+          Promise.reject(new Error(`proxy echoed middle image: ["${preparedFrameBase64Middle}"]`))
+      }
+    );
+
+    const result = await service.describeCameraScene();
+    const text = JSON.stringify(result);
+
+    expect(result).toEqual({
+      status: "failed",
+      reason:
+        'pico camera scene description failed: proxy echoed middle image: ["[redacted-image]"]'
+    });
+    expect(text).not.toContain(preparedFrameBase64Middle);
+  });
+
   it("redacts image payloads from successful camera scene descriptions", async () => {
     const preparedFrame = Uint8Array.from({ length: 180 }, (_, index) => index % 251);
     const preparedFrameBase64 = Buffer.from(preparedFrame).toString("base64");
