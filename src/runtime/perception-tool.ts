@@ -28,12 +28,9 @@ export function createPicoCameraSnapshotTool(
     parameters: emptyParameters,
     executionMode: "sequential",
     async execute() {
-      const service = getService();
-
-      return textResult({
-        tool: "pico_camera_snapshot",
-        result: await service.captureSceneSnapshot()
-      });
+      return executeWithResolvedService("pico_camera_snapshot", getService, (service) =>
+        service.captureSceneSnapshot()
+      );
     }
   };
 }
@@ -55,12 +52,9 @@ export function createPicoPersonDetectionTool(
     parameters: emptyParameters,
     executionMode: "sequential",
     async execute() {
-      const service = getService();
-
-      return textResult({
-        tool: "pico_person_detection",
-        result: await service.detectPeople()
-      });
+      return executeWithResolvedService("pico_person_detection", getService, (service) =>
+        service.detectPeople()
+      );
     }
   };
 }
@@ -82,12 +76,9 @@ export function createPicoCameraSceneDescriptionTool(
     parameters: emptyParameters,
     executionMode: "sequential",
     async execute() {
-      const service = getService();
-
-      return textResult({
-        tool: "pico_camera_scene_description",
-        result: await service.describeCameraScene()
-      });
+      return executeWithResolvedService("pico_camera_scene_description", getService, (service) =>
+        service.describeCameraScene()
+      );
     }
   };
 }
@@ -110,6 +101,31 @@ function resolveService(options: PicoPerceptionToolOptions): PicoPerceptionServi
   }
 
   return createPicoPerceptionService(options.loadConfig?.() ?? loadPicoConfigFromEnvironment());
+}
+
+async function executeWithResolvedService(
+  tool: string,
+  getService: () => PicoPerceptionService,
+  execute: (service: PicoPerceptionService) => Promise<unknown>
+): Promise<AgentToolResult<Record<string, never>>> {
+  let service: PicoPerceptionService;
+
+  try {
+    service = getService();
+  } catch {
+    return textResult({
+      tool,
+      result: {
+        status: "failed",
+        reason: "pico perception service configuration failed"
+      }
+    });
+  }
+
+  return textResult({
+    tool,
+    result: await execute(service)
+  });
 }
 
 function textResult(value: unknown): AgentToolResult<Record<string, never>> {

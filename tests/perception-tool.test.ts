@@ -48,16 +48,24 @@ describe("pico perception tools", () => {
     expect(loadCalls).toBe(1);
   });
 
-  it("reports config loading failures during tool execution instead of construction", async () => {
+  it("reports sanitized config loading failures during tool execution", async () => {
     const tool = createPicoCameraSnapshotTool({
       loadConfig: () => {
-        throw new Error("config load failed");
+        throw new Error("config load failed at /private/pico/config/pico.local.yaml");
       }
     });
 
     await expect(
-      tool.execute("tool-call-1", {}, undefined, undefined, {} as ExtensionContext)
-    ).rejects.toThrow("config load failed");
+      tool
+        .execute("tool-call-1", {}, undefined, undefined, {} as ExtensionContext)
+        .then(extractToolJson)
+    ).resolves.toEqual({
+      tool: "pico_camera_snapshot",
+      result: {
+        status: "failed",
+        reason: "pico perception service configuration failed"
+      }
+    });
   });
 
   it("returns camera snapshot metadata without image content", async () => {
