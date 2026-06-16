@@ -77,6 +77,9 @@ describe("person-follow runtime", () => {
       details: {
         sourceId: "tapo-main",
         framesProcessed: 1,
+        personDetectionsTotal: 1,
+        framesWithPersonDetections: 1,
+        maxPersonDetectionsInFrame: 1,
         movesIssued: 1,
         stopsIssued: 1,
         errors: 0
@@ -90,6 +93,99 @@ describe("person-follow runtime", () => {
       }
     ]);
     expect(stops).toEqual(["stop"]);
+  });
+
+  it("reports non-identifying aggregate person detection counts across frames", async () => {
+    const report = await runPersonFollowRuntime(
+      enabledPersonFollowConfig(),
+      {
+        enableLiveRun: true,
+        maxFrames: 2,
+        durationMs: 5_000
+      },
+      {
+        pathExists: () => true,
+        createDetectionStream: (options) => ({
+          drain() {
+            return Promise.resolve();
+          },
+          start() {
+            options.publish({
+              sourceId: "tapo-main",
+              capturedAt: "2026-06-16T00:00:00.000Z",
+              detections: [
+                {
+                  label: "person",
+                  confidence: 0.9,
+                  boundingBox: {
+                    xMin: 0.7,
+                    yMin: 0.6,
+                    xMax: 0.9,
+                    yMax: 0.8
+                  }
+                },
+                {
+                  label: "person",
+                  confidence: 0.8,
+                  boundingBox: {
+                    xMin: 0.2,
+                    yMin: 0.5,
+                    xMax: 0.3,
+                    yMax: 0.7
+                  }
+                }
+              ]
+            });
+            options.publish({
+              sourceId: "tapo-main",
+              capturedAt: "2026-06-16T00:00:01.000Z",
+              detections: [
+                {
+                  label: "person",
+                  confidence: 0.75,
+                  boundingBox: {
+                    xMin: 0.45,
+                    yMin: 0.4,
+                    xMax: 0.55,
+                    yMax: 0.7
+                  }
+                }
+              ]
+            });
+          },
+          stop() {}
+        }),
+        createDriver: () => ({
+          relativeMove() {
+            return Promise.resolve();
+          },
+          stop() {
+            return Promise.resolve();
+          }
+        }),
+        createModel: () =>
+          Promise.resolve({
+            detect: () => Promise.resolve([])
+          }),
+        captureFrame: () => Promise.resolve(undefined),
+        nowMs: () => 1_000
+      }
+    );
+
+    expect(report).toEqual({
+      status: "passed",
+      provider: "tapo-rtsp+coreml+onvif",
+      details: {
+        sourceId: "tapo-main",
+        framesProcessed: 2,
+        personDetectionsTotal: 3,
+        framesWithPersonDetections: 2,
+        maxPersonDetectionsInFrame: 2,
+        movesIssued: 1,
+        stopsIssued: 1,
+        errors: 0
+      }
+    });
   });
 
   it("fails when the detection stream reports runtime errors", async () => {
@@ -254,6 +350,9 @@ describe("person-follow runtime", () => {
       details: {
         sourceId: "tapo-main",
         framesProcessed: 1,
+        personDetectionsTotal: 1,
+        framesWithPersonDetections: 1,
+        maxPersonDetectionsInFrame: 1,
         movesIssued: 1,
         stopsIssued: 1,
         errors: 0

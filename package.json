@@ -30,6 +30,8 @@
     "smoke:person-follow-runtime": "jiti scripts/smoke/person-follow-runtime.ts",
     "smoke:voice-providers": "jiti scripts/smoke/voice-providers.ts",
     "smoke:pi-runtime": "jiti scripts/smoke/pi-runtime.ts",
+    "field:session-memory-lifecycle": "jiti scripts/field/session-memory-lifecycle.ts",
+    "field:person-follow-visible-person": "jiti scripts/field/person-follow-visible-person.ts",
     "field:voice-echo-pickup": "jiti scripts/field/voice-echo-pickup.ts",
     "lint": "eslint .",
     "format": "biome format --write .",

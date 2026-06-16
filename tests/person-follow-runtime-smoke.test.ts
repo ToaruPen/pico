@@ -80,6 +80,9 @@ describe("person-follow runtime smoke", () => {
             details: {
               sourceId: config.camera.personFollow.sourceCameraId ?? "missing",
               framesProcessed: options.enableLiveRun === true ? (options.maxFrames ?? 0) : 0,
+              personDetectionsTotal: 1,
+              framesWithPersonDetections: 1,
+              maxPersonDetectionsInFrame: 1,
               movesIssued: 1,
               stopsIssued: 1,
               errors: 0
@@ -94,6 +97,9 @@ describe("person-follow runtime smoke", () => {
       details: {
         sourceId: "tapo-main",
         framesProcessed: 10,
+        personDetectionsTotal: 1,
+        framesWithPersonDetections: 1,
+        maxPersonDetectionsInFrame: 1,
         movesIssued: 1,
         stopsIssued: 1,
         errors: 0
@@ -116,6 +122,9 @@ describe("person-follow runtime smoke", () => {
         details: {
           sourceId: "tapo-main",
           framesProcessed: 1,
+          personDetectionsTotal: 0,
+          framesWithPersonDetections: 0,
+          maxPersonDetectionsInFrame: 0,
           movesIssued: 0,
           stopsIssued: 1,
           errors: 0
