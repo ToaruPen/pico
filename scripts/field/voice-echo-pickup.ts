@@ -10,6 +10,7 @@ import {
   createHttpEchoControlProvider,
   defineVoicePcmFrame,
   type EchoControlProvider,
+  type EchoControlProviderKind,
   type EchoControlResult
 } from "../../src/modules/voice/echo-control.js";
 import {
@@ -36,7 +37,11 @@ export type VoiceEchoPickupFieldReport =
       readonly reason?: string;
     };
 
+export type VoiceEchoPickupAcceptance = "aec_pass" | "safety_pass" | "fail";
+
 export type VoiceEchoPickupFieldDetails = {
+  readonly acceptance: VoiceEchoPickupAcceptance;
+  readonly provider: EchoControlProviderKind;
   readonly echoAction: "pass" | "suppress";
   readonly transcriptLength: number;
   readonly resumedTranscriptLength: number;
@@ -44,6 +49,7 @@ export type VoiceEchoPickupFieldDetails = {
 };
 
 export type VoiceEchoPickupClassificationInput = {
+  readonly provider: EchoControlProviderKind;
   readonly echoAction: "pass" | "suppress";
   readonly transcriptText: string;
   readonly transcriptLength: number;
@@ -118,6 +124,12 @@ export function classifyVoiceEchoPickupResult(
     (input.echoAction === "pass" &&
       includesTriggerPhrase(input.transcriptText, input.triggerPhrases));
   const details: VoiceEchoPickupFieldDetails = {
+    acceptance: classifyVoiceEchoPickupAcceptance(
+      input.provider,
+      input.echoAction,
+      wouldTriggerSession
+    ),
+    provider: input.provider,
     echoAction: input.echoAction,
     transcriptLength: input.transcriptLength,
     resumedTranscriptLength: input.resumedTranscriptLength,
@@ -146,6 +158,33 @@ export function classifyVoiceEchoPickupResult(
   };
 }
 
+export async function assertVoiceEchoPickupProviderReady(
+  echoControl: EchoControlProvider
+): Promise<void> {
+  const metadata = echoControl.describe();
+  const health = await echoControl.checkHealth();
+
+  if (!health.ok) {
+    throw new Error(`pico voice echo pickup AEC provider is unhealthy: ${health.message}`);
+  }
+
+  if (metadata.mode === "aec" && metadata.provider === "half_duplex") {
+    throw new Error("pico voice echo pickup mode aec cannot use half_duplex provider");
+  }
+}
+
+function classifyVoiceEchoPickupAcceptance(
+  provider: EchoControlProviderKind,
+  echoAction: "pass" | "suppress",
+  wouldTriggerSession: boolean
+): VoiceEchoPickupAcceptance {
+  if (wouldTriggerSession) {
+    return "fail";
+  }
+
+  return provider !== "half_duplex" && echoAction === "pass" ? "aec_pass" : "safety_pass";
+}
+
 async function runVoiceEchoPickupField(
   config: PicoConfig = loadPicoConfigFromEnvironment()
 ): Promise<VoiceEchoPickupFieldReport> {
@@ -164,11 +203,14 @@ async function runVoiceEchoPickupField(
 async function executeVoiceEchoPickupField(
   plan: Extract<VoiceEchoPickupFieldPlan, { readonly status: "run" }>
 ): Promise<VoiceEchoPickupFieldReport> {
-  const fieldCapture = await captureVoiceEchoPickup(plan);
+  const echoControl = createEchoControlProvider(plan);
+  await assertVoiceEchoPickupProviderReady(echoControl);
+  const fieldCapture = await captureVoiceEchoPickup(plan, echoControl);
   const resumedTranscript = await transcribeResumeWindow(plan, fieldCapture.resumeAudio);
 
   return fieldCapture.echoResult.action === "suppress"
     ? classifyVoiceEchoPickupResult({
+        provider: fieldCapture.echoResult.diagnostics.provider,
         echoAction: "suppress",
         transcriptText: "",
         transcriptLength: 0,
@@ -176,11 +218,17 @@ async function executeVoiceEchoPickupField(
         resumedTranscriptLength: resumedTranscript.length,
         triggerPhrases: plan.triggerPhrases
       })
-    : transcribeAllowedEchoFrame(plan, fieldCapture.echoResult.frame.audio, resumedTranscript);
+    : transcribeAllowedEchoFrame(
+        plan,
+        fieldCapture.echoResult.frame.audio,
+        resumedTranscript,
+        fieldCapture.echoResult.diagnostics.provider
+      );
 }
 
 async function captureVoiceEchoPickup(
-  plan: Extract<VoiceEchoPickupFieldPlan, { readonly status: "run" }>
+  plan: Extract<VoiceEchoPickupFieldPlan, { readonly status: "run" }>,
+  echoControl: EchoControlProvider
 ): Promise<{
   readonly echoResult: EchoControlResult;
   readonly resumeAudio: Uint8Array;
@@ -225,7 +273,6 @@ async function captureVoiceEchoPickup(
 
   const microphoneAudio = new Uint8Array(await readFile(micPath));
   const resumeAudio = new Uint8Array(await readFile(resumePath));
-  const echoControl = createEchoControlProvider(plan);
   await echoControl.acceptFarEndReference(
     defineVoicePcmFrame({
       id: "field-tts",
@@ -260,7 +307,8 @@ async function captureVoiceEchoPickup(
 async function transcribeAllowedEchoFrame(
   plan: Extract<VoiceEchoPickupFieldPlan, { readonly status: "run" }>,
   audio: Uint8Array,
-  resumedTranscript: string
+  resumedTranscript: string,
+  provider: EchoControlProviderKind
 ): Promise<VoiceEchoPickupFieldReport> {
   const sttResult = await createFieldSttClient(plan).transcribe(
     buildSttRequest(audio, plan.echoControl)
@@ -274,6 +322,7 @@ async function transcribeAllowedEchoFrame(
   }
 
   return classifyVoiceEchoPickupResult({
+    provider,
     echoAction: "pass",
     transcriptText: sttResult.text,
     transcriptLength: sttResult.text.length,
