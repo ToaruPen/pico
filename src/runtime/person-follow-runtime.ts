@@ -47,6 +47,9 @@ export type PersonFollowRuntimeReport =
       readonly details: {
         readonly sourceId: string;
         readonly framesProcessed: number;
+        readonly personDetectionsTotal: number;
+        readonly framesWithPersonDetections: number;
+        readonly maxPersonDetectionsInFrame: number;
         readonly movesIssued: number;
         readonly stopsIssued: number;
         readonly errors: number;
@@ -116,6 +119,9 @@ type ResolvedPersonFollowRuntimeConfig = {
 
 type RuntimeCounters = {
   framesProcessed: number;
+  personDetectionsTotal: number;
+  framesWithPersonDetections: number;
+  maxPersonDetectionsInFrame: number;
   movesIssued: number;
   stopsIssued: number;
   errors: number;
@@ -155,6 +161,9 @@ async function runConfiguredPersonFollowRuntime(
       : await dependencies.createModel(config);
   const counters = {
     framesProcessed: 0,
+    personDetectionsTotal: 0,
+    framesWithPersonDetections: 0,
+    maxPersonDetectionsInFrame: 0,
     movesIssued: 0,
     stopsIssued: 0,
     errors: 0
@@ -208,6 +217,7 @@ async function runConfiguredPersonFollowRuntime(
 
     const publish = (frame: PersonDetectionFrame): void => {
       counters.framesProcessed += 1;
+      countPersonDetections(frame, counters);
       const reachedFrameBudget = counters.framesProcessed >= maxFrames;
       if (reachedFrameBudget) {
         stream?.stop();
@@ -268,6 +278,9 @@ function buildPersonFollowRuntimeReport(
     details: {
       sourceId: resolved.follow.sourceCameraId,
       framesProcessed: counters.framesProcessed,
+      personDetectionsTotal: counters.personDetectionsTotal,
+      framesWithPersonDetections: counters.framesWithPersonDetections,
+      maxPersonDetectionsInFrame: counters.maxPersonDetectionsInFrame,
       movesIssued: counters.movesIssued,
       stopsIssued: counters.stopsIssued,
       errors: counters.errors
@@ -427,6 +440,16 @@ function createRuntimeDetectionStream(
     },
     ...(input.dependencies.now === undefined ? {} : { now: input.dependencies.now })
   });
+}
+
+function countPersonDetections(frame: PersonDetectionFrame, counters: RuntimeCounters): void {
+  const count = frame.detections.length;
+
+  counters.personDetectionsTotal += count;
+  counters.maxPersonDetectionsInFrame = Math.max(counters.maxPersonDetectionsInFrame, count);
+  if (count > 0) {
+    counters.framesWithPersonDetections += 1;
+  }
 }
 
 function countPersonFollowAuditEvent(
