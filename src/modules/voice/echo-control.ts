@@ -43,8 +43,24 @@ export type EchoControlProviderMetadata = {
   readonly mode: "aec" | "platform_voice_processing" | "half_duplex";
 };
 
+export type EchoControlProviderHealth =
+  | {
+      readonly ok: true;
+      readonly provider: EchoControlProviderKind;
+      readonly mode: EchoControlProviderMetadata["mode"];
+      readonly engine: string;
+    }
+  | {
+      readonly ok: false;
+      readonly provider: EchoControlProviderKind;
+      readonly mode: EchoControlProviderMetadata["mode"];
+      readonly reason: "unavailable" | "invalid_response";
+      readonly message: string;
+    };
+
 export type EchoControlProvider = {
   readonly describe: () => EchoControlProviderMetadata;
+  readonly checkHealth: () => Promise<EchoControlProviderHealth>;
   readonly acceptFarEndReference: (frame: VoicePcmFrame) => Promise<void>;
   readonly processNearEnd: (frame: VoicePcmFrame) => Promise<EchoControlResult>;
   readonly flush: () => Promise<void>;
@@ -92,6 +108,14 @@ export function createHalfDuplexEchoControl(
         provider: "half_duplex",
         mode: "half_duplex"
       };
+    },
+    checkHealth() {
+      return Promise.resolve({
+        ok: true,
+        provider: "half_duplex",
+        mode: "half_duplex",
+        engine: "half-duplex-safety"
+      });
     },
     acceptFarEndReference(frame) {
       const farEnd = defineVoicePcmFrame(frame);
@@ -166,6 +190,13 @@ export function createHttpEchoControlProvider(
         mode: options.mode
       };
     },
+    async checkHealth() {
+      return getEchoControlHealth(providerEndpoint, {
+        provider: options.provider,
+        mode: options.mode,
+        fetchImplementation
+      });
+    },
     async acceptFarEndReference(frame) {
       const farEnd = defineVoicePcmFrame(frame);
       requireVoiceFrameDirection(farEnd, "far_end");
@@ -234,6 +265,43 @@ export function defineVoicePcmFrame(input: VoicePcmFrame): VoicePcmFrame {
   });
 }
 
+async function getEchoControlHealth(
+  providerEndpoint: string,
+  options: {
+    readonly provider: Exclude<EchoControlProviderKind, "half_duplex">;
+    readonly mode: "aec" | "platform_voice_processing";
+    readonly fetchImplementation: typeof fetch;
+  }
+): Promise<EchoControlProviderHealth> {
+  const response = await options.fetchImplementation(
+    new URL("/v1/echo-control/health", providerEndpoint),
+    {
+      method: "GET",
+      headers: {
+        accept: "application/json"
+      }
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `pico echo-control provider health request failed with status ${response.status}`
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    throw new Error("pico echo-control provider health response is malformed");
+  }
+
+  return parseHttpEchoControlHealthResponse(body, {
+    provider: options.provider,
+    mode: options.mode
+  });
+}
+
 async function postEchoControlFrame(
   providerEndpoint: string,
   path: "/v1/echo-control/far-end" | "/v1/echo-control/near-end",
@@ -270,6 +338,52 @@ async function postEchoControlFrame(
   }
 
   return parseHttpEchoControlResponse((await response.json()) as unknown);
+}
+
+function parseHttpEchoControlHealthResponse(
+  input: unknown,
+  expected: {
+    readonly provider: Exclude<EchoControlProviderKind, "half_duplex">;
+    readonly mode: "aec" | "platform_voice_processing";
+  }
+): EchoControlProviderHealth {
+  const response = requireRecord(input, "pico echo-control provider health response is malformed");
+
+  if (response.provider !== expected.provider || response.mode !== expected.mode) {
+    throw new Error("pico echo-control provider health response is malformed");
+  }
+
+  if (response.ok === false) {
+    return {
+      ok: false,
+      provider: expected.provider,
+      mode: expected.mode,
+      reason: requireEchoControlHealthFailureReason(response.reason),
+      message: requireText(
+        response.message,
+        "pico echo-control provider health response is malformed"
+      )
+    };
+  }
+
+  if (response.ok !== true) {
+    throw new Error("pico echo-control provider health response is malformed");
+  }
+
+  return {
+    ok: true,
+    provider: expected.provider,
+    mode: expected.mode,
+    engine: requireText(response.engine, "pico echo-control provider health response is malformed")
+  };
+}
+
+function requireEchoControlHealthFailureReason(value: unknown): "unavailable" | "invalid_response" {
+  if (value !== "unavailable" && value !== "invalid_response") {
+    throw new Error("pico echo-control provider health response is malformed");
+  }
+
+  return value;
 }
 
 function parseHttpEchoControlResponse(input: unknown): HttpEchoControlResponse {

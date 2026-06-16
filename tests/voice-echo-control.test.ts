@@ -207,6 +207,123 @@ describe("voice echo control", () => {
     ]);
   });
 
+  it("checks explicit HTTP AEC provider health before live use", async () => {
+    const requests: string[] = [];
+    const provider = createHttpEchoControlProvider({
+      provider: "web_rtc_aec3",
+      mode: "aec",
+      providerEndpoint: "http://127.0.0.1:8770",
+      fetchImplementation: (url) => {
+        if (!(url instanceof URL)) {
+          throw new Error("unexpected echo-control health request");
+        }
+
+        requests.push(url.href);
+
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ok: true,
+              provider: "web_rtc_aec3",
+              mode: "aec",
+              engine: "webrtc-aec3"
+            }),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/json"
+              }
+            }
+          )
+        );
+      }
+    });
+
+    await expect(provider.checkHealth()).resolves.toEqual({
+      ok: true,
+      provider: "web_rtc_aec3",
+      mode: "aec",
+      engine: "webrtc-aec3"
+    });
+    expect(requests).toEqual(["http://127.0.0.1:8770/v1/echo-control/health"]);
+  });
+
+  it("rejects malformed HTTP AEC provider health responses", async () => {
+    const provider = createHttpEchoControlProvider({
+      provider: "web_rtc_aec3",
+      mode: "aec",
+      providerEndpoint: "http://127.0.0.1:8770",
+      fetchImplementation: () =>
+        Promise.resolve(
+          new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          })
+        )
+    });
+
+    await expect(provider.checkHealth()).rejects.toThrow(
+      "pico echo-control provider health response is malformed"
+    );
+  });
+
+  it("returns provider-reported unhealthy HTTP AEC health responses", async () => {
+    const provider = createHttpEchoControlProvider({
+      provider: "web_rtc_aec3",
+      mode: "aec",
+      providerEndpoint: "http://127.0.0.1:8770",
+      fetchImplementation: () =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ok: false,
+              provider: "web_rtc_aec3",
+              mode: "aec",
+              reason: "unavailable",
+              message: "AEC engine is not ready"
+            }),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/json"
+              }
+            }
+          )
+        )
+    });
+
+    await expect(provider.checkHealth()).resolves.toEqual({
+      ok: false,
+      provider: "web_rtc_aec3",
+      mode: "aec",
+      reason: "unavailable",
+      message: "AEC engine is not ready"
+    });
+  });
+
+  it("rejects non-JSON HTTP AEC provider health responses as malformed", async () => {
+    const provider = createHttpEchoControlProvider({
+      provider: "web_rtc_aec3",
+      mode: "aec",
+      providerEndpoint: "http://127.0.0.1:8770",
+      fetchImplementation: () =>
+        Promise.resolve(
+          new Response("{", {
+            status: 200,
+            headers: {
+              "content-type": "application/json"
+            }
+          })
+        )
+    });
+
+    await expect(provider.checkHealth()).rejects.toThrow(
+      "pico echo-control provider health response is malformed"
+    );
+  });
+
   it("rejects HTTP AEC pass responses that omit processed audio", async () => {
     const provider = createHttpEchoControlProvider({
       provider: "web_rtc_aec3",

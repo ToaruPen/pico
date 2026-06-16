@@ -1,7 +1,8 @@
 # Pico Voice Echo Control Design
 
 Date: 2026-06-14
-Status: Draft
+Updated: 2026-06-16
+Status: Approved for implementation
 
 ## Purpose
 
@@ -12,6 +13,10 @@ turn-taking with real microphones and speakers.
 This design updates the voice architecture before broader live voice automation.
 It keeps STT and TTS adapters narrow while adding an explicit audio I/O and echo
 control layer between physical devices and transcription/session triggering.
+
+The 2026-06-16 implementation slice moves beyond the existing contract and
+half-duplex baseline. It must wire the live voice runtime through echo control
+and require a real, explicitly configured local AEC provider for AEC acceptance.
 
 ## Problem
 
@@ -138,6 +143,74 @@ allowed as:
 
 - A configured safety mode.
 - A field-test baseline to prove the echo trigger harness works.
+
+Half-duplex does not satisfy `mode: aec` acceptance. A field run that passes
+only because listening was muted proves the safety policy, not acoustic echo
+cancellation.
+
+## Real AEC Implementation Slice
+
+The current repository already has the configuration shape, TypeScript provider
+contract, a local HTTP provider boundary, a half-duplex implementation, and an
+echo-pickup field harness. The next implementation slice must complete the live
+voice path and provider enforcement without adding hidden fallback behavior.
+
+### Provider health and startup
+
+When `voice.echoControl.mode` is `aec`, the runtime must construct only the
+configured provider. For the first production path this is `web_rtc_aec3`
+through the local HTTP sidecar boundary.
+
+Startup and field harnesses must fail closed when:
+
+- `provider` is missing.
+- `providerEndpoint` is missing.
+- the endpoint is not loopback-local.
+- the provider cannot report a healthy AEC engine.
+- the provider response omits processed near-end audio for a pass result.
+
+The runtime must not silently switch to half-duplex, SpeexDSP, or platform voice
+processing. Those are separate explicit modes/providers.
+
+### Live voice pipeline
+
+The live voice pipeline must enforce this order:
+
+```text
+TTS request
+  -> voice.tts synthesize
+  -> voice.audio playback
+  -> voice.echoControl.acceptFarEndReference
+
+Microphone frame
+  -> voice.echoControl.processNearEnd
+  -> voice.stt transcribe only when action is pass
+  -> voice.sessionTrigger evaluate only echo-controlled STT output
+```
+
+Raw microphone frames must not be sent directly to STT/session triggering in the
+live runtime. If echo control suppresses a frame, the runtime may emit bounded
+diagnostics but must not transcribe that frame.
+
+### Field acceptance
+
+The existing echo-pickup harness remains useful, but AEC acceptance requires a
+run with:
+
+- `voice.echoControl.enabled: true`
+- `voice.echoControl.mode: aec`
+- an explicit non-`half_duplex` provider
+- a healthy local provider endpoint
+
+The report must distinguish:
+
+- `aec_pass`: real AEC provider processed the near-end frame and no bot-voice
+  session trigger was produced.
+- `safety_pass`: half-duplex suppressed listening and no trigger was produced.
+- `fail`: bot voice produced a session trigger, STT could not resume, or the
+  provider was unavailable.
+
+Only `aec_pass` satisfies this issue's AEC acceptance.
 
 ## YAML Shape
 
@@ -275,6 +348,10 @@ whether half-duplex remains acceptable or full-duplex AEC behavior is required.
 - Config can express an explicit echo-control provider.
 - STT/session triggers consume only echo-controlled microphone frames.
 - TTS playback supplies far-end reference frames to echo control.
-- Field test proves pico does not trigger from its own TTS output.
+- `mode: aec` fails closed unless the configured local provider is healthy.
+- Field test with a real AEC provider proves pico does not trigger from its own
+  TTS output.
 - Field test proves listening resumes after tail mute.
+- Half-duplex field success is reported as a safety baseline, not an AEC pass.
+- No raw audio or transcript data appears in audit events.
 - `just check` remains green.
