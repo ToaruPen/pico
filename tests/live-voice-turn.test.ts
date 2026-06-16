@@ -272,6 +272,69 @@ describe("live voice turn runtime", () => {
     expect(ttsCalls).toBe(0);
     expect(sttCalls).toBe(0);
   });
+
+  it("detects trigger phrases split across adjacent STT frames", async () => {
+    const echoControl = passThroughEchoControl();
+
+    const result = await runLiveVoiceTurn({
+      now: () => "2026-06-16T10:00:00.000Z",
+      tts: successfulSingleChunkTts(),
+      stt: sequentialStt(["おは", "ようピコ"]),
+      echoControl,
+      text: "おはようピコ。",
+      micFrames: [
+        sampleNearEndFrame(),
+        {
+          ...sampleNearEndFrame(),
+          id: "mic-2",
+          capturedAt: "2026-06-16T10:00:00.350Z"
+        }
+      ],
+      triggerPhrases: ["おはようピコ"]
+    });
+
+    expect(result.transcripts).toEqual(["おは", "ようピコ"]);
+    expect(result.triggered).toBe(true);
+  });
+
+  it("flushes echo-control state when the turn fails", async () => {
+    let flushCalls = 0;
+    const echoControl: EchoControlProvider = {
+      ...passThroughEchoControl(),
+      flush: () => {
+        flushCalls += 1;
+        return Promise.resolve();
+      }
+    };
+
+    await expect(
+      runLiveVoiceTurn({
+        now: () => "2026-06-16T10:00:00.000Z",
+        tts: successfulSingleChunkTts(),
+        stt: {
+          warmup: () => {
+            throw new Error("warmup is not part of this runtime test");
+          },
+          transcribe: () =>
+            Promise.resolve({
+              ok: false,
+              reason: "backend_error",
+              message: "STT sidecar failed",
+              source: {
+                sidecarId: "local-mlx-whisper",
+                provider: "mlx-whisper",
+                modelRepo: "mlx-community/whisper-large-v3-turbo"
+              }
+            })
+        },
+        echoControl,
+        text: "おはようピコ。",
+        micFrames: [sampleNearEndFrame()],
+        triggerPhrases: ["ピコ"]
+      })
+    ).rejects.toThrow("pico live voice STT failed: backend_error: STT sidecar failed");
+    expect(flushCalls).toBe(1);
+  });
 });
 
 function sampleNearEndFrame(): VoicePcmFrame {
@@ -382,5 +445,59 @@ function successfulStt(text: string): SttClient {
           modelRepo: "mlx-community/whisper-large-v3-turbo"
         }
       })
+  };
+}
+
+function sequentialStt(texts: readonly string[]): SttClient {
+  let index = 0;
+
+  return {
+    warmup: () => {
+      throw new Error("warmup is not part of this runtime test");
+    },
+    transcribe: () => {
+      const text = texts[index] ?? "";
+      index += 1;
+
+      return Promise.resolve({
+        ok: true,
+        text,
+        language: "ja",
+        confidence: 0.8,
+        durationMs: 300,
+        segments: [],
+        source: {
+          sidecarId: "local-mlx-whisper",
+          provider: "mlx-whisper",
+          modelRepo: "mlx-community/whisper-large-v3-turbo"
+        }
+      });
+    }
+  };
+}
+
+function passThroughEchoControl(): EchoControlProvider {
+  return {
+    describe: () => ({ provider: "web_rtc_aec3", mode: "aec" }),
+    checkHealth: () =>
+      Promise.resolve({
+        ok: true,
+        provider: "web_rtc_aec3",
+        mode: "aec",
+        engine: "webrtc-aec3"
+      }),
+    acceptFarEndReference: () => Promise.resolve(),
+    processNearEnd: (frame) =>
+      Promise.resolve({
+        action: "pass",
+        reason: "aec_processed",
+        frame,
+        diagnostics: {
+          provider: "web_rtc_aec3",
+          residualEchoProbability: 0,
+          voiceActivity: true
+        }
+      }),
+    flush: () => Promise.resolve()
   };
 }

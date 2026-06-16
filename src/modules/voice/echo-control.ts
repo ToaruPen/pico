@@ -349,11 +349,24 @@ function parseHttpEchoControlHealthResponse(
 ): EchoControlProviderHealth {
   const response = requireRecord(input, "pico echo-control provider health response is malformed");
 
-  if (
-    response.ok !== true ||
-    response.provider !== expected.provider ||
-    response.mode !== expected.mode
-  ) {
+  if (response.provider !== expected.provider || response.mode !== expected.mode) {
+    throw new Error("pico echo-control provider health response is malformed");
+  }
+
+  if (response.ok === false) {
+    return {
+      ok: false,
+      provider: expected.provider,
+      mode: expected.mode,
+      reason: requireEchoControlHealthFailureReason(response.reason),
+      message: requireText(
+        response.message,
+        "pico echo-control provider health response is malformed"
+      )
+    };
+  }
+
+  if (response.ok !== true) {
     throw new Error("pico echo-control provider health response is malformed");
   }
 
@@ -363,6 +376,14 @@ function parseHttpEchoControlHealthResponse(
     mode: expected.mode,
     engine: requireText(response.engine, "pico echo-control provider health response is malformed")
   };
+}
+
+function requireEchoControlHealthFailureReason(value: unknown): "unavailable" | "invalid_response" {
+  if (value !== "unavailable" && value !== "invalid_response") {
+    throw new Error("pico echo-control provider health response is malformed");
+  }
+
+  return value;
 }
 
 function parseHttpEchoControlResponse(input: unknown): HttpEchoControlResponse {

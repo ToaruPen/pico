@@ -269,6 +269,40 @@ describe("voice echo control", () => {
     );
   });
 
+  it("returns provider-reported unhealthy HTTP AEC health responses", async () => {
+    const provider = createHttpEchoControlProvider({
+      provider: "web_rtc_aec3",
+      mode: "aec",
+      providerEndpoint: "http://127.0.0.1:8770",
+      fetchImplementation: () =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ok: false,
+              provider: "web_rtc_aec3",
+              mode: "aec",
+              reason: "unavailable",
+              message: "AEC engine is not ready"
+            }),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/json"
+              }
+            }
+          )
+        )
+    });
+
+    await expect(provider.checkHealth()).resolves.toEqual({
+      ok: false,
+      provider: "web_rtc_aec3",
+      mode: "aec",
+      reason: "unavailable",
+      message: "AEC engine is not ready"
+    });
+  });
+
   it("rejects non-JSON HTTP AEC provider health responses as malformed", async () => {
     const provider = createHttpEchoControlProvider({
       provider: "web_rtc_aec3",
