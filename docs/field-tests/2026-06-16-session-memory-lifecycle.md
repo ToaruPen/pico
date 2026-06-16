@@ -32,7 +32,7 @@ npm run field:session-memory-lifecycle
   "status": "passed",
   "provider": "session+sqlite+mem0+otel",
   "details": {
-    "runId": "0a0988ca-cc46-4f20-b243-1bf97c5afae7",
+    "runId": "d21a16cf-88d9-4e35-bcfb-ab61649a53e2",
     "sessionId": "session-1",
     "sourceEntryCount": 2,
     "candidateJobId": 1,

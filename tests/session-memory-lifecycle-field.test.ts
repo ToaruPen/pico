@@ -71,7 +71,7 @@ describe("session memory lifecycle field harness", () => {
           mem0MemoryCount: 1,
           auditEventCount: 6,
           exportedOtelRecordCount: 6,
-          databasePath
+          databasePath: "<injected-database-path>"
         }
       });
       expect(addedRequests).toHaveLength(1);

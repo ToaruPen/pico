@@ -1,7 +1,7 @@
 #!/usr/bin/env jiti
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
@@ -129,6 +129,7 @@ async function executeSessionMemoryLifecycleField(
   }
 
   const databasePath = resolveDatabasePath(dependencies.databasePath);
+  const databaseReportPath = resolveDatabaseReportPath(dependencies.databasePath);
   await mkdir(dirname(databasePath), { recursive: true });
 
   const candidates = openSessionMemoryCandidateStore(databasePath, {
@@ -179,7 +180,7 @@ async function executeSessionMemoryLifecycleField(
         mem0MemoryCount,
         auditEventCount: audit.entries().length,
         exportedOtelRecordCount,
-        databasePath
+        databasePath: databaseReportPath
       }
     };
   } finally {
@@ -375,6 +376,12 @@ function firstConfiguredGreeting(config: PicoConfig): string {
 
 function resolveDatabasePath(value: string | undefined): string {
   return resolve(value?.trim() === "" || value === undefined ? defaultDatabasePath : value);
+}
+
+function resolveDatabaseReportPath(value: string | undefined): string {
+  const path = value?.trim() === "" || value === undefined ? defaultDatabasePath : value;
+
+  return isAbsolute(path) ? "<injected-database-path>" : path;
 }
 
 function requireOtelEndpoint(value: string | undefined): string {
