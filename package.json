@@ -24,6 +24,7 @@
     "smoke:camera-vlm-scene": "jiti scripts/smoke/camera-vlm-scene.ts",
     "smoke:person-detection": "jiti scripts/smoke/person-detection.ts",
     "smoke:mem0-runtime": "jiti scripts/smoke/mem0-runtime.ts",
+    "smoke:embedding-sidecar": "jiti scripts/smoke/embedding-sidecar.ts",
     "smoke:ollama-vlm": "jiti scripts/smoke/ollama-vlm-connectivity.ts",
     "smoke:camera-tapo": "jiti scripts/smoke/tapo-rtsp-snapshot.ts",
     "smoke:camera-ptz": "jiti scripts/smoke/tapo-person-follow-nudge.ts",

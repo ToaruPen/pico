@@ -48,8 +48,8 @@ export type PicoMem0Config = {
   readonly infer?: boolean;
   readonly historyDbPath?: string;
   readonly vectorStore?: PicoMem0VectorStoreConfig;
-  readonly llm?: PicoMem0ModelConfig;
-  readonly embedder?: PicoMem0ModelConfig;
+  readonly llm?: PicoMem0LlmConfig;
+  readonly embedder?: PicoMem0EmbedderConfig;
 };
 
 export type PicoMem0VectorStoreConfig = {
@@ -58,11 +58,28 @@ export type PicoMem0VectorStoreConfig = {
   readonly collectionName: string;
 };
 
-export type PicoMem0ModelConfig = {
+export type PicoMem0LlmConfig = PicoMem0OllamaLlmConfig | PicoMem0PiModelLlmConfig;
+
+export type PicoMem0OllamaLlmConfig = {
   readonly provider: "ollama";
   readonly localBaseUrl: string;
   readonly model: string;
+};
+
+export type PicoMem0PiModelLlmConfig = {
+  readonly provider: "pi_model";
+  readonly piProvider: "openai-codex";
+  readonly api: "openai-codex-responses";
+  readonly model: string;
+  readonly timeoutMs?: number;
+};
+
+export type PicoMem0EmbedderConfig = {
+  readonly provider: "ollama" | "sidecar";
+  readonly localBaseUrl: string;
+  readonly model: string;
   readonly embeddingDims?: number;
+  readonly timeoutMs?: number;
 };
 
 export type PicoAuditOtelConfig = {
@@ -395,10 +412,10 @@ function defineMem0Config(input: Record<string, unknown> | undefined): PicoMem0C
       vectorStore: defineMem0VectorStore(
         requireRecord(vectorStore, "pico config memory.mem0.vectorStore")
       ),
-      llm: defineMem0Model(requireRecord(llm, "pico config memory.mem0.llm"), "llm"),
-      embedder: defineMem0Model(
+      llm: defineMem0Llm(requireRecord(llm, "pico config memory.mem0.llm")),
+      embedder: defineMem0Embedder(
         requireRecord(embedder, "pico config memory.mem0.embedder"),
-        "embedder"
+        "pico config memory.mem0.embedder"
       )
     };
   }
@@ -408,8 +425,10 @@ function defineMem0Config(input: Record<string, unknown> | undefined): PicoMem0C
     ...optionalBooleanProperty(input, "infer", "pico config memory.mem0.infer"),
     ...(historyDatabasePath === undefined ? {} : { historyDbPath: historyDatabasePath }),
     ...(vectorStore === undefined ? {} : { vectorStore: defineMem0VectorStore(vectorStore) }),
-    ...(llm === undefined ? {} : { llm: defineMem0Model(llm, "llm") }),
-    ...(embedder === undefined ? {} : { embedder: defineMem0Model(embedder, "embedder") })
+    ...(llm === undefined ? {} : { llm: defineMem0Llm(llm) }),
+    ...(embedder === undefined
+      ? {}
+      : { embedder: defineMem0Embedder(embedder, "pico config memory.mem0.embedder") })
   };
 }
 
@@ -433,30 +452,74 @@ function defineMem0VectorStore(input: Record<string, unknown>): PicoMem0VectorSt
   };
 }
 
-function defineMem0Model(
-  input: Record<string, unknown>,
-  key: "llm" | "embedder"
-): PicoMem0ModelConfig {
-  const provider = requireString(input.provider, `pico config memory.mem0.${key}.provider`);
+function defineMem0Llm(input: Record<string, unknown>): PicoMem0LlmConfig {
+  const provider = requireString(input.provider, "pico config memory.mem0.llm.provider");
 
-  if (provider !== "ollama") {
-    throw new Error(`pico config memory.mem0.${key}.provider must be ollama`);
+  if (provider === "ollama") {
+    return {
+      provider,
+      localBaseUrl: requireLocalBaseUrl(
+        input.localBaseUrl,
+        "pico config memory.mem0.llm.localBaseUrl"
+      ),
+      model: requireString(input.model, "pico config memory.mem0.llm.model")
+    };
+  }
+
+  if (provider === "pi_model") {
+    return defineMem0PiModelLlm(input);
+  }
+
+  throw new Error("pico config memory.mem0.llm.provider must be ollama or pi_model");
+}
+
+function defineMem0PiModelLlm(input: Record<string, unknown>): PicoMem0PiModelLlmConfig {
+  const piProvider = requireString(input.piProvider, "pico config memory.mem0.llm.piProvider");
+  const api = requireString(input.api, "pico config memory.mem0.llm.api");
+
+  if (piProvider !== "openai-codex") {
+    throw new Error("pico config memory.mem0.llm.piProvider must be openai-codex");
+  }
+
+  if (api !== "openai-codex-responses") {
+    throw new Error("pico config memory.mem0.llm.api must be openai-codex-responses");
+  }
+
+  return {
+    provider: "pi_model",
+    piProvider,
+    api,
+    model: requireString(input.model, "pico config memory.mem0.llm.model"),
+    ...optionalBoundedPositiveIntegerProperty(
+      input,
+      "timeoutMs",
+      "pico config memory.mem0.llm.timeoutMs",
+      maxNodeTimeoutMs
+    )
+  };
+}
+
+function defineMem0Embedder(
+  input: Record<string, unknown>,
+  label: "pico config memory.mem0.embedder"
+): PicoMem0EmbedderConfig {
+  const provider = requireString(input.provider, `${label}.provider`);
+
+  if (provider !== "ollama" && provider !== "sidecar") {
+    throw new Error(`${label}.provider must be ollama or sidecar`);
   }
 
   return {
     provider,
-    localBaseUrl: requireLocalBaseUrl(
-      input.localBaseUrl,
-      `pico config memory.mem0.${key}.localBaseUrl`
-    ),
-    model: requireString(input.model, `pico config memory.mem0.${key}.model`),
-    ...(key === "embedder"
-      ? optionalPositiveIntegerProperty(
-          input,
-          "embeddingDims",
-          "pico config memory.mem0.embedder.embeddingDims"
-        )
-      : {})
+    localBaseUrl: requireLocalBaseUrl(input.localBaseUrl, `${label}.localBaseUrl`),
+    model: requireString(input.model, `${label}.model`),
+    ...optionalPositiveIntegerProperty(input, "embeddingDims", `${label}.embeddingDims`),
+    ...optionalBoundedPositiveIntegerProperty(
+      input,
+      "timeoutMs",
+      `${label}.timeoutMs`,
+      maxNodeTimeoutMs
+    )
   };
 }
 

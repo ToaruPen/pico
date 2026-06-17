@@ -30,6 +30,9 @@ smoke-camera-tapo:
 smoke-voice-providers:
   npm run smoke:voice-providers
 
+smoke-embedding-sidecar:
+  npm run smoke:embedding-sidecar
+
 smoke-pi-runtime:
   npm run smoke:pi-runtime
 
