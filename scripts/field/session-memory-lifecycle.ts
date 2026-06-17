@@ -18,6 +18,7 @@ import {
 } from "../../src/modules/long-memory/index.js";
 import { createMem0MemoryProvider, type Mem0Client } from "../../src/modules/long-memory/mem0.js";
 import { createMem0OssClient } from "../../src/modules/long-memory/mem0-runtime.js";
+import { createSessionMemoryWorker } from "../../src/modules/long-memory/session-worker.js";
 import { createSessionLifecycle } from "../../src/modules/session/index.js";
 import { createPicoSessionTool } from "../../src/runtime/session-tool.js";
 
@@ -31,6 +32,9 @@ export type SessionMemoryLifecycleFieldReport =
         readonly sourceEntryCount: number;
         readonly candidateJobId: number;
         readonly candidateCount: number;
+        readonly workerProcessedCount: number;
+        readonly workerRecoveredCount: number;
+        readonly workerIdle: boolean;
         readonly mem0MemoryCount: number;
         readonly auditEventCount: number;
         readonly exportedOtelRecordCount: number;
@@ -138,8 +142,12 @@ async function executeSessionMemoryLifecycleField(
   });
 
   try {
-    const candidateJob = candidates.enqueueSessionCutoff(cutoff);
-    await candidates.processNextJob();
+    const worker = createSessionMemoryWorker({
+      store: candidates,
+      audit
+    });
+    const candidateJob = worker.enqueueCutoff(cutoff);
+    const workerReport = await worker.drainUntilIdle();
     const pendingCandidates = candidates.listPending();
     const mem0Client =
       dependencies.createClient === undefined
@@ -160,6 +168,9 @@ async function executeSessionMemoryLifecycleField(
     const mem0MemoryCount = mem0Result.memoryIds.length;
     const evidenceFailure = validateSessionMemoryLifecycleEvidence({
       candidateCount,
+      workerProcessedCount: workerReport.processedCount,
+      workerRecoveredCount: workerReport.recoveredCount,
+      workerIdle: workerReport.idle,
       mem0MemoryCount,
       exportedOtelRecordCount
     });
@@ -177,6 +188,9 @@ async function executeSessionMemoryLifecycleField(
         sourceEntryCount: cutoff.sourceEntryIds.length,
         candidateJobId: candidateJob.id,
         candidateCount,
+        workerProcessedCount: workerReport.processedCount,
+        workerRecoveredCount: workerReport.recoveredCount,
+        workerIdle: workerReport.idle,
         mem0MemoryCount,
         auditEventCount: audit.entries().length,
         exportedOtelRecordCount,
@@ -215,9 +229,22 @@ function validateSessionMemoryLifecycleFieldReadiness(
 
 function validateSessionMemoryLifecycleEvidence(evidence: {
   readonly candidateCount: number;
+  readonly workerProcessedCount: number;
+  readonly workerRecoveredCount: number;
+  readonly workerIdle: boolean;
   readonly mem0MemoryCount: number;
   readonly exportedOtelRecordCount: number;
 }): SessionMemoryLifecycleFieldReport | undefined {
+  if (!evidence.workerIdle) {
+    return failed("pico session memory lifecycle field requires the memory worker to become idle");
+  }
+
+  if (evidence.workerProcessedCount === 0) {
+    return failed(
+      "pico session memory lifecycle field requires the memory worker to process a job"
+    );
+  }
+
   if (evidence.candidateCount === 0) {
     return failed("pico session memory lifecycle field requires at least one memory candidate");
   }

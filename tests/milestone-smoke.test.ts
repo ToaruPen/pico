@@ -73,6 +73,12 @@ function configuredSectionDependencies(): PicoMilestoneSmokeDependencies {
         provider: "tapo-rtsp+ollama",
         reason: "Camera config is not configured."
       }),
+    runEmbeddingSidecarSmoke: () =>
+      Promise.resolve({
+        status: "skipped",
+        provider: "embedding-sidecar",
+        reason: "Embedding sidecar is not configured."
+      }),
     runMem0RuntimeSmoke: () =>
       Promise.resolve({
         status: "skipped",
@@ -92,6 +98,7 @@ function expectMilestoneSectionNames(report: PicoMilestoneSmokeReport): void {
     "person_detection",
     "ollama_vlm",
     "camera_vlm_scene",
+    "embedding_sidecar",
     "mem0_runtime",
     "memory_candidate",
     "audit_otel"

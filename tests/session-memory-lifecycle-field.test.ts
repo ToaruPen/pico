@@ -68,9 +68,12 @@ describe("session memory lifecycle field harness", () => {
           sourceEntryCount: 2,
           candidateJobId: 1,
           candidateCount: 1,
+          workerProcessedCount: 1,
+          workerRecoveredCount: 0,
+          workerIdle: true,
           mem0MemoryCount: 1,
-          auditEventCount: 6,
-          exportedOtelRecordCount: 6,
+          auditEventCount: 8,
+          exportedOtelRecordCount: 8,
           databasePath: "<injected-database-path>"
         }
       });
@@ -79,8 +82,10 @@ describe("session memory lifecycle field harness", () => {
         "session.started",
         "session.ended",
         "long_memory.candidate_job.enqueued",
+        "long_memory.worker.cutoff_enqueued",
         "long_memory.candidate.created",
         "long_memory.candidate_job.processed",
+        "long_memory.worker.drain_once",
         "long_memory.mem0.added"
       ]);
       expect(sessionMemoryLifecycleFieldExitCode(report)).toBe(0);

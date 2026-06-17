@@ -132,6 +132,7 @@ export type SessionMemoryCandidateJob = {
   readonly status: SessionMemoryCandidateJobStatus;
   readonly sourceEntryCount: number;
   readonly queuedAt: string;
+  readonly processingStartedAt: string | undefined;
   readonly processedAt: string | undefined;
 };
 
@@ -148,6 +149,11 @@ export type SessionMemoryCandidateStoreOptions = {
 export type SessionMemoryCandidateStore = {
   readonly enqueueSessionCutoff: (input: SessionMemoryCutoffInput) => SessionMemoryCandidateJob;
   readonly processNextJob: () => Promise<SessionMemoryCandidateJob | undefined>;
+  readonly recoverStaleProcessingJobs: (input: {
+    readonly staleBefore: string;
+    readonly recoveredAt: string;
+  }) => readonly SessionMemoryCandidateJob[];
+  readonly countJobs: (statuses: readonly SessionMemoryCandidateJobStatus[]) => number;
   readonly listJobs: () => readonly SessionMemoryCandidateJob[];
   readonly listPending: () => readonly LongMemoryCandidateRecord[];
   readonly readCandidate: (id: number) => LongMemoryCandidateRecord | undefined;
@@ -209,6 +215,7 @@ type SessionMemoryCandidateJobRow = {
   readonly status: string;
   readonly source_entry_count: number;
   readonly queued_at: string;
+  readonly processing_started_at: string | null;
   readonly processed_at: string | null;
 };
 
@@ -390,7 +397,8 @@ export function openSessionMemoryCandidateStore(
       return job;
     },
     async processNextJob() {
-      const queuedJob = claimNextQueuedSessionMemoryCandidateJob(database);
+      const processingStartedAt = now();
+      const queuedJob = claimNextQueuedSessionMemoryCandidateJob(database, processingStartedAt);
 
       if (queuedJob === undefined) {
         return undefined;
@@ -405,15 +413,26 @@ export function openSessionMemoryCandidateStore(
         const normalizedDrafts = drafts.map((draft) => normalizeLongMemoryCandidateDraft(draft));
         const insertedCandidates: LongMemoryCandidateRecord[] = [];
 
-        runInTransaction(database, () => {
+        const completed = runInTransaction(database, () => {
+          if (!isOwnedProcessingCandidateJob(database, job.id, processingStartedAt)) {
+            return false;
+          }
+
           for (const draft of normalizedDrafts) {
             insertedCandidates.push(
               insertLongMemoryCandidate(database, session, draft, processedAt)
             );
           }
 
-          markCandidateJobProcessed(database, job.id, processedAt);
+          markCandidateJobProcessed(database, job.id, processedAt, processingStartedAt);
+
+          return true;
         });
+
+        if (!completed) {
+          return requireSessionMemoryCandidateJob(database, job.id);
+        }
+
         for (const candidate of insertedCandidates) {
           recordCandidateAudit(audit, "long_memory.candidate.created", candidate.createdAt, {
             "pico.memory.candidate_id": candidate.id,
@@ -430,14 +449,84 @@ export function openSessionMemoryCandidateStore(
 
         return requireSessionMemoryCandidateJob(database, job.id);
       } catch (error) {
-        markCandidateJobFailed(database, job.id, processedAt);
+        const failed = runInTransaction(database, () => {
+          if (!isOwnedProcessingCandidateJob(database, job.id, processingStartedAt)) {
+            return false;
+          }
+
+          markCandidateJobFailed(database, job.id, processedAt, processingStartedAt);
+
+          return true;
+        });
+
+        if (!failed) {
+          return requireSessionMemoryCandidateJob(database, job.id);
+        }
+
         throw error;
       }
+    },
+    recoverStaleProcessingJobs(input) {
+      const staleBefore = requireTimestamp(input.staleBefore);
+      const recoveredAt = requireTimestamp(input.recoveredAt);
+
+      return runInTransaction(database, () => {
+        const staleJobs = database
+          .prepare(`
+            SELECT id, session_id, status, source_entry_count, queued_at, processing_started_at, processed_at
+            FROM long_memory_candidate_jobs
+            WHERE status = 'processing'
+              AND (
+                (processing_started_at IS NOT NULL AND processing_started_at <= ?)
+                OR (processing_started_at IS NULL AND queued_at <= ?)
+              )
+            ORDER BY id
+          `)
+          .all(staleBefore, staleBefore)
+          .map((row) => mapSessionMemoryCandidateJob(row as SessionMemoryCandidateJobRow));
+
+        for (const job of staleJobs) {
+          database
+            .prepare(`
+              UPDATE long_memory_candidate_jobs
+              SET status = 'queued', processing_started_at = NULL, processed_at = NULL
+              WHERE id = ? AND status = 'processing'
+            `)
+            .run(job.id);
+          recordCandidateAudit(audit, "long_memory.candidate_job.recovered", recoveredAt, {
+            "pico.memory.session_id": job.sessionId,
+            "pico.memory.candidate_job_id": job.id,
+            "pico.memory.source_entry_count": job.sourceEntryCount
+          });
+        }
+
+        return staleJobs;
+      });
+    },
+    countJobs(statuses) {
+      if (statuses.length === 0) {
+        return 0;
+      }
+
+      for (const status of statuses) {
+        requireSessionMemoryCandidateJobStatus(status);
+      }
+
+      const placeholders = statuses.map(() => "?").join(", ");
+      const row = database
+        .prepare(`
+          SELECT COUNT(*) AS count
+          FROM long_memory_candidate_jobs
+          WHERE status IN (${placeholders})
+        `)
+        .get(...statuses) as { readonly count: number };
+
+      return row.count;
     },
     listJobs() {
       return database
         .prepare(`
-          SELECT id, session_id, status, source_entry_count, queued_at, processed_at
+          SELECT id, session_id, status, source_entry_count, queued_at, processing_started_at, processed_at
           FROM long_memory_candidate_jobs
           ORDER BY id
         `)
@@ -589,6 +678,7 @@ function initializeLongMemorySchema(database: DatabaseSync): void {
       status TEXT NOT NULL CHECK (status IN ('queued', 'processing', 'processed', 'failed')),
       source_entry_count INTEGER NOT NULL CHECK (source_entry_count >= 0),
       queued_at TEXT NOT NULL,
+      processing_started_at TEXT,
       cutoff_json TEXT NOT NULL,
       processed_at TEXT
     );
@@ -620,6 +710,7 @@ function initializeLongMemorySchema(database: DatabaseSync): void {
     );
   `);
   ensureLongMemoryLifecycleColumns(database);
+  ensureSessionMemoryCandidateJobColumns(database);
 }
 
 function ensureLongMemoryLifecycleColumns(database: DatabaseSync): void {
@@ -652,6 +743,19 @@ function ensureLongMemoryLifecycleColumns(database: DatabaseSync): void {
   }
 
   ensureLongMemoryLifecycleConstraints(database);
+}
+
+function ensureSessionMemoryCandidateJobColumns(database: DatabaseSync): void {
+  const columns = new Set(
+    database
+      .prepare("PRAGMA table_info(long_memory_candidate_jobs)")
+      .all()
+      .map((row) => String((row as { name: unknown }).name))
+  );
+
+  if (!columns.has("processing_started_at")) {
+    database.exec("ALTER TABLE long_memory_candidate_jobs ADD COLUMN processing_started_at TEXT");
+  }
 }
 
 function ensureLongMemoryLifecycleConstraints(database: DatabaseSync): void {
@@ -1536,7 +1640,7 @@ function requireSessionMemoryCandidateJob(
 ): SessionMemoryCandidateJob {
   const row = database
     .prepare(`
-      SELECT id, session_id, status, source_entry_count, queued_at, processed_at
+      SELECT id, session_id, status, source_entry_count, queued_at, processing_started_at, processed_at
       FROM long_memory_candidate_jobs
       WHERE id = ?
     `)
@@ -1550,7 +1654,8 @@ function requireSessionMemoryCandidateJob(
 }
 
 function claimNextQueuedSessionMemoryCandidateJob(
-  database: DatabaseSync
+  database: DatabaseSync,
+  processingStartedAt: string
 ): QueuedSessionMemoryCandidateJobRow | undefined {
   return runInTransaction(database, () => {
     const row = readNextQueuedSessionMemoryCandidateJob(database);
@@ -1562,12 +1667,16 @@ function claimNextQueuedSessionMemoryCandidateJob(
     database
       .prepare(`
         UPDATE long_memory_candidate_jobs
-        SET status = 'processing'
+        SET status = 'processing', processing_started_at = ?
         WHERE id = ? AND status = 'queued'
       `)
-      .run(row.id);
+      .run(processingStartedAt, row.id);
 
-    return row;
+    return {
+      ...row,
+      status: "processing",
+      processing_started_at: processingStartedAt
+    };
   });
 }
 
@@ -1582,6 +1691,7 @@ function readNextQueuedSessionMemoryCandidateJob(
         status,
         source_entry_count,
         queued_at,
+        processing_started_at,
         processed_at,
         cutoff_json
       FROM long_memory_candidate_jobs
@@ -1621,24 +1731,52 @@ function parseSessionMemoryCutoffPayload(
   return session;
 }
 
-function markCandidateJobProcessed(database: DatabaseSync, id: number, processedAt: string): void {
+function isOwnedProcessingCandidateJob(
+  database: DatabaseSync,
+  id: number,
+  processingStartedAt: string
+): boolean {
+  const row = database
+    .prepare(`
+      SELECT 1
+      FROM long_memory_candidate_jobs
+      WHERE id = ?
+        AND status = 'processing'
+        AND processing_started_at = ?
+    `)
+    .get(id, processingStartedAt);
+
+  return row !== undefined;
+}
+
+function markCandidateJobProcessed(
+  database: DatabaseSync,
+  id: number,
+  processedAt: string,
+  processingStartedAt: string
+): void {
   database
     .prepare(`
       UPDATE long_memory_candidate_jobs
       SET status = 'processed', processed_at = ?
-      WHERE id = ?
+      WHERE id = ? AND status = 'processing' AND processing_started_at = ?
     `)
-    .run(processedAt, id);
+    .run(processedAt, id, processingStartedAt);
 }
 
-function markCandidateJobFailed(database: DatabaseSync, id: number, processedAt: string): void {
+function markCandidateJobFailed(
+  database: DatabaseSync,
+  id: number,
+  processedAt: string,
+  processingStartedAt: string
+): void {
   database
     .prepare(`
       UPDATE long_memory_candidate_jobs
       SET status = 'failed', processed_at = ?
-      WHERE id = ?
+      WHERE id = ? AND status = 'processing' AND processing_started_at = ?
     `)
-    .run(processedAt, id);
+    .run(processedAt, id, processingStartedAt);
 }
 
 function recordCandidateAudit(
@@ -1689,8 +1827,10 @@ function mapSessionMemoryCandidateJob(
     sessionId: row.session_id,
     status: requireSessionMemoryCandidateJobStatus(row.status),
     sourceEntryCount: row.source_entry_count,
-    queuedAt: row.queued_at,
-    processedAt: row.processed_at === null ? undefined : row.processed_at
+    queuedAt: requireTimestamp(row.queued_at),
+    processingStartedAt:
+      row.processing_started_at === null ? undefined : requireTimestamp(row.processing_started_at),
+    processedAt: row.processed_at === null ? undefined : requireTimestamp(row.processed_at)
   });
 }
 

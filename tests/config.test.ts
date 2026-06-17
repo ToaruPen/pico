@@ -136,14 +136,17 @@ memory:
       localBaseUrl: http://127.0.0.1:6333
       collectionName: pico_long_memory
     llm:
-      provider: ollama
-      localBaseUrl: http://127.0.0.1:11434
-      model: qwen3.5:9b
+      provider: pi_model
+      piProvider: openai-codex
+      api: openai-codex-responses
+      model: gpt-5.4
+      timeoutMs: 30000
     embedder:
-      provider: ollama
-      localBaseUrl: http://127.0.0.1:11434
-      model: nomic-embed-text
-      embeddingDims: 768
+      provider: sidecar
+      localBaseUrl: http://127.0.0.1:18081
+      model: jinaai/jina-embeddings-v5-text-small
+      embeddingDims: 1024
+      timeoutMs: 30000
 audit:
   otel:
     enabled: true
@@ -252,15 +255,18 @@ audit:
             collectionName: "pico_long_memory"
           },
           llm: {
-            provider: "ollama",
-            localBaseUrl: "http://127.0.0.1:11434",
-            model: "qwen3.5:9b"
+            provider: "pi_model",
+            piProvider: "openai-codex",
+            api: "openai-codex-responses",
+            model: "gpt-5.4",
+            timeoutMs: 30_000
           },
           embedder: {
-            provider: "ollama",
-            localBaseUrl: "http://127.0.0.1:11434",
-            model: "nomic-embed-text",
-            embeddingDims: 768
+            provider: "sidecar",
+            localBaseUrl: "http://127.0.0.1:18081",
+            model: "jinaai/jina-embeddings-v5-text-small",
+            embeddingDims: 1024,
+            timeoutMs: 30_000
           }
         }
       },
@@ -328,6 +334,43 @@ audit:
         }
       })
     ).toThrow("pico config voice.echoControl.providerEndpoint must use a local URL");
+  });
+
+  it("rejects unsupported Mem0 embedder providers at the config boundary", () => {
+    expect(() =>
+      definePicoConfig({
+        memory: {
+          mem0: {
+            embedder: {
+              provider: "cloud-auto",
+              localBaseUrl: "http://127.0.0.1:18081",
+              model: "jinaai/jina-embeddings-v5-text-small",
+              embeddingDims: 1024
+            }
+          }
+        }
+      })
+    ).toThrow("pico config memory.mem0.embedder.provider must be ollama or sidecar");
+  });
+
+  it("rejects Mem0 embedder timeouts beyond Node timer bounds", () => {
+    expect(() =>
+      definePicoConfig({
+        memory: {
+          mem0: {
+            embedder: {
+              provider: "sidecar",
+              localBaseUrl: "http://127.0.0.1:18081",
+              model: "jinaai/jina-embeddings-v5-text-small",
+              embeddingDims: 1024,
+              timeoutMs: 2_147_483_648
+            }
+          }
+        }
+      })
+    ).toThrow(
+      "pico config memory.mem0.embedder.timeoutMs must be a positive integer <= 2147483647"
+    );
   });
 
   it("rejects unsupported voice echo control providers", () => {
@@ -548,7 +591,95 @@ camera:
           }
         }
       })
-    ).toThrow("pico config memory.mem0.llm.provider must be ollama");
+    ).toThrow("pico config memory.mem0.llm.provider must be ollama or pi_model");
+  });
+
+  it("rejects unsupported Pi Agent Mem0 LLM provider names", () => {
+    expect(() =>
+      definePicoConfig({
+        memory: {
+          mem0: {
+            enabled: true,
+            historyDbPath: "/var/lib/pico/mem0-history.sqlite",
+            vectorStore: {
+              provider: "qdrant",
+              localBaseUrl: "http://127.0.0.1:6333",
+              collectionName: "pico_long_memory"
+            },
+            llm: {
+              provider: "pi_model",
+              piProvider: "openai",
+              api: "openai-codex-responses",
+              model: "gpt-5.4"
+            },
+            embedder: {
+              provider: "ollama",
+              localBaseUrl: "http://127.0.0.1:11434",
+              model: "nomic-embed-text"
+            }
+          }
+        }
+      })
+    ).toThrow("pico config memory.mem0.llm.piProvider must be openai-codex");
+  });
+
+  it("rejects unsupported Pi Agent Mem0 LLM API types", () => {
+    expect(() =>
+      definePicoConfig({
+        memory: {
+          mem0: {
+            enabled: true,
+            historyDbPath: "/var/lib/pico/mem0-history.sqlite",
+            vectorStore: {
+              provider: "qdrant",
+              localBaseUrl: "http://127.0.0.1:6333",
+              collectionName: "pico_long_memory"
+            },
+            llm: {
+              provider: "pi_model",
+              piProvider: "openai-codex",
+              api: "openai-responses",
+              model: "gpt-5.4"
+            },
+            embedder: {
+              provider: "ollama",
+              localBaseUrl: "http://127.0.0.1:11434",
+              model: "nomic-embed-text"
+            }
+          }
+        }
+      })
+    ).toThrow("pico config memory.mem0.llm.api must be openai-codex-responses");
+  });
+
+  it("rejects Mem0 LLM timeoutMs above the Node timer limit", () => {
+    expect(() =>
+      definePicoConfig({
+        memory: {
+          mem0: {
+            enabled: true,
+            historyDbPath: "/var/lib/pico/mem0-history.sqlite",
+            vectorStore: {
+              provider: "qdrant",
+              localBaseUrl: "http://127.0.0.1:6333",
+              collectionName: "pico_long_memory"
+            },
+            llm: {
+              provider: "pi_model",
+              piProvider: "openai-codex",
+              api: "openai-codex-responses",
+              model: "gpt-5.4",
+              timeoutMs: 2_147_483_648
+            },
+            embedder: {
+              provider: "ollama",
+              localBaseUrl: "http://127.0.0.1:11434",
+              model: "nomic-embed-text"
+            }
+          }
+        }
+      })
+    ).toThrow("pico config memory.mem0.llm.timeoutMs must be a positive integer <= 2147483647");
   });
 
   it("rejects non-local Mem0 provider URLs at the config boundary", () => {

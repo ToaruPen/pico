@@ -22,6 +22,7 @@ import {
   type SessionMemoryCutoffInput
 } from "../../src/modules/long-memory/index.js";
 import { type CameraVlmSceneSmokeReport, runCameraVlmSceneSmoke } from "./camera-vlm-scene.js";
+import { type EmbeddingSidecarSmokeReport, runEmbeddingSidecarSmoke } from "./embedding-sidecar.js";
 import { type Mem0RuntimeSmokeReport, runMem0RuntimeSmoke } from "./mem0-runtime.js";
 import {
   type OllamaVlmSmokeReport,
@@ -46,6 +47,7 @@ export type PicoMilestoneSmokeSectionName =
   | "person_detection"
   | "ollama_vlm"
   | "camera_vlm_scene"
+  | "embedding_sidecar"
   | "mem0_runtime"
   | "memory_candidate"
   | "audit_otel";
@@ -80,6 +82,7 @@ export type PicoMilestoneSmokeDependencies = {
   readonly runPersonDetectionSmoke?: (config: PicoConfig) => Promise<PersonDetectionSmokeReport>;
   readonly runOllamaVlmConnectivitySmoke?: (config: PicoConfig) => Promise<OllamaVlmSmokeReport>;
   readonly runCameraVlmSceneSmoke?: (config: PicoConfig) => Promise<CameraVlmSceneSmokeReport>;
+  readonly runEmbeddingSidecarSmoke?: (config: PicoConfig) => Promise<EmbeddingSidecarSmokeReport>;
   readonly runMem0RuntimeSmoke?: (config: PicoConfig) => Promise<Mem0RuntimeSmokeReport>;
   readonly createAuditOtelExporter?: (
     config: Required<PicoConfig["audit"]["otel"]>
@@ -171,6 +174,14 @@ export async function runPicoMilestoneSmokeSuite(
       toSection(
         "camera_vlm_scene",
         await (dependencies.runCameraVlmSceneSmoke ?? runCameraVlmSceneSmoke)(config)
+      )
+    )
+  );
+  sections.push(
+    await captureSection("embedding_sidecar", "embedding-sidecar", async () =>
+      toSection(
+        "embedding_sidecar",
+        await (dependencies.runEmbeddingSidecarSmoke ?? runEmbeddingSidecarSmoke)(config)
       )
     )
   );
@@ -275,6 +286,7 @@ function failedConfigProviderSections(error: unknown): readonly PicoMilestoneSmo
     failedSection("person_detection", "tapo-rtsp+onnxruntime", reason),
     failedSection("ollama_vlm", "ollama", reason),
     failedSection("camera_vlm_scene", "tapo-rtsp+ollama", reason),
+    failedSection("embedding_sidecar", "embedding-sidecar", reason),
     failedSection("mem0_runtime", "mem0-oss", reason)
   ];
 }

@@ -88,12 +88,17 @@ memory:
     vectorStore:
       provider: qdrant
       localBaseUrl: http://127.0.0.1:6333
-      collectionName: pico_long_memory
+      collectionName: pico_long_memory_jina_v5_small_1024_v1
     llm:
-      provider: ollama
-      localBaseUrl: http://127.0.0.1:11434
-      model: qwen3.5:9b
+      provider: pi_model
+      piProvider: openai-codex
+      api: openai-codex-responses
+      model: gpt-5.4
+      timeoutMs: 60000
     embedder:
-      provider: ollama
-      localBaseUrl: http://127.0.0.1:11434
-      model: nomic-embed-text
+      provider: sidecar
+      localBaseUrl: http://127.0.0.1:18081
+      model: jinaai/jina-embeddings-v5-text-small
+      embeddingDims: 1024
+      timeoutMs: 30000
+      # Start with: uv run scripts/sidecars/jina-embedding-sidecar.py
