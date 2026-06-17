@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Codex Responses and Jina Provider Runtime
+## Task 1: Codex Responses and Jina Provider Runtime
 
 **Files:**
 - Modify: `src/config/index.ts`
@@ -30,7 +30,7 @@
 - [x] Map sidecar embeddings to a Langchain-compatible Mem0 embedder against `/v1/embeddings`.
 - [x] Add sidecar smoke coverage and example config.
 
-### Task 2: Durable Session Memory Worker
+## Task 2: Durable Session Memory Worker
 
 **Files:**
 - Modify: `src/modules/long-memory/index.ts`
@@ -44,7 +44,7 @@
 - [x] Enforce queue depth backpressure as an explicit failure signal, not a silent fallback.
 - [x] Emit structured audit events for enqueue, drain, recovery, backpressure, and processing outcomes.
 
-### Task 3: Overlap and Field Evidence
+## Task 3: Overlap and Field Evidence
 
 **Files:**
 - Modify: `tests/long-memory-candidates.test.ts`
@@ -56,7 +56,7 @@
 - [x] Extend the field harness report with worker recovery/backpressure-safe evidence.
 - [x] Verify OTel export includes memory lifecycle events.
 
-### Task 4: Gates and PR
+## Task 4: Gates and PR
 
 **Files:**
 - Modify: docs and tests touched above only.
@@ -65,4 +65,4 @@
 - [x] Run `just check`.
 - [x] Run field tests that are possible from the current machine; report skipped external dependencies explicitly.
 - [x] Run independent review, `ai-slop-cleaner`, and verification.
-- [ ] Open a Ready PR with verification evidence.
+- [x] Open a Ready PR with verification evidence.

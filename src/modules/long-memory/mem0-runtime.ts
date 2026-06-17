@@ -339,35 +339,47 @@ function createPiAgentLlm(
     provider: config.piProvider,
     api: config.api,
     async invoke(messages) {
-      const session = await createSession(config);
       const chunks: string[] = [];
-      const unsubscribe = session.subscribe((event) => {
-        if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-          chunks.push(event.assistantMessageEvent.delta);
-        }
-      });
 
-      try {
-        await withAbortTimeout(
-          async (signal) => {
-            signal.addEventListener(
-              "abort",
-              () => {
-                session.abort?.().catch(() => undefined);
-              },
-              { once: true }
-            );
+      await withAbortTimeout(
+        async (signal) => {
+          let session: PiAgentLlmSession | undefined;
+          let unsubscribe = (): void => undefined;
+          const abortSession = (): void => {
+            void Promise.resolve()
+              .then(() => session?.abort?.())
+              .catch(() => undefined);
+          };
+
+          try {
+            session = await createSession(config);
+
+            if (signal.aborted) {
+              abortSession();
+
+              return;
+            }
+
+            signal.addEventListener("abort", abortSession, { once: true });
+            unsubscribe = session.subscribe((event) => {
+              if (
+                event.type === "message_update" &&
+                event.assistantMessageEvent.type === "text_delta"
+              ) {
+                chunks.push(event.assistantMessageEvent.delta);
+              }
+            });
             await session.prompt(serializeLangchainMessages(messages));
-          },
-          `Pi Agent ${config.piProvider}/${config.model} LLM request`,
-          timeoutMs
-        );
+          } finally {
+            unsubscribe();
+            session?.dispose();
+          }
+        },
+        `Pi Agent ${config.piProvider}/${config.model} LLM request`,
+        timeoutMs
+      );
 
-        return { content: chunks.join("") };
-      } finally {
-        unsubscribe();
-        session.dispose();
-      }
+      return { content: chunks.join("") };
     }
   });
 }

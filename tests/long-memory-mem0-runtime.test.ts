@@ -460,6 +460,37 @@ describe("Mem0 OSS runtime client", () => {
     });
   });
 
+  it("times out stalled Pi Agent session creation", async () => {
+    vi.useFakeTimers();
+
+    try {
+      let capturedConfig: CapturedMem0Config | undefined;
+      await createMem0OssClient(mem0PiModelLlmConfig(), {
+        createMemory: (config) => {
+          capturedConfig = config;
+
+          return {
+            add: () => Promise.resolve({ results: [] }),
+            search: () => Promise.resolve({ results: [] }),
+            delete: () => Promise.resolve({ message: "deleted" })
+          };
+        },
+        createPiAgentSession: () => new Promise(() => undefined)
+      });
+
+      const llm = requireCapturedPiModelLlm(capturedConfig);
+      const invoke = llm.invoke([{ content: "記憶を整理してください。" }]);
+      const expected = expect(invoke).rejects.toThrow(
+        "pico Mem0 runtime Pi Agent openai-codex/gpt-5.4 LLM request timed out after 25 ms"
+      );
+
+      await vi.advanceTimersByTimeAsync(25);
+      await expected;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("preflights only Ollama embedders when the LLM is served by Pi Agent", async () => {
     const fetchedBaseUrls: string[] = [];
     await expect(

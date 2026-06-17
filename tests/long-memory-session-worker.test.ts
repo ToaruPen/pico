@@ -186,6 +186,63 @@ describe("session memory worker", () => {
     });
   });
 
+  it("does not write duplicate candidates when stale recovery wins a processing race", async () => {
+    await withLongMemoryDatabase(async (path) => {
+      let now = "2026-06-17T10:00:00.000Z";
+      let releaseOriginalProcessor: (() => void) | undefined;
+      let processCallCount = 0;
+      const originalProcessorGate = new Promise<void>((resolve) => {
+        releaseOriginalProcessor = resolve;
+      });
+      const candidates = openSessionMemoryCandidateStore(path, {
+        now: () => now,
+        processSession: async (session) => {
+          processCallCount += 1;
+
+          if (processCallCount === 1) {
+            await originalProcessorGate;
+          }
+
+          return [draftFor(session)];
+        }
+      });
+
+      try {
+        candidates.enqueueSessionCutoff(cutoffInput("session-race"));
+        const originalDrain = candidates.processNextJob();
+        await Promise.resolve();
+        now = "2026-06-17T10:10:00.000Z";
+        const worker = createSessionMemoryWorker({
+          store: candidates,
+          recoverProcessingOlderThanMs: 60_000,
+          now: () => now
+        });
+
+        await expect(worker.drainUntilIdle()).resolves.toMatchObject({
+          processedCount: 1,
+          recoveredCount: 1
+        });
+        releaseOriginalProcessor?.();
+        await expect(originalDrain).resolves.toMatchObject({
+          status: "processed"
+        });
+
+        expect(processCallCount).toBe(2);
+        expect(candidates.listJobs()).toEqual([
+          expect.objectContaining({
+            status: "processed",
+            processingStartedAt: "2026-06-17T10:10:00.000Z"
+          })
+        ]);
+        expect(candidates.listPending().map((candidate) => candidate.sessionId)).toEqual([
+          "session-race"
+        ]);
+      } finally {
+        candidates.close();
+      }
+    });
+  });
+
   it("does not report idle while a non-stale processing job remains", async () => {
     await withLongMemoryDatabase(async (path) => {
       const candidates = openSessionMemoryCandidateStore(path, {

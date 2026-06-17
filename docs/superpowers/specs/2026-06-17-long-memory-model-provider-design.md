@@ -91,8 +91,8 @@ Candidate classes:
 Current operational constraints:
 
 - The Windows RTX 4070 VLM host is already dedicated to `qwen3.5:9b`.
-- `qwen3-embedding:8b` should not be assumed to coexist with the Windows VLM
-  model in VRAM.
+- The `qwen3-embedding:8b` model should not be assumed to coexist with the
+  Windows VLM model in VRAM.
 - The Mac mini M4 16 GB host can run small or medium local embedding workers
   asynchronously, but live voice and person-detection paths should remain the
   scheduling priority.
@@ -206,11 +206,11 @@ The worker should:
 ## Non-Goals
 
 - Do not add LINE or daily-report delivery in this slice.
-- Do not add human review gates for memory output unless a later product
+- Avoid adding human review gates for memory output unless a later product
   decision reintroduces review.
-- Do not design durable memory around child tracking, scoring, or profiling.
-- Do not add automatic fallback between local and cloud providers.
-- Do not expose the Windows Ollama model port publicly.
+- Exclude durable memory designs around child tracking, scoring, or profiling.
+- Keep automatic fallback between local and cloud providers out of this slice.
+- The Windows Ollama model port must not be exposed publicly.
 
 ## References
 

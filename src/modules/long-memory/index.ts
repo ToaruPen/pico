@@ -413,15 +413,26 @@ export function openSessionMemoryCandidateStore(
         const normalizedDrafts = drafts.map((draft) => normalizeLongMemoryCandidateDraft(draft));
         const insertedCandidates: LongMemoryCandidateRecord[] = [];
 
-        runInTransaction(database, () => {
+        const completed = runInTransaction(database, () => {
+          if (!isOwnedProcessingCandidateJob(database, job.id, processingStartedAt)) {
+            return false;
+          }
+
           for (const draft of normalizedDrafts) {
             insertedCandidates.push(
               insertLongMemoryCandidate(database, session, draft, processedAt)
             );
           }
 
-          markCandidateJobProcessed(database, job.id, processedAt);
+          markCandidateJobProcessed(database, job.id, processedAt, processingStartedAt);
+
+          return true;
         });
+
+        if (!completed) {
+          return requireSessionMemoryCandidateJob(database, job.id);
+        }
+
         for (const candidate of insertedCandidates) {
           recordCandidateAudit(audit, "long_memory.candidate.created", candidate.createdAt, {
             "pico.memory.candidate_id": candidate.id,
@@ -438,7 +449,20 @@ export function openSessionMemoryCandidateStore(
 
         return requireSessionMemoryCandidateJob(database, job.id);
       } catch (error) {
-        markCandidateJobFailed(database, job.id, processedAt);
+        const failed = runInTransaction(database, () => {
+          if (!isOwnedProcessingCandidateJob(database, job.id, processingStartedAt)) {
+            return false;
+          }
+
+          markCandidateJobFailed(database, job.id, processedAt, processingStartedAt);
+
+          return true;
+        });
+
+        if (!failed) {
+          return requireSessionMemoryCandidateJob(database, job.id);
+        }
+
         throw error;
       }
     },
@@ -1707,24 +1731,52 @@ function parseSessionMemoryCutoffPayload(
   return session;
 }
 
-function markCandidateJobProcessed(database: DatabaseSync, id: number, processedAt: string): void {
+function isOwnedProcessingCandidateJob(
+  database: DatabaseSync,
+  id: number,
+  processingStartedAt: string
+): boolean {
+  const row = database
+    .prepare(`
+      SELECT 1
+      FROM long_memory_candidate_jobs
+      WHERE id = ?
+        AND status = 'processing'
+        AND processing_started_at = ?
+    `)
+    .get(id, processingStartedAt);
+
+  return row !== undefined;
+}
+
+function markCandidateJobProcessed(
+  database: DatabaseSync,
+  id: number,
+  processedAt: string,
+  processingStartedAt: string
+): void {
   database
     .prepare(`
       UPDATE long_memory_candidate_jobs
       SET status = 'processed', processed_at = ?
-      WHERE id = ?
+      WHERE id = ? AND status = 'processing' AND processing_started_at = ?
     `)
-    .run(processedAt, id);
+    .run(processedAt, id, processingStartedAt);
 }
 
-function markCandidateJobFailed(database: DatabaseSync, id: number, processedAt: string): void {
+function markCandidateJobFailed(
+  database: DatabaseSync,
+  id: number,
+  processedAt: string,
+  processingStartedAt: string
+): void {
   database
     .prepare(`
       UPDATE long_memory_candidate_jobs
       SET status = 'failed', processed_at = ?
-      WHERE id = ?
+      WHERE id = ? AND status = 'processing' AND processing_started_at = ?
     `)
-    .run(processedAt, id);
+    .run(processedAt, id, processingStartedAt);
 }
 
 function recordCandidateAudit(
