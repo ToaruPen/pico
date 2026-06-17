@@ -186,6 +186,53 @@ describe("session memory worker", () => {
     });
   });
 
+  it("does not recover processing jobs by default", async () => {
+    await withLongMemoryDatabase(async (path) => {
+      const candidates = openSessionMemoryCandidateStore(path, {
+        now: () => "2026-06-17T10:10:00.000Z",
+        processSession: (session) => Promise.resolve([draftFor(session)])
+      });
+
+      try {
+        const processingJob = candidates.enqueueSessionCutoff(cutoffInput("session-processing"));
+        const database = new DatabaseSync(path);
+
+        try {
+          database
+            .prepare(`
+              UPDATE long_memory_candidate_jobs
+              SET status = 'processing', processing_started_at = ?
+              WHERE id = ?
+            `)
+            .run("2026-06-17T10:00:00.000Z", processingJob.id);
+        } finally {
+          database.close();
+        }
+
+        const worker = createSessionMemoryWorker({
+          store: candidates,
+          now: () => "2026-06-17T10:10:00.000Z"
+        });
+
+        expect(worker.recoverStaleProcessingJobs()).toEqual([]);
+        await expect(worker.drainUntilIdle()).resolves.toEqual({
+          processedCount: 0,
+          recoveredCount: 0,
+          idle: false
+        });
+        expect(candidates.listJobs()).toEqual([
+          expect.objectContaining({
+            id: processingJob.id,
+            status: "processing",
+            processingStartedAt: "2026-06-17T10:00:00.000Z"
+          })
+        ]);
+      } finally {
+        candidates.close();
+      }
+    });
+  });
+
   it("does not write duplicate candidates when stale recovery wins a processing race", async () => {
     await withLongMemoryDatabase(async (path) => {
       let now = "2026-06-17T10:00:00.000Z";

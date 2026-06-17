@@ -33,7 +33,6 @@ export type SessionMemoryWorker = {
 };
 
 const defaultMaxQueueDepth = 100;
-const defaultRecoverProcessingOlderThanMs = 5 * 60 * 1000;
 const defaultMaxDrainJobs = 100;
 const maxNodeTimeoutMs = 2_147_483_647;
 
@@ -44,10 +43,13 @@ export function createSessionMemoryWorker(
     options.maxQueueDepth ?? defaultMaxQueueDepth,
     "pico session memory worker maxQueueDepth"
   );
-  const recoverProcessingOlderThanMs = requirePositiveInteger(
-    options.recoverProcessingOlderThanMs ?? defaultRecoverProcessingOlderThanMs,
-    "pico session memory worker recoverProcessingOlderThanMs"
-  );
+  const recoverProcessingOlderThanMs =
+    options.recoverProcessingOlderThanMs === undefined
+      ? undefined
+      : requirePositiveInteger(
+          options.recoverProcessingOlderThanMs,
+          "pico session memory worker recoverProcessingOlderThanMs"
+        );
   const maxDrainJobs = requirePositiveInteger(
     options.maxDrainJobs ?? defaultMaxDrainJobs,
     "pico session memory worker maxDrainJobs"
@@ -55,6 +57,10 @@ export function createSessionMemoryWorker(
   const now = options.now ?? (() => new Date().toISOString());
 
   const recoverStaleProcessingJobs = (): readonly SessionMemoryCandidateJob[] => {
+    if (recoverProcessingOlderThanMs === undefined) {
+      return [];
+    }
+
     const recoveredAt = requireIsoTimestamp(now(), "pico session memory worker timestamp");
     const staleBefore = new Date(
       Date.parse(recoveredAt) - recoverProcessingOlderThanMs
