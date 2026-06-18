@@ -36,6 +36,30 @@ describe("pico YAML config", () => {
     );
   });
 
+  it("requires explicit voice devices when the resident runtime is enabled", () => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          resident: {
+            enabled: true,
+            playbackDevice: "hw:0,0"
+          }
+        }
+      })
+    ).toThrow("pico config voice.resident.microphoneDevice is required when resident is enabled");
+
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          resident: {
+            enabled: true,
+            microphoneDevice: "hw:1,0"
+          }
+        }
+      })
+    ).toThrow("pico config voice.resident.playbackDevice is required when resident is enabled");
+  });
+
   it("loads configured camera, vision, voice, memory, and person detection providers from YAML", () => {
     const path = temporaryConfigFile(`
 session:
@@ -97,6 +121,15 @@ vision:
     frameIntervalMs: 500
     confidenceThreshold: 0.55
 voice:
+  resident:
+    enabled: true
+    microphoneDevice: Built-in Microphone
+    playbackDevice: Built-in Output
+    singleInstanceLockPath: tmp/pico-custom-resident.lock
+    minTriggerConfidence: 0.72
+    shutdownGraceMs: 3000
+  probes:
+    enabled: true
   echoControl:
     enabled: true
     mode: aec
@@ -218,6 +251,17 @@ audit:
         }
       },
       voice: {
+        resident: {
+          enabled: true,
+          microphoneDevice: "Built-in Microphone",
+          playbackDevice: "Built-in Output",
+          singleInstanceLockPath: "tmp/pico-custom-resident.lock",
+          minTriggerConfidence: 0.72,
+          shutdownGraceMs: 3000
+        },
+        probes: {
+          enabled: true
+        },
         echoControl: {
           enabled: true,
           mode: "aec",
@@ -306,6 +350,15 @@ audit:
         }
       },
       voice: {
+        resident: {
+          enabled: false,
+          singleInstanceLockPath: "tmp/pico-voice-resident.lock",
+          minTriggerConfidence: 0.6,
+          shutdownGraceMs: 5_000
+        },
+        probes: {
+          enabled: true
+        },
         echoControl: {
           enabled: false,
           mode: "half_duplex",
@@ -334,6 +387,34 @@ audit:
         }
       })
     ).toThrow("pico config voice.echoControl.providerEndpoint must use a local URL");
+  });
+
+  it("requires local STT and TTS provider URLs", () => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          stt: {
+            mlxWhisper: {
+              localBaseUrl: "https://stt.example.com",
+              samplePcm16lePath: "/tmp/pico-known-ja.pcm"
+            }
+          }
+        }
+      })
+    ).toThrow("pico config voice.stt.mlxWhisper.localBaseUrl must use a local SSH tunnel URL");
+
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          tts: {
+            aivis: {
+              localBaseUrl: "https://tts.example.com",
+              speakerId: 888_753_760
+            }
+          }
+        }
+      })
+    ).toThrow("pico config voice.tts.aivis.localBaseUrl must use a local SSH tunnel URL");
   });
 
   it("rejects unsupported Mem0 embedder providers at the config boundary", () => {

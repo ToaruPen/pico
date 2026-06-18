@@ -59,7 +59,9 @@ export type SessionLifecycle = {
   readonly start: (trigger: SessionStartTrigger) => SessionRecord;
   readonly read: (id: string) => SessionRecord | undefined;
   readonly appendEntry: (id: string, input: SessionEntryInput) => SessionEntry;
+  readonly end: (id: string) => SessionRecord;
   readonly cutoff: (id: string) => SessionCutoff;
+  readonly acknowledgeCutoff: (id: string) => void;
 };
 
 type ManagedSession = {
@@ -153,6 +155,12 @@ export function createSessionLifecycle(options: SessionLifecycleOptions): Sessio
 
       return entry;
     },
+    end(id) {
+      const session = requireSession(sessions, id);
+      endSession(session, sessions, options.audit, endedSessionRetentionMs);
+
+      return cloneSession(session);
+    },
     cutoff(id) {
       const session = requireSession(sessions, id);
 
@@ -168,9 +176,18 @@ export function createSessionLifecycle(options: SessionLifecycleOptions): Sessio
         requestedBy: "session_lifecycle"
       });
       clearSessionCleanup(session);
-      sessions.delete(session.id);
 
       return cutoff;
+    },
+    acknowledgeCutoff(id) {
+      const session = requireSession(sessions, id);
+
+      if (session.state !== "ended") {
+        throw new Error("pico session has not ended");
+      }
+
+      clearSessionCleanup(session);
+      sessions.delete(session.id);
     }
   };
 }

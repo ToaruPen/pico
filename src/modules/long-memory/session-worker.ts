@@ -1,6 +1,7 @@
 import type { StructuredAuditLog } from "../audit/index.js";
 import type {
   SessionMemoryCandidateJob,
+  SessionMemoryCandidateQueue,
   SessionMemoryCandidateStore,
   SessionMemoryCutoffInput
 } from "./index.js";
@@ -11,6 +12,13 @@ export type SessionMemoryWorkerOptions = {
   readonly maxQueueDepth?: number;
   readonly recoverProcessingOlderThanMs?: number;
   readonly maxDrainJobs?: number;
+  readonly now?: () => string;
+};
+
+export type SessionMemoryEnqueueWorkerOptions = {
+  readonly queue: SessionMemoryCandidateQueue;
+  readonly audit?: StructuredAuditLog;
+  readonly maxQueueDepth?: number;
   readonly now?: () => string;
 };
 
@@ -30,6 +38,13 @@ export type SessionMemoryWorker = {
   readonly recoverStaleProcessingJobs: () => readonly SessionMemoryCandidateJob[];
   readonly drainOnce: () => Promise<SessionMemoryDrainOnceResult>;
   readonly drainUntilIdle: () => Promise<SessionMemoryDrainReport>;
+};
+
+export type SessionMemoryEnqueueWorker = Pick<SessionMemoryWorker, "enqueueCutoff">;
+
+type SessionMemoryEnqueueTarget = {
+  readonly enqueueSessionCutoff: (input: SessionMemoryCutoffInput) => SessionMemoryCandidateJob;
+  readonly countJobs: (statuses: readonly ("queued" | "processing")[]) => number;
 };
 
 const defaultMaxQueueDepth = 100;
@@ -97,26 +112,13 @@ export function createSessionMemoryWorker(
 
   return {
     enqueueCutoff(cutoff) {
-      const activeDepth = options.store.countJobs(["queued", "processing"]);
-
-      if (activeDepth >= maxQueueDepth) {
-        const occurredAt = requireIsoTimestamp(now(), "pico session memory worker timestamp");
-        recordWorkerAudit(options.audit, "long_memory.worker.backpressure", occurredAt, {
-          "pico.memory.queue_depth": activeDepth,
-          "pico.memory.max_queue_depth": maxQueueDepth,
-          "pico.memory.session_id": cutoff.sessionId
-        });
-        throw new Error("pico session memory worker queue depth limit reached");
-      }
-
-      const job = options.store.enqueueSessionCutoff(cutoff);
-      recordWorkerAudit(options.audit, "long_memory.worker.cutoff_enqueued", job.queuedAt, {
-        "pico.memory.candidate_job_id": job.id,
-        "pico.memory.session_id": job.sessionId,
-        "pico.memory.queue_depth": activeDepth + 1
+      return enqueueWithBackpressure({
+        cutoff,
+        target: options.store,
+        maxQueueDepth,
+        audit: options.audit,
+        now
       });
-
-      return job;
     },
     recoverStaleProcessingJobs,
     drainOnce,
@@ -155,6 +157,57 @@ export function createSessionMemoryWorker(
       };
     }
   };
+}
+
+export function createSessionMemoryEnqueueWorker(
+  options: SessionMemoryEnqueueWorkerOptions
+): SessionMemoryEnqueueWorker {
+  const maxQueueDepth = requirePositiveInteger(
+    options.maxQueueDepth ?? defaultMaxQueueDepth,
+    "pico session memory worker maxQueueDepth"
+  );
+  const now = options.now ?? (() => new Date().toISOString());
+
+  return {
+    enqueueCutoff(cutoff) {
+      return enqueueWithBackpressure({
+        cutoff,
+        target: options.queue,
+        maxQueueDepth,
+        audit: options.audit,
+        now
+      });
+    }
+  };
+}
+
+function enqueueWithBackpressure(input: {
+  readonly cutoff: SessionMemoryCutoffInput;
+  readonly target: SessionMemoryEnqueueTarget;
+  readonly maxQueueDepth: number;
+  readonly audit: StructuredAuditLog | undefined;
+  readonly now: () => string;
+}): SessionMemoryCandidateJob {
+  const activeDepth = input.target.countJobs(["queued", "processing"]);
+
+  if (activeDepth >= input.maxQueueDepth) {
+    const occurredAt = requireIsoTimestamp(input.now(), "pico session memory worker timestamp");
+    recordWorkerAudit(input.audit, "long_memory.worker.backpressure", occurredAt, {
+      "pico.memory.queue_depth": activeDepth,
+      "pico.memory.max_queue_depth": input.maxQueueDepth,
+      "pico.memory.session_id": input.cutoff.sessionId
+    });
+    throw new Error("pico session memory worker queue depth limit reached");
+  }
+
+  const job = input.target.enqueueSessionCutoff(input.cutoff);
+  recordWorkerAudit(input.audit, "long_memory.worker.cutoff_enqueued", job.queuedAt, {
+    "pico.memory.candidate_job_id": job.id,
+    "pico.memory.session_id": job.sessionId,
+    "pico.memory.queue_depth": activeDepth + 1
+  });
+
+  return job;
 }
 
 function requirePositiveInteger(value: number, label: string): number {
