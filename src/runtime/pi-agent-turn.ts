@@ -48,12 +48,14 @@ export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAg
   return {
     async prompt(input) {
       claimTurn(activeTurns, input.sessionId);
-      const session = await getOrCreateTurnSession(options, sessions, input.sessionId);
       const output: string[] = [];
-      const unsubscribe = subscribeTextDeltas(session, output);
-      const abortHandle = installPromptAbort(session, input.signal);
+      let unsubscribe: (() => void) | undefined;
+      let abortHandle: PromptAbortHandle | undefined;
 
       try {
+        const session = await getOrCreateTurnSession(options, sessions, input.sessionId);
+        unsubscribe = subscribeTextDeltas(session, output);
+        abortHandle = installPromptAbort(session, input.signal);
         await session.prompt(input.text);
         throwIfSignalAborted(input.signal);
 
@@ -61,10 +63,12 @@ export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAg
           text: output.join("")
         };
       } catch (error) {
-        await abortIfSignalAborted(input.signal, abortHandle);
+        if (abortHandle !== undefined) {
+          await abortIfSignalAborted(input.signal, abortHandle);
+        }
         throw error;
       } finally {
-        abortHandle.remove();
+        abortHandle?.remove();
         unsubscribe?.();
         activeTurns.delete(input.sessionId);
       }

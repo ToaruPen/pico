@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, openSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
@@ -335,13 +335,74 @@ function acquireSingleInstanceLock(lockPath: string): () => void {
   const resolved = resolve(lockPath);
 
   mkdirSync(dirname(resolved), { recursive: true });
-
-  const file = openSync(resolved, "wx");
-  writeFileSync(file, String(process.pid));
+  writeSingleInstanceLock(resolved);
 
   return () => {
     rmSync(resolved, { force: true });
   };
+}
+
+function writeSingleInstanceLock(resolved: string): void {
+  try {
+    writeLockFile(resolved);
+  } catch (error) {
+    if (!isFileAlreadyExistsError(error)) {
+      throw error;
+    }
+
+    const existingPid = readLockPid(resolved);
+
+    if (existingPid !== undefined && isProcessRunning(existingPid)) {
+      throw new Error(`pico resident voice runtime is already running (pid: ${existingPid})`, {
+        cause: error
+      });
+    }
+
+    rmSync(resolved, { force: true });
+    writeLockFile(resolved);
+  }
+}
+
+function writeLockFile(resolved: string): void {
+  const file = openSync(resolved, "wx");
+
+  try {
+    writeFileSync(file, String(process.pid));
+  } finally {
+    closeSync(file);
+  }
+}
+
+function readLockPid(resolved: string): number | undefined {
+  const parsed = Number(readFileSync(resolved, "utf8").trim());
+
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+
+    return true;
+  } catch (error) {
+    if (isErrnoException(error) && error.code === "ESRCH") {
+      return false;
+    }
+
+    if (isErrnoException(error) && error.code === "EPERM") {
+      return true;
+    }
+
+    throw error;
+  }
+}
+
+function isFileAlreadyExistsError(error: unknown): boolean {
+  return isErrnoException(error) && error.code === "EEXIST";
+}
+
+function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 function requireLinuxAlsa(): void {

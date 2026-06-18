@@ -302,6 +302,44 @@ describe("Pi Agent turn adapter", () => {
     expect(createdSessions).toBe(1);
   });
 
+  it("releases the active turn claim when SDK session acquisition fails", async () => {
+    let attempts = 0;
+    const client = createPiAgentTurnClient({
+      cwd: "/Users/monsoon/Dev/pico",
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      createResourceLoader: () => ({
+        reload: () => Promise.resolve()
+      }),
+      createAgentSession: () => {
+        attempts += 1;
+
+        if (attempts === 1) {
+          return Promise.reject(new Error("sdk unavailable"));
+        }
+
+        return Promise.resolve({
+          session: {
+            subscribe: () => () => undefined,
+            prompt: () => Promise.resolve(),
+            dispose: () => undefined
+          }
+        });
+      }
+    });
+
+    await expect(client.prompt({ sessionId: "session-1", text: "一回目" })).rejects.toThrow(
+      "sdk unavailable"
+    );
+    await expect(client.prompt({ sessionId: "session-1", text: "二回目" })).resolves.toEqual({
+      text: ""
+    });
+  });
+
   it("rejects an aborted SDK prompt even if the SDK prompt resolves", async () => {
     let abortCalls = 0;
     let listener:

@@ -55,11 +55,10 @@ export type PicoSessionToolOptions = {
 export function createPicoSessionTool(
   options: PicoSessionToolOptions = {}
 ): ToolDefinition<typeof picoSessionParameters> {
-  const config = options.loadConfig?.() ?? loadPicoConfigFromEnvironment();
   const lifecycle =
     options.lifecycle ??
     createSessionLifecycle({
-      ending: config.session.ending
+      ending: (options.loadConfig?.() ?? loadPicoConfigFromEnvironment()).session.ending
     });
 
   return {

@@ -1847,9 +1847,22 @@ function compactCutoffPayload(
     sessionId: session.sessionId,
     cutoffAt: session.cutoffAt,
     sourceEntryIds: session.sourceEntryIds,
-    sourceEntryCount: session.entries.length,
+    sourceEntryCount: session.sourceEntryIds.length,
     requestedBy: session.requestedBy,
     retention
+  };
+}
+
+function compactUnparseableFailedCutoffPayload(
+  jobId: number,
+  processedAt: string
+): Record<string, unknown> {
+  return {
+    jobId,
+    processedAt,
+    sourceEntryIds: [],
+    sourceEntryCount: 0,
+    retention: "failed_unparseable_metadata_only"
   };
 }
 
@@ -1861,19 +1874,9 @@ function markCandidateJobFailed(
   session: SessionMemoryCutoffInput | undefined
 ): void {
   const retentionPayload =
-    session === undefined ? undefined : JSON.stringify(compactFailedCutoffPayload(session));
-
-  if (retentionPayload === undefined) {
-    database
-      .prepare(`
-        UPDATE long_memory_candidate_jobs
-        SET status = 'failed', processed_at = ?
-        WHERE id = ? AND status = 'processing' AND processing_started_at = ?
-      `)
-      .run(processedAt, id, processingStartedAt);
-
-    return;
-  }
+    session === undefined
+      ? JSON.stringify(compactUnparseableFailedCutoffPayload(id, processedAt))
+      : JSON.stringify(compactFailedCutoffPayload(session));
 
   database
     .prepare(`
