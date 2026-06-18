@@ -1,0 +1,283 @@
+import {
+  createAgentSession as createDefaultAgentSession,
+  DefaultResourceLoader,
+  type ExtensionAPI,
+  getAgentDir,
+  SessionManager
+} from "@earendil-works/pi-coding-agent";
+
+import { registerPicoExtensionWithRuntime } from "../index.js";
+import type { SessionLifecycle } from "../modules/session/index.js";
+import type { PiAgentTurnClient } from "./voice-resident.js";
+
+export type PiAgentSdkSession = {
+  readonly subscribe: (listener: (event: unknown) => void) => (() => void) | undefined;
+  readonly prompt: (text: string) => Promise<void>;
+  readonly dispose: () => void;
+  readonly abort?: () => Promise<void>;
+};
+
+export type PiAgentSessionFactory = (input: {
+  readonly resourceLoader: unknown;
+  readonly sessionManager: unknown;
+}) => Promise<{ readonly session: PiAgentSdkSession }>;
+
+export type PiAgentResourceLoaderFactoryInput = {
+  readonly cwd: string;
+  readonly extensionFactories: readonly ((pi: ExtensionAPI) => void)[];
+};
+
+export type PiAgentResourceLoader = {
+  readonly reload?: () => Promise<void>;
+};
+
+export type PiAgentTurnClientOptions = {
+  readonly cwd: string;
+  readonly sessionLifecycle: SessionLifecycle;
+  readonly createAgentSession?: PiAgentSessionFactory;
+  readonly createResourceLoader?: (
+    input: PiAgentResourceLoaderFactoryInput
+  ) => PiAgentResourceLoader;
+  readonly sessionManager?: unknown;
+};
+
+export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAgentTurnClient {
+  const sessions = new Map<string, Promise<PiAgentSdkSession>>();
+  const activeTurns = new Set<string>();
+
+  return {
+    async prompt(input) {
+      claimTurn(activeTurns, input.sessionId);
+      const output: string[] = [];
+      let unsubscribe: (() => void) | undefined;
+      let abortHandle: PromptAbortHandle | undefined;
+
+      try {
+        const session = await getOrCreateTurnSession(options, sessions, input.sessionId);
+        unsubscribe = subscribeTextDeltas(session, output);
+        abortHandle = installPromptAbort(session, input.signal);
+        await session.prompt(input.text);
+        throwIfSignalAborted(input.signal);
+
+        return {
+          text: output.join("")
+        };
+      } catch (error) {
+        if (abortHandle !== undefined) {
+          await abortIfSignalAborted(input.signal, abortHandle);
+        }
+        throw error;
+      } finally {
+        abortHandle?.remove();
+        unsubscribe?.();
+        activeTurns.delete(input.sessionId);
+      }
+    },
+    async disposeSession(sessionId) {
+      const session = await sessions.get(sessionId);
+
+      if (session === undefined) {
+        return;
+      }
+
+      activeTurns.delete(sessionId);
+      session.dispose();
+      sessions.delete(sessionId);
+    },
+    async disposeAll() {
+      const pendingSessions = [...sessions.values()];
+      activeTurns.clear();
+      sessions.clear();
+
+      for (const session of await Promise.all(pendingSessions)) {
+        session.dispose();
+      }
+    }
+  };
+}
+
+function claimTurn(activeTurns: Set<string>, sessionId: string): void {
+  if (activeTurns.has(sessionId)) {
+    throw new Error("pico resident Pi Agent turn is already active for this session");
+  }
+
+  activeTurns.add(sessionId);
+}
+
+async function getOrCreateTurnSession(
+  options: PiAgentTurnClientOptions,
+  sessions: Map<string, Promise<PiAgentSdkSession>>,
+  sessionId: string
+): Promise<PiAgentSdkSession> {
+  const existing = sessions.get(sessionId);
+
+  if (existing !== undefined) {
+    return existing;
+  }
+
+  const created = createTurnSession(options);
+  sessions.set(sessionId, created);
+
+  try {
+    return await created;
+  } catch (error) {
+    sessions.delete(sessionId);
+    throw error;
+  }
+}
+
+async function createTurnSession(options: PiAgentTurnClientOptions): Promise<PiAgentSdkSession> {
+  const resourceLoader = createTurnResourceLoader(options);
+  await resourceLoader.reload?.();
+
+  const createAgentSession = options.createAgentSession ?? createDefaultPiAgentSession;
+  const { session } = await createAgentSession({
+    resourceLoader,
+    sessionManager: options.sessionManager ?? SessionManager.inMemory()
+  });
+
+  return session;
+}
+
+function createTurnResourceLoader(options: PiAgentTurnClientOptions): PiAgentResourceLoader {
+  return (
+    options.createResourceLoader?.({
+      cwd: options.cwd,
+      extensionFactories: [
+        (pi) =>
+          registerPicoExtensionWithRuntime(pi, {
+            sessionLifecycle: options.sessionLifecycle,
+            sessionTool: {
+              allowCutoff: false
+            }
+          })
+      ]
+    }) ?? createDefaultResourceLoader(options.cwd, options.sessionLifecycle)
+  );
+}
+
+function subscribeTextDeltas(
+  session: PiAgentSdkSession,
+  output: string[]
+): (() => void) | undefined {
+  return session.subscribe((event) => {
+    const delta = readTextDelta(event);
+
+    if (delta !== undefined) {
+      output.push(delta);
+    }
+  });
+}
+
+type PromptAbortHandle = {
+  readonly abort: () => Promise<void>;
+  readonly remove: () => void;
+};
+
+function installPromptAbort(
+  session: PiAgentSdkSession,
+  signal: AbortSignal | undefined
+): PromptAbortHandle {
+  let abortRequested = false;
+  const abortOnce = (): Promise<void> => {
+    if (abortRequested) {
+      return Promise.resolve();
+    }
+
+    abortRequested = true;
+
+    return Promise.resolve(session.abort?.());
+  };
+
+  if (signal === undefined) {
+    return {
+      abort: abortOnce,
+      remove: () => undefined
+    };
+  }
+
+  const abort = (): void => {
+    void abortOnce().catch(() => undefined);
+  };
+
+  if (signal.aborted) {
+    abort();
+    return {
+      abort: abortOnce,
+      remove: () => undefined
+    };
+  }
+
+  signal.addEventListener("abort", abort, { once: true });
+
+  return {
+    abort: abortOnce,
+    remove: () => signal.removeEventListener("abort", abort)
+  };
+}
+
+async function abortIfSignalAborted(
+  signal: AbortSignal | undefined,
+  abortHandle: PromptAbortHandle
+): Promise<void> {
+  if (signal?.aborted) {
+    abortHandle.remove();
+    await abortHandle.abort();
+  }
+}
+
+function throwIfSignalAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new Error("pico resident Pi Agent turn aborted");
+  }
+}
+
+function createDefaultResourceLoader(
+  cwd: string,
+  sessionLifecycle: SessionLifecycle
+): PiAgentResourceLoader {
+  return new DefaultResourceLoader({
+    cwd,
+    agentDir: getAgentDir(),
+    extensionFactories: [
+      (pi) =>
+        registerPicoExtensionWithRuntime(pi, {
+          sessionLifecycle,
+          sessionTool: {
+            allowCutoff: false
+          }
+        })
+    ]
+  });
+}
+
+function createDefaultPiAgentSession(input: {
+  readonly resourceLoader: unknown;
+  readonly sessionManager: unknown;
+}): Promise<{ readonly session: PiAgentSdkSession }> {
+  return createDefaultAgentSession(input as never);
+}
+
+function readTextDelta(event: unknown): string | undefined {
+  if (typeof event !== "object" || event === null || Array.isArray(event)) {
+    return undefined;
+  }
+
+  const candidate = event as {
+    readonly type?: unknown;
+    readonly assistantMessageEvent?: {
+      readonly type?: unknown;
+      readonly delta?: unknown;
+    };
+  };
+
+  if (
+    candidate.type === "message_update" &&
+    candidate.assistantMessageEvent?.type === "text_delta" &&
+    typeof candidate.assistantMessageEvent.delta === "string"
+  ) {
+    return candidate.assistantMessageEvent.delta;
+  }
+
+  return undefined;
+}

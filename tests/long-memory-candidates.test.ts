@@ -130,12 +130,119 @@ describe("session long-memory candidate pipeline", () => {
         }
 
         expect(JSON.stringify(candidates.listJobs())).not.toContain("工作セットを早めに出す");
+        expect(JSON.stringify(candidates.listJobs())).not.toContain("工作セットを先に準備する候補");
+        const database = new DatabaseSync(path);
+        try {
+          const row = database
+            .prepare("SELECT cutoff_json FROM long_memory_candidate_jobs WHERE id = 1")
+            .get() as { readonly cutoff_json: string };
+
+          expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
+          expect(row.cutoff_json).not.toContain("工作セットを先に準備する候補");
+          expect(JSON.parse(row.cutoff_json)).toEqual({
+            sessionId: "session-2026-06-10-evening",
+            cutoffAt: "2026-06-10T18:30:00.000Z",
+            sourceEntryIds: ["memory-1", "memory-2"],
+            sourceEntryCount: 2,
+            requestedBy: "pico",
+            retention: "processed_metadata_only"
+          });
+        } finally {
+          database.close();
+        }
         expect(audit.entries().map((event) => event.name)).toEqual([
           "long_memory.candidate_job.enqueued",
           "long_memory.candidate.created",
           "long_memory.candidate_job.processed"
         ]);
         expect(JSON.stringify(audit.entries())).not.toContain("工作セットを早めに出す");
+      } finally {
+        candidates.close();
+      }
+    });
+  });
+
+  it("compacts failed job cutoff payloads to metadata after processor failure", async () => {
+    await withLongMemoryDatabase(async (path) => {
+      const candidates = openSessionMemoryCandidateStore(path, {
+        now: () => "2026-06-10T18:31:00.000Z",
+        processSession: () => {
+          throw new Error("processor unavailable");
+        }
+      });
+
+      try {
+        candidates.enqueueSessionCutoff(completedSession);
+
+        await expect(candidates.processNextJob()).rejects.toThrow("processor unavailable");
+
+        const database = new DatabaseSync(path);
+
+        try {
+          const row = database
+            .prepare("SELECT status, cutoff_json FROM long_memory_candidate_jobs WHERE id = 1")
+            .get() as { readonly status: string; readonly cutoff_json: string };
+
+          expect(row.status).toBe("failed");
+          expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
+          expect(row.cutoff_json).not.toContain("工作セットを先に準備する候補");
+          expect(JSON.parse(row.cutoff_json)).toEqual({
+            sessionId: "session-2026-06-10-evening",
+            cutoffAt: "2026-06-10T18:30:00.000Z",
+            sourceEntryIds: ["memory-1", "memory-2"],
+            sourceEntryCount: 2,
+            requestedBy: "pico",
+            retention: "failed_metadata_only"
+          });
+        } finally {
+          database.close();
+        }
+      } finally {
+        candidates.close();
+      }
+    });
+  });
+
+  it("compacts unparseable failed cutoff payloads without retaining raw JSON", async () => {
+    await withLongMemoryDatabase(async (path) => {
+      const candidates = openSessionMemoryCandidateStore(path, {
+        now: () => "2026-06-10T18:31:00.000Z",
+        processSession: () => Promise.resolve([])
+      });
+
+      try {
+        candidates.enqueueSessionCutoff(completedSession);
+        const mutationDatabase = new DatabaseSync(path);
+
+        try {
+          mutationDatabase
+            .prepare("UPDATE long_memory_candidate_jobs SET cutoff_json = ? WHERE id = 1")
+            .run('{"raw":"工作セットを早めに出す malformed"}');
+        } finally {
+          mutationDatabase.close();
+        }
+
+        await expect(candidates.processNextJob()).rejects.toThrow();
+
+        const database = new DatabaseSync(path);
+
+        try {
+          const row = database
+            .prepare("SELECT status, cutoff_json FROM long_memory_candidate_jobs WHERE id = 1")
+            .get() as { readonly status: string; readonly cutoff_json: string };
+
+          expect(row.status).toBe("failed");
+          expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
+          expect(JSON.parse(row.cutoff_json)).toEqual({
+            jobId: 1,
+            processedAt: "2026-06-10T18:31:00.000Z",
+            sourceEntryIds: [],
+            sourceEntryCount: 0,
+            retention: "failed_unparseable_metadata_only"
+          });
+        } finally {
+          database.close();
+        }
       } finally {
         candidates.close();
       }

@@ -20,6 +20,8 @@ export type PicoConfig = DeepReadonly<{
     personDetection: PicoPersonDetectionConfig;
   };
   voice: {
+    resident: PicoVoiceResidentConfig;
+    probes: PicoVoiceProbeConfig;
     echoControl: PicoEchoControlConfig;
     stt: {
       mlxWhisper?: PicoMlxWhisperConfig;
@@ -159,6 +161,19 @@ export type PicoEchoControlProvider =
   | "speexdsp"
   | "half_duplex";
 
+export type PicoVoiceResidentConfig = {
+  readonly enabled: boolean;
+  readonly microphoneDevice?: string;
+  readonly playbackDevice?: string;
+  readonly singleInstanceLockPath: string;
+  readonly minTriggerConfidence: number;
+  readonly shutdownGraceMs: number;
+};
+
+export type PicoVoiceProbeConfig = {
+  readonly enabled: boolean;
+};
+
 export type PicoEchoControlConfig = {
   readonly enabled: boolean;
   readonly mode: PicoEchoControlMode;
@@ -263,6 +278,15 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
     }
   },
   voice: {
+    resident: {
+      enabled: false,
+      singleInstanceLockPath: "tmp/pico-voice-resident.lock",
+      minTriggerConfidence: 0.6,
+      shutdownGraceMs: 5_000
+    },
+    probes: {
+      enabled: true
+    },
     echoControl: {
       enabled: false,
       mode: "half_duplex",
@@ -597,20 +621,112 @@ function defineVisionSection(root: Record<string, unknown>): PicoConfig["vision"
 
 function defineVoiceSection(root: Record<string, unknown>): PicoConfig["voice"] {
   const voice = readOptionalRecord(root.voice, "pico config voice");
+  const resident = readOptionalRecord(voice?.resident, "pico config voice.resident");
+  const probes = readOptionalRecord(voice?.probes, "pico config voice.probes");
   const echoControl = readOptionalRecord(voice?.echoControl, "pico config voice.echoControl");
+
+  return {
+    resident: defineVoiceResidentConfig(resident),
+    probes: defineVoiceProbeConfig(probes),
+    echoControl: defineEchoControlConfig(echoControl),
+    stt: defineVoiceSttConfig(voice),
+    tts: defineVoiceTtsConfig(voice)
+  };
+}
+
+function defineVoiceSttConfig(
+  voice: Record<string, unknown> | undefined
+): PicoConfig["voice"]["stt"] {
   const stt = readOptionalRecord(voice?.stt, "pico config voice.stt");
-  const tts = readOptionalRecord(voice?.tts, "pico config voice.tts");
   const mlxWhisper = readOptionalRecord(stt?.mlxWhisper, "pico config voice.stt.mlxWhisper");
+
+  return {
+    ...(mlxWhisper === undefined ? {} : { mlxWhisper: defineMlxWhisperConfig(mlxWhisper) })
+  };
+}
+
+function defineVoiceTtsConfig(
+  voice: Record<string, unknown> | undefined
+): PicoConfig["voice"]["tts"] {
+  const tts = readOptionalRecord(voice?.tts, "pico config voice.tts");
   const aivis = readOptionalRecord(tts?.aivis, "pico config voice.tts.aivis");
 
   return {
-    echoControl: defineEchoControlConfig(echoControl),
-    stt: {
-      ...(mlxWhisper === undefined ? {} : { mlxWhisper: defineMlxWhisperConfig(mlxWhisper) })
-    },
-    tts: {
-      ...(aivis === undefined ? {} : { aivis: defineAivisConfig(aivis) })
-    }
+    ...(aivis === undefined ? {} : { aivis: defineAivisConfig(aivis) })
+  };
+}
+
+function defineVoiceResidentConfig(
+  input: Record<string, unknown> | undefined
+): PicoVoiceResidentConfig {
+  if (input === undefined) {
+    return emptyPicoConfig.voice.resident;
+  }
+
+  const enabled = readOptionalBoolean(input.enabled, "pico config voice.resident.enabled") ?? false;
+  const microphoneDevice = readOptionalString(
+    input.microphoneDevice,
+    "pico config voice.resident.microphoneDevice"
+  );
+  const playbackDevice = readOptionalString(
+    input.playbackDevice,
+    "pico config voice.resident.playbackDevice"
+  );
+
+  requireResidentVoiceDevices(enabled, microphoneDevice, playbackDevice);
+
+  return {
+    enabled,
+    ...(microphoneDevice === undefined ? {} : { microphoneDevice }),
+    ...(playbackDevice === undefined ? {} : { playbackDevice }),
+    singleInstanceLockPath:
+      readOptionalString(
+        input.singleInstanceLockPath,
+        "pico config voice.resident.singleInstanceLockPath"
+      ) ?? "tmp/pico-voice-resident.lock",
+    minTriggerConfidence:
+      readOptionalConfidenceThreshold(
+        input.minTriggerConfidence,
+        "pico config voice.resident.minTriggerConfidence"
+      ) ?? 0.6,
+    shutdownGraceMs:
+      readOptionalBoundedPositiveInteger(
+        input.shutdownGraceMs,
+        "pico config voice.resident.shutdownGraceMs",
+        maxNodeTimeoutMs
+      ) ?? 5_000
+  };
+}
+
+function requireResidentVoiceDevices(
+  enabled: boolean,
+  microphoneDevice: string | undefined,
+  playbackDevice: string | undefined
+): void {
+  if (!enabled) {
+    return;
+  }
+
+  if (microphoneDevice === undefined) {
+    throw new Error(
+      "pico config voice.resident.microphoneDevice is required when resident is enabled"
+    );
+  }
+
+  if (playbackDevice === undefined) {
+    throw new Error(
+      "pico config voice.resident.playbackDevice is required when resident is enabled"
+    );
+  }
+}
+
+function defineVoiceProbeConfig(input: Record<string, unknown> | undefined): PicoVoiceProbeConfig {
+  if (input === undefined) {
+    return emptyPicoConfig.voice.probes;
+  }
+
+  return {
+    enabled: readOptionalBoolean(input.enabled, "pico config voice.probes.enabled") ?? true
   };
 }
 
@@ -905,7 +1021,10 @@ function readPersonDetectionFields(input: Record<string, unknown>): OptionalPers
       "pico config vision.personDetection.frameIntervalMs",
       maxNodeTimeoutMs
     ),
-    confidenceThreshold: readOptionalConfidenceThreshold(input.confidenceThreshold),
+    confidenceThreshold: readOptionalConfidenceThreshold(
+      input.confidenceThreshold,
+      "pico config vision.personDetection.confidenceThreshold"
+    ),
     coremlFlags: readOptionalNonNegativeInteger(
       input.coremlFlags,
       "pico config vision.personDetection.coremlFlags"
@@ -991,7 +1110,7 @@ function defineDisabledPersonDetectionConfig(
 function defineMlxWhisperConfig(input: Record<string, unknown>): PicoMlxWhisperConfig {
   return {
     ...optionalStringProperty(input, "id", "pico config voice.stt.mlxWhisper.id"),
-    localBaseUrl: requireString(
+    localBaseUrl: requireLocalBaseUrl(
       input.localBaseUrl,
       "pico config voice.stt.mlxWhisper.localBaseUrl"
     ),
@@ -1027,7 +1146,10 @@ function defineMlxWhisperConfig(input: Record<string, unknown>): PicoMlxWhisperC
 function defineAivisConfig(input: Record<string, unknown>): PicoAivisConfig {
   return {
     ...optionalStringProperty(input, "id", "pico config voice.tts.aivis.id"),
-    localBaseUrl: requireString(input.localBaseUrl, "pico config voice.tts.aivis.localBaseUrl"),
+    localBaseUrl: requireLocalBaseUrl(
+      input.localBaseUrl,
+      "pico config voice.tts.aivis.localBaseUrl"
+    ),
     speakerId: requireNonNegativeInteger(input.speakerId, "pico config voice.tts.aivis.speakerId"),
     ...optionalPositiveIntegerProperty(input, "timeoutMs", "pico config voice.tts.aivis.timeoutMs"),
     ...optionalStringProperty(input, "text", "pico config voice.tts.aivis.text")
@@ -1464,18 +1586,15 @@ function requireAecEchoControlProvider(
   return value;
 }
 
-function readOptionalConfidenceThreshold(value: unknown): number | undefined {
-  const parsed = readOptionalNumber(
-    value,
-    "pico config vision.personDetection.confidenceThreshold"
-  );
+function readOptionalConfidenceThreshold(value: unknown, label: string): number | undefined {
+  const parsed = readOptionalNumber(value, label);
 
   if (parsed === undefined) {
     return undefined;
   }
 
   if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
-    throw new Error("pico config vision.personDetection.confidenceThreshold must be >= 0 and <= 1");
+    throw new Error(`${label} must be >= 0 and <= 1`);
   }
 
   return parsed;

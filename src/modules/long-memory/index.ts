@@ -146,6 +146,18 @@ export type SessionMemoryCandidateStoreOptions = {
   readonly now?: () => string;
 };
 
+export type SessionMemoryCandidateQueueOptions = {
+  readonly audit?: StructuredAuditLog;
+  readonly now?: () => string;
+};
+
+export type SessionMemoryCandidateQueue = {
+  readonly enqueueSessionCutoff: (input: SessionMemoryCutoffInput) => SessionMemoryCandidateJob;
+  readonly countJobs: (statuses: readonly SessionMemoryCandidateJobStatus[]) => number;
+  readonly listJobs: () => readonly SessionMemoryCandidateJob[];
+  readonly close: () => void;
+};
+
 export type SessionMemoryCandidateStore = {
   readonly enqueueSessionCutoff: (input: SessionMemoryCutoffInput) => SessionMemoryCandidateJob;
   readonly processNextJob: () => Promise<SessionMemoryCandidateJob | undefined>;
@@ -361,6 +373,31 @@ export function openLongMemoryStore(
   };
 }
 
+export function openSessionMemoryCandidateQueue(
+  path: string,
+  options: SessionMemoryCandidateQueueOptions = {}
+): SessionMemoryCandidateQueue {
+  const database = new DatabaseSync(path);
+  initializeLongMemorySchema(database);
+  const now = options.now ?? (() => new Date().toISOString());
+  const audit = options.audit;
+
+  return {
+    enqueueSessionCutoff(input) {
+      return enqueueSessionMemoryCutoff(database, input, now(), audit);
+    },
+    countJobs(statuses) {
+      return countSessionMemoryCandidateJobs(database, statuses);
+    },
+    listJobs() {
+      return listSessionMemoryCandidateJobs(database);
+    },
+    close() {
+      database.close();
+    }
+  };
+}
+
 export function openSessionMemoryCandidateStore(
   path: string,
   options: SessionMemoryCandidateStoreOptions
@@ -373,28 +410,7 @@ export function openSessionMemoryCandidateStore(
 
   return {
     enqueueSessionCutoff(input) {
-      const session = normalizeSessionMemoryCutoffInput(input);
-      const queuedAt = now();
-      const result = database
-        .prepare(`
-          INSERT INTO long_memory_candidate_jobs (
-            session_id,
-            status,
-            source_entry_count,
-            queued_at,
-            cutoff_json
-          )
-          VALUES (?, 'queued', ?, ?, ?)
-        `)
-        .run(session.sessionId, session.sourceEntryIds.length, queuedAt, JSON.stringify(session));
-      const job = requireSessionMemoryCandidateJob(database, Number(result.lastInsertRowid));
-      recordCandidateAudit(audit, "long_memory.candidate_job.enqueued", queuedAt, {
-        "pico.memory.session_id": job.sessionId,
-        "pico.memory.candidate_job_id": job.id,
-        "pico.memory.source_entry_count": job.sourceEntryCount
-      });
-
-      return job;
+      return enqueueSessionMemoryCutoff(database, input, now(), audit);
     },
     async processNextJob() {
       const processingStartedAt = now();
@@ -406,9 +422,11 @@ export function openSessionMemoryCandidateStore(
 
       const job = mapSessionMemoryCandidateJob(queuedJob);
       const processedAt = now();
+      let parsedSession: SessionMemoryCutoffInput | undefined;
 
       try {
         const session = parseSessionMemoryCutoffPayload(queuedJob);
+        parsedSession = session;
         const drafts = await processSession(cloneSessionMemoryCutoffInput(session));
         const normalizedDrafts = drafts.map((draft) => normalizeLongMemoryCandidateDraft(draft));
         const insertedCandidates: LongMemoryCandidateRecord[] = [];
@@ -424,7 +442,7 @@ export function openSessionMemoryCandidateStore(
             );
           }
 
-          markCandidateJobProcessed(database, job.id, processedAt, processingStartedAt);
+          markCandidateJobProcessed(database, job.id, processedAt, processingStartedAt, session);
 
           return true;
         });
@@ -454,7 +472,7 @@ export function openSessionMemoryCandidateStore(
             return false;
           }
 
-          markCandidateJobFailed(database, job.id, processedAt, processingStartedAt);
+          markCandidateJobFailed(database, job.id, processedAt, processingStartedAt, parsedSession);
 
           return true;
         });
@@ -504,34 +522,10 @@ export function openSessionMemoryCandidateStore(
       });
     },
     countJobs(statuses) {
-      if (statuses.length === 0) {
-        return 0;
-      }
-
-      for (const status of statuses) {
-        requireSessionMemoryCandidateJobStatus(status);
-      }
-
-      const placeholders = statuses.map(() => "?").join(", ");
-      const row = database
-        .prepare(`
-          SELECT COUNT(*) AS count
-          FROM long_memory_candidate_jobs
-          WHERE status IN (${placeholders})
-        `)
-        .get(...statuses) as { readonly count: number };
-
-      return row.count;
+      return countSessionMemoryCandidateJobs(database, statuses);
     },
     listJobs() {
-      return database
-        .prepare(`
-          SELECT id, session_id, status, source_entry_count, queued_at, processing_started_at, processed_at
-          FROM long_memory_candidate_jobs
-          ORDER BY id
-        `)
-        .all()
-        .map((row) => mapSessionMemoryCandidateJob(row as SessionMemoryCandidateJobRow));
+      return listSessionMemoryCandidateJobs(database);
     },
     listPending() {
       return database
@@ -611,6 +605,73 @@ export function openSessionMemoryCandidateStore(
       database.close();
     }
   };
+}
+
+function enqueueSessionMemoryCutoff(
+  database: DatabaseSync,
+  input: SessionMemoryCutoffInput,
+  queuedAtInput: string,
+  audit: StructuredAuditLog | undefined
+): SessionMemoryCandidateJob {
+  const session = normalizeSessionMemoryCutoffInput(input);
+  const queuedAt = requireTimestamp(queuedAtInput);
+  const result = database
+    .prepare(`
+      INSERT INTO long_memory_candidate_jobs (
+        session_id,
+        status,
+        source_entry_count,
+        queued_at,
+        cutoff_json
+      )
+      VALUES (?, 'queued', ?, ?, ?)
+    `)
+    .run(session.sessionId, session.sourceEntryIds.length, queuedAt, JSON.stringify(session));
+  const job = requireSessionMemoryCandidateJob(database, Number(result.lastInsertRowid));
+  recordCandidateAudit(audit, "long_memory.candidate_job.enqueued", queuedAt, {
+    "pico.memory.session_id": job.sessionId,
+    "pico.memory.candidate_job_id": job.id,
+    "pico.memory.source_entry_count": job.sourceEntryCount
+  });
+
+  return job;
+}
+
+function countSessionMemoryCandidateJobs(
+  database: DatabaseSync,
+  statuses: readonly SessionMemoryCandidateJobStatus[]
+): number {
+  if (statuses.length === 0) {
+    return 0;
+  }
+
+  for (const status of statuses) {
+    requireSessionMemoryCandidateJobStatus(status);
+  }
+
+  const placeholders = statuses.map(() => "?").join(", ");
+  const row = database
+    .prepare(`
+      SELECT COUNT(*) AS count
+      FROM long_memory_candidate_jobs
+      WHERE status IN (${placeholders})
+    `)
+    .get(...statuses) as { readonly count: number };
+
+  return row.count;
+}
+
+function listSessionMemoryCandidateJobs(
+  database: DatabaseSync
+): readonly SessionMemoryCandidateJob[] {
+  return database
+    .prepare(`
+      SELECT id, session_id, status, source_entry_count, queued_at, processing_started_at, processed_at
+      FROM long_memory_candidate_jobs
+      ORDER BY id
+    `)
+    .all()
+    .map((row) => mapSessionMemoryCandidateJob(row as SessionMemoryCandidateJobRow));
 }
 
 function initializeLongMemorySchema(database: DatabaseSync): void {
@@ -1753,30 +1814,77 @@ function markCandidateJobProcessed(
   database: DatabaseSync,
   id: number,
   processedAt: string,
-  processingStartedAt: string
+  processingStartedAt: string,
+  session: SessionMemoryCutoffInput
 ): void {
   database
     .prepare(`
       UPDATE long_memory_candidate_jobs
-      SET status = 'processed', processed_at = ?
+      SET status = 'processed', processed_at = ?, cutoff_json = ?
       WHERE id = ? AND status = 'processing' AND processing_started_at = ?
     `)
-    .run(processedAt, id, processingStartedAt);
+    .run(
+      processedAt,
+      JSON.stringify(compactProcessedCutoffPayload(session)),
+      id,
+      processingStartedAt
+    );
+}
+
+function compactProcessedCutoffPayload(session: SessionMemoryCutoffInput): Record<string, unknown> {
+  return compactCutoffPayload(session, "processed_metadata_only");
+}
+
+function compactFailedCutoffPayload(session: SessionMemoryCutoffInput): Record<string, unknown> {
+  return compactCutoffPayload(session, "failed_metadata_only");
+}
+
+function compactCutoffPayload(
+  session: SessionMemoryCutoffInput,
+  retention: "processed_metadata_only" | "failed_metadata_only"
+): Record<string, unknown> {
+  return {
+    sessionId: session.sessionId,
+    cutoffAt: session.cutoffAt,
+    sourceEntryIds: session.sourceEntryIds,
+    sourceEntryCount: session.sourceEntryIds.length,
+    requestedBy: session.requestedBy,
+    retention
+  };
+}
+
+function compactUnparseableFailedCutoffPayload(
+  jobId: number,
+  processedAt: string
+): Record<string, unknown> {
+  return {
+    jobId,
+    processedAt,
+    sourceEntryIds: [],
+    sourceEntryCount: 0,
+    retention: "failed_unparseable_metadata_only"
+  };
 }
 
 function markCandidateJobFailed(
   database: DatabaseSync,
   id: number,
   processedAt: string,
-  processingStartedAt: string
+  processingStartedAt: string,
+  session: SessionMemoryCutoffInput | undefined
 ): void {
+  const retentionPayload =
+    session === undefined
+      ? JSON.stringify(compactUnparseableFailedCutoffPayload(id, processedAt))
+      : JSON.stringify(compactFailedCutoffPayload(session));
+
   database
     .prepare(`
       UPDATE long_memory_candidate_jobs
-      SET status = 'failed', processed_at = ?
+      SET status = 'failed', processed_at = ?, cutoff_json = ?
       WHERE id = ? AND status = 'processing' AND processing_started_at = ?
     `)
-    .run(processedAt, id, processingStartedAt);
+    .run(processedAt, retentionPayload, id, processingStartedAt);
 }
 
 function recordCandidateAudit(

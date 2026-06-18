@@ -1,5 +1,6 @@
 import type { BeforeAgentStartEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+import type { PicoConfig } from "./config/index.js";
 import { picoIdentity } from "./identity/profile.js";
 import { buildSystemPrompt } from "./identity/system-prompt.js";
 import { createAuditModule } from "./modules/audit/index.js";
@@ -8,7 +9,7 @@ import { futurePicoModules } from "./modules/future.js";
 import { createHandoffModule } from "./modules/handoff/index.js";
 import { createLocalModelsModule } from "./modules/local-models/index.js";
 import { createMemoryModule } from "./modules/memory/index.js";
-import { createSessionModule } from "./modules/session/index.js";
+import { createSessionModule, type SessionLifecycle } from "./modules/session/index.js";
 import { createTransportModule } from "./modules/transport/index.js";
 import { PicoModuleRegistry } from "./orchestrator/registry.js";
 import {
@@ -72,12 +73,35 @@ export function buildPicoExtensionSystemPrompt(baseSystemPrompt: string): string
   ].join("\n");
 }
 
-export default function registerPicoExtension(pi: ExtensionAPI): void {
-  pi.registerTool(createPicoSessionTool());
+export type PicoExtensionRuntimeOptions = {
+  readonly sessionLifecycle?: SessionLifecycle;
+  readonly loadConfig?: () => PicoConfig;
+  readonly sessionTool?: {
+    readonly allowCutoff?: boolean;
+  };
+};
+
+export function registerPicoExtensionWithRuntime(
+  pi: ExtensionAPI,
+  options: PicoExtensionRuntimeOptions = {}
+): void {
+  pi.registerTool(
+    createPicoSessionTool({
+      ...(options.sessionLifecycle === undefined ? {} : { lifecycle: options.sessionLifecycle }),
+      ...(options.loadConfig === undefined ? {} : { loadConfig: options.loadConfig }),
+      ...(options.sessionTool?.allowCutoff === undefined
+        ? {}
+        : { allowCutoff: options.sessionTool.allowCutoff })
+    })
+  );
   pi.registerTool(createPicoCameraSnapshotTool());
   pi.registerTool(createPicoPersonDetectionTool());
   pi.registerTool(createPicoCameraSceneDescriptionTool());
   pi.on("before_agent_start", (event: BeforeAgentStartEvent) => ({
     systemPrompt: buildPicoExtensionSystemPrompt(event.systemPrompt)
   }));
+}
+
+export default function registerPicoExtension(pi: ExtensionAPI): void {
+  registerPicoExtensionWithRuntime(pi);
 }

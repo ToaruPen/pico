@@ -7,10 +7,14 @@ import { describe, expect, it, vi } from "vitest";
 import { createStructuredAuditLog } from "../src/modules/audit/index.js";
 import {
   type LongMemoryCandidateDraft,
+  openSessionMemoryCandidateQueue,
   openSessionMemoryCandidateStore,
   type SessionMemoryCutoffInput
 } from "../src/modules/long-memory/index.js";
-import { createSessionMemoryWorker } from "../src/modules/long-memory/session-worker.js";
+import {
+  createSessionMemoryEnqueueWorker,
+  createSessionMemoryWorker
+} from "../src/modules/long-memory/session-worker.js";
 import { createSessionLifecycle } from "../src/modules/session/index.js";
 
 async function withLongMemoryDatabase(run: (path: string) => Promise<void> | void): Promise<void> {
@@ -49,6 +53,45 @@ function draftFor(session: SessionMemoryCutoffInput): LongMemoryCandidateDraft {
 }
 
 describe("session memory worker", () => {
+  it("supports enqueue-only resident processes without a drain processor", async () => {
+    await withLongMemoryDatabase((path) => {
+      const audit = createStructuredAuditLog();
+      const queue = openSessionMemoryCandidateQueue(path, {
+        audit,
+        now: () => "2026-06-17T10:00:00.000Z"
+      });
+      const worker = createSessionMemoryEnqueueWorker({
+        queue,
+        audit,
+        maxQueueDepth: 4,
+        now: () => "2026-06-17T10:00:00.000Z"
+      });
+
+      try {
+        const job = worker.enqueueCutoff(cutoffInput("session-resident"));
+
+        expect(job).toMatchObject({
+          sessionId: "session-resident",
+          status: "queued",
+          queuedAt: "2026-06-17T10:00:00.000Z"
+        });
+        expect(queue.countJobs(["queued", "processing"])).toBe(1);
+        expect(queue.listJobs()).toEqual([
+          expect.objectContaining({
+            sessionId: "session-resident",
+            status: "queued"
+          })
+        ]);
+        expect(audit.entries().map((event) => event.name)).toEqual([
+          "long_memory.candidate_job.enqueued",
+          "long_memory.worker.cutoff_enqueued"
+        ]);
+      } finally {
+        queue.close();
+      }
+    });
+  });
+
   it("keeps later sessions responsive while an earlier cutoff is still processing", async () => {
     vi.useFakeTimers();
 

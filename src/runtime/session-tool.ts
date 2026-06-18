@@ -49,16 +49,16 @@ type PicoSessionToolParameters = {
 export type PicoSessionToolOptions = {
   readonly lifecycle?: SessionLifecycle;
   readonly loadConfig?: () => PicoConfig;
+  readonly allowCutoff?: boolean;
 };
 
 export function createPicoSessionTool(
   options: PicoSessionToolOptions = {}
 ): ToolDefinition<typeof picoSessionParameters> {
-  const config = options.loadConfig?.() ?? loadPicoConfigFromEnvironment();
   const lifecycle =
     options.lifecycle ??
     createSessionLifecycle({
-      ending: config.session.ending
+      ending: (options.loadConfig?.() ?? loadPicoConfigFromEnvironment()).session.ending
     });
 
   return {
@@ -70,19 +70,22 @@ export function createPicoSessionTool(
     promptGuidelines: [
       "Use pico_session start only when a trusted session trigger is present.",
       "Use pico_session append for staff and assistant utterances that belong to the active session.",
-      "Use pico_session cutoff only after the session has ended."
+      options.allowCutoff === false
+        ? "Do not use pico_session cutoff in resident runtime; the resident process owns memory enqueue and cutoff acknowledgement."
+        : "Use pico_session cutoff only after the session has ended."
     ],
     parameters: picoSessionParameters,
     executionMode: "sequential",
     execute(_toolCallId, parameters) {
-      return Promise.resolve(executePicoSessionTool(lifecycle, parameters));
+      return Promise.resolve(executePicoSessionTool(lifecycle, parameters, options));
     }
   };
 }
 
 function executePicoSessionTool(
   lifecycle: SessionLifecycle,
-  parameters: PicoSessionToolParameters
+  parameters: PicoSessionToolParameters,
+  options: PicoSessionToolOptions
 ): AgentToolResult<Record<string, never>> {
   switch (parameters.action) {
     case "start": {
@@ -107,9 +110,17 @@ function executePicoSessionTool(
     }
 
     case "cutoff": {
+      if (options.allowCutoff === false) {
+        throw new Error("pico_session cutoff is disabled for resident runtime");
+      }
+
+      const sessionId = requireSessionId(parameters);
+      const cutoff = lifecycle.cutoff(sessionId);
+      lifecycle.acknowledgeCutoff(sessionId);
+
       return textResult({
         action: parameters.action,
-        cutoff: lifecycle.cutoff(requireSessionId(parameters))
+        cutoff
       });
     }
   }

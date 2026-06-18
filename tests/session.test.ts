@@ -58,6 +58,7 @@ describe("session lifecycle", () => {
         ],
         requestedBy: "session_lifecycle"
       });
+      lifecycle.acknowledgeCutoff(session.id);
       expect(lifecycle.read(session.id)).toBeUndefined();
       expect(audit.entries().map((event) => event.name)).toEqual([
         "session.started",
@@ -103,6 +104,33 @@ describe("session lifecycle", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("can explicitly end an active session for resident shutdown cutoff", () => {
+    const lifecycle = createSessionLifecycle({
+      ending: {
+        mode: "timed",
+        durationMs: 60_000
+      }
+    });
+    const session = lifecycle.start({
+      kind: "wake_name",
+      label: "ピコ",
+      source: "voice"
+    });
+    lifecycle.appendEntry(session.id, {
+      role: "staff",
+      content: "終了時にも記憶化する内容です。"
+    });
+
+    expect(lifecycle.end(session.id)).toMatchObject({
+      id: session.id,
+      state: "ended"
+    });
+    expect(lifecycle.cutoff(session.id)).toMatchObject({
+      sessionId: session.id,
+      sourceEntryIds: ["session-1-entry-1"]
+    });
   });
 
   it("enforces one active session at a time and allows a new session after timed ending", () => {
@@ -234,6 +262,40 @@ describe("session lifecycle", () => {
       vi.advanceTimersByTime(2);
       expect(lifecycle.read(session.id)).toBeUndefined();
       expect(() => lifecycle.cutoff(session.id)).toThrow("pico session does not exist");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an ended session after cutoff until the cutoff is acknowledged", () => {
+    vi.useFakeTimers();
+
+    try {
+      const lifecycle = createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 1
+        },
+        endedSessionRetentionMs: 1_000
+      });
+      const session = lifecycle.start({
+        kind: "wake_name",
+        label: "ピコ",
+        source: "voice"
+      });
+      lifecycle.appendEntry(session.id, {
+        role: "staff",
+        content: "記憶に残す発話です。"
+      });
+
+      vi.advanceTimersByTime(1);
+
+      const cutoff = lifecycle.cutoff(session.id);
+      expect(cutoff.sessionId).toBe(session.id);
+      expect(lifecycle.read(session.id)?.state).toBe("ended");
+
+      lifecycle.acknowledgeCutoff(session.id);
+      expect(lifecycle.read(session.id)).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }

@@ -59,6 +59,15 @@ vision:
     confidenceThreshold: 0.55
 
 voice:
+  resident:
+    enabled: false
+    microphoneDevice: Built-in Microphone
+    playbackDevice: Built-in Output
+    singleInstanceLockPath: tmp/pico-voice-resident.lock
+    minTriggerConfidence: 0.6
+    shutdownGraceMs: 5000
+  probes:
+    enabled: true
   echoControl:
     enabled: false
     mode: aec

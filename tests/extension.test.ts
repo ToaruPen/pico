@@ -10,7 +10,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
-import picoExtension, { createPicoRegistry, picoExtensionMetadata } from "../src/index.js";
+import picoExtension, {
+  createPicoRegistry,
+  picoExtensionMetadata,
+  registerPicoExtensionWithRuntime
+} from "../src/index.js";
+import { createSessionLifecycle } from "../src/modules/session/index.js";
 
 type PicoBeforeAgentStartHandler = (
   event: BeforeAgentStartEvent,
@@ -217,6 +222,54 @@ describe("pico extension", () => {
             content: "今日は折り紙をします。"
           }
         ]
+      }
+    });
+  });
+
+  it("registers session tools against an injected shared lifecycle", async () => {
+    const capture = createCapturedExtensionApi();
+    const lifecycle = createSessionLifecycle({
+      ending: {
+        mode: "timed",
+        durationMs: 60_000
+      }
+    });
+
+    registerPicoExtensionWithRuntime(extensionApiFromCapture(capture) as never, {
+      sessionLifecycle: lifecycle
+    });
+
+    const sessionTool = capture.tools.find((tool) => tool.name === "pico_session");
+    if (sessionTool === undefined) {
+      throw new Error("pico_session tool was not registered");
+    }
+
+    const started = await sessionTool.execute(
+      "tool-call-shared",
+      {
+        action: "start",
+        triggerKind: "wake_name",
+        label: "ピコ",
+        source: "resident-runtime"
+      },
+      undefined,
+      undefined,
+      {} as ExtensionContext
+    );
+
+    expect(extractToolJson(started)).toMatchObject({
+      action: "start",
+      session: {
+        id: "session-1",
+        state: "active"
+      }
+    });
+    expect(lifecycle.read("session-1")).toMatchObject({
+      id: "session-1",
+      trigger: {
+        kind: "wake_name",
+        label: "ピコ",
+        source: "resident-runtime"
       }
     });
   });
