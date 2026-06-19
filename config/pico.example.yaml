@@ -38,7 +38,13 @@ camera:
 
 vision:
   ollama:
-    localBaseUrl: http://127.0.0.1:11434
+    # This must be a pico-host loopback URL served by a protected SSH local
+    # forward to Windows native Ollama on the vision host, not a direct
+    # Windows, LAN, tailnet, WSL, or public Ollama URL.
+    # Example:
+    # ssh -N -o ExitOnForwardFailure=yes \
+    #   -L 127.0.0.1:11435:127.0.0.1:11434 pico-vision-host
+    localBaseUrl: http://127.0.0.1:11435
     maxImageEdgePixels: 512
     # Optional defaults: endpointId=windows-ollama-qwen3-5,
     # tunnel.kind=tailscale_ssh, tunnel.sshTarget=pico-vision-host.
