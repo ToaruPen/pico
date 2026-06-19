@@ -116,11 +116,11 @@ Configure these sections in `config/pico.local.yaml` as needed:
 - `vision.ollama` for `qwen3.5:9b` through the protected local tunnel.
 - `camera.tapo` plus `vision.ollama` for camera-to-VLM scene smoke.
 
-For the protected Windows GPU vision host, keep the Ubuntu WSL distro resident
-while `ollama.service` serves the tunneled endpoint. The validated field setup
-uses a Windows Task Scheduler task named `PicoWslOllamaKeepAlive` that runs
-`wsl.exe -d Ubuntu-24.04 --exec sh -lc "while true; do sleep 86400; done"` at
-logon.
+For the protected Windows GPU vision host, run Windows native Ollama on
+`127.0.0.1:11434` and reach it only through the pico-host SSH local forward. The
+validated field setup uses a Windows Task Scheduler task named
+`PicoNativeOllamaServe` that runs `%LOCALAPPDATA%\Programs\Ollama\ollama.exe
+serve` with `OLLAMA_HOST=127.0.0.1:11434` at logon.
 
 See:
 

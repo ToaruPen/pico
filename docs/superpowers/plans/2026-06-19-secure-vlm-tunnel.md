@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
-**Goal:** Make the Windows GPU Ollama VLM path fail closed unless it is reached through a loopback-bound protected SSH tunnel, with clear diagnostics for stale Windows/WSL forwarding.
+**Goal:** Make the Windows GPU Ollama VLM path fail closed unless it is reached through a loopback-bound protected SSH tunnel, with clear diagnostics for stale Windows or host-forwarding failures.
 
-**Architecture:** Keep the selected provider as one Ollama endpoint over a protected tunnel. Add a transport-level preflight that validates the local tunnel URL, checks `/api/tags`, and reports common misroutes such as an API-key proxy or an unresponsive Windows portproxy without adding provider fallbacks.
+**Architecture:** Keep the selected provider as one Windows native Ollama endpoint over a protected tunnel. Add a transport-level preflight that validates the local tunnel URL, checks `/api/tags`, and reports common misroutes such as an API-key proxy or an unresponsive Windows loopback endpoint without adding provider fallbacks.
 
 **Tech Stack:** TypeScript, Vitest, existing `src/modules/local-models`, existing `src/modules/transport`, existing `scripts/smoke/ollama-vlm-connectivity.ts`, Tailscale SSH local forwarding.
 

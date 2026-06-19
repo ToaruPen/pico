@@ -39,7 +39,8 @@ camera:
 vision:
   ollama:
     # This must be a pico-host loopback URL served by a protected SSH local
-    # forward, not a direct Windows, LAN, or tailnet Ollama URL.
+    # forward to Windows native Ollama on the vision host, not a direct
+    # Windows, LAN, tailnet, WSL, or public Ollama URL.
     # Example:
     # ssh -N -o ExitOnForwardFailure=yes \
     #   -L 127.0.0.1:11435:127.0.0.1:11434 pico-vision-host

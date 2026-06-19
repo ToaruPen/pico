@@ -19,7 +19,7 @@ The current production boundary is:
 ```text
 pico host http://127.0.0.1:11435
   -> Tailscale SSH local forward
-  -> Windows vision host 127.0.0.1:11434
+  -> Windows vision host native Ollama 127.0.0.1:11434
   -> Ollama qwen3.5:9b
 ```
 
@@ -35,25 +35,35 @@ ssh -N -o ExitOnForwardFailure=yes \
 
 The Windows host invariant is that the SSH server can reach Ollama on
 `127.0.0.1:11434`, and Ollama is not directly exposed on LAN or tailnet
-interfaces. If Windows uses WSL-hosted Ollama, bind Ollama inside WSL to the WSL
-virtual network and expose only a Windows loopback portproxy:
+interfaces. The stable operating shape is Windows native Ollama, not a Windows
+`netsh interface portproxy` bridge into WSL. The portproxy bridge was tested and
+found to intermittently return reset, timeout, or empty-reply failures even when
+WSL-local Ollama itself was healthy.
 
-```ini
-# /etc/systemd/system/ollama.service.d/override.conf
-[Service]
-Environment="OLLAMA_HOST=0.0.0.0:11434"
-```
+Windows native setup applied on the vision host:
 
 ```powershell
-$wslIp = (wsl.exe hostname -I).Trim().Split()[0]
-netsh interface portproxy add v4tov4 `
-  listenaddress=127.0.0.1 listenport=11434 `
-  connectaddress=$wslIp connectport=11434
+winget install --id Ollama.Ollama --source winget `
+  --accept-source-agreements --accept-package-agreements --silent
 ```
 
-Do not use `listenaddress=0.0.0.0` for the Windows portproxy. The portproxy
-target must be WSL's Ollama port `11434`, not an authenticated proxy or stale
-WSL port.
+The resident native server is launched by the Windows Task Scheduler task
+`PicoNativeOllamaServe`, which runs:
+
+```cmd
+set OLLAMA_HOST=127.0.0.1:11434
+"%LOCALAPPDATA%\Programs\Ollama\ollama.exe" serve
+```
+
+The `qwen3.5:9b` model is installed in Windows native Ollama:
+
+```cmd
+"%LOCALAPPDATA%\Programs\Ollama\ollama.exe" pull qwen3.5:9b
+```
+
+Do not use `listenaddress=0.0.0.0` or a WSL portproxy for the production
+boundary. WSL-hosted Ollama can remain useful for local diagnostics, but pico's
+protected tunnel should terminate at Windows native `127.0.0.1:11434`.
 
 The previous VLM path failed on `/api/chat` with a socket close before an HTTP
 response. Boundary checks showed:
@@ -66,7 +76,7 @@ response. Boundary checks showed:
 Root cause: the Windows vision host did not keep the Ubuntu WSL distro alive, so
 Ollama could stop while a chat request was loading or generating.
 
-Permanent host change applied on the Windows vision host:
+Superseded host change that is no longer the production path:
 
 - Registered `PicoWslOllamaKeepAlive` in Windows Task Scheduler.
 - Action: run `wsl.exe -d Ubuntu-24.04 --exec sh -lc "while true; do sleep 86400; done"`.
@@ -74,6 +84,9 @@ Permanent host change applied on the Windows vision host:
 - Runtime evidence after stopping the temporary keepalive: task state is running,
   WSL has the scheduled keepalive process, `ollama.service` is active, and
   authenticated `/api/chat` returns HTTP 200.
+
+This WSL keepalive task does not remove the portproxy instability. The final
+production path uses the Windows native `PicoNativeOllamaServe` task instead.
 
 ## Commands and Results
 
