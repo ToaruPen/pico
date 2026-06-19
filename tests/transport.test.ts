@@ -181,6 +181,32 @@ describe("protected Ollama endpoint preflight", () => {
     );
     expect(result.reason).not.toContain(apiKey);
   });
+
+  it("returns a structured failure when the endpoint URL cannot be parsed", async () => {
+    const malformedEndpoint = {
+      ...selectedEndpoint,
+      host: {
+        ...selectedEndpoint.host,
+        tunnel: {
+          ...selectedEndpoint.host.tunnel,
+          localBaseUrl: "not a url"
+        }
+      }
+    };
+
+    const result = await preflightProtectedOllamaEndpoint(malformedEndpoint, {
+      timeoutMs: 1_000
+    });
+
+    expect(result).toEqual({
+      status: "failed",
+      endpointId: "windows-ollama-qwen3-5",
+      checkedUrl: "unavailable",
+      model: "qwen3.5:9b",
+      reason:
+        "pico protected Ollama endpoint failed through the protected tunnel; verify the Tailscale SSH local forward and Windows loopback Ollama service"
+    });
+  });
 });
 
 function tagsResponse(models: readonly string[]): Response {

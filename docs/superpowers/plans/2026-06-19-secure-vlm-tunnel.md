@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Transport Preflight Contract
+## Task 1: Transport Preflight Contract
 
 **Files:**
 - Modify: `src/modules/transport/index.ts`
@@ -57,7 +57,7 @@ npm run test -- tests/transport.test.ts
 
 Expected: pass.
 
-### Task 2: VLM Smoke Integration
+## Task 2: VLM Smoke Integration
 
 **Files:**
 - Modify: `scripts/smoke/ollama-vlm-connectivity.ts`
@@ -91,7 +91,7 @@ npm run test -- tests/ollama-vlm-smoke.test.ts tests/transport.test.ts
 
 Expected: pass.
 
-### Task 3: Operator Documentation And Field Check
+## Task 3: Operator Documentation And Field Check
 
 **Files:**
 - Modify: `config/pico.example.yaml`
@@ -120,7 +120,7 @@ npm run typecheck
 
 Expected: pass.
 
-### Task 4: Live Tailscale SSH Verification
+## Task 4: Live Tailscale SSH Verification
 
 **Files:**
 - No production code changes.
@@ -145,4 +145,3 @@ ssh -o BatchMode=yes win-main 'curl.exe -sS --max-time 5 http://127.0.0.1:11434/
 ```
 
 Expected: the local listener is `ssh`, and Windows loopback returns Ollama tags.
-

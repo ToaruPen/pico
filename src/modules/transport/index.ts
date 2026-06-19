@@ -84,13 +84,16 @@ export async function preflightProtectedOllamaEndpoint(
   endpoint: SelectedModelEndpointConfig,
   probe: ProtectedOllamaEndpointPreflightProbe
 ): Promise<ProtectedOllamaEndpointPreflightResult> {
-  const checkedUrl = new URL("/api/tags", endpoint.host.tunnel.localBaseUrl).toString();
-  const abortController = new AbortController();
-  const timeout = setTimeout(() => {
-    abortController.abort();
-  }, probe.timeoutMs);
+  let checkedUrl = "unavailable";
+  let timeout: ReturnType<typeof setTimeout> | undefined;
 
   try {
+    checkedUrl = new URL("/api/tags", endpoint.host.tunnel.localBaseUrl).toString();
+    const abortController = new AbortController();
+    timeout = setTimeout(() => {
+      abortController.abort();
+    }, probe.timeoutMs);
+
     const response = await (probe.fetchTags ?? fetchProtectedOllamaTags)(
       checkedUrl,
       abortController.signal,
@@ -98,13 +101,7 @@ export async function preflightProtectedOllamaEndpoint(
     );
 
     if (!response.ok) {
-      return failedPreflight(
-        endpoint,
-        checkedUrl,
-        response.status === 401 || response.status === 403
-          ? "pico protected Ollama endpoint requires unexpected auth; verify the SSH tunnel points to the Windows Ollama loopback port"
-          : `pico protected Ollama endpoint /api/tags failed with status ${response.status}`
-      );
+      return failedPreflight(endpoint, checkedUrl, failedHttpPreflightReason(response.status));
     }
 
     const tags = parseOllamaTagsResponse((await response.json()) as unknown);
@@ -136,7 +133,9 @@ export async function preflightProtectedOllamaEndpoint(
 
     return failedPreflight(endpoint, checkedUrl, protectedOllamaTunnelFailureMessage);
   } finally {
-    clearTimeout(timeout);
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
   }
 }
 
@@ -152,6 +151,14 @@ function failedPreflight(
     model: endpoint.model,
     reason
   };
+}
+
+function failedHttpPreflightReason(status: number): string {
+  if (status === 401 || status === 403) {
+    return "pico protected Ollama endpoint requires unexpected auth; verify the SSH tunnel points to the Windows Ollama loopback port";
+  }
+
+  return `pico protected Ollama endpoint /api/tags failed with status ${status}`;
 }
 
 function fetchProtectedOllamaTags(
