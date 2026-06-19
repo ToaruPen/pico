@@ -1,5 +1,8 @@
 import type { PicoModule } from "../../orchestrator/contracts.js";
-import type { SelectedModelEndpointConfig } from "../local-models/index.js";
+import {
+  buildSelectedModelEndpointAuthHeaders,
+  type SelectedModelEndpointConfig
+} from "../local-models/index.js";
 
 export type ProtectedModelEndpointConnectivityProbe = {
   readonly canReach: (localBaseUrl: string) => Promise<boolean>;
@@ -10,6 +13,41 @@ export type ProtectedModelEndpointConnectivityResult = {
   readonly reachable: boolean;
   readonly checkedUrl: string;
 };
+
+export type ProtectedOllamaEndpointPreflightProbe = {
+  readonly timeoutMs: number;
+  readonly fetchTags?: (
+    url: string,
+    signal: AbortSignal,
+    headers: Record<string, string>
+  ) => Promise<Response>;
+};
+
+export type ProtectedOllamaEndpointPreflightResult =
+  | {
+      readonly status: "passed";
+      readonly endpointId: string;
+      readonly checkedUrl: string;
+      readonly model: SelectedModelEndpointConfig["model"];
+      readonly modelCount: number;
+    }
+  | {
+      readonly status: "failed";
+      readonly endpointId: string;
+      readonly checkedUrl: string;
+      readonly model: SelectedModelEndpointConfig["model"];
+      readonly reason: string;
+    };
+
+type OllamaTagsResponse = {
+  readonly models: readonly {
+    readonly name: string;
+  }[];
+};
+
+const malformedOllamaTagsMessage = "pico protected Ollama endpoint /api/tags response is malformed";
+const protectedOllamaTunnelFailureMessage =
+  "pico protected Ollama endpoint failed through the protected tunnel; verify the Tailscale SSH local forward and Windows loopback Ollama service";
 
 export function createTransportModule(): PicoModule {
   return {
@@ -40,4 +78,126 @@ export async function checkProtectedModelEndpointConnectivity(
     reachable,
     checkedUrl
   };
+}
+
+export async function preflightProtectedOllamaEndpoint(
+  endpoint: SelectedModelEndpointConfig,
+  probe: ProtectedOllamaEndpointPreflightProbe
+): Promise<ProtectedOllamaEndpointPreflightResult> {
+  const checkedUrl = new URL("/api/tags", endpoint.host.tunnel.localBaseUrl).toString();
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => {
+    abortController.abort();
+  }, probe.timeoutMs);
+
+  try {
+    const response = await (probe.fetchTags ?? fetchProtectedOllamaTags)(
+      checkedUrl,
+      abortController.signal,
+      buildSelectedModelEndpointAuthHeaders(endpoint)
+    );
+
+    if (!response.ok) {
+      return failedPreflight(
+        endpoint,
+        checkedUrl,
+        response.status === 401 || response.status === 403
+          ? "pico protected Ollama endpoint requires unexpected auth; verify the SSH tunnel points to the Windows Ollama loopback port"
+          : `pico protected Ollama endpoint /api/tags failed with status ${response.status}`
+      );
+    }
+
+    const tags = parseOllamaTagsResponse((await response.json()) as unknown);
+    const hasSelectedModel = tags.models.some((model) => model.name === endpoint.model);
+
+    if (!hasSelectedModel) {
+      return failedPreflight(
+        endpoint,
+        checkedUrl,
+        `pico protected Ollama endpoint could not find ${endpoint.model} in /api/tags`
+      );
+    }
+
+    return {
+      status: "passed",
+      endpointId: endpoint.id,
+      checkedUrl,
+      model: endpoint.model,
+      modelCount: tags.models.length
+    };
+  } catch (error) {
+    if (isAbortError(error)) {
+      return failedPreflight(
+        endpoint,
+        checkedUrl,
+        `pico protected Ollama endpoint timed out after ${probe.timeoutMs} ms; verify the Tailscale SSH local forward and Windows loopback Ollama service`
+      );
+    }
+
+    return failedPreflight(endpoint, checkedUrl, protectedOllamaTunnelFailureMessage);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function failedPreflight(
+  endpoint: SelectedModelEndpointConfig,
+  checkedUrl: string,
+  reason: string
+): ProtectedOllamaEndpointPreflightResult {
+  return {
+    status: "failed",
+    endpointId: endpoint.id,
+    checkedUrl,
+    model: endpoint.model,
+    reason
+  };
+}
+
+function fetchProtectedOllamaTags(
+  url: string,
+  signal: AbortSignal,
+  headers: Record<string, string>
+): Promise<Response> {
+  return fetch(url, {
+    method: "GET",
+    headers,
+    signal
+  });
+}
+
+function parseOllamaTagsResponse(value: unknown): OllamaTagsResponse {
+  const response = requireRecord(value, malformedOllamaTagsMessage);
+
+  if (!Array.isArray(response.models)) {
+    throw new Error(malformedOllamaTagsMessage);
+  }
+
+  return {
+    models: response.models.map(requireOllamaModelTag)
+  };
+}
+
+function requireOllamaModelTag(value: unknown): { readonly name: string } {
+  const model = requireRecord(value, malformedOllamaTagsMessage);
+
+  if (typeof model.name !== "string" || model.name.trim() === "") {
+    throw new Error(malformedOllamaTagsMessage);
+  }
+
+  return {
+    name: model.name
+  };
+}
+
+function requireRecord(value: unknown, message: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(message);
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }

@@ -193,6 +193,31 @@ describe("Ollama VLM connectivity smoke configuration", () => {
     ]);
   });
 
+  it("reports an authenticated service on the protected tunnel as a failed VLM preflight", async () => {
+    const report = await runOllamaVlmConnectivitySmoke(
+      definePicoConfig({
+        vision: {
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434"
+          }
+        }
+      }),
+      () =>
+        Promise.resolve(
+          new Response(JSON.stringify({ error: "unauthorized - API key required" }), {
+            status: 401
+          })
+        )
+    );
+
+    expect(report).toEqual({
+      status: "failed",
+      provider: "ollama",
+      reason:
+        "pico protected Ollama endpoint requires unexpected auth; verify the SSH tunnel points to the Windows Ollama loopback port"
+    });
+  });
+
   it("fails when the selected qwen3.5:9b model is absent", async () => {
     const report = await runOllamaVlmConnectivitySmoke(
       definePicoConfig({
@@ -208,7 +233,7 @@ describe("Ollama VLM connectivity smoke configuration", () => {
     expect(report).toEqual({
       status: "failed",
       provider: "ollama",
-      reason: "pico Ollama VLM smoke could not find qwen3.5:9b in /api/tags"
+      reason: "pico protected Ollama endpoint could not find qwen3.5:9b in /api/tags"
     });
     expect(ollamaVlmSmokeExitCode(report)).toBe(1);
   });

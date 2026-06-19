@@ -14,7 +14,48 @@
 
 ## Environment Fix
 
-The VLM path initially failed on `/api/chat` with a socket close before an HTTP
+The current production boundary is:
+
+```text
+pico host http://127.0.0.1:11435
+  -> Tailscale SSH local forward
+  -> Windows vision host 127.0.0.1:11434
+  -> Ollama qwen3.5:9b
+```
+
+The pico config must not point at a Windows LAN address, a Windows tailnet IP, a
+WSL address, or a public model port. Use a loopback-only local forward:
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -L 127.0.0.1:11435:127.0.0.1:11434 win-main
+```
+
+The Windows host invariant is that the SSH server can reach Ollama on
+`127.0.0.1:11434`, and Ollama is not directly exposed on LAN or tailnet
+interfaces. If Windows uses WSL-hosted Ollama, bind Ollama inside WSL to the WSL
+virtual network and expose only a Windows loopback portproxy:
+
+```ini
+# /etc/systemd/system/ollama.service.d/override.conf
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+```
+
+```powershell
+$wslIp = (wsl.exe hostname -I).Trim().Split()[0]
+netsh interface portproxy add v4tov4 `
+  listenaddress=127.0.0.1 listenport=11434 `
+  connectaddress=$wslIp connectport=11434
+```
+
+Do not use `listenaddress=0.0.0.0` for the Windows portproxy. The portproxy
+target must be WSL's Ollama port `11434`, not an authenticated proxy or stale
+WSL port.
+
+The previous VLM path failed on `/api/chat` with a socket close before an HTTP
 response. Boundary checks showed:
 
 - Mac to Windows/WSL nginx `/api/tags`: passed.
