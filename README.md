@@ -112,9 +112,27 @@ Configure these sections in `config/pico.local.yaml` as needed:
   `curl -s http://127.0.0.1:10101/speakers`.
 - `voice.stt.mlxWhisper` for mlx-whisper STT. `samplePcm16lePath` must point to
   a PCM16LE mono 16 kHz sample.
+- `voice.resident.audioInput` and `voice.resident.audioOutput` for the
+  production resident voice process. Use `avfoundation` plus `afplay` with
+  explicit `route: system_default` on macOS, and `alsa` plus `alsa` with explicit
+  devices on Raspberry Pi / Linux.
 - `camera.tapo` for one Tapo RTSP JPEG frame.
 - `vision.ollama` for `qwen3.5:9b` through the protected local tunnel.
 - `camera.tapo` plus `vision.ollama` for camera-to-VLM scene smoke.
+
+Run the resident processes after the local providers are configured:
+
+```bash
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:memory
+```
+
+`resident:voice` owns live microphone, speaker, session cutoff, and enqueueing.
+`resident:memory` is the companion drain worker that writes queued session
+cutoffs to Mem0 and OTel/audit without adding a default job timeout. It recovers
+stale `processing` jobs after `PICO_RESIDENT_MEMORY_RECOVER_PROCESSING_OLDER_THAN_MS`
+or 10 minutes by default; this is crash recovery, not a per-job execution
+deadline.
 
 For the protected Windows GPU vision host, run Windows native Ollama on
 `127.0.0.1:11434` and reach it only through the pico-host SSH local forward. The

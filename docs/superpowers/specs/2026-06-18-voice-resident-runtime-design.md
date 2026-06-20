@@ -186,13 +186,23 @@ process lifecycle は以下を持つ。
 
 必要な項目:
 
-- microphone input provider/device/window duration。
-- playback provider/device。
+- `voice.resident.audioInput`。Mac mini 常駐では `provider: avfoundation`
+  と AVFoundation device を明示する。Raspberry Pi / Linux 常駐では
+  `provider: alsa` と ALSA device を明示する。
+- `voice.resident.audioOutput`。Mac mini 常駐では `provider: afplay` と
+  `route: system_default` を明示し、macOS の現在の default output route を
+  resident 用として運用者が承認する。Raspberry Pi / Linux 常駐では
+  `provider: alsa` と ALSA device を明示する。
 - trigger confidence。
 - probe enablement and sink。
 
 production config が不足している場合は起動時に失敗する。field script の env-only
 設定を production runtime にそのまま流用しない。
+
+Mac mini を resident host とする場合、ALSA を Mac に持ち込まない。
+resident runtime は音声 I/O provider を通して macOS の AVFoundation capture と
+明示承認された default route の afplay playback を使う。Linux/Pi では同じ runtime
+contract の ALSA provider を使う。provider の暗黙 fallback は持たない。
 
 ## Testing Strategy
 
@@ -221,4 +231,7 @@ field validation は実機で以下を確認する。
 - Pi Agent SDK turn。
 - session cutoff。
 - long-memory enqueue。
+- companion `resident:memory` drain worker による queued cutoff の Mem0
+  processing。worker は default job execution timeout を持たない。ただし
+  crash 後に残った stale `processing` job は復旧閾値で queued に戻せる。
 - OTel/probe event。

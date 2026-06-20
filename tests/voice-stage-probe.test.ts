@@ -41,6 +41,51 @@ describe("voice stage probe", () => {
     ]);
   });
 
+  it("accepts fractional stage durations from provider timing measurements", () => {
+    const audit = createStructuredAuditLog();
+
+    recordVoiceStageProbe(
+      { audit },
+      {
+        stage: "stt",
+        status: "ok",
+        startedAt: "2026-06-18T00:00:00.000Z",
+        durationMs: 1007.515792036429
+      }
+    );
+
+    const event = audit.entries()[0];
+
+    expect(event?.occurredAt).toBe("2026-06-18T00:00:01.007Z");
+    expect(event?.attributes["pico.voice.stage_duration_ms"]).toBe(1007.515792036429);
+  });
+
+  it("rejects non-finite or oversized stage durations", () => {
+    expect(() =>
+      recordVoiceStageProbe(
+        { audit: createStructuredAuditLog() },
+        {
+          stage: "stt",
+          status: "ok",
+          startedAt: "2026-06-18T00:00:00.000Z",
+          durationMs: Number.POSITIVE_INFINITY
+        }
+      )
+    ).toThrow("pico voice stage probe durationMs must be a non-negative number <= 2147483647");
+
+    expect(() =>
+      recordVoiceStageProbe(
+        { audit: createStructuredAuditLog() },
+        {
+          stage: "stt",
+          status: "ok",
+          startedAt: "2026-06-18T00:00:00.000Z",
+          durationMs: 2_147_483_648
+        }
+      )
+    ).toThrow("pico voice stage probe durationMs must be a non-negative number <= 2147483647");
+  });
+
   it("rejects raw transcript and prompt-like probe attributes before audit recording", () => {
     const audit = createStructuredAuditLog();
 

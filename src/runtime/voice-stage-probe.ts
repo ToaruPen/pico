@@ -61,7 +61,7 @@ export function recordVoiceStageProbe(
   const stage = requireVoiceRuntimeStage(input.stage);
   const status = requireVoiceStageStatus(input.status);
   const startedAt = requireIsoTimestamp(input.startedAt, "pico voice stage probe startedAt");
-  const durationMs = requireNonNegativeInteger(
+  const durationMs = requireNonNegativeNumber(
     input.durationMs,
     "pico voice stage probe durationMs"
   );
@@ -113,9 +113,9 @@ function requireIsoTimestamp(value: string, label: string): string {
   return value;
 }
 
-function requireNonNegativeInteger(value: number, label: string): number {
-  if (!Number.isInteger(value) || value < 0 || value > maxNodeTimeoutMs) {
-    throw new Error(`${label} must be a non-negative integer <= ${maxNodeTimeoutMs}`);
+function requireNonNegativeNumber(value: number, label: string): number {
+  if (!Number.isFinite(value) || value < 0 || value > maxNodeTimeoutMs) {
+    throw new Error(`${label} must be a non-negative number <= ${maxNodeTimeoutMs}`);
   }
 
   return value;

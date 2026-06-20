@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
@@ -10,8 +9,7 @@ import { createSessionLifecycle } from "../../src/modules/session/index.js";
 import {
   createHalfDuplexEchoControl,
   createHttpEchoControlProvider,
-  type EchoControlProvider,
-  type VoicePcmFrame
+  type EchoControlProvider
 } from "../../src/modules/voice/echo-control.js";
 import {
   createAivisSpeechTtsClient,
@@ -21,9 +19,10 @@ import {
 } from "../../src/modules/voice/index.js";
 import { createPiAgentTurnClient } from "../../src/runtime/pi-agent-turn.js";
 import {
-  runVoiceResidentRuntime,
-  type VoicePlaybackSink
-} from "../../src/runtime/voice-resident.js";
+  createResidentPcmFrameSource,
+  createResidentPlaybackSink
+} from "../../src/runtime/resident-audio-io.js";
+import { runVoiceResidentRuntime } from "../../src/runtime/voice-resident.js";
 
 const config = loadPicoConfigFromEnvironment();
 
@@ -56,7 +55,7 @@ async function runResidentVoice(config: PicoConfig, signal: AbortSignal): Promis
   const memoryWorker = createResidentMemoryWorker(config);
 
   await runVoiceResidentRuntime({
-    frames: createAlsaPcmFrameSource(config, signal),
+    frames: createResidentPcmFrameSource(config, signal),
     triggerPhrases: [
       ...config.session.startTriggers.wakeNames,
       ...config.session.startTriggers.greetings
@@ -65,7 +64,7 @@ async function runResidentVoice(config: PicoConfig, signal: AbortSignal): Promis
     echoControl: createConfiguredEchoControl(config),
     stt: createConfiguredStt(config),
     tts: createConfiguredTts(config),
-    playback: createAlsaPlaybackSink(config),
+    playback: createResidentPlaybackSink(config),
     piAgent: createPiAgentTurnClient({
       cwd: process.cwd(),
       sessionLifecycle
@@ -205,132 +204,6 @@ function createResidentMemoryWorker(config: PicoConfig) {
   };
 }
 
-async function* createAlsaPcmFrameSource(
-  config: PicoConfig,
-  signal: AbortSignal
-): AsyncIterable<VoicePcmFrame> {
-  requireLinuxAlsa();
-  const echoControl = config.voice.echoControl;
-  const frameBytes = Math.round(
-    (echoControl.sampleRateHz * echoControl.channels * 2 * echoControl.frameMs) / 1_000
-  );
-  const arguments_ = [
-    "-q",
-    "-f",
-    "S16_LE",
-    "-r",
-    String(echoControl.sampleRateHz),
-    "-c",
-    String(echoControl.channels),
-    "-t",
-    "raw",
-    ...(config.voice.resident.microphoneDevice === undefined
-      ? []
-      : ["-D", config.voice.resident.microphoneDevice])
-  ];
-  const child = spawn("arecord", arguments_, {
-    stdio: ["ignore", "pipe", "inherit"]
-  });
-  let frameIndex = 0;
-  let pending = Buffer.alloc(0);
-  let childFailure: Error | undefined;
-  const abort = (): void => {
-    child.kill("SIGTERM");
-  };
-  const closed = new Promise<void>((resolve) => {
-    child.once("close", (code, signalName) => {
-      if (!signal.aborted && code !== 0) {
-        childFailure = new Error(
-          `pico resident voice arecord exited with code ${String(code)} signal ${String(
-            signalName
-          )}`
-        );
-        child.stdout.destroy(childFailure);
-      }
-
-      resolve();
-    });
-  });
-
-  child.once("error", (error) => {
-    childFailure = error;
-    child.stdout.destroy(error);
-  });
-
-  signal.addEventListener("abort", abort, { once: true });
-
-  try {
-    for await (const chunk of child.stdout) {
-      pending = Buffer.concat([pending, chunk as Buffer]);
-
-      while (pending.byteLength >= frameBytes) {
-        const audio = pending.subarray(0, frameBytes);
-        pending = pending.subarray(frameBytes);
-        frameIndex += 1;
-
-        yield {
-          id: `alsa-mic-${frameIndex}`,
-          direction: "near_end",
-          audio: new Uint8Array(audio),
-          encoding: "pcm16le",
-          sampleRateHz: echoControl.sampleRateHz,
-          channels: echoControl.channels,
-          capturedAt: new Date().toISOString(),
-          durationMs: echoControl.frameMs
-        };
-      }
-    }
-
-    await closed;
-
-    if (childFailure !== undefined) {
-      throw childFailure;
-    }
-  } finally {
-    signal.removeEventListener("abort", abort);
-    child.kill("SIGTERM");
-  }
-}
-
-function createAlsaPlaybackSink(config: PicoConfig): VoicePlaybackSink {
-  return {
-    play(chunk) {
-      requireLinuxAlsa();
-
-      return new Promise((resolve, reject) => {
-        const arguments_ = [
-          "-q",
-          "-f",
-          "S16_LE",
-          "-r",
-          String(chunk.sampleRateHz),
-          "-c",
-          String(chunk.channels),
-          "-t",
-          "raw",
-          ...(config.voice.resident.playbackDevice === undefined
-            ? []
-            : ["-D", config.voice.resident.playbackDevice])
-        ];
-        const child = spawn("aplay", arguments_, {
-          stdio: ["pipe", "ignore", "inherit"]
-        });
-
-        child.once("error", reject);
-        child.once("exit", (code) => {
-          if (code === 0) {
-            resolve();
-            return;
-          }
-
-          reject(new Error(`pico resident voice aplay exited with code ${String(code)}`));
-        });
-        child.stdin.end(chunk.audio);
-      });
-    }
-  };
-}
-
 function acquireSingleInstanceLock(lockPath: string): () => void {
   const resolved = resolve(lockPath);
 
@@ -403,10 +276,4 @@ function isFileAlreadyExistsError(error: unknown): boolean {
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
-}
-
-function requireLinuxAlsa(): void {
-  if (process.platform !== "linux") {
-    throw new Error("pico resident voice ALSA I/O requires Linux");
-  }
 }
