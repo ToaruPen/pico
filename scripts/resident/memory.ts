@@ -105,17 +105,21 @@ async function exportNewAuditEvents(
     return events.length;
   }
 
+  let nextExportedCount = exportedCount;
+
   for (const event of events.slice(exportedCount)) {
     try {
       await exporter.export(event);
+      nextExportedCount += 1;
     } catch (error) {
       process.stderr.write(
         `${JSON.stringify({ status: "otel_export_failed", error: String(error) })}\n`
       );
+      break;
     }
   }
 
-  return events.length;
+  return nextExportedCount;
 }
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {
