@@ -36,28 +36,34 @@ describe("pico YAML config", () => {
     );
   });
 
-  it("requires explicit voice devices when the resident runtime is enabled", () => {
+  it("requires explicit voice audio providers when the resident runtime is enabled", () => {
     expect(() =>
       definePicoConfig({
         voice: {
           resident: {
             enabled: true,
-            playbackDevice: "hw:0,0"
+            audioOutput: {
+              provider: "alsa",
+              device: "hw:0,0"
+            }
           }
         }
       })
-    ).toThrow("pico config voice.resident.microphoneDevice is required when resident is enabled");
+    ).toThrow("pico config voice.resident.audioInput is required when resident is enabled");
 
     expect(() =>
       definePicoConfig({
         voice: {
           resident: {
             enabled: true,
-            microphoneDevice: "hw:1,0"
+            audioInput: {
+              provider: "alsa",
+              device: "hw:1,0"
+            }
           }
         }
       })
-    ).toThrow("pico config voice.resident.playbackDevice is required when resident is enabled");
+    ).toThrow("pico config voice.resident.audioOutput is required when resident is enabled");
   });
 
   it("loads configured camera, vision, voice, memory, and person detection providers from YAML", () => {
@@ -123,8 +129,12 @@ vision:
 voice:
   resident:
     enabled: true
-    microphoneDevice: Built-in Microphone
-    playbackDevice: Built-in Output
+    audioInput:
+      provider: avfoundation
+      device: ':0'
+    audioOutput:
+      provider: afplay
+      route: system_default
     singleInstanceLockPath: tmp/pico-custom-resident.lock
     minTriggerConfidence: 0.72
     shutdownGraceMs: 3000
@@ -253,8 +263,14 @@ audit:
       voice: {
         resident: {
           enabled: true,
-          microphoneDevice: "Built-in Microphone",
-          playbackDevice: "Built-in Output",
+          audioInput: {
+            provider: "avfoundation",
+            device: ":0"
+          },
+          audioOutput: {
+            provider: "afplay",
+            route: "system_default"
+          },
           singleInstanceLockPath: "tmp/pico-custom-resident.lock",
           minTriggerConfidence: 0.72,
           shutdownGraceMs: 3000

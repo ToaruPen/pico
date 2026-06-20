@@ -290,7 +290,12 @@ Expected: fails because `voice.resident` and `voice.probes` are missing.
 
 - [ ] **Step 3: Implement config parser and example YAML**
 
-Add `PicoVoiceResidentConfig` with `enabled`, `microphoneDevice`, `playbackDevice`, `singleInstanceLockPath`, `minTriggerConfidence`, and `shutdownGraceMs`. Add `PicoVoiceProbeConfig` with `enabled`.
+Add `PicoVoiceResidentConfig` with `enabled`, explicit `audioInput` and
+`audioOutput` provider objects, `singleInstanceLockPath`, `minTriggerConfidence`,
+and `shutdownGraceMs`. Add `PicoVoiceProbeConfig` with `enabled`. The original
+first slice used direct microphone/playback device fields; the current resident
+host decision replaces those with explicit macOS `avfoundation`/`afplay` and
+Linux `alsa` provider boundaries.
 
 - [ ] **Step 4: Add resident entrypoint**
 

@@ -34,6 +34,7 @@
     "field:session-memory-lifecycle": "jiti scripts/field/session-memory-lifecycle.ts",
     "field:person-follow-visible-person": "jiti scripts/field/person-follow-visible-person.ts",
     "field:voice-echo-pickup": "jiti scripts/field/voice-echo-pickup.ts",
+    "resident:memory": "jiti scripts/resident/memory.ts",
     "resident:voice": "jiti scripts/resident/voice.ts",
     "lint": "eslint .",
     "format": "biome format --write .",

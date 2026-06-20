@@ -67,8 +67,20 @@ vision:
 voice:
   resident:
     enabled: false
-    microphoneDevice: Built-in Microphone
-    playbackDevice: Built-in Output
+    # Mac mini resident runtime:
+    audioInput:
+      provider: avfoundation
+      device: ':0'
+    audioOutput:
+      provider: afplay
+      route: system_default
+    # Raspberry Pi / Linux resident runtime:
+    # audioInput:
+    #   provider: alsa
+    #   device: hw:1,0
+    # audioOutput:
+    #   provider: alsa
+    #   device: hw:0,0
     singleInstanceLockPath: tmp/pico-voice-resident.lock
     minTriggerConfidence: 0.6
     shutdownGraceMs: 5000

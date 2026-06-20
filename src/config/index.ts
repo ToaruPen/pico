@@ -163,12 +163,32 @@ export type PicoEchoControlProvider =
 
 export type PicoVoiceResidentConfig = {
   readonly enabled: boolean;
-  readonly microphoneDevice?: string;
-  readonly playbackDevice?: string;
+  readonly audioInput?: PicoResidentAudioInputConfig;
+  readonly audioOutput?: PicoResidentAudioOutputConfig;
   readonly singleInstanceLockPath: string;
   readonly minTriggerConfidence: number;
   readonly shutdownGraceMs: number;
 };
+
+export type PicoResidentAudioInputConfig =
+  | {
+      readonly provider: "alsa";
+      readonly device: string;
+    }
+  | {
+      readonly provider: "avfoundation";
+      readonly device: string;
+    };
+
+export type PicoResidentAudioOutputConfig =
+  | {
+      readonly provider: "alsa";
+      readonly device: string;
+    }
+  | {
+      readonly provider: "afplay";
+      readonly route: "system_default";
+    };
 
 export type PicoVoiceProbeConfig = {
   readonly enabled: boolean;
@@ -664,21 +684,18 @@ function defineVoiceResidentConfig(
   }
 
   const enabled = readOptionalBoolean(input.enabled, "pico config voice.resident.enabled") ?? false;
-  const microphoneDevice = readOptionalString(
-    input.microphoneDevice,
-    "pico config voice.resident.microphoneDevice"
-  );
-  const playbackDevice = readOptionalString(
-    input.playbackDevice,
-    "pico config voice.resident.playbackDevice"
+  const audioInput = readOptionalRecord(input.audioInput, "pico config voice.resident.audioInput");
+  const audioOutput = readOptionalRecord(
+    input.audioOutput,
+    "pico config voice.resident.audioOutput"
   );
 
-  requireResidentVoiceDevices(enabled, microphoneDevice, playbackDevice);
+  requireResidentVoiceAudio(enabled, audioInput, audioOutput);
 
   return {
     enabled,
-    ...(microphoneDevice === undefined ? {} : { microphoneDevice }),
-    ...(playbackDevice === undefined ? {} : { playbackDevice }),
+    ...(audioInput === undefined ? {} : { audioInput: defineResidentAudioInput(audioInput) }),
+    ...(audioOutput === undefined ? {} : { audioOutput: defineResidentAudioOutput(audioOutput) }),
     singleInstanceLockPath:
       readOptionalString(
         input.singleInstanceLockPath,
@@ -698,26 +715,65 @@ function defineVoiceResidentConfig(
   };
 }
 
-function requireResidentVoiceDevices(
+function requireResidentVoiceAudio(
   enabled: boolean,
-  microphoneDevice: string | undefined,
-  playbackDevice: string | undefined
+  audioInput: Record<string, unknown> | undefined,
+  audioOutput: Record<string, unknown> | undefined
 ): void {
   if (!enabled) {
     return;
   }
 
-  if (microphoneDevice === undefined) {
-    throw new Error(
-      "pico config voice.resident.microphoneDevice is required when resident is enabled"
-    );
+  if (audioInput === undefined) {
+    throw new Error("pico config voice.resident.audioInput is required when resident is enabled");
   }
 
-  if (playbackDevice === undefined) {
-    throw new Error(
-      "pico config voice.resident.playbackDevice is required when resident is enabled"
-    );
+  if (audioOutput === undefined) {
+    throw new Error("pico config voice.resident.audioOutput is required when resident is enabled");
   }
+}
+
+function defineResidentAudioInput(input: Record<string, unknown>): PicoResidentAudioInputConfig {
+  const provider = requireString(input.provider, "pico config voice.resident.audioInput.provider");
+
+  if (provider === "alsa") {
+    return {
+      provider,
+      device: requireString(input.device, "pico config voice.resident.audioInput.device")
+    };
+  }
+
+  if (provider === "avfoundation") {
+    return {
+      provider,
+      device: requireString(input.device, "pico config voice.resident.audioInput.device")
+    };
+  }
+
+  throw new Error("pico config voice.resident.audioInput.provider must be alsa or avfoundation");
+}
+
+function defineResidentAudioOutput(input: Record<string, unknown>): PicoResidentAudioOutputConfig {
+  const provider = requireString(input.provider, "pico config voice.resident.audioOutput.provider");
+
+  if (provider === "alsa") {
+    return {
+      provider,
+      device: requireString(input.device, "pico config voice.resident.audioOutput.device")
+    };
+  }
+
+  if (provider === "afplay") {
+    const route = requireString(input.route, "pico config voice.resident.audioOutput.route");
+
+    if (route !== "system_default") {
+      throw new Error("pico config voice.resident.audioOutput.route must be system_default");
+    }
+
+    return { provider, route };
+  }
+
+  throw new Error("pico config voice.resident.audioOutput.provider must be alsa or afplay");
 }
 
 function defineVoiceProbeConfig(input: Record<string, unknown> | undefined): PicoVoiceProbeConfig {
