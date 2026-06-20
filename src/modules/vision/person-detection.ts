@@ -150,6 +150,12 @@ type OnnxDetectionRow = {
   readonly classId: number;
 };
 
+type YoloxGridCell = {
+  readonly x: number;
+  readonly y: number;
+  readonly stride: number;
+};
+
 export type PersonDetectionStreamOptions = {
   readonly sourceId: string;
   readonly frameIntervalMs: number;
@@ -451,8 +457,22 @@ function parseOnnxPersonDetections(input: {
   readonly nmsIouThreshold: number;
 }): readonly PersonDetectionInput[] {
   const rows = toOnnxRows(input.output);
+  const yoloxGridCells =
+    input.outputLayout === "yolox_coco_raw"
+      ? buildYoloxGridCellsForRows(rows.length, input.frameWidth, input.frameHeight)
+      : undefined;
   const detections = rows
-    .map((row) => parseOnnxPersonDetectionRow(row, input))
+    .map((row, index) =>
+      parseOnnxPersonDetectionRow(
+        row,
+        yoloxGridCells?.[index] === undefined
+          ? input
+          : {
+              ...input,
+              yoloxGridCell: yoloxGridCells[index]
+            }
+      )
+    )
     .filter((detection): detection is PersonDetectionInput => detection !== undefined);
 
   return input.outputLayout === "yolox_coco_raw"
@@ -490,6 +510,7 @@ function parseOnnxPersonDetectionRow(
     readonly frameHeight: number;
     readonly personClassId: number;
     readonly confidenceThreshold: number;
+    readonly yoloxGridCell?: YoloxGridCell;
   }
 ): PersonDetectionInput | undefined {
   if (options.outputLayout === "yolox_coco_raw") {
@@ -521,6 +542,7 @@ function parseYoloxCocoRawPersonDetectionRow(
     readonly frameHeight: number;
     readonly personClassId: number;
     readonly confidenceThreshold: number;
+    readonly yoloxGridCell?: YoloxGridCell;
   }
 ): PersonDetectionInput | undefined {
   if (row.length !== 85) {
@@ -543,11 +565,11 @@ function parseYoloxCocoRawPersonDetectionRow(
     return undefined;
   }
 
-  const box = clampBoxToFrame(
-    parseCxcywhBox(centerX, centerY, width, height, options),
-    options.frameWidth,
-    options.frameHeight
-  );
+  const decodedBox =
+    options.yoloxGridCell === undefined
+      ? parseCxcywhBox(centerX, centerY, width, height, options)
+      : decodeYoloxCocoRawBox(centerX, centerY, width, height, options.yoloxGridCell);
+  const box = clampBoxToFrame(decodedBox, options.frameWidth, options.frameHeight);
 
   if (box === undefined) {
     return undefined;
@@ -557,6 +579,58 @@ function parseYoloxCocoRawPersonDetectionRow(
     label: "person",
     confidence,
     box
+  };
+}
+
+function buildYoloxGridCellsForRows(
+  rowCount: number,
+  frameWidth: number,
+  frameHeight: number
+): readonly YoloxGridCell[] | undefined {
+  const cells = buildYoloxGridCells(frameWidth, frameHeight);
+
+  return cells.length === rowCount ? cells : undefined;
+}
+
+function buildYoloxGridCells(frameWidth: number, frameHeight: number): readonly YoloxGridCell[] {
+  const strides = [8, 16, 32] as const;
+  const cells: YoloxGridCell[] = [];
+
+  for (const stride of strides) {
+    const width = Math.floor(frameWidth / stride);
+    const height = Math.floor(frameHeight / stride);
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        cells.push({ x, y, stride });
+      }
+    }
+  }
+
+  return cells;
+}
+
+function decodeYoloxCocoRawBox(
+  centerXOffset: number,
+  centerYOffset: number,
+  widthLog: number,
+  heightLog: number,
+  grid: YoloxGridCell
+): PersonDetectionBoxInput {
+  const width =
+    Math.exp(requireNumber(widthLog, "pico person detection YOLOX box width")) * grid.stride;
+  const height =
+    Math.exp(requireNumber(heightLog, "pico person detection YOLOX box height")) * grid.stride;
+  const centerX =
+    (requireNumber(centerXOffset, "pico person detection YOLOX center x") + grid.x) * grid.stride;
+  const centerY =
+    (requireNumber(centerYOffset, "pico person detection YOLOX center y") + grid.y) * grid.stride;
+
+  return {
+    x: centerX - width / 2,
+    y: centerY - height / 2,
+    width: requirePositiveDimension(width, "pico person detection ONNX box width"),
+    height: requirePositiveDimension(height, "pico person detection ONNX box height")
   };
 }
 
