@@ -127,6 +127,15 @@ export type TtsClient = {
   readonly synthesize: (request: TtsSynthesisRequest) => Promise<TtsSynthesisResult>;
 };
 
+export type AivisSpeechServiceHealth =
+  | {
+      readonly ok: true;
+    }
+  | {
+      readonly ok: false;
+      readonly message: string;
+    };
+
 type SttTranscriptionSource = {
   readonly sidecarId: string;
   readonly provider: "mlx-whisper";
@@ -291,6 +300,62 @@ export function createAivisSpeechTtsClient(
       };
     }
   };
+}
+
+export async function checkAivisSpeechServiceHealth(
+  service: AivisSpeechServiceConfig,
+  fetchImplementation: typeof fetch = fetch
+): Promise<AivisSpeechServiceHealth> {
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => abortController.abort(), service.timeoutMs);
+
+  try {
+    const response = await fetchImplementation(new URL("/speakers", service.localBaseUrl), {
+      method: "GET",
+      signal: abortController.signal
+    });
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        message: `pico TTS Aivis Speech speakers request failed with status ${response.status}`
+      };
+    }
+
+    const speakers: unknown = await response.json();
+
+    if (!aivisSpeakersIncludeStyle(speakers, service.speakerId)) {
+      return {
+        ok: false,
+        message: `pico TTS Aivis Speech speakerId ${service.speakerId} is not available from /speakers`
+      };
+    }
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `pico TTS Aivis Speech speakers request failed: ${errorMessage(error)}`
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function aivisSpeakersIncludeStyle(speakers: unknown, speakerId: number): boolean {
+  if (!Array.isArray(speakers)) {
+    return false;
+  }
+
+  return speakers.some((speaker) => aivisSpeakerIncludesStyle(speaker, speakerId));
+}
+
+function aivisSpeakerIncludesStyle(speaker: unknown, speakerId: number): boolean {
+  if (!isRecord(speaker) || !Array.isArray(speaker.styles)) {
+    return false;
+  }
+
+  return speaker.styles.some((style) => isRecord(style) && style.id === speakerId);
 }
 
 export function segmentJapaneseSentences(text: string): readonly string[] {
@@ -1243,4 +1308,8 @@ function aivisRequestErrorMessage(stage: "audio_query" | "synthesis", error: unk
   }
 
   return `pico TTS Aivis Speech ${stage} request failed`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
