@@ -261,6 +261,38 @@ describe("resident audio I/O plans", () => {
     expect(process.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
+  it("fails before spawning when the input signal is already aborted", async () => {
+    const config = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: {
+            provider: "avfoundation",
+            device: ":0"
+          },
+          audioOutput: {
+            provider: "afplay",
+            route: "system_default"
+          }
+        }
+      }
+    });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const spawn = vi.fn(() => process.child);
+    const abortController = new AbortController();
+
+    abortController.abort();
+
+    const iterator = createResidentPcmFrameSource(config, abortController.signal, spawn, "darwin")[
+      Symbol.asyncIterator
+    ]();
+
+    await expect(iterator.next()).rejects.toThrow(
+      "pico resident voice avfoundation input was aborted before startup"
+    );
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
   it("plays ALSA PCM using the TTS chunk sample format", async () => {
     const config = definePicoConfig({
       voice: {

@@ -106,7 +106,13 @@ async function exportNewAuditEvents(
   }
 
   for (const event of events.slice(exportedCount)) {
-    await exporter.export(event);
+    try {
+      await exporter.export(event);
+    } catch (error) {
+      process.stderr.write(
+        `${JSON.stringify({ status: "otel_export_failed", error: String(error) })}\n`
+      );
+    }
   }
 
   return events.length;

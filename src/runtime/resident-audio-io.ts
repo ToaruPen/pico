@@ -174,6 +174,10 @@ async function* readPcmFrames(
   signal: AbortSignal,
   spawnAudioProcess: SpawnAudioProcess
 ): AsyncIterable<VoicePcmFrame> {
+  if (signal.aborted) {
+    throw new Error(`pico resident voice ${plan.provider} input was aborted before startup`);
+  }
+
   const child = spawnAudioProcess(plan.command, plan.args, {
     stdio: ["ignore", "pipe", "inherit"]
   });
