@@ -64,6 +64,52 @@ function yoloxCocoRow(input: {
   ];
 }
 
+function yoloxCocoRawOutput(input: {
+  readonly frameWidth: number;
+  readonly frameHeight: number;
+  readonly detections: readonly {
+    readonly rowIndex: number;
+    readonly centerXOffset: number;
+    readonly centerYOffset: number;
+    readonly widthLog: number;
+    readonly heightLog: number;
+    readonly objectness: number;
+    readonly personScore: number;
+  }[];
+}): Float32Array {
+  const rowCount = yoloxGridRowCount(input.frameWidth, input.frameHeight);
+  const rows = Array.from({ length: rowCount }, () =>
+    yoloxCocoRow({
+      centerX: 0,
+      centerY: 0,
+      width: 0,
+      height: 0,
+      objectness: 0,
+      personScore: 0
+    })
+  );
+
+  for (const detection of input.detections) {
+    rows[detection.rowIndex] = yoloxCocoRow({
+      centerX: detection.centerXOffset,
+      centerY: detection.centerYOffset,
+      width: detection.widthLog,
+      height: detection.heightLog,
+      objectness: detection.objectness,
+      personScore: detection.personScore
+    });
+  }
+
+  return Float32Array.from(rows.flat());
+}
+
+function yoloxGridRowCount(frameWidth: number, frameHeight: number): number {
+  return [8, 16, 32].reduce(
+    (total, stride) => total + Math.floor(frameWidth / stride) * Math.floor(frameHeight / stride),
+    0
+  );
+}
+
 describe("streaming person detection", () => {
   it("preprocesses image frames into NCHW RGB float tensors", async () => {
     const operations: string[] = [];
@@ -419,6 +465,54 @@ describe("streaming person detection", () => {
         }
       }
     ]);
+  });
+
+  it("decodes YOLOX raw grid offsets and log sizes into input-frame boxes", async () => {
+    const runtime = createOneOutputRuntime(
+      yoloxCocoRawOutput({
+        frameWidth: 320,
+        frameHeight: 320,
+        detections: [
+          {
+            rowIndex: 10 * 40 + 20,
+            centerXOffset: 0.5,
+            centerYOffset: 0.25,
+            widthLog: Math.log(10),
+            heightLog: Math.log(12.5),
+            objectness: 0.9,
+            personScore: 0.8
+          }
+        ]
+      }),
+      [1, 2100, 85]
+    );
+
+    const model = await createOnnxPersonDetectionModel({
+      modelPath: "/opt/pico/models/pinto0309/yolox_nano_320x320.onnx",
+      frameSize: {
+        width: 320,
+        height: 320
+      },
+      outputLayout: "yolox_coco_raw",
+      coordinateScale: "pixel",
+      runtime,
+      preprocessFrame: () =>
+        Promise.resolve({
+          data: Float32Array.of(0),
+          dims: [1, 3, 320, 320]
+        }),
+      confidenceThreshold: 0.5,
+      nmsIouThreshold: 0.45
+    });
+
+    const [detection] = await model.detect(Buffer.from("frame"));
+
+    expect(detection?.label).toBe("person");
+    expect(detection?.confidence).toBe(0.72);
+    expect(detection?.box.x).toBeCloseTo(124);
+    expect(detection?.box.y).toBeCloseTo(32);
+    expect(detection?.box.width).toBeCloseTo(80);
+    expect(detection?.box.height).toBeCloseTo(100);
   });
 
   it("clamps raw YOLOX COCO boxes to the frame", async () => {
