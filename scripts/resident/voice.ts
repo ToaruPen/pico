@@ -1,6 +1,3 @@
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
 import { createStructuredAuditLog } from "../../src/modules/audit/index.js";
 import { openSessionMemoryCandidateQueue } from "../../src/modules/long-memory/index.js";
@@ -12,6 +9,8 @@ import {
   type EchoControlProvider
 } from "../../src/modules/voice/echo-control.js";
 import {
+  type AivisSpeechServiceConfig,
+  checkAivisSpeechServiceHealth,
   createAivisSpeechTtsClient,
   createMlxWhisperSttClient,
   defineAivisSpeechService,
@@ -22,6 +21,10 @@ import {
   createResidentPcmFrameSource,
   createResidentPlaybackSink
 } from "../../src/runtime/resident-audio-io.js";
+import {
+  acquireResidentSingleInstanceLock,
+  registerResidentSingleInstanceLockShutdownCleanup
+} from "../../src/runtime/resident-single-instance-lock.js";
 import { runVoiceResidentRuntime } from "../../src/runtime/voice-resident.js";
 
 const config = loadPicoConfigFromEnvironment();
@@ -30,11 +33,14 @@ if (!config.voice.resident.enabled) {
   throw new Error("pico resident voice runtime requires voice.resident.enabled=true");
 }
 
-const abortController = new AbortController();
-const releaseLock = acquireSingleInstanceLock(config.voice.resident.singleInstanceLockPath);
+await assertResidentVoiceStartupReadiness(config);
 
-process.once("SIGINT", () => abortController.abort());
-process.once("SIGTERM", () => abortController.abort());
+const abortController = new AbortController();
+const lock = acquireResidentSingleInstanceLock(config.voice.resident.singleInstanceLockPath);
+const unregisterShutdownCleanup = registerResidentSingleInstanceLockShutdownCleanup(
+  lock,
+  abortController
+);
 
 try {
   await withShutdownGrace(
@@ -43,7 +49,8 @@ try {
     config.voice.resident.shutdownGraceMs
   );
 } finally {
-  releaseLock();
+  unregisterShutdownCleanup();
+  lock.release();
 }
 
 async function runResidentVoice(config: PicoConfig, signal: AbortSignal): Promise<void> {
@@ -169,21 +176,7 @@ function createConfiguredStt(config: PicoConfig) {
 }
 
 function createConfiguredTts(config: PicoConfig) {
-  const aivis = config.voice.tts.aivis;
-
-  if (aivis === undefined) {
-    throw new Error("pico resident voice requires voice.tts.aivis config");
-  }
-
-  return createAivisSpeechTtsClient(
-    defineAivisSpeechService({
-      id: aivis.id ?? "local-aivis",
-      provider: "aivis-speech",
-      localBaseUrl: aivis.localBaseUrl,
-      speakerId: aivis.speakerId,
-      timeoutMs: aivis.timeoutMs ?? 30_000
-    })
-  );
+  return createAivisSpeechTtsClient(buildAivisSpeechService(config));
 }
 
 function createResidentMemoryWorker(config: PicoConfig) {
@@ -204,76 +197,26 @@ function createResidentMemoryWorker(config: PicoConfig) {
   };
 }
 
-function acquireSingleInstanceLock(lockPath: string): () => void {
-  const resolved = resolve(lockPath);
+async function assertResidentVoiceStartupReadiness(config: PicoConfig): Promise<void> {
+  const health = await checkAivisSpeechServiceHealth(buildAivisSpeechService(config));
 
-  mkdirSync(dirname(resolved), { recursive: true });
-  writeSingleInstanceLock(resolved);
-
-  return () => {
-    rmSync(resolved, { force: true });
-  };
-}
-
-function writeSingleInstanceLock(resolved: string): void {
-  try {
-    writeLockFile(resolved);
-  } catch (error) {
-    if (!isFileAlreadyExistsError(error)) {
-      throw error;
-    }
-
-    const existingPid = readLockPid(resolved);
-
-    if (existingPid !== undefined && isProcessRunning(existingPid)) {
-      throw new Error(`pico resident voice runtime is already running (pid: ${existingPid})`, {
-        cause: error
-      });
-    }
-
-    rmSync(resolved, { force: true });
-    writeLockFile(resolved);
+  if (!health.ok) {
+    throw new Error(`pico resident voice TTS provider is unhealthy: ${health.message}`);
   }
 }
 
-function writeLockFile(resolved: string): void {
-  const file = openSync(resolved, "wx");
+function buildAivisSpeechService(config: PicoConfig): AivisSpeechServiceConfig {
+  const aivis = config.voice.tts.aivis;
 
-  try {
-    writeFileSync(file, String(process.pid));
-  } finally {
-    closeSync(file);
+  if (aivis === undefined) {
+    throw new Error("pico resident voice requires voice.tts.aivis config");
   }
-}
 
-function readLockPid(resolved: string): number | undefined {
-  const parsed = Number(readFileSync(resolved, "utf8").trim());
-
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
-}
-
-function isProcessRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-
-    return true;
-  } catch (error) {
-    if (isErrnoException(error) && error.code === "ESRCH") {
-      return false;
-    }
-
-    if (isErrnoException(error) && error.code === "EPERM") {
-      return true;
-    }
-
-    throw error;
-  }
-}
-
-function isFileAlreadyExistsError(error: unknown): boolean {
-  return isErrnoException(error) && error.code === "EEXIST";
-}
-
-function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error;
+  return defineAivisSpeechService({
+    id: aivis.id ?? "local-aivis",
+    provider: "aivis-speech",
+    localBaseUrl: aivis.localBaseUrl,
+    speakerId: aivis.speakerId,
+    timeoutMs: aivis.timeoutMs ?? 30_000
+  });
 }
