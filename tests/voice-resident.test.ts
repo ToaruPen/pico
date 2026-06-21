@@ -7,6 +7,238 @@ import type { SttClient, TtsAudioChunk, TtsClient } from "../src/modules/voice/i
 import { runVoiceResidentRuntime, type VoicePlaybackSink } from "../src/runtime/voice-resident.js";
 
 describe("voice resident runtime", () => {
+  it("buffers speech frames into one utterance before sending audio to STT", async () => {
+    const lifecycle = createSessionLifecycle({
+      ending: {
+        mode: "timed",
+        durationMs: 60_000
+      }
+    });
+    const transcribedDurations: number[] = [];
+
+    const result = await runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [
+        speechFrame("speech-1", 0),
+        speechFrame("speech-2", 10),
+        speechFrame("speech-3", 20),
+        silenceFrame("silence-1", 30),
+        silenceFrame("silence-2", 40)
+      ],
+      utteranceWindow: testUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: lifecycle,
+      echoControl: createIdleEchoControl(),
+      stt: {
+        warmup: () => {
+          throw new Error("warmup is not part of resident runtime");
+        },
+        transcribe: (request) => {
+          transcribedDurations.push((request.audio.byteLength / 2 / 16_000) * 1_000);
+          return Promise.resolve(successfulTranscript("ピコ"));
+        }
+      },
+      tts: createSuccessfulTts("はい。"),
+      playback: {
+        play: () => Promise.resolve()
+      },
+      piAgent: {
+        prompt: () => Promise.resolve({ text: "はい。" })
+      }
+    });
+
+    expect(transcribedDurations).toEqual([50]);
+    expect(result.processedFrames).toBe(5);
+    expect(result.startedSessions).toBe(1);
+  });
+
+  it("does not send silence-only windows to STT", async () => {
+    let sttCalls = 0;
+
+    const result = await runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [silenceFrame("silence-1", 0), silenceFrame("silence-2", 10)],
+      utteranceWindow: testUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      echoControl: createIdleEchoControl(),
+      stt: {
+        warmup: () => {
+          throw new Error("warmup is not part of resident runtime");
+        },
+        transcribe: () => {
+          sttCalls += 1;
+          throw new Error("silence-only windows must not be transcribed");
+        }
+      },
+      tts: createSuccessfulTts("unused"),
+      playback: {
+        play: () => Promise.resolve()
+      },
+      piAgent: {
+        prompt: () => {
+          throw new Error("silence-only windows must not reach Pi Agent");
+        }
+      }
+    });
+
+    expect(sttCalls).toBe(0);
+    expect(result.processedFrames).toBe(2);
+    expect(result.completedTurns).toBe(0);
+  });
+
+  it("flushes a pending utterance before shutdown cleanup after abort", async () => {
+    const abortController = new AbortController();
+    const transcribedDurations: number[] = [];
+
+    await expect(
+      runVoiceResidentRuntime({
+        now: fixedNow(),
+        frames: abortingFrames(abortController),
+        utteranceWindow: {
+          minSpeechMs: 20,
+          silenceMs: 700,
+          maxUtteranceMs: 1_000,
+          minRmsDb: -50
+        },
+        triggerPhrases: ["ピコ"],
+        sessionLifecycle: createSessionLifecycle({
+          ending: {
+            mode: "timed",
+            durationMs: 60_000
+          }
+        }),
+        echoControl: createIdleEchoControl(),
+        stt: {
+          warmup: () => {
+            throw new Error("warmup is not part of resident runtime");
+          },
+          transcribe: (request) => {
+            transcribedDurations.push((request.audio.byteLength / 2 / 16_000) * 1_000);
+            return Promise.resolve(successfulTranscript("ピコ"));
+          }
+        },
+        tts: createSuccessfulTts("はい。"),
+        playback: {
+          play: () => Promise.resolve()
+        },
+        piAgent: {
+          prompt: () => Promise.resolve({ text: "はい。" })
+        },
+        signal: abortController.signal
+      })
+    ).rejects.toThrow("pico resident voice runtime aborted");
+
+    expect(transcribedDurations).toEqual([20]);
+  });
+
+  it("runs shutdown cleanup even when pending utterance flush fails", async () => {
+    const events: string[] = [];
+    const abortController = new AbortController();
+
+    await expect(
+      runVoiceResidentRuntime({
+        now: fixedNow(),
+        frames: abortingFrames(abortController),
+        utteranceWindow: {
+          minSpeechMs: 20,
+          silenceMs: 700,
+          maxUtteranceMs: 1_000,
+          minRmsDb: -50
+        },
+        triggerPhrases: ["ピコ"],
+        sessionLifecycle: createSessionLifecycle({
+          ending: {
+            mode: "timed",
+            durationMs: 60_000
+          }
+        }),
+        echoControl: createCleanupTrackingEchoControl(events),
+        stt: {
+          warmup: () => {
+            throw new Error("warmup is not part of resident runtime");
+          },
+          transcribe: () => {
+            events.push("stt:throw");
+            throw new Error("stt failed during pending flush");
+          }
+        },
+        tts: createSuccessfulTts("unused"),
+        playback: {
+          play: () => Promise.resolve()
+        },
+        piAgent: {
+          prompt: () => {
+            throw new Error("Pi Agent must not run after failed STT");
+          },
+          disposeAll: () => {
+            events.push("pi:disposeAll");
+          }
+        },
+        memoryWorker: {
+          enqueueCutoff: () => {
+            throw new Error("no cutoff is expected");
+          },
+          close: () => {
+            events.push("memory:close");
+          }
+        },
+        signal: abortController.signal
+      })
+    ).rejects.toThrow("stt failed during pending flush");
+
+    expect(events).toEqual(["stt:throw", "pi:disposeAll", "memory:close", "echo:flush"]);
+  });
+
+  it("continues shutdown cleanup when Pi Agent disposal fails", async () => {
+    const events: string[] = [];
+
+    await expect(
+      runVoiceResidentRuntime({
+        now: fixedNow(),
+        frames: [],
+        utteranceWindow: perFrameCompatibleUtteranceWindow(),
+        triggerPhrases: ["ピコ"],
+        sessionLifecycle: createSessionLifecycle({
+          ending: {
+            mode: "timed",
+            durationMs: 60_000
+          }
+        }),
+        echoControl: createCleanupTrackingEchoControl(events),
+        stt: successfulStt(""),
+        tts: createSuccessfulTts("unused"),
+        playback: {
+          play: () => Promise.resolve()
+        },
+        piAgent: {
+          prompt: () => {
+            throw new Error("no prompt is expected");
+          },
+          disposeAll: () => {
+            events.push("pi:disposeAll");
+            throw new Error("dispose failed");
+          }
+        },
+        memoryWorker: {
+          enqueueCutoff: () => {
+            throw new Error("no cutoff is expected");
+          },
+          close: () => {
+            events.push("memory:close");
+          }
+        }
+      })
+    ).rejects.toThrow("dispose failed");
+
+    expect(events).toEqual(["pi:disposeAll", "memory:close", "echo:flush"]);
+  });
+
   it("keeps pre-trigger transcripts ephemeral and processes an active Pi Agent voice turn", async () => {
     const lifecycle = createSessionLifecycle({
       ending: {
@@ -49,6 +281,7 @@ describe("voice resident runtime", () => {
         sampleNearEndFrame("mic-2"),
         sampleNearEndFrame("mic-3")
       ],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
       triggerPhrases: ["ピコ"],
       sessionLifecycle: lifecycle,
       echoControl,
@@ -106,6 +339,7 @@ describe("voice resident runtime", () => {
       runVoiceResidentRuntime({
         now: fixedNow(),
         frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
+        utteranceWindow: perFrameCompatibleUtteranceWindow(),
         triggerPhrases: ["ピコ"],
         sessionLifecycle: lifecycle,
         echoControl: createIdleEchoControl(),
@@ -160,6 +394,7 @@ describe("voice resident runtime", () => {
     const result = await runVoiceResidentRuntime({
       now: fixedNow(),
       frames: [sampleNearEndFrame("mic-1")],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
       triggerPhrases: ["ピコ"],
       sessionLifecycle: createSessionLifecycle({
         ending: {
@@ -200,6 +435,7 @@ describe("voice resident runtime", () => {
     const result = await runVoiceResidentRuntime({
       now: fixedNow(),
       frames: [],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
       triggerPhrases: ["ピコ"],
       sessionLifecycle: lifecycle,
       endedSessionIds: ["session-ended"],
@@ -247,6 +483,7 @@ describe("voice resident runtime", () => {
       runVoiceResidentRuntime({
         now: fixedNow(),
         frames: [sampleNearEndFrame("mic-after-failed-cutoff")],
+        utteranceWindow: perFrameCompatibleUtteranceWindow(),
         triggerPhrases: ["ピコ"],
         sessionLifecycle: lifecycle,
         endedSessionIds: ["session-ended"],
@@ -295,6 +532,7 @@ describe("voice resident runtime", () => {
     await runVoiceResidentRuntime({
       now: fixedNow(),
       frames: [sampleNearEndFrame("mic-1")],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
       triggerPhrases: ["ピコ"],
       sessionLifecycle: createSessionLifecycle({
         ending: {
@@ -329,6 +567,7 @@ describe("voice resident runtime", () => {
     const result = await runVoiceResidentRuntime({
       now: fixedNow(),
       frames: [sampleNearEndFrame("mic-low-confidence")],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
       triggerPhrases: ["ピコ"],
       minTriggerConfidence: 0.7,
       sessionLifecycle: lifecycle,
@@ -360,6 +599,7 @@ describe("voice resident runtime", () => {
           sampleNearEndFrame("mic-stt-trigger"),
           sampleNearEndFrame("mic-stt-recovers")
         ],
+        utteranceWindow: perFrameCompatibleUtteranceWindow(),
         triggerPhrases: ["ピコ"],
         sessionLifecycle: createSessionLifecycle({
           ending: {
@@ -415,6 +655,7 @@ describe("voice resident runtime", () => {
           sampleNearEndFrame("mic-tts-fails"),
           sampleNearEndFrame("mic-next")
         ],
+        utteranceWindow: perFrameCompatibleUtteranceWindow(),
         triggerPhrases: ["ピコ"],
         sessionLifecycle: createSessionLifecycle({
           ending: {
@@ -516,6 +757,16 @@ function createIdleEchoControl(): EchoControlProvider {
   return createPassingEchoControl([], []);
 }
 
+function createCleanupTrackingEchoControl(events: string[]): EchoControlProvider {
+  return {
+    ...createIdleEchoControl(),
+    flush: () => {
+      events.push("echo:flush");
+      return Promise.resolve();
+    }
+  };
+}
+
 function createSuccessfulTts(text: string): TtsClient {
   return {
     synthesize: () =>
@@ -585,8 +836,68 @@ function sampleNearEndFrame(id: string): VoicePcmFrame {
   };
 }
 
+function* abortingFrames(abortController: AbortController): Iterable<VoicePcmFrame> {
+  yield speechFrame("speech-before-abort-1", 0);
+  yield speechFrame("speech-before-abort-2", 10);
+  abortController.abort();
+  yield speechFrame("speech-after-abort", 20);
+}
+
+function speechFrame(id: string, offsetMs: number): VoicePcmFrame {
+  return pcmFrame(id, offsetMs, 3_000);
+}
+
+function silenceFrame(id: string, offsetMs: number): VoicePcmFrame {
+  return pcmFrame(id, offsetMs, 0);
+}
+
+function pcmFrame(id: string, offsetMs: number, sample: number): VoicePcmFrame {
+  const sampleRateHz = 16_000;
+  const durationMs = 10;
+  const sampleCount = (sampleRateHz * durationMs) / 1_000;
+  const audio = new Uint8Array(sampleCount * 2);
+
+  for (let index = 0; index < audio.length; index += 2) {
+    audio[index] = sample & 0xff;
+    audio[index + 1] = (sample >> 8) & 0xff;
+  }
+
+  return {
+    id,
+    direction: "near_end",
+    audio,
+    encoding: "pcm16le",
+    sampleRateHz,
+    channels: 1,
+    capturedAt: addTestMilliseconds("2026-06-18T00:00:00.000Z", offsetMs),
+    durationMs
+  };
+}
+
 function fixedNow(): () => string {
   return () => "2026-06-18T00:00:00.000Z";
+}
+
+function testUtteranceWindow() {
+  return {
+    minSpeechMs: 20,
+    silenceMs: 20,
+    maxUtteranceMs: 1_000,
+    minRmsDb: -50
+  };
+}
+
+function perFrameCompatibleUtteranceWindow() {
+  return {
+    minSpeechMs: 1,
+    silenceMs: 1,
+    maxUtteranceMs: 100,
+    minRmsDb: -120
+  };
+}
+
+function addTestMilliseconds(timestamp: string, milliseconds: number): string {
+  return new Date(Date.parse(timestamp) + milliseconds).toISOString();
 }
 
 function createOrderingLifecycle(calls: string[]): SessionLifecycle {

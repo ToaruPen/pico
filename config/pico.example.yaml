@@ -82,8 +82,13 @@ voice:
     #   provider: alsa
     #   device: hw:0,0
     singleInstanceLockPath: tmp/pico-voice-resident.lock
-    minTriggerConfidence: 0.6
+    minTriggerConfidence: 0.5
     shutdownGraceMs: 5000
+    utteranceWindow:
+      minSpeechMs: 300
+      silenceMs: 700
+      maxUtteranceMs: 5000
+      minRmsDb: -55
   probes:
     enabled: true
   echoControl:

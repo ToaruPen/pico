@@ -138,6 +138,11 @@ voice:
     singleInstanceLockPath: tmp/pico-custom-resident.lock
     minTriggerConfidence: 0.72
     shutdownGraceMs: 3000
+    utteranceWindow:
+      minSpeechMs: 300
+      silenceMs: 700
+      maxUtteranceMs: 5000
+      minRmsDb: -55
   probes:
     enabled: true
   echoControl:
@@ -273,7 +278,13 @@ audit:
           },
           singleInstanceLockPath: "tmp/pico-custom-resident.lock",
           minTriggerConfidence: 0.72,
-          shutdownGraceMs: 3000
+          shutdownGraceMs: 3000,
+          utteranceWindow: {
+            minSpeechMs: 300,
+            silenceMs: 700,
+            maxUtteranceMs: 5_000,
+            minRmsDb: -55
+          }
         },
         probes: {
           enabled: true
@@ -369,7 +380,7 @@ audit:
         resident: {
           enabled: false,
           singleInstanceLockPath: "tmp/pico-voice-resident.lock",
-          minTriggerConfidence: 0.6,
+          minTriggerConfidence: 0.5,
           shutdownGraceMs: 5_000
         },
         probes: {
@@ -431,6 +442,22 @@ audit:
         }
       })
     ).toThrow("pico config voice.tts.aivis.localBaseUrl must use a local SSH tunnel URL");
+  });
+
+  it("rejects unbounded resident utterance window settings", () => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          resident: {
+            utteranceWindow: {
+              maxUtteranceMs: 60_001
+            }
+          }
+        }
+      })
+    ).toThrow(
+      "pico config voice.resident.utteranceWindow.maxUtteranceMs must be a positive integer <= 60000"
+    );
   });
 
   it("rejects unsupported Mem0 embedder providers at the config boundary", () => {

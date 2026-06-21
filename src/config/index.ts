@@ -168,6 +168,14 @@ export type PicoVoiceResidentConfig = {
   readonly singleInstanceLockPath: string;
   readonly minTriggerConfidence: number;
   readonly shutdownGraceMs: number;
+  readonly utteranceWindow: PicoVoiceUtteranceWindowConfig;
+};
+
+export type PicoVoiceUtteranceWindowConfig = {
+  readonly minSpeechMs: number;
+  readonly silenceMs: number;
+  readonly maxUtteranceMs: number;
+  readonly minRmsDb: number;
 };
 
 export type PicoResidentAudioInputConfig =
@@ -261,6 +269,7 @@ export type LoadPicoConfigOptions = {
 
 const defaultConfigPath = "config/pico.local.yaml";
 const maxNodeTimeoutMs = 2_147_483_647;
+const maxVoiceUtteranceWindowMs = 60_000;
 const maxTcpPort = 65_535;
 const maxOllamaImageEdgePixels = 4096;
 
@@ -301,8 +310,14 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
     resident: {
       enabled: false,
       singleInstanceLockPath: "tmp/pico-voice-resident.lock",
-      minTriggerConfidence: 0.6,
-      shutdownGraceMs: 5_000
+      minTriggerConfidence: 0.5,
+      shutdownGraceMs: 5_000,
+      utteranceWindow: {
+        minSpeechMs: 300,
+        silenceMs: 700,
+        maxUtteranceMs: 5_000,
+        minRmsDb: -55
+      }
     },
     probes: {
       enabled: true
@@ -689,6 +704,10 @@ function defineVoiceResidentConfig(
     input.audioOutput,
     "pico config voice.resident.audioOutput"
   );
+  const utteranceWindow = readOptionalRecord(
+    input.utteranceWindow,
+    "pico config voice.resident.utteranceWindow"
+  );
 
   requireResidentVoiceAudio(enabled, audioInput, audioOutput);
 
@@ -705,14 +724,59 @@ function defineVoiceResidentConfig(
       readOptionalConfidenceThreshold(
         input.minTriggerConfidence,
         "pico config voice.resident.minTriggerConfidence"
-      ) ?? 0.6,
+      ) ?? 0.5,
     shutdownGraceMs:
       readOptionalBoundedPositiveInteger(
         input.shutdownGraceMs,
         "pico config voice.resident.shutdownGraceMs",
         maxNodeTimeoutMs
-      ) ?? 5_000
+      ) ?? 5_000,
+    utteranceWindow: defineVoiceUtteranceWindowConfig(utteranceWindow)
   };
+}
+
+function defineVoiceUtteranceWindowConfig(
+  input: Record<string, unknown> | undefined
+): PicoVoiceUtteranceWindowConfig {
+  const defaults = emptyPicoConfig.voice.resident.utteranceWindow;
+
+  if (input === undefined) {
+    return defaults;
+  }
+
+  const config: PicoVoiceUtteranceWindowConfig = {
+    minSpeechMs:
+      readOptionalBoundedPositiveInteger(
+        input.minSpeechMs,
+        "pico config voice.resident.utteranceWindow.minSpeechMs",
+        maxVoiceUtteranceWindowMs
+      ) ?? defaults.minSpeechMs,
+    silenceMs:
+      readOptionalBoundedPositiveInteger(
+        input.silenceMs,
+        "pico config voice.resident.utteranceWindow.silenceMs",
+        maxVoiceUtteranceWindowMs
+      ) ?? defaults.silenceMs,
+    maxUtteranceMs:
+      readOptionalBoundedPositiveInteger(
+        input.maxUtteranceMs,
+        "pico config voice.resident.utteranceWindow.maxUtteranceMs",
+        maxVoiceUtteranceWindowMs
+      ) ?? defaults.maxUtteranceMs,
+    minRmsDb:
+      readOptionalRmsDatabase(
+        input.minRmsDb,
+        "pico config voice.resident.utteranceWindow.minRmsDb"
+      ) ?? defaults.minRmsDb
+  };
+
+  if (config.maxUtteranceMs < config.minSpeechMs) {
+    throw new Error(
+      "pico config voice.resident.utteranceWindow.maxUtteranceMs must be >= minSpeechMs"
+    );
+  }
+
+  return config;
 }
 
 function requireResidentVoiceAudio(
@@ -1651,6 +1715,20 @@ function readOptionalConfidenceThreshold(value: unknown, label: string): number 
 
   if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
     throw new Error(`${label} must be >= 0 and <= 1`);
+  }
+
+  return parsed;
+}
+
+function readOptionalRmsDatabase(value: unknown, label: string): number | undefined {
+  const parsed = readOptionalNumber(value, label);
+
+  if (parsed === undefined) {
+    return undefined;
+  }
+
+  if (!Number.isFinite(parsed) || parsed < -120 || parsed > 0) {
+    throw new Error(`${label} must be >= -120 and <= 0`);
   }
 
   return parsed;
