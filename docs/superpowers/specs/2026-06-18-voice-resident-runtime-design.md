@@ -201,8 +201,12 @@ runtime の常駐管理入口である。
   `PICO_CONFIG_PATH` と stable `PATH` は `EnvironmentVariables` で渡す。
 - local config の内容、camera credential、transcript、audio payload は plist や
   launchd command plan に埋め込まない。渡すのは resolved config path だけにする。
-- stdout/stderr は `.pico-local/logs/resident-voice.out.log` と
-  `.pico-local/logs/resident-voice.err.log` に分ける。
+- stdout/stderr は
+  `~/.pico/resident-voice/normal/processes/resident-voice.out.log` と
+  `~/.pico/resident-voice/normal/processes/resident-voice.err.log` に分ける。
+  resident runtime の process/event/session logs も `~/.pico/resident-voice/normal/`
+  配下に保持し、development terminal のログは
+  `~/.pico/resident-voice/development/` 配下に分離する。
 - `RunAtLoad` と `KeepAlive` を有効化し、process crash や login 後に resident
   voice が戻る形にする。
 - `stop` は `KeepAlive` による即時再起動を避けるため `launchctl bootout` を使い、

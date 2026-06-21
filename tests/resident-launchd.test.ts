@@ -30,12 +30,16 @@ describe("resident launchd service", () => {
     expect(service.plistPath).toBe(
       "/Users/monsoon/Library/LaunchAgents/dev.toarupen.pico.resident-voice.plist"
     );
-    expect(service.standardOutputPath).toBe(
-      "/Users/monsoon/Dev/pico project/.pico-local/logs/resident-voice.out.log"
+    expect(service.logDirectory).toBe("/Users/monsoon/.pico/resident-voice/normal/processes");
+    expect(service.picoDirectory).toBe("/Users/monsoon/.pico");
+    expect(service.standardOutputPath).toContain(
+      "/Users/monsoon/.pico/resident-voice/normal/processes/"
     );
-    expect(service.standardErrorPath).toBe(
-      "/Users/monsoon/Dev/pico project/.pico-local/logs/resident-voice.err.log"
+    expect(service.standardOutputPath).toMatch(/resident-voice\.out\.log$/);
+    expect(service.standardErrorPath).toContain(
+      "/Users/monsoon/.pico/resident-voice/normal/processes/"
     );
+    expect(service.standardErrorPath).toMatch(/resident-voice\.err\.log$/);
     expect(service.plist).toContain("<key>RunAtLoad</key>");
     expect(service.plist).toContain("<true/>");
     expect(service.plist).toContain("<key>KeepAlive</key>");
@@ -43,6 +47,11 @@ describe("resident launchd service", () => {
     expect(service.plist).toContain(
       "<string>/Users/monsoon/Dev/pico/config/pico.local.yaml</string>"
     );
+    expect(service.plist).toContain("<key>PICO_VOICE_PROBE_STDOUT</key>");
+    expect(service.plist).toContain("<string>summary</string>");
+    expect(service.plist).toContain("<key>PICO_RESIDENT_VOICE_LOG_MODE</key>");
+    expect(service.plist).toContain("<string>normal</string>");
+    expect(service.plist).toContain(`<string>${service.standardOutputPath}</string>`);
     expect(service.plist).toContain(
       "<string>/Users/monsoon/.nvm/versions/node/v24.13.0/bin/node</string>"
     );
@@ -121,7 +130,13 @@ describe("resident launchd service", () => {
     expect(createResidentLaunchdOperationPlan(service, "install", 501)).toEqual([
       {
         kind: "mkdir",
-        path: "/repo/pico/.pico-local/logs"
+        path: service.picoDirectory,
+        mode: 0o700
+      },
+      {
+        kind: "mkdir",
+        path: service.logDirectory,
+        mode: 0o700
       },
       {
         kind: "mkdir",

@@ -20,4 +20,14 @@ describe("pico identity", () => {
     expect(prompt).toContain("- legal judgment");
     expect(prompt).toContain("- tracking, scoring, or profiling individual children");
   });
+
+  it("builds a prompt with voice-first response rules", () => {
+    const prompt = buildSystemPrompt(picoIdentity);
+
+    expect(prompt).toContain("Voice response rules:");
+    expect(prompt).toContain("- Reply in short spoken Japanese");
+    expect(prompt).toContain("- Do not use Markdown");
+    expect(prompt).toContain("- Avoid bullet lists and visible line breaks");
+    expect(prompt).toContain("- When asked for a wake acknowledgement");
+  });
 });

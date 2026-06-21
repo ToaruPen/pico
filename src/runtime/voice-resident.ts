@@ -40,6 +40,39 @@ export type VoiceResidentMemoryWorker = Pick<SessionMemoryWorker, "enqueueCutoff
   readonly close?: () => void;
 };
 
+export type VoiceResidentConsoleEvent =
+  | {
+      readonly kind: "staff_transcript";
+      readonly occurredAt: string;
+      readonly sessionId: string;
+      readonly text: string;
+    }
+  | {
+      readonly kind: "pi_agent_response";
+      readonly occurredAt: string;
+      readonly sessionId: string;
+      readonly durationMs: number;
+      readonly text: string;
+    }
+  | {
+      readonly kind: "wake_ack_input";
+      readonly occurredAt: string;
+      readonly sessionId: string;
+      readonly trigger: string;
+      readonly text: string;
+    }
+  | {
+      readonly kind: "wake_ack_response";
+      readonly occurredAt: string;
+      readonly sessionId: string;
+      readonly durationMs: number;
+      readonly text: string;
+    };
+
+export type VoiceResidentConsoleSink = {
+  readonly record: (event: VoiceResidentConsoleEvent) => void;
+};
+
 export type VoiceResidentRuntimeOptions = {
   readonly now?: () => string;
   readonly frames: VoiceFrameSource;
@@ -51,11 +84,16 @@ export type VoiceResidentRuntimeOptions = {
   readonly playback: VoicePlaybackSink;
   readonly piAgent: PiAgentTurnClient;
   readonly memoryWorker?: VoiceResidentMemoryWorker;
+  readonly console?: VoiceResidentConsoleSink;
+  readonly wakeAcknowledgement?: {
+    readonly enabled: boolean;
+  };
   readonly probe?: VoiceStageProbe;
   readonly signal?: AbortSignal;
   readonly endedSessionIds?: readonly string[];
   readonly minTriggerConfidence?: number;
   readonly utteranceWindow: VoiceUtteranceWindowConfig;
+  readonly monotonicNow?: () => number;
 };
 
 export type VoiceResidentRuntimeResult = {
@@ -90,7 +128,19 @@ type PendingSessionState = {
   readonly pendingCutoffSessionIds: Set<string>;
 };
 
+type ActiveVoiceSessionResult =
+  | {
+      readonly kind: "active";
+      readonly sessionId: string;
+    }
+  | {
+      readonly kind: "started";
+      readonly sessionId: string;
+      readonly trigger: string;
+    };
+
 const defaultNow = (): string => new Date().toISOString();
+const defaultMonotonicNow = (): number => performance.now();
 
 export async function runVoiceResidentRuntime(
   options: VoiceResidentRuntimeOptions
@@ -306,50 +356,90 @@ async function processTranscribedUtterances(
   state: PendingSessionState
 ): Promise<void> {
   for (const utterance of utterances) {
-    recordVoiceStageProbe(options.probe ?? {}, {
-      stage: "utterance_window",
-      status: "ok",
-      startedAt: utterance.frame.capturedAt,
-      durationMs: 0,
-      attributes: {
-        "pico.voice.frame_count": utterance.frameCount,
-        "pico.voice.utterance_duration_ms": utterance.frame.durationMs,
-        "pico.voice.sample_rate_hz": utterance.frame.sampleRateHz,
-        "pico.voice.channels": utterance.frame.channels
-      }
-    });
-
-    const transcript = await transcribePassedFrame(utterance, options, counters, now);
-
-    if (transcript === undefined || transcript.text === "") {
-      continue;
-    }
-
-    const activeSessionId = ensureActiveVoiceSession(
-      transcript,
-      options,
-      counters,
-      now,
-      state.activeSession
-    );
-
-    if (activeSessionId === undefined) {
-      continue;
-    }
-
-    if (activeSessionId !== state.activeSession.getActiveSessionId()) {
-      continue;
-    }
-
-    await runActiveVoiceTurn(transcript.text, options, counters, now, activeSessionId);
-    state.activeSession.setActiveSessionId(
-      collectEndedActiveSession(options.sessionLifecycle, activeSessionId, {
-        pendingCutoffSessionIds: state.pendingCutoffSessionIds,
-        piAgent: options.piAgent
-      })
-    );
-    enqueueEndedSessions(options, state.pendingCutoffSessionIds, counters, now);
+    await processTranscribedUtterance(utterance, options, counters, now, state);
   }
+}
+
+async function processTranscribedUtterance(
+  utterance: TranscribedUtterance,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string,
+  state: PendingSessionState
+): Promise<void> {
+  recordUtteranceWindowProbe(utterance, options);
+  const transcript = await transcribePassedFrame(utterance, options, counters, now);
+
+  if (transcript === undefined || transcript.text === "") {
+    return;
+  }
+
+  const activeSession = ensureActiveVoiceSession(
+    transcript,
+    options,
+    counters,
+    now,
+    state.activeSession
+  );
+
+  if (activeSession === undefined) {
+    return;
+  }
+
+  if (activeSession.kind === "started") {
+    await runOptionalWakeAcknowledgement(activeSession, options, counters, now);
+    return;
+  }
+
+  if (activeSession.sessionId !== state.activeSession.getActiveSessionId()) {
+    return;
+  }
+
+  await runActiveVoiceTurn(transcript.text, options, counters, now, activeSession.sessionId);
+  state.activeSession.setActiveSessionId(
+    collectEndedActiveSession(options.sessionLifecycle, activeSession.sessionId, {
+      pendingCutoffSessionIds: state.pendingCutoffSessionIds,
+      piAgent: options.piAgent
+    })
+  );
+  enqueueEndedSessions(options, state.pendingCutoffSessionIds, counters, now);
+}
+
+function recordUtteranceWindowProbe(
+  utterance: TranscribedUtterance,
+  options: VoiceResidentRuntimeOptions
+): void {
+  recordVoiceStageProbe(options.probe ?? {}, {
+    stage: "utterance_window",
+    status: "ok",
+    startedAt: utterance.frame.capturedAt,
+    durationMs: 0,
+    attributes: {
+      "pico.voice.frame_count": utterance.frameCount,
+      "pico.voice.utterance_duration_ms": utterance.frame.durationMs,
+      "pico.voice.sample_rate_hz": utterance.frame.sampleRateHz,
+      "pico.voice.channels": utterance.frame.channels
+    }
+  });
+}
+
+async function runOptionalWakeAcknowledgement(
+  activeSession: Extract<ActiveVoiceSessionResult, { readonly kind: "started" }>,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string
+): Promise<void> {
+  if (options.wakeAcknowledgement?.enabled !== true) {
+    return;
+  }
+
+  await runWakeAcknowledgement(
+    activeSession.sessionId,
+    activeSession.trigger,
+    options,
+    counters,
+    now
+  );
 }
 
 async function processEchoControlledFrame(
@@ -430,15 +520,15 @@ function ensureActiveVoiceSession(
   options: VoiceResidentRuntimeOptions,
   counters: VoiceResidentCounters,
   now: () => string,
-  activeSession: {
-    readonly getActiveSessionId: () => string | undefined;
-    readonly setActiveSessionId: (id: string | undefined) => void;
-  }
-): string | undefined {
+  activeSession: ActiveSessionState
+): ActiveVoiceSessionResult | undefined {
   const currentSessionId = activeSession.getActiveSessionId();
 
   if (currentSessionId !== undefined) {
-    return currentSessionId;
+    return {
+      kind: "active",
+      sessionId: currentSessionId
+    };
   }
 
   const trigger =
@@ -456,7 +546,11 @@ function ensureActiveVoiceSession(
   counters.startedSessions += 1;
   recordSessionStartProbe(started.id, options, now);
 
-  return undefined;
+  return {
+    kind: "started",
+    sessionId: started.id,
+    trigger
+  };
 }
 
 function recordTriggerProbe(
@@ -489,28 +583,108 @@ function recordSessionStartProbe(
   });
 }
 
+async function runWakeAcknowledgement(
+  sessionId: string,
+  trigger: string,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string
+): Promise<void> {
+  const prompt = buildWakeAcknowledgementPrompt(trigger);
+  const piStageStartedAt = now();
+  const piStageStartedMs = (options.monotonicNow ?? defaultMonotonicNow)();
+  recordResidentConsoleEvent(options.console, {
+    kind: "wake_ack_input",
+    occurredAt: piStageStartedAt,
+    sessionId,
+    trigger,
+    text: prompt
+  });
+  const response = await requestPiAgentResponse(
+    sessionId,
+    prompt,
+    options,
+    counters,
+    piStageStartedAt,
+    piStageStartedMs
+  );
+
+  if (response === undefined) {
+    return;
+  }
+
+  recordResidentConsoleEvent(options.console, {
+    kind: "wake_ack_response",
+    occurredAt: response.completedAt,
+    sessionId,
+    durationMs: response.durationMs,
+    text: response.text
+  });
+  recordVoiceStageProbe(options.probe ?? {}, {
+    stage: "pi_turn",
+    status: "ok",
+    startedAt: piStageStartedAt,
+    durationMs: response.durationMs,
+    attributes: {}
+  });
+
+  const ttsStageStartedAt = now();
+  const ttsResult = await synthesizeTurnResponse(
+    response.text,
+    options,
+    counters,
+    ttsStageStartedAt
+  );
+
+  if (ttsResult === undefined) {
+    return;
+  }
+
+  recordVoiceStageProbe(options.probe ?? {}, {
+    stage: "tts_synthesize",
+    status: "ok",
+    startedAt: ttsStageStartedAt,
+    durationMs: ttsResult.totalDurationMs,
+    attributes: {
+      "pico.voice.chunk_count": ttsResult.chunks.length
+    }
+  });
+  await playTtsChunks(ttsResult.chunks, options, now);
+  counters.completedTurns += 1;
+}
+
+function buildWakeAcknowledgementPrompt(trigger: string): string {
+  return `The user just woke you up by saying: ${JSON.stringify(
+    trigger
+  )}. Respond briefly in spoken Japanese to show you are listening. Do not answer a separate task yet.`;
+}
+
 async function runActiveVoiceTurn(
   transcript: string,
   options: VoiceResidentRuntimeOptions,
   counters: VoiceResidentCounters,
   now: () => string,
-  activeSessionId: string | undefined
+  activeSessionId: string
 ): Promise<void> {
-  if (activeSessionId === undefined) {
-    throw new Error("pico resident voice active session is missing");
-  }
-
   if (!appendStaffEntryIfSessionActive(options.sessionLifecycle, activeSessionId, transcript)) {
     return;
   }
 
   const piStageStartedAt = now();
+  const piStageStartedMs = (options.monotonicNow ?? defaultMonotonicNow)();
+  recordResidentConsoleEvent(options.console, {
+    kind: "staff_transcript",
+    occurredAt: piStageStartedAt,
+    sessionId: activeSessionId,
+    text: transcript
+  });
   const response = await requestPiAgentResponse(
     activeSessionId,
     transcript,
     options,
     counters,
-    piStageStartedAt
+    piStageStartedAt,
+    piStageStartedMs
   );
 
   if (response === undefined) {
@@ -518,11 +692,18 @@ async function runActiveVoiceTurn(
   }
 
   appendAssistantEntryIfSessionActive(options.sessionLifecycle, activeSessionId, response.text);
+  recordResidentConsoleEvent(options.console, {
+    kind: "pi_agent_response",
+    occurredAt: response.completedAt,
+    sessionId: activeSessionId,
+    durationMs: response.durationMs,
+    text: response.text
+  });
   recordVoiceStageProbe(options.probe ?? {}, {
     stage: "pi_turn",
     status: "ok",
     startedAt: piStageStartedAt,
-    durationMs: 0,
+    durationMs: response.durationMs,
     attributes: {}
   });
 
@@ -556,14 +737,30 @@ async function requestPiAgentResponse(
   transcript: string,
   options: VoiceResidentRuntimeOptions,
   counters: VoiceResidentCounters,
-  startedAt: string
-): Promise<{ readonly text: string } | undefined> {
+  startedAt: string,
+  startedAtMs: number
+): Promise<
+  | {
+      readonly text: string;
+      readonly completedAt: string;
+      readonly durationMs: number;
+    }
+  | undefined
+> {
   try {
-    return await options.piAgent.prompt({
+    const response = await options.piAgent.prompt({
       sessionId,
       text: transcript,
       ...(options.signal === undefined ? {} : { signal: options.signal })
     });
+    const completedAt = (options.now ?? defaultNow)();
+    const completedAtMs = (options.monotonicNow ?? defaultMonotonicNow)();
+
+    return {
+      text: response.text,
+      completedAt,
+      durationMs: Math.max(0, completedAtMs - startedAtMs)
+    };
   } catch {
     counters.failedTurns += 1;
     recordVoiceStageProbe(options.probe ?? {}, {
@@ -607,6 +804,17 @@ async function synthesizeTurnResponse(
   });
 
   return undefined;
+}
+
+function recordResidentConsoleEvent(
+  sink: VoiceResidentConsoleSink | undefined,
+  event: VoiceResidentConsoleEvent
+): void {
+  try {
+    sink?.record(event);
+  } catch {
+    // Console and file logging must not break resident voice operation.
+  }
 }
 
 function appendStaffEntryIfSessionActive(

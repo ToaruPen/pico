@@ -35,6 +35,7 @@
     "field:session-memory-lifecycle": "jiti scripts/field/session-memory-lifecycle.ts",
     "field:person-follow-visible-person": "jiti scripts/field/person-follow-visible-person.ts",
     "field:voice-echo-pickup": "jiti scripts/field/voice-echo-pickup.ts",
+    "resident:voice:dev-terminal": "jiti scripts/resident/development-terminal.ts",
     "resident:memory": "jiti scripts/resident/memory.ts",
     "resident:voice:launchd": "jiti scripts/resident/launchd.ts",
     "resident:voice": "jiti scripts/resident/voice.ts",

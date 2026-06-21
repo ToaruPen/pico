@@ -325,6 +325,328 @@ describe("voice resident runtime", () => {
     expect(farEndFrames.map((frame) => frame.capturedAt)).toEqual(["2026-06-18T00:00:00.000Z"]);
   });
 
+  it("records active user input and Pi Agent response text only to the resident console sink", async () => {
+    const consoleEvents: unknown[] = [];
+
+    await runVoiceResidentRuntime({
+      now: sequenceNow([
+        "2026-06-18T00:00:00.000Z",
+        "2026-06-18T00:00:00.000Z",
+        "2026-06-18T00:00:00.000Z",
+        "2026-06-18T00:00:00.000Z",
+        "2026-06-18T00:00:00.000Z",
+        "2026-06-18T00:00:00.000Z",
+        "2026-06-18T00:00:00.000Z",
+        "2026-06-18T00:00:00.250Z",
+        "2026-06-18T00:00:00.250Z",
+        "2026-06-18T00:00:00.250Z"
+      ]),
+      monotonicNow: sequenceNumber([1_000, 1_250]),
+      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      echoControl: createIdleEchoControl(),
+      stt: (() => {
+        const texts = ["ピコ", "今日はテストです"];
+
+        return {
+          warmup: () => {
+            throw new Error("warmup is not part of resident runtime");
+          },
+          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
+        };
+      })(),
+      tts: createSuccessfulTts("了解です。"),
+      playback: {
+        play: () => Promise.resolve()
+      },
+      piAgent: {
+        prompt: () => Promise.resolve({ text: "了解です。" })
+      },
+      console: {
+        record: (event) => {
+          consoleEvents.push(event);
+        }
+      }
+    });
+
+    expect(consoleEvents).toEqual([
+      {
+        kind: "staff_transcript",
+        occurredAt: "2026-06-18T00:00:00.000Z",
+        sessionId: "session-1",
+        text: "今日はテストです"
+      },
+      {
+        kind: "pi_agent_response",
+        occurredAt: "2026-06-18T00:00:00.250Z",
+        sessionId: "session-1",
+        durationMs: 250,
+        text: "了解です。"
+      }
+    ]);
+  });
+
+  it("measures Pi Agent response duration with monotonic time instead of wall-clock timestamps", async () => {
+    const consoleEvents: unknown[] = [];
+
+    await runVoiceResidentRuntime({
+      now: sequenceNow([
+        "2026-06-18T00:00:10.000Z",
+        "2026-06-18T00:00:10.000Z",
+        "2026-06-18T00:00:10.000Z",
+        "2026-06-18T00:00:10.000Z",
+        "2026-06-18T00:00:10.000Z",
+        "2026-06-18T00:00:10.000Z",
+        "2026-06-18T00:00:10.000Z",
+        "2026-06-18T00:00:08.000Z",
+        "2026-06-18T00:00:08.000Z",
+        "2026-06-18T00:00:08.000Z"
+      ]),
+      monotonicNow: sequenceNumber([1_000, 1_123]),
+      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      echoControl: createIdleEchoControl(),
+      stt: (() => {
+        const texts = ["ピコ", "今日はテストです"];
+
+        return {
+          warmup: () => {
+            throw new Error("warmup is not part of resident runtime");
+          },
+          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
+        };
+      })(),
+      tts: createSuccessfulTts("了解です。"),
+      playback: {
+        play: () => Promise.resolve()
+      },
+      piAgent: {
+        prompt: () => Promise.resolve({ text: "了解です。" })
+      },
+      console: {
+        record: (event) => {
+          consoleEvents.push(event);
+        }
+      }
+    });
+
+    expect(consoleEvents).toContainEqual({
+      kind: "pi_agent_response",
+      occurredAt: "2026-06-18T00:00:08.000Z",
+      sessionId: "session-1",
+      durationMs: 123,
+      text: "了解です。"
+    });
+  });
+
+  it("keeps active voice turns running when resident console logging fails", async () => {
+    const prompts: string[] = [];
+    const spokenTexts: string[] = [];
+    let playbackCalls = 0;
+
+    const result = await runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      echoControl: createIdleEchoControl(),
+      stt: (() => {
+        const texts = ["ピコ", "今日はテストです"];
+
+        return {
+          warmup: () => {
+            throw new Error("warmup is not part of resident runtime");
+          },
+          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
+        };
+      })(),
+      tts: {
+        synthesize: (request) => {
+          spokenTexts.push(request.text);
+          return createSuccessfulTts(request.text).synthesize(request);
+        }
+      },
+      playback: {
+        play: () => {
+          playbackCalls += 1;
+          return Promise.resolve();
+        }
+      },
+      piAgent: {
+        prompt: (input) => {
+          prompts.push(input.text);
+          return Promise.resolve({ text: "了解です。" });
+        }
+      },
+      console: {
+        record: () => {
+          throw new Error("log sink unavailable");
+        }
+      }
+    });
+
+    expect(result.completedTurns).toBe(1);
+    expect(result.failedTurns).toBe(0);
+    expect(prompts).toEqual(["今日はテストです"]);
+    expect(spokenTexts).toEqual(["了解です。"]);
+    expect(playbackCalls).toBe(1);
+  });
+
+  it("generates and speaks a wake acknowledgement through Pi Agent after a trigger starts a session", async () => {
+    const prompts: string[] = [];
+    const spokenTexts: string[] = [];
+    const consoleEvents: unknown[] = [];
+
+    const result = await runVoiceResidentRuntime({
+      now: sequenceNow([
+        "2026-06-18T00:00:00.000Z",
+        "2026-06-18T00:00:00.000Z",
+        "2026-06-18T00:00:00.000Z",
+        "2026-06-18T00:00:00.000Z",
+        "2026-06-18T00:00:00.000Z",
+        "2026-06-18T00:00:00.180Z",
+        "2026-06-18T00:00:00.180Z",
+        "2026-06-18T00:00:00.180Z"
+      ]),
+      monotonicNow: sequenceNumber([2_000, 2_180]),
+      frames: [sampleNearEndFrame("mic-trigger")],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      echoControl: createIdleEchoControl(),
+      stt: successfulStt("ピコ"),
+      tts: {
+        synthesize: (request) => {
+          spokenTexts.push(request.text);
+          return createSuccessfulTts(request.text).synthesize(request);
+        }
+      },
+      playback: {
+        play: () => Promise.resolve()
+      },
+      piAgent: {
+        prompt: (input) => {
+          prompts.push(input.text);
+          return Promise.resolve({ text: "はい、聞いています。" });
+        }
+      },
+      wakeAcknowledgement: {
+        enabled: true
+      },
+      console: {
+        record: (event) => {
+          consoleEvents.push(event);
+        }
+      }
+    });
+
+    expect(result).toMatchObject({
+      startedSessions: 1,
+      completedTurns: 1,
+      failedTurns: 0
+    });
+    expect(prompts).toEqual([
+      'The user just woke you up by saying: "ピコ". Respond briefly in spoken Japanese to show you are listening. Do not answer a separate task yet.'
+    ]);
+    expect(spokenTexts).toEqual(["はい、聞いています。"]);
+    expect(consoleEvents).toEqual([
+      {
+        kind: "wake_ack_input",
+        occurredAt: "2026-06-18T00:00:00.000Z",
+        sessionId: "session-1",
+        trigger: "ピコ",
+        text: 'The user just woke you up by saying: "ピコ". Respond briefly in spoken Japanese to show you are listening. Do not answer a separate task yet.'
+      },
+      {
+        kind: "wake_ack_response",
+        occurredAt: "2026-06-18T00:00:00.180Z",
+        sessionId: "session-1",
+        durationMs: 180,
+        text: "はい、聞いています。"
+      }
+    ]);
+  });
+
+  it("keeps wake acknowledgement running when resident console logging fails", async () => {
+    const prompts: string[] = [];
+    const spokenTexts: string[] = [];
+    let playbackCalls = 0;
+
+    const result = await runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [sampleNearEndFrame("mic-trigger")],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      echoControl: createIdleEchoControl(),
+      stt: successfulStt("ピコ"),
+      tts: {
+        synthesize: (request) => {
+          spokenTexts.push(request.text);
+          return createSuccessfulTts(request.text).synthesize(request);
+        }
+      },
+      playback: {
+        play: () => {
+          playbackCalls += 1;
+          return Promise.resolve();
+        }
+      },
+      piAgent: {
+        prompt: (input) => {
+          prompts.push(input.text);
+          return Promise.resolve({ text: "はい、聞いています。" });
+        }
+      },
+      wakeAcknowledgement: {
+        enabled: true
+      },
+      console: {
+        record: () => {
+          throw new Error("log sink unavailable");
+        }
+      }
+    });
+
+    expect(result.completedTurns).toBe(1);
+    expect(result.failedTurns).toBe(0);
+    expect(prompts).toEqual([
+      'The user just woke you up by saying: "ピコ". Respond briefly in spoken Japanese to show you are listening. Do not answer a separate task yet.'
+    ]);
+    expect(spokenTexts).toEqual(["はい、聞いています。"]);
+    expect(playbackCalls).toBe(1);
+  });
+
   it("cuts off and enqueues an active session during shutdown cleanup", async () => {
     const lifecycle = createSessionLifecycle({
       ending: {
@@ -876,6 +1198,18 @@ function pcmFrame(id: string, offsetMs: number, sample: number): VoicePcmFrame {
 
 function fixedNow(): () => string {
   return () => "2026-06-18T00:00:00.000Z";
+}
+
+function sequenceNow(timestamps: readonly string[]): () => string {
+  let index = 0;
+
+  return () => timestamps[Math.min(index++, timestamps.length - 1)] ?? timestamps[0] ?? "";
+}
+
+function sequenceNumber(values: readonly number[]): () => number {
+  let index = 0;
+
+  return () => values[Math.min(index++, values.length - 1)] ?? values[0] ?? 0;
 }
 
 function testUtteranceWindow() {

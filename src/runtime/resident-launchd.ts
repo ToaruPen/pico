@@ -12,6 +12,7 @@ export type ResidentLaunchdServiceOptions = {
 export type ResidentLaunchdService = {
   readonly label: string;
   readonly plistPath: string;
+  readonly picoDirectory: string;
   readonly logDirectory: string;
   readonly standardOutputPath: string;
   readonly standardErrorPath: string;
@@ -50,6 +51,7 @@ export type ResidentLaunchdOperationStep =
   | {
       readonly kind: "mkdir";
       readonly path: string;
+      readonly mode?: number;
     }
   | {
       readonly kind: "output";
@@ -85,13 +87,15 @@ export function defineResidentLaunchdService(
     options.pathEnvironment,
     "resident launchd pathEnvironment"
   );
-  const logDirectory = join(repoRoot, ".pico-local", "logs");
+  const picoDirectory = join(homeDirectory, ".pico");
+  const logDirectory = join(picoDirectory, "resident-voice", "normal", "processes");
   const standardOutputPath = join(logDirectory, "resident-voice.out.log");
   const standardErrorPath = join(logDirectory, "resident-voice.err.log");
 
   const service = {
     label,
     plistPath: join(homeDirectory, "Library", "LaunchAgents", `${label}.plist`),
+    picoDirectory,
     logDirectory,
     standardOutputPath,
     standardErrorPath
@@ -151,7 +155,8 @@ export function createResidentLaunchdOperationPlan(
 ): readonly ResidentLaunchdOperationStep[] {
   if (operation === "install") {
     return [
-      { kind: "mkdir", path: service.logDirectory },
+      { kind: "mkdir", path: service.picoDirectory, mode: 0o700 },
+      { kind: "mkdir", path: service.logDirectory, mode: 0o700 },
       { kind: "mkdir", path: dirname(service.plistPath) },
       { kind: "writeFile", path: service.plistPath, content: service.plist },
       commandStep(createResidentLaunchctlCommandPlan(service, "bootstrap", userId))
@@ -216,6 +221,10 @@ function buildResidentLaunchdPlist(input: {
   <dict>
     <key>PICO_CONFIG_PATH</key>
     <string>${escapePlist(input.configPath)}</string>
+    <key>PICO_VOICE_PROBE_STDOUT</key>
+    <string>summary</string>
+    <key>PICO_RESIDENT_VOICE_LOG_MODE</key>
+    <string>normal</string>
     <key>PATH</key>
     <string>${escapePlist(input.pathEnvironment)}</string>
   </dict>
