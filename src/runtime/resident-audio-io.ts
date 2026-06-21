@@ -286,15 +286,28 @@ function createResidentAudioInputLevelPlan(
     };
   }
 
+  const insertIndex = requireAvfoundationInputDeviceArgumentEnd(plan.args);
+
   return {
     ...plan,
     args: [
-      ...plan.args.slice(0, 7),
+      ...plan.args.slice(0, insertIndex),
       "-t",
       formatCaptureSeconds(captureMs + 1_000),
-      ...plan.args.slice(7)
+      ...plan.args.slice(insertIndex)
     ]
   };
+}
+
+function requireAvfoundationInputDeviceArgumentEnd(arguments_: readonly string[]): number {
+  const inputArgumentIndex = arguments_.indexOf("-i");
+  const inputDeviceArgumentIndex = inputArgumentIndex + 1;
+
+  if (inputArgumentIndex === -1 || arguments_[inputDeviceArgumentIndex] === undefined) {
+    throw new Error("pico resident voice AVFoundation input plan is missing input device");
+  }
+
+  return inputDeviceArgumentIndex + 1;
 }
 
 function captureResidentAudioInputLevel(
