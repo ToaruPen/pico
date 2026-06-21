@@ -137,6 +137,26 @@ stale `processing` jobs after `PICO_RESIDENT_MEMORY_RECOVER_PROCESSING_OLDER_THA
 or 10 minutes by default; this is crash recovery, not a per-job execution
 deadline.
 
+On the Mac mini resident host, manage the production voice process as a user
+LaunchAgent after `smoke:resident-audio-input` proves that the configured
+microphone clears `voice.resident.utteranceWindow.minRmsDb`:
+
+```bash
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- install
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- status
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- restart
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- stop
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- uninstall
+```
+
+The LaunchAgent label is `dev.toarupen.pico.resident-voice`. It runs the
+resident voice script through the current Node executable and local `jiti` with
+`PICO_CONFIG_PATH` set to the resolved local config path, writes the plist to
+`~/Library/LaunchAgents/dev.toarupen.pico.resident-voice.plist`, and writes logs
+under `.pico-local/logs/`. `stop` boots the KeepAlive service out of the user
+launchd domain while leaving the plist installed; use `install` to bootstrap it
+again or `uninstall` to remove the plist.
+
 For the protected Windows GPU vision host, run Windows native Ollama on
 `127.0.0.1:11434` and reach it only through the pico-host SSH local forward. The
 validated field setup uses a Windows Task Scheduler task named
