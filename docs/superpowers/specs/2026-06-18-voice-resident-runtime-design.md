@@ -234,6 +234,8 @@ interface 実装で runtime contract を検証する。
 field validation は実機で以下を確認する。
 
 - real microphone capture。
+  `npm run smoke:resident-audio-input` は短時間の bounded capture から
+  RMS/peak dB と `minRmsDb` 閾値判定だけを報告し、音声 payload は出さない。
 - mlx-whisper STT。
 - Aivis Speech TTS playback。
 - echo control による自己音声抑制。

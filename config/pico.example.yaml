@@ -88,6 +88,7 @@ voice:
       minSpeechMs: 300
       silenceMs: 700
       maxUtteranceMs: 5000
+      # smoke:resident-audio-input fails below this RMS threshold.
       minRmsDb: -55
   probes:
     enabled: true

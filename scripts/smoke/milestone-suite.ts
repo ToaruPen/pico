@@ -30,6 +30,10 @@ import {
 } from "./ollama-vlm-connectivity.js";
 import { type PersonDetectionSmokeReport, runPersonDetectionSmoke } from "./person-detection.js";
 import {
+  type ResidentAudioInputSmokeReport,
+  runResidentAudioInputSmoke
+} from "./resident-audio-input.js";
+import {
   runTapoPersonFollowSmoke,
   type TapoPersonFollowSmokeReport
 } from "./tapo-person-follow-nudge.js";
@@ -42,6 +46,7 @@ export type PicoMilestoneSmokeSectionName =
   | "pi_runtime"
   | "voice_stt"
   | "voice_tts"
+  | "resident_audio_input"
   | "tapo_snapshot"
   | "tapo_ptz"
   | "person_detection"
@@ -74,6 +79,9 @@ export type PiRuntimeSmokeCommandResult = {
 export type PicoMilestoneSmokeDependencies = {
   readonly runPiRuntimeCommand?: (env: NodeJS.ProcessEnv) => PiRuntimeSmokeCommandResult;
   readonly runVoiceProviderSmoke?: (config: PicoConfig) => Promise<VoiceSmokeReport>;
+  readonly runResidentAudioInputSmoke?: (
+    config: PicoConfig
+  ) => Promise<ResidentAudioInputSmokeReport>;
   readonly runTapoRtspSnapshotSmoke?: (config: PicoConfig) => Promise<TapoRtspSmokeReport>;
   readonly runTapoPersonFollowSmoke?: (
     config: PicoConfig,
@@ -136,6 +144,14 @@ export async function runPicoMilestoneSmokeSuite(
 
   sections.push(
     ...(await runVoiceSections(dependencies.runVoiceProviderSmoke ?? runVoiceProviderSmoke, config))
+  );
+  sections.push(
+    await captureSection("resident_audio_input", "resident-audio-input", async () =>
+      toSection(
+        "resident_audio_input",
+        await (dependencies.runResidentAudioInputSmoke ?? runResidentAudioInputSmoke)(config)
+      )
+    )
   );
   sections.push(
     await captureSection("tapo_snapshot", "tapo-rtsp", async () =>
@@ -281,6 +297,7 @@ function failedConfigProviderSections(error: unknown): readonly PicoMilestoneSmo
   return [
     failedSection("voice_stt", "mlx-whisper", reason),
     failedSection("voice_tts", "aivis-speech", reason),
+    failedSection("resident_audio_input", "resident-audio-input", reason),
     failedSection("tapo_snapshot", "tapo-rtsp", reason),
     failedSection("tapo_ptz", "tapo-onvif-ptz", reason),
     failedSection("person_detection", "tapo-rtsp+onnxruntime", reason),

@@ -11,6 +11,27 @@ import type { VoicePlaybackSink } from "./voice-resident.js";
 
 type Platform = NodeJS.Platform;
 
+export type Pcm16leAudioLevel = {
+  readonly sampleCount: number;
+  readonly durationMs: number;
+  readonly rmsDb: number;
+  readonly peakDb: number;
+};
+
+export type ResidentAudioInputLevelOptions = {
+  readonly captureMs: number;
+  readonly minimumRmsDb: number;
+  readonly timeoutMs?: number;
+};
+
+export type ResidentAudioInputLevel = Pcm16leAudioLevel & {
+  readonly provider: ResidentAudioInputPlan["provider"];
+  readonly sampleRateHz: number;
+  readonly channels: number;
+  readonly capturedMs: number;
+  readonly signalDetected: boolean;
+};
+
 export type ResidentAudioInputPlan =
   | {
       readonly provider: "alsa";
@@ -146,6 +167,52 @@ export function createResidentPcmFrameSource(
   );
 }
 
+export async function measureResidentAudioInputLevel(
+  config: PicoConfig,
+  options: ResidentAudioInputLevelOptions,
+  spawnAudioProcess: SpawnAudioProcess = spawn as SpawnAudioProcess,
+  platform: Platform = process.platform
+): Promise<ResidentAudioInputLevel> {
+  const captureMs = requirePositiveInteger(options.captureMs, "resident audio captureMs");
+  const timeoutMs = requirePositiveInteger(
+    options.timeoutMs ?? Math.max(captureMs + 1_000, 5_000),
+    "resident audio timeoutMs"
+  );
+  const minimumRmsDatabase = requireFiniteNumber(
+    options.minimumRmsDb,
+    "resident audio minimumRmsDb"
+  );
+  const plan = createResidentAudioInputPlan(config, platform);
+  const measured = await captureResidentAudioInputLevel(
+    createResidentAudioInputLevelPlan(plan, captureMs),
+    config,
+    captureMs,
+    timeoutMs,
+    spawnAudioProcess
+  );
+
+  return {
+    provider: plan.provider,
+    sampleRateHz: config.voice.echoControl.sampleRateHz,
+    channels: config.voice.echoControl.channels,
+    capturedMs: measured.durationMs,
+    ...measured,
+    signalDetected: measured.rmsDb >= minimumRmsDatabase
+  };
+}
+
+export function measurePcm16leAudioLevel(
+  audio: Uint8Array,
+  sampleRateHz: number,
+  channels: number
+): Pcm16leAudioLevel {
+  const accumulator = createPcm16leAudioLevelAccumulator(sampleRateHz, channels);
+
+  accumulator.accept(audio);
+
+  return accumulator.measure();
+}
+
 export function createResidentPlaybackSink(
   config: PicoConfig,
   spawnAudioProcess: SpawnAudioProcess = spawn as SpawnAudioProcess,
@@ -166,6 +233,151 @@ export function createResidentPlaybackSink(
       await playWavFile(plan, chunk, spawnAudioProcess);
     }
   };
+}
+
+function createPcm16leAudioLevelAccumulator(
+  sampleRateHz: number,
+  channels: number
+): {
+  readonly accept: (audio: Uint8Array) => void;
+  readonly measure: () => Pcm16leAudioLevel;
+} {
+  const normalizedSampleRateHz = requirePositiveInteger(sampleRateHz, "PCM sampleRateHz");
+  const normalizedChannels = requirePositiveInteger(channels, "PCM channels");
+  let squareSum = 0;
+  let peakAbs = 0;
+  let sampleCount = 0;
+
+  return {
+    accept(audio) {
+      const view = new DataView(audio.buffer, audio.byteOffset, audio.byteLength);
+      const chunkSampleCount = Math.floor(audio.byteLength / 2);
+
+      for (let index = 0; index < chunkSampleCount; index += 1) {
+        const absolute = Math.abs(view.getInt16(index * 2, true) / 32_768);
+        squareSum += absolute * absolute;
+        peakAbs = Math.max(peakAbs, absolute);
+      }
+
+      sampleCount += chunkSampleCount;
+    },
+    measure() {
+      return {
+        sampleCount,
+        durationMs: (sampleCount / normalizedChannels / normalizedSampleRateHz) * 1_000,
+        rmsDb:
+          sampleCount === 0 || squareSum === 0
+            ? Number.NEGATIVE_INFINITY
+            : 20 * Math.log10(Math.sqrt(squareSum / sampleCount)),
+        peakDb: peakAbs === 0 ? Number.NEGATIVE_INFINITY : 20 * Math.log10(peakAbs)
+      };
+    }
+  };
+}
+
+function createResidentAudioInputLevelPlan(
+  plan: ResidentAudioInputPlan,
+  captureMs: number
+): ResidentAudioInputPlan {
+  if (plan.provider === "alsa") {
+    return {
+      ...plan,
+      args: [...plan.args, "-d", String(Math.ceil(captureMs / 1_000))]
+    };
+  }
+
+  return {
+    ...plan,
+    args: [
+      ...plan.args.slice(0, 7),
+      "-t",
+      formatCaptureSeconds(captureMs + 1_000),
+      ...plan.args.slice(7)
+    ]
+  };
+}
+
+function captureResidentAudioInputLevel(
+  plan: ResidentAudioInputPlan,
+  config: PicoConfig,
+  captureMs: number,
+  timeoutMs: number,
+  spawnAudioProcess: SpawnAudioProcess
+): Promise<Pcm16leAudioLevel> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const level = createPcm16leAudioLevelAccumulator(
+      config.voice.echoControl.sampleRateHz,
+      config.voice.echoControl.channels
+    );
+    const child = spawnAudioProcess(plan.command, plan.args, {
+      stdio: ["ignore", "pipe", "inherit"]
+    });
+    const stdout = child.stdout;
+
+    const settle = (error: Error | undefined, value?: Pcm16leAudioLevel): void => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeout);
+
+      if (error !== undefined) {
+        reject(error);
+        return;
+      }
+
+      resolve(value ?? level.measure());
+    };
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      settle(new Error(`pico resident voice ${plan.provider} input level capture timed out`));
+    }, timeoutMs);
+    timeout.unref();
+
+    if (stdout === null) {
+      settle(new Error(`pico resident voice ${plan.provider} input did not expose stdout`));
+      return;
+    }
+
+    stdout.on("data", (chunk: Buffer) => {
+      level.accept(new Uint8Array(chunk));
+    });
+    stdout.once("error", settle);
+    child.once("error", settle);
+    child.once("close", (code, signalName) => {
+      if (code !== 0) {
+        settle(
+          new Error(
+            `pico resident voice ${plan.provider} input exited with code ${String(
+              code
+            )} signal ${String(signalName)}`
+          )
+        );
+        return;
+      }
+
+      const measured = level.measure();
+
+      if (!isSufficientAudioInputLevelCapture(measured.durationMs, captureMs)) {
+        settle(new Error(`pico resident voice ${plan.provider} input ended before level capture`));
+        return;
+      }
+
+      settle(undefined, measured);
+    });
+  });
+}
+
+function isSufficientAudioInputLevelCapture(measuredMs: number, requestedMs: number): boolean {
+  const timingToleranceMs = Math.min(100, requestedMs * 0.05);
+
+  return measuredMs >= requestedMs - timingToleranceMs;
+}
+
+function formatCaptureSeconds(captureMs: number): string {
+  return (captureMs / 1_000).toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 async function* readPcmFrames(
@@ -402,4 +614,20 @@ function requirePlatform(platform: Platform, expected: Platform, message: string
   if (platform !== expected) {
     throw new Error(message);
   }
+}
+
+function requirePositiveInteger(value: number, label: string): number {
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+
+  return value;
+}
+
+function requireFiniteNumber(value: number, label: string): number {
+  if (!Number.isFinite(value)) {
+    throw new Error(`${label} must be a finite number`);
+  }
+
+  return value;
 }

@@ -10,31 +10,102 @@ import {
   createResidentAudioInputPlan,
   createResidentAudioOutputPlan,
   createResidentPcmFrameSource,
-  createResidentPlaybackSink
+  createResidentPlaybackSink,
+  measurePcm16leAudioLevel,
+  measureResidentAudioInputLevel
 } from "../src/runtime/resident-audio-io.js";
 
 describe("resident audio I/O plans", () => {
-  it("builds explicit macOS AVFoundation input and afplay output plans", () => {
-    const config = definePicoConfig({
-      voice: {
-        resident: {
-          enabled: true,
-          audioInput: {
-            provider: "avfoundation",
-            device: ":0"
-          },
-          audioOutput: {
-            provider: "afplay",
-            route: "system_default"
-          }
-        },
-        echoControl: {
-          sampleRateHz: 16000,
-          channels: 1,
-          frameMs: 20
-        }
-      }
+  it("measures PCM16LE RMS and peak levels without retaining audio payloads", () => {
+    const audio = pcm16le([0, 16_384, -16_384, 0]);
+    const level = measurePcm16leAudioLevel(audio, 16_000, 1);
+
+    expect(level).toMatchObject({
+      sampleCount: 4,
+      durationMs: 0.25
     });
+    expect(level.rmsDb).toBeCloseTo(-9.03, 2);
+    expect(level.peakDb).toBeCloseTo(-6.02, 2);
+  });
+
+  it("captures bounded resident input level from the configured audio source", async () => {
+    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const spawn = vi.fn(() => process.child);
+    const capture = measureResidentAudioInputLevel(
+      config,
+      {
+        captureMs: 20,
+        minimumRmsDb: -55
+      },
+      spawn,
+      "darwin"
+    );
+
+    process.stdout.write(pcm16le([8_192, -8_192, 8_192, -8_192], 80));
+    process.stdout.end();
+    process.emitClose(0, undefined);
+
+    await expect(capture).resolves.toMatchObject({
+      provider: "avfoundation",
+      sampleRateHz: 16000,
+      channels: 1,
+      capturedMs: 20,
+      sampleCount: 320,
+      signalDetected: true
+    });
+    expect(spawn).toHaveBeenCalledWith(
+      "ffmpeg",
+      [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "avfoundation",
+        "-i",
+        ":0",
+        "-t",
+        "1.02",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-f",
+        "s16le",
+        "pipe:1"
+      ],
+      { stdio: ["ignore", "pipe", "inherit"] }
+    );
+    expect(process.kill).not.toHaveBeenCalled();
+  });
+
+  it("accepts a finite input level capture that ends within device timing tolerance", async () => {
+    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const spawn = vi.fn(() => process.child);
+    const capture = measureResidentAudioInputLevel(
+      config,
+      {
+        captureMs: 20,
+        minimumRmsDb: -55
+      },
+      spawn,
+      "darwin"
+    );
+
+    process.stdout.write(pcm16le([8_192, -8_192], 152));
+    process.stdout.end();
+    process.emitClose(0, undefined);
+
+    await expect(capture).resolves.toMatchObject({
+      capturedMs: 19,
+      sampleCount: 304,
+      signalDetected: true
+    });
+  });
+
+  it("builds explicit macOS AVFoundation input and afplay output plans", () => {
+    const config = avfoundationResidentAudioConfig({ frameMs: 20 });
 
     expect(createResidentAudioInputPlan(config, "darwin")).toEqual({
       provider: "avfoundation",
@@ -476,4 +547,42 @@ function createAudioProcess(streams: {
       listeners.exit?.(code);
     }
   };
+}
+
+function pcm16le(samples: readonly number[], repeat = 1): Uint8Array {
+  const audio = new Uint8Array(samples.length * repeat * 2);
+  const view = new DataView(audio.buffer);
+  let offset = 0;
+
+  for (let iteration = 0; iteration < repeat; iteration += 1) {
+    for (const sample of samples) {
+      view.setInt16(offset, sample, true);
+      offset += 2;
+    }
+  }
+
+  return audio;
+}
+
+function avfoundationResidentAudioConfig(input: { readonly frameMs: number }) {
+  return definePicoConfig({
+    voice: {
+      resident: {
+        enabled: true,
+        audioInput: {
+          provider: "avfoundation",
+          device: ":0"
+        },
+        audioOutput: {
+          provider: "afplay",
+          route: "system_default"
+        }
+      },
+      echoControl: {
+        sampleRateHz: 16_000,
+        channels: 1,
+        frameMs: input.frameMs
+      }
+    }
+  });
 }

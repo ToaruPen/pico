@@ -30,6 +30,7 @@
     "smoke:camera-ptz": "jiti scripts/smoke/tapo-person-follow-nudge.ts",
     "smoke:person-follow-runtime": "jiti scripts/smoke/person-follow-runtime.ts",
     "smoke:voice-providers": "jiti scripts/smoke/voice-providers.ts",
+    "smoke:resident-audio-input": "jiti scripts/smoke/resident-audio-input.ts",
     "smoke:pi-runtime": "jiti scripts/smoke/pi-runtime.ts",
     "field:session-memory-lifecycle": "jiti scripts/field/session-memory-lifecycle.ts",
     "field:person-follow-visible-person": "jiti scripts/field/person-follow-visible-person.ts",
