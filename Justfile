@@ -36,6 +36,9 @@ smoke-embedding-sidecar:
 smoke-pi-runtime:
   npm run smoke:pi-runtime
 
+resident-voice-launchd action:
+  npm run resident:voice:launchd -- {{action}}
+
 field-voice-echo-pickup:
   npm run field:voice-echo-pickup
 

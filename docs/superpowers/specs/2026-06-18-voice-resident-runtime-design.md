@@ -185,6 +185,29 @@ process lifecycle は以下を持つ。
 - active session の cutoff/enqueue 試行。ただし memory worker が構成されている
   resident process に限る。
 
+## Mac Resident Service Management
+
+Mac mini を resident host とする場合、`npm run resident:voice` は launchd の
+user LaunchAgent から起動する。これは smoke/field harness ではなく production
+runtime の常駐管理入口である。
+
+- package entrypoint は `npm run resident:voice:launchd -- <operation>` とする。
+- operation は `install`、`start`、`restart`、`stop`、`status`、`uninstall`、
+  `print-plist` を明示指定する。
+- LaunchAgent label は `dev.toarupen.pico.resident-voice` とする。
+- plist は `~/Library/LaunchAgents/dev.toarupen.pico.resident-voice.plist` に置く。
+- `ProgramArguments` は current Node executable、local
+  `node_modules/jiti/lib/jiti-cli.mjs`、`scripts/resident/voice.ts` を直接指定する。
+  `PICO_CONFIG_PATH` と stable `PATH` は `EnvironmentVariables` で渡す。
+- local config の内容、camera credential、transcript、audio payload は plist や
+  launchd command plan に埋め込まない。渡すのは resolved config path だけにする。
+- stdout/stderr は `.pico-local/logs/resident-voice.out.log` と
+  `.pico-local/logs/resident-voice.err.log` に分ける。
+- `RunAtLoad` と `KeepAlive` を有効化し、process crash や login 後に resident
+  voice が戻る形にする。
+- `stop` は `KeepAlive` による即時再起動を避けるため `launchctl bootout` を使い、
+  plist は残す。完全削除は `uninstall` が bootout 後に plist を削除する。
+
 ## Configuration
 
 既存 `PicoConfig` に resident runtime 用の config 境界を追加する。
