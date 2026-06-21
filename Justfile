@@ -39,6 +39,9 @@ smoke-pi-runtime:
 resident-voice-launchd action:
   npm run resident:voice:launchd -- {{action}}
 
+resident-voice-dev-terminal:
+  npm run resident:voice:dev-terminal
+
 field-voice-echo-pickup:
   npm run field:voice-echo-pickup
 

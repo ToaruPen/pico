@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { resolve } from "node:path";
 
@@ -38,7 +38,10 @@ async function executeResidentLaunchdOperationStep(
   step: ResidentLaunchdOperationStep
 ): Promise<void> {
   if (step.kind === "mkdir") {
-    await mkdir(step.path, { recursive: true });
+    await mkdir(step.path, { recursive: true, mode: step.mode });
+    if (step.mode !== undefined) {
+      await chmod(step.path, step.mode);
+    }
     return;
   }
 

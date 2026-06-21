@@ -137,6 +137,71 @@ stale `processing` jobs after `PICO_RESIDENT_MEMORY_RECOVER_PROCESSING_OLDER_THA
 or 10 minutes by default; this is crash recovery, not a per-job execution
 deadline.
 
+For local development on macOS, open a Minecraft-server-style log terminal for
+the voice resident process:
+
+```bash
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:dev-terminal
+```
+
+This opens Terminal.app, starts `resident:voice`, streams stdout and stderr in
+that terminal window, and also appends the same output to
+`~/.pico/resident-voice/development/processes/dev-terminal.log`. Stop it from
+the opened terminal with `Ctrl-C`; the development terminal closes its own
+Terminal window after the resident process exits. This is a development
+entrypoint; production resident voice management still uses the LaunchAgent
+below.
+
+The development terminal uses concise voice probe logs by default and does not
+support verbose mode. It shows utterance windows, STT completion, trigger
+decisions, session start, Pi Agent turns, Pi Agent response duration, wake
+acknowledgement prompts/responses, active user input text, active Pi Agent
+response text, TTS synthesis/playback, cutoff enqueue, and errors. Text payloads
+are displayed as indented multiline blocks so operator logs show the actual
+response shape without hiding line breaks. Per-frame successful
+capture/echo-control events are suppressed because they are too high-volume for
+operator-facing logs. Use
+`PICO_VOICE_PROBE_STDOUT=verbose npm run resident:voice` only when debugging the
+frame pipeline directly from a plain terminal, not from
+`resident:voice:dev-terminal`.
+
+Resident voice logs are stored under `~/.pico` with local-user-only
+permissions. Development and normal resident runs are separated:
+
+```text
+~/.pico/
+  resident-voice/
+    development/
+      processes/dev-terminal.log
+      processes/YYYY-MM-DD/<run-id>.log
+      events/YYYY-MM-DD.jsonl
+      sessions/YYYY-MM-DD/<run-id>/<session-id>.log
+      sessions/YYYY-MM-DD/<run-id>/<session-id>.jsonl
+    normal/
+      processes/resident-voice.out.log
+      processes/resident-voice.err.log
+      processes/YYYY-MM-DD/<run-id>.log
+      events/YYYY-MM-DD.jsonl
+      sessions/YYYY-MM-DD/<run-id>/<session-id>.log
+      sessions/YYYY-MM-DD/<run-id>/<session-id>.jsonl
+```
+
+Process logs contain stage summaries, durations, and errors. Session logs keep
+the spoken input and Pi Agent response text for review, while JSONL files carry
+the same session events in a script-friendly shape with `schemaVersion`,
+`runMode`, and `runId`. Raw audio is not stored continuously; use targeted field
+harnesses for short diagnostic audio artifacts.
+
+The resident voice process generates a short Pi Agent wake acknowledgement after
+trusted wake-name or greeting triggers. This confirms that pico is listening
+without treating the wake phrase itself as the user's task.
+
+Background music is not removed by the resident voice runtime. Echo control is
+for pico's own TTS playback reference, so loud music or lyric-heavy audio can
+still degrade STT accuracy, keep an utterance window open, or create false wake
+matches. Validate resident placement with the same background audio expected in
+the room.
+
 On the Mac mini resident host, manage the production voice process as a user
 LaunchAgent after `smoke:resident-audio-input` proves that the configured
 microphone clears `voice.resident.utteranceWindow.minRmsDb`:
@@ -153,9 +218,13 @@ The LaunchAgent label is `dev.toarupen.pico.resident-voice`. It runs the
 resident voice script through the current Node executable and local `jiti` with
 `PICO_CONFIG_PATH` set to the resolved local config path, writes the plist to
 `~/Library/LaunchAgents/dev.toarupen.pico.resident-voice.plist`, and writes logs
-under `.pico-local/logs/`. `stop` boots the KeepAlive service out of the user
-launchd domain while leaving the plist installed; use `install` to bootstrap it
-again or `uninstall` to remove the plist.
+under `~/.pico/resident-voice/normal/`. The normal LaunchAgent session keeps
+process stdout/stderr in `processes/resident-voice.out.log` and
+`processes/resident-voice.err.log`, and the resident runtime writes dated
+process, event, and session logs under the same normal run mode. `stop` boots
+the KeepAlive service out of the user launchd domain while leaving the plist
+installed; use `install` to bootstrap it again or `uninstall` to remove the
+plist.
 
 For the protected Windows GPU vision host, run Windows native Ollama on
 `127.0.0.1:11434` and reach it only through the pico-host SSH local forward. The

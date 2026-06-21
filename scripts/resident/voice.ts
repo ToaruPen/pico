@@ -1,5 +1,6 @@
+import { homedir } from "node:os";
+
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
-import { createStructuredAuditLog } from "../../src/modules/audit/index.js";
 import { openSessionMemoryCandidateQueue } from "../../src/modules/long-memory/index.js";
 import { createSessionMemoryEnqueueWorker } from "../../src/modules/long-memory/session-worker.js";
 import { createSessionLifecycle } from "../../src/modules/session/index.js";
@@ -25,6 +26,16 @@ import {
   acquireResidentSingleInstanceLock,
   registerResidentSingleInstanceLockShutdownCleanup
 } from "../../src/runtime/resident-single-instance-lock.js";
+import {
+  createResidentVoiceAuditLog,
+  type ResidentVoiceAuditLogStdoutMode
+} from "../../src/runtime/resident-voice-audit-log.js";
+import { createResidentVoiceConsoleLog } from "../../src/runtime/resident-voice-console-log.js";
+import {
+  createResidentVoiceCompositeConsoleSink,
+  createResidentVoiceFileLogSink,
+  type ResidentVoiceLogRunMode
+} from "../../src/runtime/resident-voice-log-files.js";
 import { runVoiceResidentRuntime } from "../../src/runtime/voice-resident.js";
 
 const config = loadPicoConfigFromEnvironment();
@@ -54,7 +65,26 @@ try {
 }
 
 async function runResidentVoice(config: PicoConfig, signal: AbortSignal): Promise<void> {
-  const audit = config.voice.probes.enabled ? createStructuredAuditLog() : undefined;
+  const stdoutProbeMode = readVoiceProbeStdoutMode(process.env.PICO_VOICE_PROBE_STDOUT);
+  const logRunMode = readResidentVoiceLogRunMode(process.env.PICO_RESIDENT_VOICE_LOG_MODE);
+  const fileLog = createResidentVoiceFileLogSink({
+    homeDirectory: homedir(),
+    runMode: logRunMode
+  });
+  const writeProcessLine = (line: string): void => {
+    fileLog.writeProcessLine(line);
+
+    if (stdoutProbeMode !== undefined) {
+      process.stdout.write(line);
+    }
+  };
+  const audit = config.voice.probes.enabled
+    ? createResidentVoiceAuditLog({
+        stdoutEnabled: true,
+        writeStdout: writeProcessLine,
+        ...(stdoutProbeMode === undefined ? {} : { stdoutMode: stdoutProbeMode })
+      })
+    : undefined;
   const sessionLifecycle = createSessionLifecycle({
     ending: config.session.ending,
     ...(audit === undefined ? {} : { audit })
@@ -77,11 +107,57 @@ async function runResidentVoice(config: PicoConfig, signal: AbortSignal): Promis
       sessionLifecycle
     }),
     memoryWorker,
+    wakeAcknowledgement: {
+      enabled: true
+    },
+    console: createResidentVoiceRuntimeConsoleSink(logRunMode, fileLog, stdoutProbeMode),
     minTriggerConfidence: config.voice.resident.minTriggerConfidence,
     utteranceWindow: config.voice.resident.utteranceWindow,
     ...(audit === undefined ? {} : { probe: { audit } }),
     signal
   });
+}
+
+function createResidentVoiceRuntimeConsoleSink(
+  logRunMode: ResidentVoiceLogRunMode,
+  fileLog: ReturnType<typeof createResidentVoiceFileLogSink>,
+  stdoutProbeMode: ResidentVoiceAuditLogStdoutMode | undefined
+) {
+  if (stdoutProbeMode !== undefined && logRunMode === "development") {
+    return createResidentVoiceCompositeConsoleSink([createResidentVoiceConsoleLog(), fileLog]);
+  }
+
+  return fileLog;
+}
+
+function readVoiceProbeStdoutMode(
+  value: string | undefined
+): ResidentVoiceAuditLogStdoutMode | undefined {
+  if (value === undefined || value.trim() === "") {
+    return undefined;
+  }
+
+  if (value === "1" || value === "summary") {
+    return "summary";
+  }
+
+  if (value === "verbose") {
+    return "verbose";
+  }
+
+  throw new Error("PICO_VOICE_PROBE_STDOUT must be unset, 1, summary, or verbose");
+}
+
+function readResidentVoiceLogRunMode(value: string | undefined): ResidentVoiceLogRunMode {
+  if (value === undefined || value.trim() === "") {
+    return "normal";
+  }
+
+  if (value === "development" || value === "normal") {
+    return value;
+  }
+
+  throw new Error("PICO_RESIDENT_VOICE_LOG_MODE must be unset, development, or normal");
 }
 
 function withShutdownGrace<T>(
