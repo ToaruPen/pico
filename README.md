@@ -152,16 +152,18 @@ Terminal window after the resident process exits. This is a development
 entrypoint; production resident voice management still uses the LaunchAgent
 below.
 
-The development terminal uses concise voice probe logs by default. It shows
-utterance windows, STT completion, trigger decisions, session start, Pi Agent
-turns, Pi Agent response duration, wake acknowledgement prompts/responses,
-active user input text, active Pi Agent response text, TTS synthesis/playback,
-cutoff enqueue, and errors. Text payloads are displayed as indented multiline
-blocks so operator logs show the actual response shape without hiding line
-breaks. Per-frame successful capture/echo-control events are suppressed because
-they are too high-volume for operator-facing logs. Use
+The development terminal uses concise voice probe logs by default and does not
+support verbose mode. It shows utterance windows, STT completion, trigger
+decisions, session start, Pi Agent turns, Pi Agent response duration, wake
+acknowledgement prompts/responses, active user input text, active Pi Agent
+response text, TTS synthesis/playback, cutoff enqueue, and errors. Text payloads
+are displayed as indented multiline blocks so operator logs show the actual
+response shape without hiding line breaks. Per-frame successful
+capture/echo-control events are suppressed because they are too high-volume for
+operator-facing logs. Use
 `PICO_VOICE_PROBE_STDOUT=verbose npm run resident:voice` only when debugging the
-frame pipeline directly.
+frame pipeline directly from a plain terminal, not from
+`resident:voice:dev-terminal`.
 
 Resident voice logs are stored under `~/.pico` with local-user-only
 permissions. Development and normal resident runs are separated:

@@ -120,4 +120,31 @@ describe("resident voice file logs", () => {
       ["second", event]
     ]);
   });
+
+  it("continues composite console fan-out when one sink fails", () => {
+    const events: unknown[] = [];
+    const sink = createResidentVoiceCompositeConsoleSink([
+      {
+        record: () => {
+          throw new Error("stdout unavailable");
+        }
+      },
+      {
+        record: (event) => {
+          events.push(["second", event]);
+        }
+      }
+    ]);
+    const event = {
+      kind: "staff_transcript" as const,
+      occurredAt: "2026-06-22T01:02:04.000Z",
+      sessionId: "session-1",
+      text: "こんにちは"
+    };
+
+    expect(() => {
+      sink.record(event);
+    }).not.toThrow();
+    expect(events).toEqual([["second", event]]);
+  });
 });

@@ -89,7 +89,11 @@ export function createResidentVoiceCompositeConsoleSink(
   return {
     record(event) {
       for (const sink of sinks) {
-        sink.record(event);
+        try {
+          sink.record(event);
+        } catch {
+          // One console sink failure must not prevent the remaining sinks.
+        }
       }
     }
   };
