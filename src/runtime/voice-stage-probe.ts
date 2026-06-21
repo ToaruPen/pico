@@ -7,6 +7,7 @@ import type {
 export type VoiceRuntimeStage =
   | "mic_capture"
   | "echo_control"
+  | "utterance_window"
   | "stt"
   | "trigger_match"
   | "session_start"
@@ -32,6 +33,7 @@ export type VoiceStageProbeInput = {
 const voiceRuntimeStages = new Set<VoiceRuntimeStage>([
   "mic_capture",
   "echo_control",
+  "utterance_window",
   "stt",
   "trigger_match",
   "session_start",
@@ -43,6 +45,7 @@ const voiceRuntimeStages = new Set<VoiceRuntimeStage>([
 const voiceStageStatuses = new Set<VoiceStageStatus>(["ok", "error", "skipped", "suppressed"]);
 const voiceStageAttributeKeys = new Set([
   "pico.voice.frame_count",
+  "pico.voice.utterance_duration_ms",
   "pico.voice.sample_rate_hz",
   "pico.voice.channels",
   "pico.voice.suppressed_frame_count",

@@ -30,21 +30,24 @@ provider へ自動で切り替えない。
 
 ## Runtime Data Flow
 
-1. `voice.audio` が短いマイク window を取得する。
-2. window は必ず `voice.echoControl.processNearEnd` を通る。
-3. `suppress` された window は STT に渡さない。
-4. `pass` された window だけを `voice.stt` へ渡す。
-5. session 開始前の transcript は trigger 判定だけに使い、保存しない。
-6. wake name、greeting、将来の bell/tool event など trusted trigger が成立したら session を開始する。
-7. active session 中の staff utterance を session entry として append する。
-8. 同じ Pi Agent SDK session に turn を渡す。
-9. Pi Agent response text を assistant entry として append する。
-10. response text を Aivis Speech で synthesize し、`voice.audio` で再生する。
-11. 再生音声は playback 呼び出し前に同じ chunk start timestamp で
+1. `voice.audio` が 10ms 程度の短い PCM frame を継続取得する。
+2. frame は必ず `voice.echoControl.processNearEnd` を通る。
+3. `suppress` された frame は STT に渡さない。
+4. `pass` された frame は energy VAD と configured silence threshold で
+   utterance window に集約する。
+5. utterance window が閉じた時だけ `voice.stt` へ渡す。10ms frame を直接
+   Whisper に渡さない。
+6. session 開始前の transcript は trigger 判定だけに使い、保存しない。
+7. wake name、greeting、将来の bell/tool event など trusted trigger が成立したら session を開始する。
+8. active session 中の staff utterance を session entry として append する。
+9. 同じ Pi Agent SDK session に turn を渡す。
+10. Pi Agent response text を assistant entry として append する。
+11. response text を Aivis Speech で synthesize し、`voice.audio` で再生する。
+12. 再生音声は playback 呼び出し前に同じ chunk start timestamp で
     `echoControl.acceptFarEndReference` へ渡す。
-12. configured timed duration で session を cut off する。
-13. cutoff payload を long-memory worker queue に enqueue する。
-14. live conversation path は memory worker の処理完了を待たない。
+13. configured timed duration で session を cut off する。
+14. cutoff payload を long-memory worker queue に enqueue する。
+15. live conversation path は memory worker の処理完了を待たない。
 
 ## Pi Agent Integration
 
@@ -128,6 +131,7 @@ stage は固定 enum とする。
 
 - `mic_capture`
 - `echo_control`
+- `utterance_window`
 - `stt`
 - `trigger_match`
 - `session_start`
@@ -144,6 +148,7 @@ event name は `voice.runtime.stage` に統一する。
 - `pico.voice.stage_status`
 - `pico.voice.stage_duration_ms`
 - `pico.voice.frame_count`
+- `pico.voice.utterance_duration_ms`
 - `pico.voice.sample_rate_hz`
 - `pico.voice.channels`
 - `pico.voice.triggered`
@@ -193,7 +198,11 @@ process lifecycle は以下を持つ。
   `route: system_default` を明示し、macOS の現在の default output route を
   resident 用として運用者が承認する。Raspberry Pi / Linux 常駐では
   `provider: alsa` と ALSA device を明示する。
-- trigger confidence。
+- `voice.resident.utteranceWindow`。`minSpeechMs`、`silenceMs`、
+  `maxUtteranceMs`、`minRmsDb` で常時待受の VAD/windowing を調整する。
+- trigger confidence。`mlx-whisper` sidecar の現行 smoke では成功時 confidence
+  が `0.5` として返るため、default は `0.5` とし、施設環境で false trigger が
+  多ければ local config で上げる。
 - probe enablement and sink。
 
 production config が不足している場合は起動時に失敗する。field script の env-only

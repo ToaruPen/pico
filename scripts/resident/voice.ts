@@ -78,6 +78,7 @@ async function runResidentVoice(config: PicoConfig, signal: AbortSignal): Promis
     }),
     memoryWorker,
     minTriggerConfidence: config.voice.resident.minTriggerConfidence,
+    utteranceWindow: config.voice.resident.utteranceWindow,
     ...(audit === undefined ? {} : { probe: { audit } }),
     signal
   });

@@ -13,6 +13,12 @@ import type {
   TtsSynthesisSuccess
 } from "../modules/voice/index.js";
 import { recordVoiceStageProbe, type VoiceStageProbe } from "./voice-stage-probe.js";
+import {
+  createVoiceUtteranceAssembler,
+  type TranscribedUtterance,
+  type VoiceUtteranceAssembler,
+  type VoiceUtteranceWindowConfig
+} from "./voice-utterance-window.js";
 
 export type VoiceFrameSource = AsyncIterable<VoicePcmFrame> | Iterable<VoicePcmFrame>;
 
@@ -49,6 +55,7 @@ export type VoiceResidentRuntimeOptions = {
   readonly signal?: AbortSignal;
   readonly endedSessionIds?: readonly string[];
   readonly minTriggerConfidence?: number;
+  readonly utteranceWindow: VoiceUtteranceWindowConfig;
 };
 
 export type VoiceResidentRuntimeResult = {
@@ -73,6 +80,16 @@ type VoiceResidentCounters = {
   suppressedFrames: number;
 };
 
+type ActiveSessionState = {
+  readonly getActiveSessionId: () => string | undefined;
+  readonly setActiveSessionId: (id: string | undefined) => void;
+};
+
+type PendingSessionState = {
+  readonly activeSession: ActiveSessionState;
+  readonly pendingCutoffSessionIds: Set<string>;
+};
+
 const defaultNow = (): string => new Date().toISOString();
 
 export async function runVoiceResidentRuntime(
@@ -91,6 +108,7 @@ export async function runVoiceResidentRuntime(
   };
   const pendingCutoffSessionIds = new Set(options.endedSessionIds ?? []);
   let activeSessionId: string | undefined;
+  const utteranceAssembler = createVoiceUtteranceAssembler(options.utteranceWindow);
   const activeSession = {
     getActiveSessionId: () => activeSessionId,
     setActiveSessionId: (id: string | undefined) => {
@@ -109,17 +127,19 @@ export async function runVoiceResidentRuntime(
 
     for await (const rawFrame of toAsyncIterable(options.frames)) {
       throwIfAborted(options.signal);
-      activeSessionId = collectEndedActiveSession(options.sessionLifecycle, activeSessionId, {
-        pendingCutoffSessionIds,
-        piAgent: options.piAgent
-      });
-      enqueueEndedSessions(options, pendingCutoffSessionIds, counters, now);
-      await processNearEndFrame(rawFrame, options, counters, now, {
+      activeSessionId = await processResidentFrameIteration(rawFrame, options, counters, now, {
         activeSession,
-        pendingCutoffSessionIds
+        pendingCutoffSessionIds,
+        utteranceAssembler,
+        currentActiveSessionId: activeSessionId
       });
       counters.processedFrames += 1;
     }
+
+    await flushPendingUtteranceWindow(utteranceAssembler, options, counters, now, {
+      activeSession,
+      pendingCutoffSessionIds
+    });
 
     activeSessionId = collectEndedActiveSession(options.sessionLifecycle, activeSessionId, {
       pendingCutoffSessionIds,
@@ -127,19 +147,106 @@ export async function runVoiceResidentRuntime(
     });
     enqueueEndedSessions(options, pendingCutoffSessionIds, counters, now);
   } finally {
-    activeSessionId = cleanupActiveSessionForShutdown(
-      options,
-      activeSessionId,
-      pendingCutoffSessionIds,
-      counters,
-      now
-    );
-    await options.piAgent.disposeAll?.();
-    options.memoryWorker?.close?.();
-    await options.echoControl.flush();
+    try {
+      await flushPendingUtteranceWindow(utteranceAssembler, options, counters, now, {
+        activeSession,
+        pendingCutoffSessionIds
+      });
+    } finally {
+      activeSessionId = await runShutdownCleanup(
+        options,
+        activeSessionId,
+        pendingCutoffSessionIds,
+        counters,
+        now
+      );
+    }
   }
 
   return Object.freeze({ ...counters });
+}
+
+async function runShutdownCleanup(
+  options: VoiceResidentRuntimeOptions,
+  activeSessionId: string | undefined,
+  pendingCutoffSessionIds: Set<string>,
+  counters: VoiceResidentCounters,
+  now: () => string
+): Promise<string | undefined> {
+  const nextActiveSessionId = cleanupActiveSessionForShutdown(
+    options,
+    activeSessionId,
+    pendingCutoffSessionIds,
+    counters,
+    now
+  );
+  const firstError = await collectFirstShutdownCleanupError(options);
+
+  if (firstError !== undefined) {
+    throw firstError;
+  }
+
+  return nextActiveSessionId;
+}
+
+async function collectFirstShutdownCleanupError(
+  options: VoiceResidentRuntimeOptions
+): Promise<Error | undefined> {
+  const errors: Error[] = [];
+
+  await recordCleanupError(errors, () => options.piAgent.disposeAll?.());
+  await recordCleanupError(errors, () => {
+    options.memoryWorker?.close?.();
+  });
+  await recordCleanupError(errors, () => options.echoControl.flush());
+
+  return errors[0];
+}
+
+async function recordCleanupError(
+  errors: Error[],
+  cleanup: () => void | Promise<void>
+): Promise<void> {
+  try {
+    await cleanup();
+  } catch (error) {
+    errors.push(error instanceof Error ? error : new Error(String(error)));
+  }
+}
+
+async function processResidentFrameIteration(
+  rawFrame: VoicePcmFrame,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string,
+  state: PendingSessionState & {
+    readonly utteranceAssembler: VoiceUtteranceAssembler;
+    readonly currentActiveSessionId: string | undefined;
+  }
+): Promise<string | undefined> {
+  const activeSessionId = collectEndedActiveSession(
+    options.sessionLifecycle,
+    state.currentActiveSessionId,
+    {
+      pendingCutoffSessionIds: state.pendingCutoffSessionIds,
+      piAgent: options.piAgent
+    }
+  );
+  state.activeSession.setActiveSessionId(activeSessionId);
+  enqueueEndedSessions(options, state.pendingCutoffSessionIds, counters, now);
+  await processNearEndFrame(rawFrame, options, counters, now, state);
+
+  return state.activeSession.getActiveSessionId();
+}
+
+async function flushPendingUtteranceWindow(
+  utteranceAssembler: VoiceUtteranceAssembler,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string,
+  state: PendingSessionState
+): Promise<void> {
+  await processTranscribedUtterances(utteranceAssembler.flush(), options, counters, now, state);
 }
 
 function cleanupActiveSessionForShutdown(
@@ -171,12 +278,8 @@ async function processNearEndFrame(
   options: VoiceResidentRuntimeOptions,
   counters: VoiceResidentCounters,
   now: () => string,
-  state: {
-    readonly activeSession: {
-      readonly getActiveSessionId: () => string | undefined;
-      readonly setActiveSessionId: (id: string | undefined) => void;
-    };
-    readonly pendingCutoffSessionIds: Set<string>;
+  state: PendingSessionState & {
+    readonly utteranceAssembler: VoiceUtteranceAssembler;
   }
 ): Promise<void> {
   const echoResult = await processEchoControlledFrame(rawFrame, options, now);
@@ -186,36 +289,67 @@ async function processNearEndFrame(
     return;
   }
 
-  const transcript = await transcribePassedFrame(echoResult.frame, options, counters, now);
-
-  if (transcript === undefined || transcript.text === "") {
-    return;
-  }
-
-  const activeSessionId = ensureActiveVoiceSession(
-    transcript,
+  await processTranscribedUtterances(
+    state.utteranceAssembler.accept(echoResult.frame, echoResult.diagnostics.voiceActivity),
     options,
     counters,
     now,
-    state.activeSession
+    state
   );
+}
 
-  if (activeSessionId === undefined) {
-    return;
+async function processTranscribedUtterances(
+  utterances: readonly TranscribedUtterance[],
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string,
+  state: PendingSessionState
+): Promise<void> {
+  for (const utterance of utterances) {
+    recordVoiceStageProbe(options.probe ?? {}, {
+      stage: "utterance_window",
+      status: "ok",
+      startedAt: utterance.frame.capturedAt,
+      durationMs: 0,
+      attributes: {
+        "pico.voice.frame_count": utterance.frameCount,
+        "pico.voice.utterance_duration_ms": utterance.frame.durationMs,
+        "pico.voice.sample_rate_hz": utterance.frame.sampleRateHz,
+        "pico.voice.channels": utterance.frame.channels
+      }
+    });
+
+    const transcript = await transcribePassedFrame(utterance, options, counters, now);
+
+    if (transcript === undefined || transcript.text === "") {
+      continue;
+    }
+
+    const activeSessionId = ensureActiveVoiceSession(
+      transcript,
+      options,
+      counters,
+      now,
+      state.activeSession
+    );
+
+    if (activeSessionId === undefined) {
+      continue;
+    }
+
+    if (activeSessionId !== state.activeSession.getActiveSessionId()) {
+      continue;
+    }
+
+    await runActiveVoiceTurn(transcript.text, options, counters, now, activeSessionId);
+    state.activeSession.setActiveSessionId(
+      collectEndedActiveSession(options.sessionLifecycle, activeSessionId, {
+        pendingCutoffSessionIds: state.pendingCutoffSessionIds,
+        piAgent: options.piAgent
+      })
+    );
+    enqueueEndedSessions(options, state.pendingCutoffSessionIds, counters, now);
   }
-
-  if (activeSessionId !== state.activeSession.getActiveSessionId()) {
-    return;
-  }
-
-  await runActiveVoiceTurn(transcript.text, options, counters, now, activeSessionId);
-  state.activeSession.setActiveSessionId(
-    collectEndedActiveSession(options.sessionLifecycle, activeSessionId, {
-      pendingCutoffSessionIds: state.pendingCutoffSessionIds,
-      piAgent: options.piAgent
-    })
-  );
-  enqueueEndedSessions(options, state.pendingCutoffSessionIds, counters, now);
 }
 
 async function processEchoControlledFrame(
@@ -243,12 +377,13 @@ async function processEchoControlledFrame(
 }
 
 async function transcribePassedFrame(
-  frame: VoicePcmFrame,
+  utterance: TranscribedUtterance,
   options: VoiceResidentRuntimeOptions,
   counters: VoiceResidentCounters,
   now: () => string
 ): Promise<{ readonly text: string; readonly confidence: number } | undefined> {
   const sttStageStartedAt = now();
+  const { frame } = utterance;
   const sttResult = await options.stt.transcribe({
     audio: frame.audio,
     encoding: frame.encoding,
@@ -264,7 +399,7 @@ async function transcribePassedFrame(
       startedAt: sttStageStartedAt,
       durationMs: 0,
       attributes: {
-        "pico.voice.frame_count": 1,
+        "pico.voice.frame_count": utterance.frameCount,
         "pico.voice.error_code": sttResult.reason
       }
     });
@@ -278,7 +413,7 @@ async function transcribePassedFrame(
     startedAt: sttStageStartedAt,
     durationMs: sttResult.durationMs,
     attributes: {
-      "pico.voice.frame_count": 1,
+      "pico.voice.frame_count": utterance.frameCount,
       "pico.voice.sample_rate_hz": frame.sampleRateHz,
       "pico.voice.channels": frame.channels
     }
@@ -307,7 +442,7 @@ function ensureActiveVoiceSession(
   }
 
   const trigger =
-    transcript.confidence >= (options.minTriggerConfidence ?? 0.6)
+    transcript.confidence >= (options.minTriggerConfidence ?? 0.5)
       ? findTrigger(transcript.text, options.triggerPhrases)
       : undefined;
   recordTriggerProbe(trigger, options, now);
