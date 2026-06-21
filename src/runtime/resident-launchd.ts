@@ -67,6 +67,12 @@ export type ResidentLaunchdOperationStep =
 
 const defaultLabel = "dev.toarupen.pico.resident-voice";
 
+export function requireResidentLaunchdPlatform(platform: NodeJS.Platform): void {
+  if (platform !== "darwin") {
+    throw new Error("resident:voice:launchd is supported only on macOS (darwin)");
+  }
+}
+
 export function defineResidentLaunchdService(
   options: ResidentLaunchdServiceOptions
 ): ResidentLaunchdService {

@@ -3,10 +3,20 @@ import { describe, expect, it } from "vitest";
 import {
   createResidentLaunchctlCommandPlan,
   createResidentLaunchdOperationPlan,
-  defineResidentLaunchdService
+  defineResidentLaunchdService,
+  requireResidentLaunchdPlatform
 } from "../src/runtime/resident-launchd.js";
 
 describe("resident launchd service", () => {
+  it("fails fast outside macOS before launchctl operations are planned", () => {
+    expect(() => {
+      requireResidentLaunchdPlatform("linux");
+    }).toThrow("resident:voice:launchd is supported only on macOS (darwin)");
+    expect(() => {
+      requireResidentLaunchdPlatform("darwin");
+    }).not.toThrow();
+  });
+
   it("builds a resident voice LaunchAgent without embedding local config contents", () => {
     const service = defineResidentLaunchdService({
       repoRoot: "/Users/monsoon/Dev/pico project",

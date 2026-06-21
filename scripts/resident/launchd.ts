@@ -7,8 +7,11 @@ import {
   createResidentLaunchdOperationPlan,
   defineResidentLaunchdService,
   type ResidentLaunchdOperation,
-  type ResidentLaunchdOperationStep
+  type ResidentLaunchdOperationStep,
+  requireResidentLaunchdPlatform
 } from "../../src/runtime/resident-launchd.js";
+
+requireResidentLaunchdPlatform(process.platform);
 
 const operation = readOperation(process.argv[2]);
 const service = defineResidentLaunchdService({
