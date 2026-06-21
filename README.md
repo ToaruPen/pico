@@ -101,6 +101,7 @@ sections exit successfully with explicit skipped reports:
 
 ```bash
 just smoke-voice-providers
+PICO_CONFIG_PATH=config/pico.local.yaml npm run smoke:resident-audio-input
 just smoke-camera-tapo
 just smoke-ollama-vlm
 just smoke-camera-vlm-scene
@@ -115,7 +116,9 @@ Configure these sections in `config/pico.local.yaml` as needed:
 - `voice.resident.audioInput` and `voice.resident.audioOutput` for the
   production resident voice process. Use `avfoundation` plus `afplay` with
   explicit `route: system_default` on macOS, and `alsa` plus `alsa` with explicit
-  devices on Raspberry Pi / Linux.
+  devices on Raspberry Pi / Linux. `smoke:resident-audio-input` records a short
+  bounded sample and reports RMS/peak levels only; speak near the resident mic
+  during the capture to verify it clears `voice.resident.utteranceWindow.minRmsDb`.
 - `camera.tapo` for one Tapo RTSP JPEG frame.
 - `vision.ollama` for `qwen3.5:9b` through the protected local tunnel.
 - `camera.tapo` plus `vision.ollama` for camera-to-VLM scene smoke.

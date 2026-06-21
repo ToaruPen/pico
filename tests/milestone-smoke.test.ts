@@ -20,6 +20,12 @@ const piPassed = {
   stderr: ""
 } as const satisfies PiRuntimeSmokeCommandResult;
 
+const residentAudioInputSkipped = {
+  status: "skipped",
+  provider: "resident-audio-input",
+  reason: "Resident audio input is not configured."
+} as const;
+
 function configuredSectionDependencies(): PicoMilestoneSmokeDependencies {
   return {
     runPiRuntimeCommand: () => piPassed,
@@ -38,6 +44,7 @@ function configuredSectionDependencies(): PicoMilestoneSmokeDependencies {
           }
         }
       }),
+    runResidentAudioInputSmoke: () => Promise.resolve(residentAudioInputSkipped),
     runTapoRtspSnapshotSmoke: () =>
       Promise.resolve({
         status: "skipped",
@@ -93,6 +100,7 @@ function expectMilestoneSectionNames(report: PicoMilestoneSmokeReport): void {
     "pi_runtime",
     "voice_stt",
     "voice_tts",
+    "resident_audio_input",
     "tapo_snapshot",
     "tapo_ptz",
     "person_detection",
@@ -155,6 +163,7 @@ describe("pico milestone smoke suite", () => {
               provider: "aivis-speech"
             }
           }),
+        runResidentAudioInputSmoke: () => Promise.resolve(residentAudioInputSkipped),
         runTapoRtspSnapshotSmoke: () =>
           Promise.resolve({
             status: "skipped",
@@ -256,6 +265,15 @@ vision:
             }
           });
         },
+        runResidentAudioInputSmoke: (config) => {
+          observedConfigs.push(config);
+
+          return Promise.resolve({
+            status: "skipped",
+            provider: "resident-audio-input",
+            reason: "Resident audio input is not configured."
+          });
+        },
         runTapoRtspSnapshotSmoke: (config) => {
           observedConfigs.push(config);
 
@@ -311,7 +329,7 @@ vision:
     );
 
     expect(report.status).toBe("skipped");
-    expect(observedConfigs).toHaveLength(7);
+    expect(observedConfigs).toHaveLength(8);
     expect(new Set(observedConfigs).size).toBe(1);
     expect(observedConfigs[0]?.camera.tapo?.host).toBe("192.168.10.25");
     expect(observedConfigs[0]?.vision.ollama?.localBaseUrl).toBe("http://127.0.0.1:11434");
@@ -628,6 +646,7 @@ audit:
               provider: "aivis-speech"
             }
           }),
+        runResidentAudioInputSmoke: () => Promise.resolve(residentAudioInputSkipped),
         runTapoRtspSnapshotSmoke: () =>
           Promise.resolve({
             status: "skipped",
