@@ -13,15 +13,6 @@ export type PicoCliPlan =
 
 type DevelopmentTerminal = "kitty" | "terminal";
 
-const launchdCommands = new Set([
-  "install",
-  "start",
-  "restart",
-  "stop",
-  "status",
-  "uninstall",
-  "print-plist"
-]);
 const helpCommands = new Set(["help", "--help", "-h"]);
 
 export function createPicoCliPlan(arguments_: readonly string[]): PicoCliPlan {
@@ -35,10 +26,14 @@ export function createPicoCliPlan(arguments_: readonly string[]): PicoCliPlan {
   }
 
   if (command === "run") {
-    throw new Error("pico run is ambiguous; use pico foreground or pico start");
+    throw new Error("pico run is ambiguous; start Pi Agent with the pico extension instead");
   }
 
-  return createCommandPlan(command, rest);
+  if (command === "dev") {
+    return createDevelopmentTerminalPlan(rest);
+  }
+
+  throw new Error(`unknown pico command: ${command}\n\n${formatPicoCliHelp()}`);
 }
 
 export function formatPicoCliHelp(): string {
@@ -46,67 +41,15 @@ export function formatPicoCliHelp(): string {
     "Usage:",
     "  pico help",
     "  pico dev [--terminal=kitty|terminal]",
-    "  pico foreground",
-    "  pico install",
-    "  pico start",
-    "  pico restart",
-    "  pico stop",
-    "  pico status",
-    "  pico uninstall",
-    "  pico print-plist",
     "",
     "Commands:",
     "  help        Show this help.",
-    "  dev         Open a visible development voice session with live logs. Defaults to kitty.",
-    "  foreground  Start resident voice in the current terminal and stop when that process exits.",
-    "  install     Register the macOS LaunchAgent for resident voice and load it.",
-    "  start       Start the installed LaunchAgent in the background.",
-    "  restart     Restart the installed LaunchAgent in the background.",
-    "  stop        Stop the background LaunchAgent while keeping it installed.",
-    "  status      Print the LaunchAgent status from launchctl.",
-    "  uninstall   Stop and remove the LaunchAgent plist.",
-    "  print-plist Print the LaunchAgent plist without installing it.",
+    "  dev         Open a visible resident voice development terminal with live logs.",
     "",
     "Notes:",
-    "  Use foreground when you want to watch the process directly in this shell.",
-    "  Use start when Pico should keep listening as a background resident service."
+    "  Pi Agent owns production startup and loads pico as an extension.",
+    "  The pico CLI is only a development helper."
   ].join("\n");
-}
-
-function createCommandPlan(command: string, rest: readonly string[]): PicoCliPlan {
-  if (command === "dev") {
-    return createDevelopmentTerminalPlan(rest);
-  }
-
-  if (command === "foreground") {
-    return createForegroundPlan(command, rest);
-  }
-
-  if (launchdCommands.has(command)) {
-    return createLaunchdPlan(command, rest);
-  }
-
-  throw new Error(`unknown pico command: ${command}\n\n${formatPicoCliHelp()}`);
-}
-
-function createForegroundPlan(command: string, rest: readonly string[]): PicoCliPlan {
-  rejectUnexpectedArguments(command, rest);
-
-  return {
-    kind: "script",
-    scriptPath: "scripts/resident/voice.ts",
-    args: []
-  };
-}
-
-function createLaunchdPlan(command: string, rest: readonly string[]): PicoCliPlan {
-  rejectUnexpectedArguments(command, rest);
-
-  return {
-    kind: "script",
-    scriptPath: "scripts/resident/launchd.ts",
-    args: [command]
-  };
 }
 
 function createDevelopmentTerminalPlan(arguments_: readonly string[]): PicoCliPlan {
@@ -135,10 +78,4 @@ function requireDevelopmentTerminal(value: string | boolean | undefined): Develo
   }
 
   throw new Error("pico dev --terminal must be kitty or terminal");
-}
-
-function rejectUnexpectedArguments(command: string, arguments_: readonly string[]): void {
-  if (arguments_.length > 0) {
-    throw new Error(`pico ${command} does not accept arguments: ${arguments_.join(" ")}`);
-  }
 }

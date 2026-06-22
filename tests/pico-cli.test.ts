@@ -18,14 +18,6 @@ describe("pico cli", () => {
     });
   });
 
-  it("routes foreground to the current-terminal resident voice process", () => {
-    expect(createPicoCliPlan(["foreground"])).toEqual({
-      kind: "script",
-      scriptPath: "scripts/resident/voice.ts",
-      args: []
-    });
-  });
-
   it("routes dev to a kitty-backed development terminal", () => {
     expect(createPicoCliPlan(["dev"])).toEqual({
       kind: "script",
@@ -42,7 +34,7 @@ describe("pico cli", () => {
     });
   });
 
-  it("routes launchd lifecycle commands to the resident launchd script", () => {
+  it("does not expose resident launchd lifecycle as pico commands", () => {
     for (const command of [
       "install",
       "start",
@@ -52,17 +44,17 @@ describe("pico cli", () => {
       "uninstall",
       "print-plist"
     ]) {
-      expect(createPicoCliPlan([command])).toEqual({
-        kind: "script",
-        scriptPath: "scripts/resident/launchd.ts",
-        args: [command]
-      });
+      expect(() => createPicoCliPlan([command])).toThrow(`unknown pico command: ${command}`);
     }
   });
 
-  it("rejects the ambiguous run command and points to precise alternatives", () => {
+  it("rejects foreground because Pi Agent owns production startup", () => {
+    expect(() => createPicoCliPlan(["foreground"])).toThrow("unknown pico command: foreground");
+  });
+
+  it("rejects the ambiguous run command and points to the Pi Agent startup boundary", () => {
     expect(() => createPicoCliPlan(["run"])).toThrow(
-      "pico run is ambiguous; use pico foreground or pico start"
+      "pico run is ambiguous; start Pi Agent with the pico extension instead"
     );
   });
 
@@ -70,11 +62,24 @@ describe("pico cli", () => {
     expect(() => createPicoCliPlan(["unknown"])).toThrow("unknown pico command: unknown");
   });
 
-  it("describes foreground and start without using run as a public command", () => {
+  it("describes pico as a development helper", () => {
     const help = formatPicoCliHelp();
 
-    expect(help).toContain("pico foreground");
-    expect(help).toContain("pico start");
-    expect(help).not.toContain("pico run");
+    expect(help).toContain("pico dev");
+    expect(help).toContain("Pi Agent");
+
+    for (const command of [
+      "foreground",
+      "install",
+      "start",
+      "restart",
+      "stop",
+      "status",
+      "uninstall",
+      "print-plist",
+      "run"
+    ]) {
+      expect(help).not.toContain(`pico ${command}`);
+    }
   });
 });

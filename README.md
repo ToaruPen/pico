@@ -16,13 +16,15 @@ Install dependencies:
 npm install
 ```
 
-Expose the local `pico` command in your shell:
+Optionally expose the local `pico` helper command in your shell:
 
 ```bash
 npm link
 ```
 
-Without linking, use `npm run pico -- <command>` from the repository root.
+Without linking, use `npm run pico -- <command>` from the repository root. The
+helper is for development only; Pi Agent owns production startup and loads pico
+through `package.json` `pi.extensions`.
 
 Run all local checks:
 
@@ -121,8 +123,8 @@ Configure these sections in `config/pico.local.yaml` as needed:
   `curl -s http://127.0.0.1:10101/speakers`.
 - `voice.stt.mlxWhisper` for mlx-whisper STT. `samplePcm16lePath` must point to
   a PCM16LE mono 16 kHz sample.
-- `voice.resident.audioInput` and `voice.resident.audioOutput` for the
-  production resident voice process. Use `avfoundation` plus `afplay` with
+- `voice.resident.audioInput` and `voice.resident.audioOutput` for the direct
+  resident voice harness. Use `avfoundation` plus `afplay` with
   explicit `route: system_default` on macOS, and `alsa` plus `alsa` with explicit
   devices on Raspberry Pi / Linux. `smoke:resident-audio-input` records a short
   bounded sample and reports RMS/peak levels only; speak near the resident mic
@@ -131,17 +133,21 @@ Configure these sections in `config/pico.local.yaml` as needed:
 - `vision.ollama` for `qwen3.5:9b` through the protected local tunnel.
 - `camera.tapo` plus `vision.ollama` for camera-to-VLM scene smoke.
 
-Run the resident processes after the local providers are configured:
+Pi Agent is the runtime owner. Start Pi Agent with this package available so it
+loads the pico extension from `package.json` `pi.extensions`; do not treat
+`pico` as a standalone production process.
+
+The direct resident scripts remain low-level field and provider harnesses while
+resident voice integration is validated:
 
 ```bash
-PICO_CONFIG_PATH=config/pico.local.yaml pico foreground
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice
 PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:memory
 ```
 
-`pico foreground` owns live microphone, speaker, session cutoff, and enqueueing
-in the current terminal. Use it when you want the resident voice process to stop
-with that shell. Use `pico start` when Pico should keep listening as a background
-resident service.
+`resident:voice` owns live microphone, speaker, session cutoff, and enqueueing in
+the current terminal for direct field validation. It is not the public pico
+startup contract.
 `resident:memory` is the companion drain worker that writes queued session
 cutoffs to Mem0 and OTel/audit without adding a default job timeout. It recovers
 stale `processing` jobs after `PICO_RESIDENT_MEMORY_RECOVER_PROCESSING_OLDER_THAN_MS`
@@ -160,8 +166,8 @@ and stderr in that terminal window, and also appends the same output to
 `~/.pico/resident-voice/development/processes/YYYY-MM-DD/<run-id>.log`. Use
 `pico dev --terminal=terminal` to open Terminal.app instead. Stop it from the
 opened terminal with `Ctrl-C`; the development terminal closes after the
-resident process exits. This is a development entrypoint; production resident
-voice management still uses the LaunchAgent below.
+resident process exits. This is a development helper around the direct resident
+voice harness, not the Pi Agent production startup path.
 
 The development terminal uses concise voice probe logs by default and does not
 support verbose mode. It shows utterance windows, STT completion, trigger
@@ -171,7 +177,7 @@ response text, TTS synthesis/playback, cutoff enqueue, and errors. Text payloads
 are displayed as indented multiline blocks so operator logs show the actual
 response shape without hiding line breaks. Per-frame successful
 capture/echo-control events are suppressed because they are too high-volume for
-operator-facing logs. Use `PICO_VOICE_PROBE_STDOUT=verbose pico foreground` only
+operator-facing logs. Use `PICO_VOICE_PROBE_STDOUT=verbose npm run resident:voice` only
 when debugging the frame pipeline directly from a plain terminal, not from
 `pico dev`.
 
@@ -212,16 +218,17 @@ still degrade STT accuracy, keep an utterance window open, or create false wake
 matches. Validate resident placement with the same background audio expected in
 the room.
 
-On the Mac mini resident host, manage the production voice process as a user
-LaunchAgent after `smoke:resident-audio-input` proves that the configured
-microphone clears `voice.resident.utteranceWindow.minRmsDb`:
+On the Mac mini resident host, the public production startup target is Pi Agent
+with the pico extension loaded. The direct LaunchAgent harness below is kept for
+low-level resident voice validation after `smoke:resident-audio-input` proves
+that the configured microphone clears `voice.resident.utteranceWindow.minRmsDb`:
 
 ```bash
-PICO_CONFIG_PATH=config/pico.local.yaml pico install
-PICO_CONFIG_PATH=config/pico.local.yaml pico status
-PICO_CONFIG_PATH=config/pico.local.yaml pico restart
-PICO_CONFIG_PATH=config/pico.local.yaml pico stop
-PICO_CONFIG_PATH=config/pico.local.yaml pico uninstall
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- install
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- status
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- restart
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- stop
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- uninstall
 ```
 
 The LaunchAgent label is `dev.toarupen.pico.resident-voice`. It runs the

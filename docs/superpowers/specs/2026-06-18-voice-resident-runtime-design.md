@@ -21,8 +21,10 @@ wrapper に留める。
 
 常駐 runtime は `src/runtime/voice-resident.ts` に置く。
 
-`npm run resident:voice` は production runtime の起動口にする。実地検証用の
-script は、必要になった時点で `field:*` として追加し、この runtime を呼ぶ。
+production startup owner は Pi Agent であり、pico は Pi Agent extension として
+読み込まれる。`npm run resident:voice` は direct resident voice harness として
+この runtime を直接起動する低レベル検証口に留める。実地検証用の script は、
+必要になった時点で `field:*` として追加し、この runtime を呼ぶ。
 
 OS 依存のマイク入力、スピーカー再生、Pi Agent turn、probe 出力は interface
 で分離する。production path では config が不足したら fail closed し、別
@@ -185,11 +187,12 @@ process lifecycle は以下を持つ。
 - active session の cutoff/enqueue 試行。ただし memory worker が構成されている
   resident process に限る。
 
-## Mac Resident Service Management
+## Mac Direct Resident Harness Management
 
-Mac mini を resident host とする場合、`npm run resident:voice` は launchd の
-user LaunchAgent から起動する。これは smoke/field harness ではなく production
-runtime の常駐管理入口である。
+Mac mini を resident host とする場合も、公開 production startup target は
+Pi Agent with pico extension である。`npm run resident:voice` を launchd の
+user LaunchAgent から起動する経路は、direct resident voice harness の低レベル
+検証・移行用管理口として扱う。
 
 - package entrypoint は `npm run resident:voice:launchd -- <operation>` とする。
 - operation は `install`、`start`、`restart`、`stop`、`status`、`uninstall`、
@@ -232,8 +235,8 @@ runtime の常駐管理入口である。
   多ければ local config で上げる。
 - probe enablement and sink。
 
-production config が不足している場合は起動時に失敗する。field script の env-only
-設定を production runtime にそのまま流用しない。
+resident config が不足している場合は起動時に失敗する。field script の env-only
+設定を resident runtime にそのまま流用しない。
 
 Mac mini を resident host とする場合、ALSA を Mac に持ち込まない。
 resident runtime は音声 I/O provider を通して macOS の AVFoundation capture と

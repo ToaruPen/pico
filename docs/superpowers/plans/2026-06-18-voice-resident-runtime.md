@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the production-oriented pico resident voice runtime that keeps listening, starts/stops timed sessions, calls Pi Agent through the SDK, plays Aivis output through echo control, enqueues ended sessions for long-memory processing, and records bounded stage probes.
+**Goal:** Build the resident voice runtime that keeps listening, starts/stops timed sessions, calls Pi Agent through the SDK, plays Aivis output through echo control, enqueues ended sessions for long-memory processing, and records bounded stage probes. Pi Agent remains the production startup owner and loads pico as an extension; direct resident scripts are low-level validation and transition harnesses.
 
 **Architecture:** The resident runtime is a dependency-injected loop that owns microphone frames, echo control, STT, trigger/session state, Pi Agent SDK turns, TTS playback, and memory enqueue ordering. `SessionLifecycle` separates cutoff generation from cleanup so a session is not discarded until its cutoff has been durably enqueued. Stage probes are recorded through the existing audit sink with a fixed schema and no raw audio, transcript, prompt, completion, secret, or profile payloads.
 
@@ -23,7 +23,7 @@
 - Create `src/runtime/pi-agent-turn.ts`: adapt a resident turn to Pi Agent SDK `createAgentSession` without CLI subprocesses.
 - Create `tests/pi-agent-turn.test.ts`: verify SDK prompt/subscribe path and shared extension factory usage with injected SDK factory.
 - Modify `src/config/index.ts`, `tests/config.test.ts`, and `config/pico.example.yaml`: add `voice.resident` and `voice.probes` production config.
-- Create `scripts/resident/voice.ts`: production entrypoint that loads config, creates clients, installs signal cleanup, and runs the resident runtime.
+- Create `scripts/resident/voice.ts`: direct resident harness entrypoint that loads config, creates clients, installs signal cleanup, and runs the resident runtime.
 - Modify `package.json`: add `resident:voice`.
 
 ## Task 1: Session Cutoff Acknowledgement
@@ -297,7 +297,7 @@ first slice used direct microphone/playback device fields; the current resident
 host decision replaces those with explicit macOS `avfoundation`/`afplay` and
 Linux `alsa` provider boundaries.
 
-- [ ] **Step 4: Add resident entrypoint**
+- [ ] **Step 4: Add resident harness entrypoint**
 
 Create `scripts/resident/voice.ts` that loads `PICO_CONFIG_PATH`, refuses to start unless `voice.resident.enabled` is true, creates the shared lifecycle and clients, installs `SIGINT`/`SIGTERM`, and calls `runVoiceResidentRuntime()`.
 
