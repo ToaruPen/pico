@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 
 import { parse } from "yaml";
 
@@ -363,7 +363,10 @@ export function loadPicoConfig(options: LoadPicoConfigOptions = {}): PicoConfig 
 
   const parsed = parse(readFileSync(configPath, "utf8")) as unknown;
 
-  return definePicoConfig(parsed);
+  return resolveConfigRelativePaths(
+    definePicoConfig(parsed),
+    resolveConfigRelativeBaseDirectory(configPath)
+  );
 }
 
 export function definePicoConfig(input: unknown): PicoConfig {
@@ -1281,6 +1284,73 @@ function resolveConfigPath(options: LoadPicoConfigOptions): string {
   const path = options.path ?? defaultConfigPath;
 
   return isAbsolute(path) ? path : resolve(cwd, path);
+}
+
+function resolveConfigRelativeBaseDirectory(configPath: string): string {
+  const configDirectory = dirname(configPath);
+
+  return basename(configDirectory) === "config" ? dirname(configDirectory) : configDirectory;
+}
+
+function resolveConfigRelativePaths(config: PicoConfig, baseDirectory: string): PicoConfig {
+  return deepFreeze({
+    ...config,
+    memory: {
+      mem0: {
+        ...config.memory.mem0,
+        ...(config.memory.mem0.historyDbPath === undefined
+          ? {}
+          : {
+              historyDbPath: resolveConfigRelativePath(
+                baseDirectory,
+                config.memory.mem0.historyDbPath
+              )
+            })
+      }
+    },
+    vision: {
+      ...config.vision,
+      personDetection: {
+        ...config.vision.personDetection,
+        ...(config.vision.personDetection.modelPath === undefined
+          ? {}
+          : {
+              modelPath: resolveConfigRelativePath(
+                baseDirectory,
+                config.vision.personDetection.modelPath
+              )
+            })
+      }
+    },
+    voice: {
+      ...config.voice,
+      resident: {
+        ...config.voice.resident,
+        singleInstanceLockPath: resolveConfigRelativePath(
+          baseDirectory,
+          config.voice.resident.singleInstanceLockPath
+        )
+      },
+      stt: {
+        ...config.voice.stt,
+        ...(config.voice.stt.mlxWhisper === undefined
+          ? {}
+          : {
+              mlxWhisper: {
+                ...config.voice.stt.mlxWhisper,
+                samplePcm16lePath: resolveConfigRelativePath(
+                  baseDirectory,
+                  config.voice.stt.mlxWhisper.samplePcm16lePath
+                )
+              }
+            })
+      }
+    }
+  });
+}
+
+function resolveConfigRelativePath(baseDirectory: string, path: string): string {
+  return isAbsolute(path) ? path : resolve(baseDirectory, path);
 }
 
 function optionalStringProperty(

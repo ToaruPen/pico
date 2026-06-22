@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { definePicoConfig } from "../src/config/index.js";
+import { createStructuredAuditLog } from "../src/modules/audit/index.js";
 import { createPicoPerceptionService } from "../src/runtime/perception-service.js";
 
 const jpegFrame = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
@@ -429,6 +430,7 @@ describe("pico perception service", () => {
   });
 
   it("describes camera scenes from the scene stream through the configured VLM", async () => {
+    const audit = createStructuredAuditLog();
     const observedUrls: string[] = [];
     const preparedInputs: { frame: Uint8Array; maxImageEdgePixels: number }[] = [];
     const describedRequests: {
@@ -500,7 +502,8 @@ describe("pico perception service", () => {
               purpose: request.purpose
             }
           });
-        }
+        },
+        probe: { audit }
       }
     );
 
@@ -546,6 +549,139 @@ describe("pico perception service", () => {
     expect(text).not.toContain("rtsp://");
     expect(text).not.toContain("camera-user");
     expect(text).not.toContain("camera-password");
+    expect(
+      audit.entries().map((entry) => ({
+        stage: entry.attributes["pico.voice.stage"],
+        status: entry.attributes["pico.voice.stage_status"]
+      }))
+    ).toEqual([
+      {
+        stage: "camera_capture",
+        status: "ok"
+      },
+      {
+        stage: "vlm_scene_description",
+        status: "ok"
+      }
+    ]);
+  });
+
+  it("records VLM scene description errors when frame description fails", async () => {
+    const audit = createStructuredAuditLog();
+    const service = createPicoPerceptionService(
+      definePicoConfig({
+        camera: {
+          tapo: {
+            sourceId: "tapo-main",
+            host: "192.168.10.25",
+            user: "camera-user",
+            password: "camera-password"
+          }
+        },
+        vision: {
+          ollama: {
+            endpointId: "windows-ollama-qwen3-5",
+            localBaseUrl: "http://127.0.0.1:11434",
+            model: "qwen3.5:9b"
+          }
+        }
+      }),
+      {
+        now: () => "2026-06-15T09:02:00.000Z",
+        captureSnapshot: () =>
+          Promise.resolve({
+            ok: true,
+            sourceId: "tapo-main",
+            frame: jpegFrame,
+            mimeType: "image/jpeg"
+          }),
+        prepareFrameForVlm: () => Promise.resolve(new Uint8Array([0xff, 0xd8, 0x01, 0xff, 0xd9])),
+        describeFrame: () => {
+          throw new Error("VLM unavailable");
+        },
+        probe: { audit }
+      }
+    );
+
+    await expect(service.describeCameraScene()).resolves.toMatchObject({
+      status: "failed",
+      reason: "pico camera scene description failed: VLM unavailable"
+    });
+    expect(
+      audit.entries().map((entry) => ({
+        stage: entry.attributes["pico.voice.stage"],
+        status: entry.attributes["pico.voice.stage_status"]
+      }))
+    ).toEqual([
+      {
+        stage: "camera_capture",
+        status: "ok"
+      },
+      {
+        stage: "vlm_scene_description",
+        status: "error"
+      }
+    ]);
+  });
+
+  it("records VLM scene description errors when frame preparation fails", async () => {
+    const audit = createStructuredAuditLog();
+    const service = createPicoPerceptionService(
+      definePicoConfig({
+        camera: {
+          tapo: {
+            sourceId: "tapo-main",
+            host: "192.168.10.25",
+            user: "camera-user",
+            password: "camera-password"
+          }
+        },
+        vision: {
+          ollama: {
+            endpointId: "windows-ollama-qwen3-5",
+            localBaseUrl: "http://127.0.0.1:11434",
+            model: "qwen3.5:9b"
+          }
+        }
+      }),
+      {
+        now: () => "2026-06-15T09:02:00.000Z",
+        captureSnapshot: () =>
+          Promise.resolve({
+            ok: true,
+            sourceId: "tapo-main",
+            frame: jpegFrame,
+            mimeType: "image/jpeg"
+          }),
+        prepareFrameForVlm: () => {
+          throw new Error("frame preparation failed");
+        },
+        describeFrame: () => {
+          throw new Error("describeFrame must not run after preparation failure");
+        },
+        probe: { audit }
+      }
+    );
+
+    await expect(service.describeCameraScene()).resolves.toMatchObject({
+      status: "failed",
+      reason: "pico camera scene description failed: frame preparation failed"
+    });
+    expect(
+      audit.entries().map((entry) => ({
+        stage: entry.attributes["pico.voice.stage"],
+        status: entry.attributes["pico.voice.stage_status"]
+      }))
+    ).toEqual([
+      {
+        stage: "camera_capture",
+        status: "ok"
+      },
+      {
+        stage: "vlm_scene_description",
+        status: "error"
+      }
+    ]);
   });
 
   it("honors an explicit scene stream for camera scene descriptions", async () => {

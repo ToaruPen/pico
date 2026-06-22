@@ -1,14 +1,27 @@
 import { join } from "node:path";
 
+import {
+  defineResidentVoiceRunId,
+  resolveResidentVoiceLogPaths
+} from "./resident-voice-log-files.js";
+
 export type ResidentDevelopmentTerminalSessionOptions = {
   readonly repoRoot: string;
   readonly homeDirectory: string;
   readonly configPath: string;
   readonly pathEnvironment: string;
+  readonly terminal?: ResidentDevelopmentTerminal;
   readonly title?: string;
+  readonly now?: () => string;
+  readonly processId?: number;
+  readonly runId?: string;
 };
 
+export type ResidentDevelopmentTerminal = "kitty" | "terminal";
+
 export type ResidentDevelopmentTerminalSession = {
+  readonly runId: string;
+  readonly terminal: ResidentDevelopmentTerminal;
   readonly picoDirectory: string;
   readonly launcherDirectory: string;
   readonly launcherPath: string;
@@ -16,11 +29,14 @@ export type ResidentDevelopmentTerminalSession = {
   readonly logDirectory: string;
   readonly logPath: string;
   readonly shellCommand: string;
-  readonly appleScript: string;
+  readonly appleScript?: string;
+  readonly kittyCommand?: {
+    readonly command: "kitty";
+    readonly args: readonly string[];
+  };
 };
 
 const defaultTitle = "pico resident voice";
-const relativeLogPath = "dev-terminal.log";
 
 export function requireResidentDevelopmentTerminalPlatform(platform: NodeJS.Platform): void {
   if (platform !== "darwin") {
@@ -41,12 +57,22 @@ export function defineResidentDevelopmentTerminalSession(
     options.pathEnvironment,
     "resident dev terminal pathEnvironment"
   );
+  const terminal = options.terminal ?? "terminal";
   const title = requireNonEmpty(options.title ?? defaultTitle, "resident dev terminal title");
+  const occurredAt = options.now?.() ?? new Date().toISOString();
+  const runId =
+    options.runId ?? defineResidentVoiceRunId(occurredAt, options.processId ?? process.pid);
   const picoDirectory = join(homeDirectory, ".pico");
   const launcherDirectory = join(picoDirectory, "dev-terminal");
   const launcherPath = join(launcherDirectory, "resident-voice-launcher.sh");
-  const logDirectory = join(picoDirectory, "resident-voice", "development", "processes");
-  const logPath = join(logDirectory, relativeLogPath);
+  const logPaths = resolveResidentVoiceLogPaths({
+    homeDirectory,
+    runMode: "development",
+    runId,
+    occurredAt
+  });
+  const logDirectory = logPaths.dayDirectory;
+  const logPath = logPaths.processLogPath;
   const shellCommand = buildResidentDevelopmentTerminalShellCommand({
     repoRoot,
     picoDirectory,
@@ -55,10 +81,14 @@ export function defineResidentDevelopmentTerminalSession(
     logPath,
     configPath,
     pathEnvironment,
-    title
+    terminal,
+    title,
+    runId
   });
 
   return {
+    runId,
+    terminal,
     picoDirectory,
     launcherDirectory,
     launcherPath,
@@ -66,7 +96,9 @@ export function defineResidentDevelopmentTerminalSession(
     logDirectory,
     logPath,
     shellCommand,
-    appleScript: buildTerminalAppleScript(buildTerminalLauncherCommand(launcherPath))
+    ...(terminal === "terminal"
+      ? { appleScript: buildTerminalAppleScript(buildTerminalLauncherCommand(launcherPath)) }
+      : { kittyCommand: buildKittyCommand(title, launcherPath) })
   };
 }
 
@@ -86,7 +118,9 @@ function buildResidentDevelopmentTerminalShellCommand(input: {
   readonly logPath: string;
   readonly configPath: string;
   readonly pathEnvironment: string;
+  readonly terminal: ResidentDevelopmentTerminal;
   readonly title: string;
+  readonly runId: string;
 }): string {
   return [
     `cd ${quoteShell(input.repoRoot)}`,
@@ -95,29 +129,41 @@ function buildResidentDevelopmentTerminalShellCommand(input: {
     `mkdir -p ${quoteShell(input.launcherDirectory)}`,
     `mkdir -p ${quoteShell(input.logDirectory)}`,
     `chmod 700 ${quoteShell(input.picoDirectory)}`,
-    `: > ${quoteShell(input.logPath)}`,
+    `touch ${quoteShell(input.logPath)}`,
     `chmod 600 ${quoteShell(input.logPath)}`,
+    `export PICO_RESIDENT_VOICE_RUN_ID=${quoteShell(input.runId)}`,
     `export PICO_CONFIG_PATH=${quoteShell(input.configPath)}`,
     "export PICO_VOICE_PROBE_STDOUT='summary'",
     "export PICO_RESIDENT_VOICE_LOG_MODE='development'",
     `export PATH=${quoteShell(input.pathEnvironment)}:"$PATH"`,
-    "PICO_DEV_TERMINAL_TTY=$(tty)",
+    ...(input.terminal === "terminal" ? ["PICO_DEV_TERMINAL_TTY=$(tty)"] : []),
     `printf '\\033]0;%s\\007' ${quoteShell(input.title)}`,
     `printf '\\n[pico] resident voice dev terminal\\n[pico] log: %s\\n\\n' ${quoteShell(input.logPath)}`,
-    buildResidentVoiceRunAndCloseCommand(input.logPath)
+    buildResidentVoiceRunAndCloseCommand(input.logPath, input.terminal)
   ].join(" && ");
 }
 
-function buildResidentVoiceRunAndCloseCommand(logPath: string): string {
-  return [
+function buildResidentVoiceRunAndCloseCommand(
+  logPath: string,
+  terminal: ResidentDevelopmentTerminal
+): string {
+  const commands = [
     `npm run resident:voice 2>&1 | tee -a ${quoteShell(logPath)}`,
     "status=$?",
-    `printf '\\n[pico] resident voice exited with status %s\\n' "$status" | tee -a ${quoteShell(logPath)}`,
-    "(sleep 0.2; osascript " +
-      buildCloseTerminalTabAppleScriptArguments('"$PICO_DEV_TERMINAL_TTY"') +
-      " >/dev/null 2>&1 &)",
-    'exit "$status"'
-  ].join("; ");
+    `printf '\\n[pico] resident voice exited with status %s\\n' "$status" | tee -a ${quoteShell(logPath)}`
+  ];
+
+  if (terminal === "terminal") {
+    commands.push(
+      "(sleep 0.2; osascript " +
+        buildCloseTerminalTabAppleScriptArguments('"$PICO_DEV_TERMINAL_TTY"') +
+        " >/dev/null 2>&1 &)"
+    );
+  }
+
+  commands.push('exit "$status"');
+
+  return commands.join("; ");
 }
 
 function buildCloseTerminalTabAppleScriptArguments(ttyVariableReference: string): string {
@@ -151,6 +197,19 @@ function buildTerminalAppleScript(shellCommand: string): string {
     `  do script "${escapeAppleScriptString(shellCommand)}"`,
     "end tell"
   ].join("\n");
+}
+
+function buildKittyCommand(
+  title: string,
+  launcherPath: string
+): {
+  readonly command: "kitty";
+  readonly args: readonly string[];
+} {
+  return {
+    command: "kitty",
+    args: ["--title", title, "/bin/zsh", launcherPath]
+  };
 }
 
 function quoteShell(value: string): string {

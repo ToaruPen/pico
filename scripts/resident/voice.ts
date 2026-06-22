@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
+import type { AuditEvent } from "../../src/modules/audit/index.js";
 import { openSessionMemoryCandidateQueue } from "../../src/modules/long-memory/index.js";
 import { createSessionMemoryEnqueueWorker } from "../../src/modules/long-memory/session-worker.js";
 import { createSessionLifecycle } from "../../src/modules/session/index.js";
@@ -39,6 +40,20 @@ import {
 import { runVoiceResidentRuntime } from "../../src/runtime/voice-resident.js";
 
 const config = loadPicoConfigFromEnvironment();
+const residentVoiceMetricStages = new Set([
+  "utterance_window",
+  "stt",
+  "trigger_match",
+  "session_start",
+  "pi_turn",
+  "tts_request_wall",
+  "tts_audio_duration",
+  "tts_synthesize",
+  "tts_playback",
+  "camera_capture",
+  "vlm_scene_description",
+  "session_cutoff_enqueue"
+]);
 
 if (!config.voice.resident.enabled) {
   throw new Error("pico resident voice runtime requires voice.resident.enabled=true");
@@ -67,9 +82,11 @@ try {
 async function runResidentVoice(config: PicoConfig, signal: AbortSignal): Promise<void> {
   const stdoutProbeMode = readVoiceProbeStdoutMode(process.env.PICO_VOICE_PROBE_STDOUT);
   const logRunMode = readResidentVoiceLogRunMode(process.env.PICO_RESIDENT_VOICE_LOG_MODE);
+  const runId = readResidentVoiceRunId(process.env.PICO_RESIDENT_VOICE_RUN_ID);
   const fileLog = createResidentVoiceFileLogSink({
     homeDirectory: homedir(),
-    runMode: logRunMode
+    runMode: logRunMode,
+    ...(runId === undefined ? {} : { runId })
   });
   const writeProcessLine = (line: string): void => {
     fileLog.writeProcessLine(line);
@@ -82,6 +99,9 @@ async function runResidentVoice(config: PicoConfig, signal: AbortSignal): Promis
     ? createResidentVoiceAuditLog({
         stdoutEnabled: true,
         writeStdout: writeProcessLine,
+        writeEvent: (event) => {
+          writeResidentVoiceMetricEvent(fileLog.writeAuditEvent, event);
+        },
         ...(stdoutProbeMode === undefined ? {} : { stdoutMode: stdoutProbeMode })
       })
     : undefined;
@@ -104,10 +124,14 @@ async function runResidentVoice(config: PicoConfig, signal: AbortSignal): Promis
     playback: createResidentPlaybackSink(config),
     piAgent: createPiAgentTurnClient({
       cwd: process.cwd(),
-      sessionLifecycle
+      sessionLifecycle,
+      ...(audit === undefined ? {} : { voiceProbe: { audit } })
     }),
     memoryWorker,
     wakeAcknowledgement: {
+      enabled: true
+    },
+    farewell: {
       enabled: true
     },
     console: createResidentVoiceRuntimeConsoleSink(logRunMode, fileLog, stdoutProbeMode),
@@ -158,6 +182,29 @@ function readResidentVoiceLogRunMode(value: string | undefined): ResidentVoiceLo
   }
 
   throw new Error("PICO_RESIDENT_VOICE_LOG_MODE must be unset, development, or normal");
+}
+
+function readResidentVoiceRunId(value: string | undefined): string | undefined {
+  if (value === undefined || value.trim() === "") {
+    return undefined;
+  }
+
+  return value;
+}
+
+function writeResidentVoiceMetricEvent(
+  writeAuditEvent: (event: AuditEvent) => void,
+  event: AuditEvent
+): void {
+  const stage = event.attributes["pico.voice.stage"];
+
+  if (
+    event.name === "voice.runtime.stage" &&
+    typeof stage === "string" &&
+    residentVoiceMetricStages.has(stage)
+  ) {
+    writeAuditEvent(event);
+  }
 }
 
 function withShutdownGrace<T>(

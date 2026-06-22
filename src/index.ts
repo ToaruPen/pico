@@ -18,6 +18,7 @@ import {
   createPicoPersonDetectionTool
 } from "./runtime/perception-tool.js";
 import { createPicoSessionTool } from "./runtime/session-tool.js";
+import type { VoiceStageProbe } from "./runtime/voice-stage-probe.js";
 
 export function createPicoRegistry(): PicoModuleRegistry {
   const registry = new PicoModuleRegistry();
@@ -76,6 +77,7 @@ export function buildPicoExtensionSystemPrompt(baseSystemPrompt: string): string
 export type PicoExtensionRuntimeOptions = {
   readonly sessionLifecycle?: SessionLifecycle;
   readonly loadConfig?: () => PicoConfig;
+  readonly voiceProbe?: VoiceStageProbe;
   readonly sessionTool?: {
     readonly allowCutoff?: boolean;
   };
@@ -94,9 +96,13 @@ export function registerPicoExtensionWithRuntime(
         : { allowCutoff: options.sessionTool.allowCutoff })
     })
   );
-  pi.registerTool(createPicoCameraSnapshotTool());
-  pi.registerTool(createPicoPersonDetectionTool());
-  pi.registerTool(createPicoCameraSceneDescriptionTool());
+  const perceptionToolOptions = {
+    ...(options.voiceProbe === undefined ? {} : { probe: options.voiceProbe })
+  };
+
+  pi.registerTool(createPicoCameraSnapshotTool(perceptionToolOptions));
+  pi.registerTool(createPicoPersonDetectionTool(perceptionToolOptions));
+  pi.registerTool(createPicoCameraSceneDescriptionTool(perceptionToolOptions));
   pi.on("before_agent_start", (event: BeforeAgentStartEvent) => ({
     systemPrompt: buildPicoExtensionSystemPrompt(event.systemPrompt)
   }));

@@ -24,6 +24,7 @@ import {
   type PersonDetection,
   type PersonDetectionModel
 } from "../modules/vision/person-detection.js";
+import { recordVoiceStageProbe, type VoiceStageProbe } from "./voice-stage-probe.js";
 
 const defaultTapoSceneStream = "stream1";
 const defaultTapoDetectionStream = "stream2";
@@ -100,6 +101,7 @@ export type PicoPerceptionServiceDependencies = {
     maxImageEdgePixels: number
   ) => Promise<Uint8Array>;
   readonly describeFrame?: (request: SceneDescriptionRequest) => Promise<SceneDescription>;
+  readonly probe?: VoiceStageProbe;
   readonly now?: () => string;
 };
 
@@ -128,7 +130,8 @@ export function createPicoPerceptionService(
         source,
         "scene",
         inFlightCapturePurposes,
-        dependencies
+        dependencies,
+        now
       );
 
       if (!snapshot.ok) {
@@ -179,7 +182,8 @@ export function createPicoPerceptionService(
         source,
         "detection",
         inFlightCapturePurposes,
-        dependencies
+        dependencies,
+        now
       );
 
       if (!snapshot.ok) {
@@ -262,7 +266,8 @@ export function createPicoPerceptionService(
           source,
           "scene",
           inFlightCapturePurposes,
-          dependencies
+          dependencies,
+          now
         );
 
         if (!snapshot.ok) {
@@ -472,6 +477,8 @@ async function describeSnapshotScene({
   now
 }: DescribeSnapshotSceneInput): Promise<PicoCameraSceneDescriptionResult> {
   let preparedFrame: Uint8Array | undefined;
+  const vlmStartedAt = now();
+  const vlmStartedMs = performance.now();
 
   try {
     const maxImageEdgePixels =
@@ -487,6 +494,17 @@ async function describeSnapshotScene({
       purpose: "staff_requested_snapshot",
       timeoutMs: config.vision.ollama?.timeoutMs ?? defaultOllamaTimeoutMs
     });
+    recordPerceptionStage(
+      dependencies.probe,
+      "vlm_scene_description",
+      "ok",
+      vlmStartedAt,
+      vlmStartedMs,
+      {
+        "pico.voice.frame_bytes": snapshot.frame.byteLength,
+        "pico.voice.vlm_frame_bytes": preparedFrame.byteLength
+      }
+    );
     const imageSensitiveValues = readImageSensitiveValues(snapshot.frame, preparedFrame);
 
     return {
@@ -500,6 +518,14 @@ async function describeSnapshotScene({
       scene: sanitizeSceneDescription(scene, config, source, imageSensitiveValues)
     };
   } catch (error: unknown) {
+    recordVlmSceneDescriptionError(
+      dependencies.probe,
+      snapshot,
+      preparedFrame,
+      vlmStartedAt,
+      vlmStartedMs
+    );
+
     return {
       status: "failed",
       reason: `pico camera scene description failed: ${sanitizeRtspMessage(
@@ -510,6 +536,21 @@ async function describeSnapshotScene({
       )}`
     };
   }
+}
+
+function recordVlmSceneDescriptionError(
+  probe: VoiceStageProbe | undefined,
+  snapshot: Extract<RtspSnapshotResult, { readonly ok: true }>,
+  preparedFrame: Uint8Array | undefined,
+  startedAt: string,
+  startedMs: number
+): void {
+  recordPerceptionStage(probe, "vlm_scene_description", "error", startedAt, startedMs, {
+    "pico.voice.frame_bytes": snapshot.frame.byteLength,
+    ...(preparedFrame === undefined
+      ? {}
+      : { "pico.voice.vlm_frame_bytes": preparedFrame.byteLength })
+  });
 }
 
 function sanitizeSceneDescription(
@@ -590,30 +631,33 @@ async function captureSnapshotSafely(
   source: RtspSnapshotSource,
   purpose: "scene" | "detection",
   inFlightCapturePurposes: Set<"scene" | "detection">,
-  dependencies: PicoPerceptionServiceDependencies
+  dependencies: PicoPerceptionServiceDependencies,
+  now: () => string
 ): Promise<RtspSnapshotResult> {
   const tapo = config.camera.tapo;
   const timeoutMs = tapo?.timeoutMs ?? defaultTimeoutMs;
   const maxFrameBytes = tapo?.maxFrameBytes ?? defaultMaxFrameBytes;
+  const startedAt = now();
+  const startedMs = performance.now();
 
   if (inFlightCapturePurposes.has(purpose)) {
-    return {
-      ok: false,
-      sourceId: source.id,
-      reason: "in_flight",
-      message: "previous RTSP snapshot capture is still in flight"
-    };
+    return skippedCaptureResult(source, dependencies.probe, startedAt, startedMs);
   }
 
   try {
     inFlightCapturePurposes.add(purpose);
 
-    return await (dependencies.captureSnapshot ?? captureSnapshotWithRtsp)(
+    return await captureSnapshotWithProbe({
       source,
       timeoutMs,
-      maxFrameBytes
-    );
+      maxFrameBytes,
+      dependencies,
+      startedAt,
+      startedMs
+    });
   } catch (error: unknown) {
+    recordPerceptionStage(dependencies.probe, "camera_capture", "error", startedAt, startedMs);
+
     return {
       ok: false,
       sourceId: source.id,
@@ -623,6 +667,65 @@ async function captureSnapshotSafely(
   } finally {
     inFlightCapturePurposes.delete(purpose);
   }
+}
+
+function skippedCaptureResult(
+  source: RtspSnapshotSource,
+  probe: VoiceStageProbe | undefined,
+  startedAt: string,
+  startedMs: number
+): RtspSnapshotResult {
+  recordPerceptionStage(probe, "camera_capture", "skipped", startedAt, startedMs);
+
+  return {
+    ok: false,
+    sourceId: source.id,
+    reason: "in_flight",
+    message: "previous RTSP snapshot capture is still in flight"
+  };
+}
+
+async function captureSnapshotWithProbe(input: {
+  readonly source: RtspSnapshotSource;
+  readonly timeoutMs: number;
+  readonly maxFrameBytes: number;
+  readonly dependencies: PicoPerceptionServiceDependencies;
+  readonly startedAt: string;
+  readonly startedMs: number;
+}): Promise<RtspSnapshotResult> {
+  const result = await (input.dependencies.captureSnapshot ?? captureSnapshotWithRtsp)(
+    input.source,
+    input.timeoutMs,
+    input.maxFrameBytes
+  );
+
+  recordPerceptionStage(
+    input.dependencies.probe,
+    "camera_capture",
+    result.ok ? "ok" : "error",
+    input.startedAt,
+    input.startedMs,
+    result.ok ? { "pico.voice.frame_bytes": result.frame.byteLength } : {}
+  );
+
+  return result;
+}
+
+function recordPerceptionStage(
+  probe: VoiceStageProbe | undefined,
+  stage: "camera_capture" | "vlm_scene_description",
+  status: "ok" | "error" | "skipped",
+  startedAt: string,
+  startedMs: number,
+  attributes: Readonly<Record<string, number>> = {}
+): void {
+  recordVoiceStageProbe(probe ?? {}, {
+    stage,
+    status,
+    startedAt,
+    durationMs: Math.max(0, performance.now() - startedMs),
+    attributes
+  });
 }
 
 function captureSnapshotWithRtsp(

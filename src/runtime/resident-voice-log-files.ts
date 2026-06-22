@@ -1,6 +1,7 @@
 import { appendFileSync, chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
+import type { AuditAttributeValue, AuditEvent } from "../modules/audit/index.js";
 import { formatResidentVoiceConsoleEvent } from "./resident-voice-console-log.js";
 import type { VoiceResidentConsoleSink } from "./voice-resident.js";
 
@@ -20,6 +21,7 @@ export type ResidentVoiceLogPaths = {
   readonly dayDirectory: string;
   readonly processLogPath: string;
   readonly dailyEventsJsonlPath: string;
+  readonly metricsJsonlPath: string;
   readonly sessionTextLogPath?: string;
   readonly sessionJsonlPath?: string;
 };
@@ -33,15 +35,32 @@ export type ResidentVoiceFileLogSinkOptions = {
 };
 
 const defaultMaxTextLength = 240;
+const voiceMetricAttributeKeys = new Set([
+  "pico.voice.stage",
+  "pico.voice.stage_status",
+  "pico.voice.stage_duration_ms",
+  "pico.voice.frame_count",
+  "pico.voice.utterance_duration_ms",
+  "pico.voice.sample_rate_hz",
+  "pico.voice.channels",
+  "pico.voice.suppressed_frame_count",
+  "pico.voice.entry_count",
+  "pico.voice.chunk_count",
+  "pico.voice.frame_bytes",
+  "pico.voice.vlm_frame_bytes",
+  "pico.voice.triggered",
+  "pico.voice.queue_depth",
+  "pico.voice.error_code"
+]);
 
 export function createResidentVoiceFileLogSink(
   options: ResidentVoiceFileLogSinkOptions
 ): VoiceResidentConsoleSink & {
   readonly writeProcessLine: (line: string) => void;
+  readonly writeAuditEvent: (event: ResidentVoiceLogAuditEvent) => void;
 } {
-  const runId =
-    options.runId ?? defaultResidentVoiceRunId(options.now?.() ?? new Date().toISOString());
-  const now = options.now ?? (() => new Date().toISOString());
+  const runStartedAt = options.now?.() ?? new Date().toISOString();
+  const runId = options.runId ?? defineResidentVoiceRunId(runStartedAt, process.pid);
   const maxTextLength = options.maxTextLength ?? defaultMaxTextLength;
 
   return {
@@ -75,10 +94,31 @@ export function createResidentVoiceFileLogSink(
         homeDirectory: options.homeDirectory,
         runMode: options.runMode,
         runId,
-        occurredAt: now()
+        occurredAt: runStartedAt
       });
 
       appendPrivateFile(paths.processLogPath, line);
+    },
+    writeAuditEvent(event) {
+      const normalized = normalizeResidentVoiceMetricEvent(event);
+      const paths = resolveResidentVoiceLogPaths({
+        homeDirectory: options.homeDirectory,
+        runMode: options.runMode,
+        runId,
+        occurredAt: runStartedAt
+      });
+
+      appendPrivateFile(
+        paths.metricsJsonlPath,
+        `${JSON.stringify({
+          schemaVersion: 1,
+          runMode: options.runMode,
+          runId,
+          name: normalized.name,
+          occurredAt: normalized.occurredAt,
+          attributes: normalized.attributes
+        })}\n`
+      );
     }
   };
 }
@@ -103,11 +143,12 @@ export function resolveResidentVoiceLogPaths(
   input: ResidentVoiceLogPathInput
 ): ResidentVoiceLogPaths {
   const day = datePart(input.occurredAt);
-  const runId = input.runId ?? "process";
+  const runId = requireResidentVoiceRunId(input.runId ?? "process");
   const picoDirectory = join(input.homeDirectory, ".pico");
   const modeDirectory = join(picoDirectory, "resident-voice", input.runMode);
   const dayDirectory = join(modeDirectory, "processes", day);
   const sessionsDirectory = join(modeDirectory, "sessions", day, runId);
+  const metricsDirectory = join(modeDirectory, "metrics", day);
 
   return {
     picoDirectory,
@@ -115,6 +156,7 @@ export function resolveResidentVoiceLogPaths(
     dayDirectory,
     processLogPath: join(dayDirectory, `${runId}.log`),
     dailyEventsJsonlPath: join(modeDirectory, "events", `${day}.jsonl`),
+    metricsJsonlPath: join(metricsDirectory, `${runId}.jsonl`),
     ...(input.sessionId === undefined
       ? {}
       : {
@@ -122,6 +164,59 @@ export function resolveResidentVoiceLogPaths(
           sessionJsonlPath: join(sessionsDirectory, `${input.sessionId}.jsonl`)
         })
   };
+}
+
+export function defineResidentVoiceRunId(timestamp: string, processId: number): string {
+  const parsed = new Date(Date.parse(timestamp));
+
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString() !== timestamp) {
+    throw new Error("resident voice run id timestamp must be a valid ISO timestamp");
+  }
+
+  if (!Number.isInteger(processId) || processId < 1) {
+    throw new Error("resident voice run id processId must be a positive integer");
+  }
+
+  return requireResidentVoiceRunId(`${timestamp.replaceAll(/[:.]/g, "-")}-${processId}`);
+}
+
+export function requireResidentVoiceRunId(value: string): string {
+  if (!/^[\dA-Za-z][\dA-Za-z._-]{0,127}$/u.test(value)) {
+    throw new Error("resident voice runId must be a path-safe identifier");
+  }
+
+  return value;
+}
+
+export type ResidentVoiceLogAuditEvent = Omit<AuditEvent, "traceId" | "spanId"> & {
+  readonly traceId?: string | undefined;
+  readonly spanId?: string | undefined;
+};
+
+function normalizeResidentVoiceMetricEvent(event: ResidentVoiceLogAuditEvent): {
+  readonly name: string;
+  readonly occurredAt: string;
+  readonly attributes: Readonly<Record<string, AuditAttributeValue>>;
+} {
+  return {
+    name: event.name,
+    occurredAt: event.occurredAt,
+    attributes: normalizeMetricAttributes(event.attributes)
+  };
+}
+
+function normalizeMetricAttributes(
+  attributes: Readonly<Record<string, AuditAttributeValue>>
+): Readonly<Record<string, AuditAttributeValue>> {
+  const normalized: Record<string, AuditAttributeValue> = {};
+
+  for (const [key, value] of Object.entries(attributes)) {
+    if (voiceMetricAttributeKeys.has(key)) {
+      normalized[key] = value;
+    }
+  }
+
+  return Object.freeze(normalized);
 }
 
 function appendPrivateFile(path: string, content: string): void {
@@ -144,10 +239,6 @@ function ensurePrivateDirectoryTree(path: string): void {
   mkdirSync(picoDirectory, { recursive: true, mode: 0o700 });
   chmodSync(picoDirectory, 0o700);
   mkdirSync(parent, { recursive: true, mode: 0o700 });
-}
-
-function defaultResidentVoiceRunId(timestamp: string): string {
-  return `${timestamp.replaceAll(/[:.]/g, "-")}-${process.pid}`;
 }
 
 function datePart(timestamp: string): string {

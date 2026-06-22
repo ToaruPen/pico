@@ -797,6 +797,135 @@ describe("voice resident runtime", () => {
     expect(result.enqueuedCutoffs).toBe(1);
   });
 
+  it("generates and speaks a farewell before enqueueing a timed-ended active session", async () => {
+    const calls: string[] = [];
+    const lifecycle = createOrderingLifecycle(calls);
+    const prompts: string[] = [];
+    const spokenTexts: string[] = [];
+
+    const result = await runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: lifecycle,
+      endedSessionIds: ["session-ended"],
+      echoControl: createIdleEchoControl(),
+      stt: successfulStt(""),
+      tts: {
+        synthesize: (request) => {
+          spokenTexts.push(request.text);
+          calls.push(`tts:${request.text}`);
+          return createSuccessfulTts(request.text).synthesize(request);
+        }
+      },
+      playback: {
+        play: () => {
+          calls.push("play");
+          return Promise.resolve();
+        }
+      },
+      piAgent: {
+        prompt: (input) => {
+          prompts.push(input.text);
+          calls.push(`prompt:${input.sessionId}`);
+          return Promise.resolve({ text: "また呼んでね。" });
+        }
+      },
+      memoryWorker: {
+        enqueueCutoff: (cutoff) => {
+          calls.push(`enqueue:${cutoff.sessionId}`);
+          return {
+            id: 42,
+            sessionId: cutoff.sessionId,
+            status: "queued",
+            sourceEntryCount: cutoff.entries.length,
+            queuedAt: "2026-06-18T00:00:00.000Z",
+            processingStartedAt: undefined,
+            processedAt: undefined
+          };
+        }
+      },
+      farewell: {
+        enabled: true
+      }
+    });
+
+    expect(result.enqueuedCutoffs).toBe(1);
+    expect(prompts).toEqual([
+      "The voice session is ending now. Respond with one brief spoken Japanese farewell for the staff. Do not introduce a new topic."
+    ]);
+    expect(spokenTexts).toEqual(["また呼んでね。"]);
+    expect(calls).toEqual([
+      "read:session-ended",
+      "prompt:session-ended",
+      "tts:また呼んでね。",
+      "play",
+      "cutoff:session-ended",
+      "enqueue:session-ended",
+      "ack:session-ended"
+    ]);
+  });
+
+  it("still enqueues a timed-ended session when farewell generation fails", async () => {
+    const calls: string[] = [];
+    const lifecycle = createOrderingLifecycle(calls);
+
+    const result = await runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: lifecycle,
+      endedSessionIds: ["session-ended"],
+      echoControl: createIdleEchoControl(),
+      stt: successfulStt(""),
+      tts: {
+        synthesize: () => {
+          throw new Error("farewell TTS must not run after prompt failure");
+        }
+      },
+      playback: {
+        play: () => {
+          throw new Error("farewell playback must not run after prompt failure");
+        }
+      },
+      piAgent: {
+        prompt: () => {
+          calls.push("prompt:failed");
+          throw new Error("LLM unavailable");
+        }
+      },
+      memoryWorker: {
+        enqueueCutoff: (cutoff) => {
+          calls.push(`enqueue:${cutoff.sessionId}`);
+          return {
+            id: 42,
+            sessionId: cutoff.sessionId,
+            status: "queued",
+            sourceEntryCount: cutoff.entries.length,
+            queuedAt: "2026-06-18T00:00:00.000Z",
+            processingStartedAt: undefined,
+            processedAt: undefined
+          };
+        }
+      },
+      farewell: {
+        enabled: true
+      }
+    });
+
+    expect(result.enqueuedCutoffs).toBe(1);
+    expect(result.failedTurns).toBe(1);
+    expect(calls).toEqual([
+      "read:session-ended",
+      "prompt:failed",
+      "cutoff:session-ended",
+      "enqueue:session-ended",
+      "ack:session-ended"
+    ]);
+  });
+
   it("keeps ended sessions unacknowledged and keeps running when memory enqueue fails", async () => {
     const calls: string[] = [];
     const lifecycle = createOrderingLifecycle(calls);
@@ -876,6 +1005,62 @@ describe("voice resident runtime", () => {
 
     expect(audit.entries().map((entry) => entry.name)).toContain("voice.runtime.stage");
     expect(JSON.stringify(audit.entries())).not.toContain("ピコ");
+  });
+
+  it("records TTS request wall latency separately from synthesized audio duration", async () => {
+    const audit = createStructuredAuditLog();
+
+    await runVoiceResidentRuntime({
+      now: fixedNow(),
+      monotonicNow: sequenceNumber([10, 20, 100, 145]),
+      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      echoControl: createIdleEchoControl(),
+      stt: (() => {
+        const texts = ["ピコ", "今日はテストです"];
+
+        return {
+          warmup: () => {
+            throw new Error("warmup is not part of resident runtime");
+          },
+          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
+        };
+      })(),
+      tts: createSuccessfulTts("了解です。"),
+      playback: {
+        play: () => Promise.resolve()
+      },
+      piAgent: {
+        prompt: () => Promise.resolve({ text: "了解です。" })
+      },
+      probe: { audit }
+    });
+
+    expect(
+      audit.entries().map((entry) => ({
+        stage: entry.attributes["pico.voice.stage"],
+        durationMs: entry.attributes["pico.voice.stage_duration_ms"]
+      }))
+    ).toContainEqual({
+      stage: "tts_request_wall",
+      durationMs: 45
+    });
+    expect(
+      audit.entries().map((entry) => ({
+        stage: entry.attributes["pico.voice.stage"],
+        durationMs: entry.attributes["pico.voice.stage_duration_ms"]
+      }))
+    ).toContainEqual({
+      stage: "tts_audio_duration",
+      durationMs: 120
+    });
   });
 
   it("does not start a session from low-confidence trigger transcripts", async () => {
@@ -1262,6 +1447,9 @@ function createOrderingLifecycle(calls: string[]): SessionLifecycle {
     },
     appendEntry: () => {
       throw new Error("append is not expected");
+    },
+    refreshActivity: () => {
+      throw new Error("refresh activity is not expected");
     },
     end: (id) => {
       calls.push(`end:${id}`);

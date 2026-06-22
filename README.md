@@ -16,6 +16,14 @@ Install dependencies:
 npm install
 ```
 
+Expose the local `pico` command in your shell:
+
+```bash
+npm link
+```
+
+Without linking, use `npm run pico -- <command>` from the repository root.
+
 Run all local checks:
 
 ```bash
@@ -126,11 +134,14 @@ Configure these sections in `config/pico.local.yaml` as needed:
 Run the resident processes after the local providers are configured:
 
 ```bash
-PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice
+PICO_CONFIG_PATH=config/pico.local.yaml pico foreground
 PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:memory
 ```
 
-`resident:voice` owns live microphone, speaker, session cutoff, and enqueueing.
+`pico foreground` owns live microphone, speaker, session cutoff, and enqueueing
+in the current terminal. Use it when you want the resident voice process to stop
+with that shell. Use `pico start` when Pico should keep listening as a background
+resident service.
 `resident:memory` is the companion drain worker that writes queued session
 cutoffs to Mem0 and OTel/audit without adding a default job timeout. It recovers
 stale `processing` jobs after `PICO_RESIDENT_MEMORY_RECOVER_PROCESSING_OLDER_THAN_MS`
@@ -141,16 +152,16 @@ For local development on macOS, open a Minecraft-server-style log terminal for
 the voice resident process:
 
 ```bash
-PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:dev-terminal
+PICO_CONFIG_PATH=config/pico.local.yaml pico dev
 ```
 
-This opens Terminal.app, starts `resident:voice`, streams stdout and stderr in
-that terminal window, and also appends the same output to
-`~/.pico/resident-voice/development/processes/dev-terminal.log`. Stop it from
-the opened terminal with `Ctrl-C`; the development terminal closes its own
-Terminal window after the resident process exits. This is a development
-entrypoint; production resident voice management still uses the LaunchAgent
-below.
+This opens kitty by default, starts the resident voice process, streams stdout
+and stderr in that terminal window, and also appends the same output to
+`~/.pico/resident-voice/development/processes/YYYY-MM-DD/<run-id>.log`. Use
+`pico dev --terminal=terminal` to open Terminal.app instead. Stop it from the
+opened terminal with `Ctrl-C`; the development terminal closes after the
+resident process exits. This is a development entrypoint; production resident
+voice management still uses the LaunchAgent below.
 
 The development terminal uses concise voice probe logs by default and does not
 support verbose mode. It shows utterance windows, STT completion, trigger
@@ -160,10 +171,9 @@ response text, TTS synthesis/playback, cutoff enqueue, and errors. Text payloads
 are displayed as indented multiline blocks so operator logs show the actual
 response shape without hiding line breaks. Per-frame successful
 capture/echo-control events are suppressed because they are too high-volume for
-operator-facing logs. Use
-`PICO_VOICE_PROBE_STDOUT=verbose npm run resident:voice` only when debugging the
-frame pipeline directly from a plain terminal, not from
-`resident:voice:dev-terminal`.
+operator-facing logs. Use `PICO_VOICE_PROBE_STDOUT=verbose pico foreground` only
+when debugging the frame pipeline directly from a plain terminal, not from
+`pico dev`.
 
 Resident voice logs are stored under `~/.pico` with local-user-only
 permissions. Development and normal resident runs are separated:
@@ -172,8 +182,8 @@ permissions. Development and normal resident runs are separated:
 ~/.pico/
   resident-voice/
     development/
-      processes/dev-terminal.log
       processes/YYYY-MM-DD/<run-id>.log
+      metrics/YYYY-MM-DD/<run-id>.jsonl
       events/YYYY-MM-DD.jsonl
       sessions/YYYY-MM-DD/<run-id>/<session-id>.log
       sessions/YYYY-MM-DD/<run-id>/<session-id>.jsonl
@@ -207,11 +217,11 @@ LaunchAgent after `smoke:resident-audio-input` proves that the configured
 microphone clears `voice.resident.utteranceWindow.minRmsDb`:
 
 ```bash
-PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- install
-PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- status
-PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- restart
-PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- stop
-PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- uninstall
+PICO_CONFIG_PATH=config/pico.local.yaml pico install
+PICO_CONFIG_PATH=config/pico.local.yaml pico status
+PICO_CONFIG_PATH=config/pico.local.yaml pico restart
+PICO_CONFIG_PATH=config/pico.local.yaml pico stop
+PICO_CONFIG_PATH=config/pico.local.yaml pico uninstall
 ```
 
 The LaunchAgent label is `dev.toarupen.pico.resident-voice`. It runs the

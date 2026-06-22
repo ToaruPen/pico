@@ -1,0 +1,29 @@
+#!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const jitiCliPath = join(repoRoot, "node_modules", "jiti", "lib", "jiti-cli.mjs");
+const scriptPath = join(repoRoot, "scripts", "pico.ts");
+const child = spawn(process.execPath, [jitiCliPath, scriptPath, ...process.argv.slice(2)], {
+  cwd: repoRoot,
+  env: {
+    ...process.env,
+    PICO_REPO_ROOT: repoRoot
+  },
+  stdio: "inherit"
+});
+
+child.once("error", (error) => {
+  console.error(error.message);
+  process.exitCode = 1;
+});
+child.once("exit", (code, signal) => {
+  if (signal !== null) {
+    process.kill(process.pid, signal);
+    return;
+  }
+
+  process.exitCode = code ?? 1;
+});
