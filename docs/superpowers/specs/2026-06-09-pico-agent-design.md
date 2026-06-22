@@ -104,24 +104,43 @@ The default framing is place memory and support knowledge, not child profiles.
 Long-term memory should be designed around what helps the facility provide
 consistent care.
 
-The initial durable slice is a reviewed SQLite store for facility knowledge,
-care-continuity notes, and operational notes. It is not an autonomous memory
-collector, a child dossier store, or a vector-primary memory system.
+The initial durable slice is a SQLite store for facility knowledge,
+care-continuity notes, and operational notes. It is not a child dossier store
+or a vector-primary memory system. Session-cutoff automation may write facility
+memories without a human review gate, but SQLite remains the durable source of
+truth and vector storage remains a replaceable retrieval index.
+
+Session-cutoff processing should run outside the live response path. It may use
+an explicit cloud LLM provider through Pi Agent authentication when that is the
+selected operational provider. The worker must be bounded, observable, and
+replaceable; it must not become a hidden provider chain or block live
+conversation turns.
 
 ### local_models
 
 Provides local model capabilities around Pi Agent.
 
-The design goal is local-first for surrounding cognition. Aside from the Pi
-Agent brain itself, supporting model work such as local LLM calls, speech,
-vision, classification, extraction, or summarization should prefer local models
-where practical.
+The design goal is local-first for surrounding cognition where practical, while
+allowing explicit provider choices when local models would compromise accuracy,
+latency, or machine capacity. Aside from the Pi Agent brain itself, supporting
+model work such as speech, vision, classification, embedding, extraction, or
+summarization should name its provider and runtime boundary directly.
 
 `local` does not require every model to run on the same host as Pi Agent. The
 vision model is expected to run on a Windows GPU host and be reached through a
 protected Tailscale or Cloudflare SSH tunnel. From `pico`'s perspective this is
 still a selected local-first provider, not a cloud model and not an automatic
 provider chain.
+
+For long-memory work, generation/extraction and embedding are separate provider
+decisions. The main long-memory LLM path is expected to use Pi Agent's
+`openai-codex` model registry provider and the `openai-codex-responses` API
+through stored Pi authentication. The embedding path is expected to remain local
+by default and explicitly selectable, with `jinaai/jina-embeddings-v5-text-small`
+as the primary local sidecar candidate while the deployment remains
+non-commercial/private. Changing embedding models requires an intentional
+vector-index migration because vector dimensions and embedding spaces are not
+interchangeable.
 
 ### voice
 
@@ -205,6 +224,9 @@ rather than an exposed Ollama port.
 - External channels are output surfaces, not the core architecture.
 - No test-double modules, compatibility layers, or automatic provider switching
   in production architecture. Providers are selected explicitly.
+- Long-memory LLM and embedding providers are selected independently. A failed
+  cloud LLM must not silently switch to a local model, and a failed local
+  embedder must not silently switch to a cloud embedder.
 
 ## Initial Implementation Shape
 
@@ -222,9 +244,9 @@ Suggested first slice:
 5. Keep `voice`, `vision`, `camera`, and `channels` as explicit future modules
    with contracts but no runtime implementation until their real dependencies
    are selected and reachable.
-6. Keep the first `long_memory` runtime surface limited to reviewed SQLite
-   facility memory. Broader extraction, compaction, and integration behavior is
-   future work.
+6. Keep the first `long_memory` runtime surface limited to SQLite facility
+   memory. Broader extraction, compaction, and integration behavior is future
+   work.
 
 ## Open Decisions
 
@@ -234,5 +256,7 @@ Suggested first slice:
   service.
 - Where protected Cloudflare transport is required in the first milestone.
 - Which local LLM/runtime should back `local_models`.
-- How long-term memory should be reviewed, compacted, and corrected.
+- How long-term memory should be compacted, corrected, and decayed.
+- Which multilingual local embedding model should back the first production
+  vector index.
 - Which LINE/OpenClaw integration pattern, if any, should be adopted later.
