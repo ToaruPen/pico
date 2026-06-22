@@ -9,6 +9,7 @@ import {
 import { registerPicoExtensionWithRuntime } from "../index.js";
 import type { SessionLifecycle } from "../modules/session/index.js";
 import type { PiAgentTurnClient } from "./voice-resident.js";
+import type { VoiceStageProbe } from "./voice-stage-probe.js";
 
 export type PiAgentSdkSession = {
   readonly subscribe: (listener: (event: unknown) => void) => (() => void) | undefined;
@@ -34,6 +35,7 @@ export type PiAgentResourceLoader = {
 export type PiAgentTurnClientOptions = {
   readonly cwd: string;
   readonly sessionLifecycle: SessionLifecycle;
+  readonly voiceProbe?: VoiceStageProbe;
   readonly createAgentSession?: PiAgentSessionFactory;
   readonly createResourceLoader?: (
     input: PiAgentResourceLoaderFactoryInput
@@ -147,12 +149,13 @@ function createTurnResourceLoader(options: PiAgentTurnClientOptions): PiAgentRes
         (pi) =>
           registerPicoExtensionWithRuntime(pi, {
             sessionLifecycle: options.sessionLifecycle,
+            ...(options.voiceProbe === undefined ? {} : { voiceProbe: options.voiceProbe }),
             sessionTool: {
               allowCutoff: false
             }
           })
       ]
-    }) ?? createDefaultResourceLoader(options.cwd, options.sessionLifecycle)
+    }) ?? createDefaultResourceLoader(options)
   );
 }
 
@@ -232,17 +235,15 @@ function throwIfSignalAborted(signal: AbortSignal | undefined): void {
   }
 }
 
-function createDefaultResourceLoader(
-  cwd: string,
-  sessionLifecycle: SessionLifecycle
-): PiAgentResourceLoader {
+function createDefaultResourceLoader(options: PiAgentTurnClientOptions): PiAgentResourceLoader {
   return new DefaultResourceLoader({
-    cwd,
+    cwd: options.cwd,
     agentDir: getAgentDir(),
     extensionFactories: [
       (pi) =>
         registerPicoExtensionWithRuntime(pi, {
-          sessionLifecycle,
+          sessionLifecycle: options.sessionLifecycle,
+          ...(options.voiceProbe === undefined ? {} : { voiceProbe: options.voiceProbe }),
           sessionTool: {
             allowCutoff: false
           }

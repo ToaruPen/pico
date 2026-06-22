@@ -1,6 +1,6 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -17,6 +17,20 @@ function temporaryConfigFile(content: string): string {
   writeFileSync(path, content);
 
   return path;
+}
+
+function temporaryRepoConfigFile(content: string): {
+  readonly root: string;
+  readonly path: string;
+} {
+  const root = mkdtempSync(join(tmpdir(), "pico-config-root-"));
+  const directory = join(root, "config");
+  const path = join(directory, "pico.local.yaml");
+
+  mkdirSync(directory);
+  writeFileSync(path, content);
+
+  return { root, path };
 }
 
 describe("pico YAML config", () => {
@@ -276,7 +290,7 @@ audit:
             provider: "afplay",
             route: "system_default"
           },
-          singleInstanceLockPath: "tmp/pico-custom-resident.lock",
+          singleInstanceLockPath: join(dirname(path), "tmp/pico-custom-resident.lock"),
           minTriggerConfidence: 0.72,
           shutdownGraceMs: 3000,
           utteranceWindow: {
@@ -574,6 +588,35 @@ camera:
 
     expect(config.camera.tapo?.host).toBe("192.168.3.25");
     expect(config.vision.ollama).toBeUndefined();
+  });
+
+  it("resolves local file paths relative to the repo root for config directory files", () => {
+    const { root, path } = temporaryRepoConfigFile(`
+memory:
+  mem0:
+    enabled: false
+    historyDbPath: .pico-local/mem0-history.sqlite
+vision:
+  personDetection:
+    enabled: false
+    modelPath: models/person-detector.mlmodel
+voice:
+  resident:
+    singleInstanceLockPath: tmp/pico-resident.lock
+  stt:
+    mlxWhisper:
+      localBaseUrl: http://127.0.0.1:8765
+      samplePcm16lePath: samples/warmup.pcm
+`);
+
+    const config = loadPicoConfig({ path });
+
+    expect(config.memory.mem0.historyDbPath).toBe(join(root, ".pico-local/mem0-history.sqlite"));
+    expect(config.vision.personDetection.modelPath).toBe(
+      join(root, "models/person-detector.mlmodel")
+    );
+    expect(config.voice.resident.singleInstanceLockPath).toBe(join(root, "tmp/pico-resident.lock"));
+    expect(config.voice.stt.mlxWhisper?.samplePcm16lePath).toBe(join(root, "samples/warmup.pcm"));
   });
 
   it("rejects partial Tapo camera credentials at the config boundary", () => {

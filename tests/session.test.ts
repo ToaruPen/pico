@@ -133,6 +133,38 @@ describe("session lifecycle", () => {
     });
   });
 
+  it("ends timed sessions after the latest activity instead of the start time", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-12T09:00:00.000Z"));
+
+    try {
+      const lifecycle = createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      });
+      const session = lifecycle.start({
+        kind: "wake_name",
+        label: "ピコ",
+        source: "voice"
+      });
+
+      vi.advanceTimersByTime(50_000);
+      vi.setSystemTime(new Date("2026-06-12T09:00:50.000Z"));
+      lifecycle.refreshActivity(session.id);
+
+      vi.advanceTimersByTime(10_000);
+      expect(lifecycle.read(session.id)?.state).toBe("active");
+
+      vi.advanceTimersByTime(50_000);
+      expect(lifecycle.read(session.id)?.state).toBe("ended");
+      expect(lifecycle.read(session.id)?.endedAt).toBe("2026-06-12T09:01:50.000Z");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("enforces one active session at a time and allows a new session after timed ending", () => {
     vi.useFakeTimers();
 

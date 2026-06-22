@@ -12,8 +12,12 @@ export type VoiceRuntimeStage =
   | "trigger_match"
   | "session_start"
   | "pi_turn"
+  | "tts_request_wall"
+  | "tts_audio_duration"
   | "tts_synthesize"
   | "tts_playback"
+  | "camera_capture"
+  | "vlm_scene_description"
   | "session_cutoff_enqueue";
 
 export type VoiceStageStatus = "ok" | "error" | "skipped" | "suppressed";
@@ -38,8 +42,12 @@ const voiceRuntimeStages = new Set<VoiceRuntimeStage>([
   "trigger_match",
   "session_start",
   "pi_turn",
+  "tts_request_wall",
+  "tts_audio_duration",
   "tts_synthesize",
   "tts_playback",
+  "camera_capture",
+  "vlm_scene_description",
   "session_cutoff_enqueue"
 ]);
 const voiceStageStatuses = new Set<VoiceStageStatus>(["ok", "error", "skipped", "suppressed"]);
@@ -52,6 +60,8 @@ const voiceStageAttributeKeys = new Set([
   "pico.voice.triggered",
   "pico.voice.entry_count",
   "pico.voice.chunk_count",
+  "pico.voice.frame_bytes",
+  "pico.voice.vlm_frame_bytes",
   "pico.voice.queue_depth",
   "pico.voice.error_code"
 ]);

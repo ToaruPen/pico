@@ -3,12 +3,14 @@ import { Type } from "typebox";
 
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../config/index.js";
 import { createPicoPerceptionService, type PicoPerceptionService } from "./perception-service.js";
+import type { VoiceStageProbe } from "./voice-stage-probe.js";
 
 const emptyParameters = Type.Object({});
 
 export type PicoPerceptionToolOptions = {
   readonly service?: PicoPerceptionService;
   readonly loadConfig?: () => PicoConfig;
+  readonly probe?: VoiceStageProbe;
 };
 
 export function createPicoCameraSnapshotTool(
@@ -100,7 +102,9 @@ function resolveService(options: PicoPerceptionToolOptions): PicoPerceptionServi
     return options.service;
   }
 
-  return createPicoPerceptionService(options.loadConfig?.() ?? loadPicoConfigFromEnvironment());
+  return createPicoPerceptionService(options.loadConfig?.() ?? loadPicoConfigFromEnvironment(), {
+    ...(options.probe === undefined ? {} : { probe: options.probe })
+  });
 }
 
 async function executeWithResolvedService(

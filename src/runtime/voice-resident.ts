@@ -1,5 +1,9 @@
 import type { SessionMemoryWorker } from "../modules/long-memory/session-worker.js";
-import type { SessionLifecycle, SessionStartTrigger } from "../modules/session/index.js";
+import type {
+  SessionLifecycle,
+  SessionRecord,
+  SessionStartTrigger
+} from "../modules/session/index.js";
 import {
   defineVoicePcmFrame,
   type EchoControlProvider,
@@ -88,6 +92,9 @@ export type VoiceResidentRuntimeOptions = {
   readonly wakeAcknowledgement?: {
     readonly enabled: boolean;
   };
+  readonly farewell?: {
+    readonly enabled: boolean;
+  };
   readonly probe?: VoiceStageProbe;
   readonly signal?: AbortSignal;
   readonly endedSessionIds?: readonly string[];
@@ -126,6 +133,7 @@ type ActiveSessionState = {
 type PendingSessionState = {
   readonly activeSession: ActiveSessionState;
   readonly pendingCutoffSessionIds: Set<string>;
+  readonly farewelledSessionIds: Set<string>;
 };
 
 type ActiveVoiceSessionResult =
@@ -141,6 +149,8 @@ type ActiveVoiceSessionResult =
 
 const defaultNow = (): string => new Date().toISOString();
 const defaultMonotonicNow = (): number => performance.now();
+const farewellPrompt =
+  "The voice session is ending now. Respond with one brief spoken Japanese farewell for the staff. Do not introduce a new topic.";
 
 export async function runVoiceResidentRuntime(
   options: VoiceResidentRuntimeOptions
@@ -157,6 +167,7 @@ export async function runVoiceResidentRuntime(
     suppressedFrames: 0
   };
   const pendingCutoffSessionIds = new Set(options.endedSessionIds ?? []);
+  const farewelledSessionIds = new Set<string>();
   let activeSessionId: string | undefined;
   const utteranceAssembler = createVoiceUtteranceAssembler(options.utteranceWindow);
   const activeSession = {
@@ -173,13 +184,20 @@ export async function runVoiceResidentRuntime(
       throw new Error(`pico resident voice echo-control provider is unhealthy: ${health.message}`);
     }
 
-    enqueueEndedSessions(options, pendingCutoffSessionIds, counters, now);
+    await enqueueEndedSessions(
+      options,
+      pendingCutoffSessionIds,
+      counters,
+      now,
+      farewelledSessionIds
+    );
 
     for await (const rawFrame of toAsyncIterable(options.frames)) {
       throwIfAborted(options.signal);
       activeSessionId = await processResidentFrameIteration(rawFrame, options, counters, now, {
         activeSession,
         pendingCutoffSessionIds,
+        farewelledSessionIds,
         utteranceAssembler,
         currentActiveSessionId: activeSessionId
       });
@@ -188,25 +206,34 @@ export async function runVoiceResidentRuntime(
 
     await flushPendingUtteranceWindow(utteranceAssembler, options, counters, now, {
       activeSession,
-      pendingCutoffSessionIds
+      pendingCutoffSessionIds,
+      farewelledSessionIds
     });
 
     activeSessionId = collectEndedActiveSession(options.sessionLifecycle, activeSessionId, {
       pendingCutoffSessionIds,
       piAgent: options.piAgent
     });
-    enqueueEndedSessions(options, pendingCutoffSessionIds, counters, now);
+    await enqueueEndedSessions(
+      options,
+      pendingCutoffSessionIds,
+      counters,
+      now,
+      farewelledSessionIds
+    );
   } finally {
     try {
       await flushPendingUtteranceWindow(utteranceAssembler, options, counters, now, {
         activeSession,
-        pendingCutoffSessionIds
+        pendingCutoffSessionIds,
+        farewelledSessionIds
       });
     } finally {
       activeSessionId = await runShutdownCleanup(
         options,
         activeSessionId,
         pendingCutoffSessionIds,
+        farewelledSessionIds,
         counters,
         now
       );
@@ -220,13 +247,15 @@ async function runShutdownCleanup(
   options: VoiceResidentRuntimeOptions,
   activeSessionId: string | undefined,
   pendingCutoffSessionIds: Set<string>,
+  farewelledSessionIds: Set<string>,
   counters: VoiceResidentCounters,
   now: () => string
 ): Promise<string | undefined> {
-  const nextActiveSessionId = cleanupActiveSessionForShutdown(
+  const nextActiveSessionId = await cleanupActiveSessionForShutdown(
     options,
     activeSessionId,
     pendingCutoffSessionIds,
+    farewelledSessionIds,
     counters,
     now
   );
@@ -283,7 +312,13 @@ async function processResidentFrameIteration(
     }
   );
   state.activeSession.setActiveSessionId(activeSessionId);
-  enqueueEndedSessions(options, state.pendingCutoffSessionIds, counters, now);
+  await enqueueEndedSessions(
+    options,
+    state.pendingCutoffSessionIds,
+    counters,
+    now,
+    state.farewelledSessionIds
+  );
   await processNearEndFrame(rawFrame, options, counters, now, state);
 
   return state.activeSession.getActiveSessionId();
@@ -299,13 +334,14 @@ async function flushPendingUtteranceWindow(
   await processTranscribedUtterances(utteranceAssembler.flush(), options, counters, now, state);
 }
 
-function cleanupActiveSessionForShutdown(
+async function cleanupActiveSessionForShutdown(
   options: VoiceResidentRuntimeOptions,
   activeSessionId: string | undefined,
   pendingCutoffSessionIds: Set<string>,
+  farewelledSessionIds: Set<string>,
   counters: VoiceResidentCounters,
   now: () => string
-): string | undefined {
+): Promise<string | undefined> {
   if (options.memoryWorker === undefined) {
     return activeSessionId;
   }
@@ -318,7 +354,7 @@ function cleanupActiveSessionForShutdown(
       piAgent: options.piAgent
     }
   );
-  enqueueEndedSessions(options, pendingCutoffSessionIds, counters, now);
+  await enqueueEndedSessions(options, pendingCutoffSessionIds, counters, now, farewelledSessionIds);
 
   return nextActiveSessionId;
 }
@@ -402,7 +438,13 @@ async function processTranscribedUtterance(
       piAgent: options.piAgent
     })
   );
-  enqueueEndedSessions(options, state.pendingCutoffSessionIds, counters, now);
+  await enqueueEndedSessions(
+    options,
+    state.pendingCutoffSessionIds,
+    counters,
+    now,
+    state.farewelledSessionIds
+  );
 }
 
 function recordUtteranceWindowProbe(
@@ -650,6 +692,7 @@ async function runWakeAcknowledgement(
     }
   });
   await playTtsChunks(ttsResult.chunks, options, now);
+  refreshSessionActivityQuietly(options.sessionLifecycle, sessionId);
   counters.completedTurns += 1;
 }
 
@@ -729,6 +772,7 @@ async function runActiveVoiceTurn(
     }
   });
   await playTtsChunks(ttsResult.chunks, options, now);
+  refreshSessionActivityQuietly(options.sessionLifecycle, activeSessionId);
   counters.completedTurns += 1;
 }
 
@@ -783,21 +827,43 @@ async function synthesizeTurnResponse(
   counters: VoiceResidentCounters,
   startedAt: string
 ): Promise<TtsSynthesisSuccess | undefined> {
+  const startedAtMs = (options.monotonicNow ?? defaultMonotonicNow)();
   const ttsResult = await options.tts.synthesize({
     text,
     ...(options.signal === undefined ? {} : { signal: options.signal })
   });
+  const completedAtMs = (options.monotonicNow ?? defaultMonotonicNow)();
+  const wallDurationMs = Math.max(0, completedAtMs - startedAtMs);
 
   if (ttsResult.ok) {
+    recordVoiceStageProbe(options.probe ?? {}, {
+      stage: "tts_request_wall",
+      status: "ok",
+      startedAt,
+      durationMs: wallDurationMs,
+      attributes: {
+        "pico.voice.chunk_count": ttsResult.chunks.length
+      }
+    });
+    recordVoiceStageProbe(options.probe ?? {}, {
+      stage: "tts_audio_duration",
+      status: "ok",
+      startedAt,
+      durationMs: ttsResult.totalDurationMs,
+      attributes: {
+        "pico.voice.chunk_count": ttsResult.chunks.length
+      }
+    });
+
     return ttsResult;
   }
 
   counters.failedTurns += 1;
   recordVoiceStageProbe(options.probe ?? {}, {
-    stage: "tts_synthesize",
+    stage: "tts_request_wall",
     status: "error",
     startedAt,
-    durationMs: 0,
+    durationMs: wallDurationMs,
     attributes: {
       "pico.voice.error_code": ttsResult.reason
     }
@@ -944,12 +1010,13 @@ function endActiveSessionForShutdown(
   return undefined;
 }
 
-function enqueueEndedSessions(
+async function enqueueEndedSessions(
   options: VoiceResidentRuntimeOptions,
   pendingCutoffSessionIds: Set<string>,
   counters: VoiceResidentCounters,
-  now: () => string
-): void {
+  now: () => string,
+  farewelledSessionIds: Set<string>
+): Promise<void> {
   for (const sessionId of [...pendingCutoffSessionIds]) {
     const session = options.sessionLifecycle.read(sessionId);
 
@@ -957,6 +1024,8 @@ function enqueueEndedSessions(
       pendingCutoffSessionIds.delete(sessionId);
       continue;
     }
+
+    await runOptionalFarewell(session, options, counters, now, farewelledSessionIds);
 
     if (options.memoryWorker === undefined) {
       counters.failedCutoffs += 1;
@@ -988,6 +1057,103 @@ function enqueueEndedSessions(
       }
     });
     disposeSessionQuietly(options.piAgent, sessionId);
+  }
+}
+
+async function runOptionalFarewell(
+  session: SessionRecord,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string,
+  farewelledSessionIds: Set<string>
+): Promise<void> {
+  if (!claimFarewell(session.id, options, farewelledSessionIds)) {
+    return;
+  }
+
+  try {
+    await runFarewellTurn(session.id, options, counters, now);
+  } catch {
+    counters.failedTurns += 1;
+  }
+}
+
+function claimFarewell(
+  sessionId: string,
+  options: VoiceResidentRuntimeOptions,
+  farewelledSessionIds: Set<string>
+): boolean {
+  if (options.farewell?.enabled !== true || farewelledSessionIds.has(sessionId)) {
+    return false;
+  }
+
+  farewelledSessionIds.add(sessionId);
+
+  return true;
+}
+
+async function runFarewellTurn(
+  sessionId: string,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string
+): Promise<void> {
+  const piStageStartedAt = now();
+  const piStageStartedMs = (options.monotonicNow ?? defaultMonotonicNow)();
+  const response = await requestPiAgentResponse(
+    sessionId,
+    farewellPrompt,
+    options,
+    counters,
+    piStageStartedAt,
+    piStageStartedMs
+  );
+
+  if (response === undefined) {
+    return;
+  }
+
+  recordVoiceStageProbe(options.probe ?? {}, {
+    stage: "pi_turn",
+    status: "ok",
+    startedAt: piStageStartedAt,
+    durationMs: response.durationMs,
+    attributes: {}
+  });
+
+  await synthesizeAndPlayFarewell(response.text, options, counters, now);
+}
+
+async function synthesizeAndPlayFarewell(
+  text: string,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string
+): Promise<void> {
+  const ttsStageStartedAt = now();
+  const ttsResult = await synthesizeTurnResponse(text, options, counters, ttsStageStartedAt);
+
+  if (ttsResult === undefined) {
+    return;
+  }
+
+  recordVoiceStageProbe(options.probe ?? {}, {
+    stage: "tts_synthesize",
+    status: "ok",
+    startedAt: ttsStageStartedAt,
+    durationMs: ttsResult.totalDurationMs,
+    attributes: {
+      "pico.voice.chunk_count": ttsResult.chunks.length
+    }
+  });
+  await playTtsChunks(ttsResult.chunks, options, now);
+}
+
+function refreshSessionActivityQuietly(lifecycle: SessionLifecycle, sessionId: string): void {
+  try {
+    lifecycle.refreshActivity(sessionId);
+  } catch {
+    // Activity refresh must not break an otherwise completed voice turn.
   }
 }
 

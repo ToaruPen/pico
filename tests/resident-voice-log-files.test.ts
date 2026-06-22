@@ -71,6 +71,62 @@ describe("resident voice file logs", () => {
     expect((await stat(paths.sessionJsonlPath ?? "")).mode & 0o777).toBe(0o600);
   });
 
+  it("writes audit-safe voice metrics separately from contentful session logs", async () => {
+    const homeDirectory = await mkdtemp(join(tmpdir(), "pico-home-"));
+    const log = createResidentVoiceFileLogSink({
+      homeDirectory,
+      runMode: "development",
+      runId: "run-1",
+      now: () => "2026-06-22T01:02:03.000Z"
+    });
+
+    log.writeAuditEvent({
+      category: "transport_event",
+      name: "voice.runtime.stage",
+      severity: "info",
+      occurredAt: "2026-06-23T01:02:04.000Z",
+      summary: "Pico voice runtime stage completed.",
+      attributes: {
+        "pico.voice.stage": "stt",
+        "pico.voice.stage_status": "ok",
+        "pico.voice.stage_duration_ms": 123.4,
+        "pico.voice.entry_count": 2,
+        "pico.voice.queue_depth": 1,
+        "pico.voice.sample_rate_hz": 16_000,
+        "pico.voice.channels": 1,
+        "pico.voice.suppressed_frame_count": 4
+      }
+    });
+
+    const paths = resolveResidentVoiceLogPaths({
+      homeDirectory,
+      runMode: "development",
+      runId: "run-1",
+      occurredAt: "2026-06-22T01:02:03.000Z"
+    });
+
+    await expect(readFile(paths.metricsJsonlPath, "utf8")).resolves.toBe(
+      `${JSON.stringify({
+        schemaVersion: 1,
+        runMode: "development",
+        runId: "run-1",
+        name: "voice.runtime.stage",
+        occurredAt: "2026-06-23T01:02:04.000Z",
+        attributes: {
+          "pico.voice.stage": "stt",
+          "pico.voice.stage_status": "ok",
+          "pico.voice.stage_duration_ms": 123.4,
+          "pico.voice.entry_count": 2,
+          "pico.voice.queue_depth": 1,
+          "pico.voice.sample_rate_hz": 16_000,
+          "pico.voice.channels": 1,
+          "pico.voice.suppressed_frame_count": 4
+        }
+      })}\n`
+    );
+    expect((await stat(paths.metricsJsonlPath)).mode & 0o777).toBe(0o600);
+  });
+
   it("keeps development and normal run modes in separate directories", async () => {
     const homeDirectory = await mkdtemp(join(tmpdir(), "pico-home-"));
 

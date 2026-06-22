@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 
 import {
   defineResidentDevelopmentTerminalSession,
+  type ResidentDevelopmentTerminal,
   requireResidentDevelopmentTerminalPlatform
 } from "../../src/runtime/resident-development-terminal.js";
 
@@ -14,11 +15,17 @@ const session = defineResidentDevelopmentTerminalSession({
   repoRoot: process.cwd(),
   homeDirectory: homedir(),
   configPath: resolve(process.env.PICO_CONFIG_PATH ?? "config/pico.local.yaml"),
-  pathEnvironment: readDevelopmentTerminalPathEnvironment(process.env, homedir())
+  pathEnvironment: readDevelopmentTerminalPathEnvironment(process.env, homedir()),
+  terminal: readDevelopmentTerminal(process.argv.slice(2), process.env)
 });
 
 await writeLauncherScript(session);
-await runAppleScript(session.appleScript);
+
+if (session.terminal === "kitty") {
+  await runKitty(requireKittyCommand(session.kittyCommand));
+} else {
+  await runAppleScript(requireAppleScript(session.appleScript));
+}
 
 async function writeLauncherScript(session: {
   readonly picoDirectory: string;
@@ -51,6 +58,59 @@ function runAppleScript(script: string): Promise<void> {
       rejectRun(new Error(`osascript exited with code ${String(code ?? -1)}`));
     });
   });
+}
+
+function runKitty(command: {
+  readonly command: "kitty";
+  readonly args: readonly string[];
+}): Promise<void> {
+  return new Promise((resolveRun, rejectRun) => {
+    const child = spawn(command.command, command.args, {
+      stdio: "inherit"
+    });
+
+    child.once("error", rejectRun);
+    child.once("exit", (code) => {
+      if (code === 0) {
+        resolveRun();
+        return;
+      }
+
+      rejectRun(new Error(`kitty exited with code ${String(code ?? -1)}`));
+    });
+  });
+}
+
+function requireKittyCommand(
+  command: { readonly command: "kitty"; readonly args: readonly string[] } | undefined
+): { readonly command: "kitty"; readonly args: readonly string[] } {
+  if (command === undefined) {
+    throw new Error("pico dev terminal session is missing kitty command");
+  }
+
+  return command;
+}
+
+function requireAppleScript(script: string | undefined): string {
+  if (script === undefined) {
+    throw new Error("pico dev terminal session is missing Terminal.app AppleScript");
+  }
+
+  return script;
+}
+
+function readDevelopmentTerminal(
+  arguments_: readonly string[],
+  environment: NodeJS.ProcessEnv
+): ResidentDevelopmentTerminal {
+  const option = arguments_.find((argument) => argument.startsWith("--terminal="));
+  const value = option?.slice("--terminal=".length) ?? environment.PICO_DEV_TERMINAL ?? "terminal";
+
+  if (value === "kitty" || value === "terminal") {
+    return value;
+  }
+
+  throw new Error("PICO_DEV_TERMINAL and --terminal must be kitty or terminal");
 }
 
 function readDevelopmentTerminalPathEnvironment(

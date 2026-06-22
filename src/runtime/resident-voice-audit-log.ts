@@ -9,6 +9,7 @@ export type ResidentVoiceAuditLogOptions = {
   readonly stdoutEnabled: boolean;
   readonly stdoutMode?: ResidentVoiceAuditLogStdoutMode;
   readonly writeStdout?: (line: string) => void;
+  readonly writeEvent?: (event: AuditEvent) => void;
 };
 
 export type ResidentVoiceAuditLogStdoutMode = "summary" | "verbose";
@@ -29,8 +30,12 @@ const summaryVoiceStages = new Set([
   "trigger_match",
   "session_start",
   "pi_turn",
+  "tts_request_wall",
+  "tts_audio_duration",
   "tts_synthesize",
   "tts_playback",
+  "camera_capture",
+  "vlm_scene_description",
   "session_cutoff_enqueue"
 ]);
 
@@ -51,6 +56,8 @@ export function createResidentVoiceAuditLog(
           writeStdout(line);
         }
       }
+
+      options.writeEvent?.(event);
 
       return event;
     },

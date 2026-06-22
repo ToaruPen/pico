@@ -59,6 +59,7 @@ export type SessionLifecycle = {
   readonly start: (trigger: SessionStartTrigger) => SessionRecord;
   readonly read: (id: string) => SessionRecord | undefined;
   readonly appendEntry: (id: string, input: SessionEntryInput) => SessionEntry;
+  readonly refreshActivity: (id: string) => SessionRecord;
   readonly end: (id: string) => SessionRecord;
   readonly cutoff: (id: string) => SessionCutoff;
   readonly acknowledgeCutoff: (id: string) => void;
@@ -152,8 +153,20 @@ export function createSessionLifecycle(options: SessionLifecycleOptions): Sessio
         content: requireSessionText(input.content, "pico session entry content is required")
       });
       session.entries = [...session.entries, entry];
+      refreshSessionTimer(session, sessions, options.audit, endedSessionRetentionMs, durationMs);
 
       return entry;
+    },
+    refreshActivity(id) {
+      const session = requireSession(sessions, id);
+
+      if (session.state !== "active") {
+        throw new Error("pico session is not active");
+      }
+
+      refreshSessionTimer(session, sessions, options.audit, endedSessionRetentionMs, durationMs);
+
+      return cloneSession(session);
     },
     end(id) {
       const session = requireSession(sessions, id);
@@ -213,6 +226,22 @@ function endSession(
   session.cleanupTimeout = scheduleSessionTimer(() => {
     sessions.delete(session.id);
   }, endedSessionRetentionMs);
+}
+
+function refreshSessionTimer(
+  session: ManagedSession,
+  sessions: Map<string, ManagedSession>,
+  audit: StructuredAuditLog | undefined,
+  endedSessionRetentionMs: number,
+  durationMs: number
+): void {
+  if (session.timeout !== undefined) {
+    clearTimeout(session.timeout);
+  }
+
+  session.timeout = scheduleSessionTimer(() => {
+    endSession(session, sessions, audit, endedSessionRetentionMs);
+  }, durationMs);
 }
 
 function scheduleSessionTimer(callback: () => void, durationMs: number): NodeJS.Timeout {
