@@ -33,7 +33,7 @@ function runScript(scriptPath: string, arguments_: readonly string[]): Promise<v
     child.once("error", rejectRun);
     child.once("exit", (code, signal) => {
       if (signal !== null) {
-        rejectRun(new Error(`${scriptPath} exited with signal ${signal}`));
+        process.kill(process.pid, signal);
         return;
       }
 

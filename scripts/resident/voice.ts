@@ -35,7 +35,8 @@ import { createResidentVoiceConsoleLog } from "../../src/runtime/resident-voice-
 import {
   createResidentVoiceCompositeConsoleSink,
   createResidentVoiceFileLogSink,
-  type ResidentVoiceLogRunMode
+  type ResidentVoiceLogRunMode,
+  requireResidentVoiceRunId
 } from "../../src/runtime/resident-voice-log-files.js";
 import { runVoiceResidentRuntime } from "../../src/runtime/voice-resident.js";
 
@@ -189,7 +190,11 @@ function readResidentVoiceRunId(value: string | undefined): string | undefined {
     return undefined;
   }
 
-  return value;
+  try {
+    return requireResidentVoiceRunId(value);
+  } catch {
+    throw new Error("PICO_RESIDENT_VOICE_RUN_ID must be a path-safe identifier");
+  }
 }
 
 function writeResidentVoiceMetricEvent(

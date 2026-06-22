@@ -131,6 +131,19 @@ export function compareResidentVoiceRuns(
   return comparisons.sort(compareStageMeasurements);
 }
 
+export function requireSingleResidentVoiceRun(
+  summary: ResidentVoiceMeasurementSummary,
+  inputLabel: string
+): ResidentVoiceRunMeasurement {
+  if (summary.runs.length !== 1) {
+    throw new Error(
+      `resident voice metrics comparison requires exactly one run in ${inputLabel} input`
+    );
+  }
+
+  return summary.runs[0] as ResidentVoiceRunMeasurement;
+}
+
 function parseVoiceStageMetricEvent(input: unknown):
   | {
       readonly runId: string;

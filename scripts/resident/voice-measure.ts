@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 
 import {
   compareResidentVoiceRuns,
+  requireSingleResidentVoiceRun,
   summarizeResidentVoiceMetricsJsonl
 } from "../../src/runtime/resident-voice-measurements.js";
 
@@ -17,12 +18,8 @@ if (secondPath === undefined) {
   process.stdout.write(`${JSON.stringify(first, undefined, 2)}\n`);
 } else {
   const second = summarizeResidentVoiceMetricsJsonl(await readFile(secondPath, "utf8"));
-  const baselineRun = first.runs[0];
-  const candidateRun = second.runs[0];
-
-  if (baselineRun === undefined || candidateRun === undefined) {
-    throw new Error("resident voice metrics comparison requires one run in each input file");
-  }
+  const baselineRun = requireSingleResidentVoiceRun(first, "baseline");
+  const candidateRun = requireSingleResidentVoiceRun(second, "candidate");
 
   process.stdout.write(
     `${JSON.stringify(

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   compareResidentVoiceRuns,
   type ResidentVoiceRunMeasurement,
+  requireSingleResidentVoiceRun,
   summarizeResidentVoiceMetricsJsonl
 } from "../src/runtime/resident-voice-measurements.js";
 
@@ -111,6 +112,19 @@ describe("resident voice measurements", () => {
         p95DeltaMs: 100
       }
     ]);
+  });
+
+  it("requires exactly one run for pairwise comparisons", () => {
+    const summary = summarizeResidentVoiceMetricsJsonl(
+      [
+        JSON.stringify(stageEvent("run-a", "stt", "ok", 100)),
+        JSON.stringify(stageEvent("run-b", "stt", "ok", 200))
+      ].join("\n")
+    );
+
+    expect(() => requireSingleResidentVoiceRun(summary, "baseline")).toThrow(
+      "resident voice metrics comparison requires exactly one run in baseline input"
+    );
   });
 });
 
