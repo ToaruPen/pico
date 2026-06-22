@@ -18,8 +18,9 @@ responsible decision makers.
 - Module code uses one folder per module under `src/modules/<module>/index.ts`.
 - First-slice runtime modules are metadata/contract modules for context, memory,
   local models, handoff, audit, and transport.
-- `long_memory` has a narrow SQLite durable-memory slice for reviewed facility
-  knowledge; broader long-memory automation remains future work.
+- `long_memory` has a narrow SQLite durable-memory slice for facility
+  knowledge. Session-cutoff automation may write facility memories without a
+  human review gate; broader integrations remain explicit future work.
 - Planned heavy modules include voice, vision, camera, channels, and broader
   long-memory integrations.
 - Vision provider selection is `Qwen/Qwen3.5-9B` through Ollama `qwen3.5:9b`

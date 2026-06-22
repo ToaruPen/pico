@@ -2,9 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add the first local-only Mem0-backed long-memory slice for pico.
+**Historical goal:** Add the first local-only Mem0-backed long-memory slice for
+pico.
 
-**Architecture:** Pico remains the lifecycle owner: YAML validates local-only providers, SQLite owns review/provenance/decay metadata, and Mem0 is accessed through a narrow injected adapter. This first slice avoids real network integration by defining the adapter boundary and deterministic session-cutoff mapping.
+> Status note, 2026-06-17: the local-only model-provider assumptions in this
+> plan are superseded for future long-memory worker work. Keep the adapter,
+> SQLite, and Mem0 boundary lessons, but use
+> `docs/superpowers/specs/2026-06-17-long-memory-model-provider-design.md` for
+> provider selection. In particular, do not keep `provider: ollama` as the only
+> valid LLM provider, and do not reject Pi `openai-codex-responses` model
+> access at the config boundary.
+
+**Architecture:** Pico remains the lifecycle owner: YAML validates explicit providers, SQLite owns provenance/decay metadata, and Mem0 is accessed through a narrow injected adapter. This first slice avoided real network integration by defining the adapter boundary and deterministic session-cutoff mapping; later worker slices should add the Pi model-registry LLM boundary and a replaceable embedding provider.
 
 **Tech Stack:** TypeScript strict ESM, Vitest, YAML config, SQLite long-memory module, Mem0 OSS-compatible client contract.
 
@@ -31,16 +40,20 @@ memory:
       localBaseUrl: http://127.0.0.1:6333
       collectionName: pico_long_memory
     llm:
-      provider: ollama
-      localBaseUrl: http://127.0.0.1:11434
-      model: qwen3.5:9b
+      provider: pi_model
+      piProvider: openai-codex
+      api: openai-codex-responses
+      model: gpt-5.4
     embedder:
       provider: ollama
       localBaseUrl: http://127.0.0.1:11434
       model: nomic-embed-text
 ```
 
-Also add tests that reject `provider: openai`, non-loopback URLs, empty collection names, and missing model names.
+This original slice rejected hosted model providers. The current model-provider
+work replaces that rule with explicit provider validation: Pi
+`openai-codex-responses` is allowed for the LLM path, while embedding provider
+selection remains a separate explicit decision.
 
 - [ ] **Step 2: Verify RED**
 
@@ -54,7 +67,11 @@ Expected: FAIL because `memory.mem0` is absent from `PicoConfig`.
 
 - [ ] **Step 3: Implement minimal config parser**
 
-Add `PicoMem0Config`, `PicoMem0VectorStoreConfig`, `PicoMem0ModelConfig`, defaults with `enabled: false`, and local-only validation using the existing URL validation helpers generalized away from vision-specific error text.
+This original slice added `PicoMem0Config`, `PicoMem0VectorStoreConfig`,
+`PicoMem0ModelConfig`, defaults with `enabled: false`, and local-only
+validation. Future worker work should keep local validation for local providers
+but must not use this historical rule to block explicitly configured Pi
+`openai-codex-responses` LLM access.
 
 - [ ] **Step 4: Verify GREEN**
 
