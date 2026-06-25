@@ -100,6 +100,89 @@ describe("Pi Agent turn adapter", () => {
     expect(registeredTools).toContain("pico_session");
   });
 
+  it("registers the voice resident tool profile for resident SDK sessions", async () => {
+    const registeredTools: string[] = [];
+    const client = createPiAgentTurnClient({
+      cwd: "/Users/monsoon/Dev/pico",
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      deferredTools: {
+        coordinator: {
+          enqueue: () => ({
+            status: "queued",
+            kind: "camera_scene_description",
+            jobId: "deferred-job-1",
+            sessionId: "session-1"
+          })
+        } as never
+      },
+      createResourceLoader: (input) => {
+        for (const factory of input.extensionFactories) {
+          factory({
+            registerTool: (tool: { readonly name: string }) => {
+              registeredTools.push(tool.name);
+            },
+            on: () => undefined
+          } as never);
+        }
+
+        return {
+          reload: () => Promise.resolve()
+        };
+      },
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            subscribe: () => () => undefined,
+            prompt: () => Promise.resolve(),
+            dispose: () => undefined
+          }
+        })
+    });
+
+    await client.prompt({ sessionId: "session-1", text: "ピコ" });
+
+    expect(registeredTools.sort()).toEqual([
+      "pico_camera_scene_description_deferred",
+      "pico_session"
+    ]);
+  });
+
+  it("creates resident SDK sessions with medium thinking level", async () => {
+    let thinkingLevel: unknown;
+    const client = createPiAgentTurnClient({
+      cwd: "/Users/monsoon/Dev/pico",
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      createResourceLoader: () => ({
+        reload: () => Promise.resolve()
+      }),
+      createAgentSession: (input) => {
+        thinkingLevel = input.thinkingLevel;
+
+        return Promise.resolve({
+          session: {
+            subscribe: () => () => undefined,
+            prompt: () => Promise.resolve(),
+            dispose: () => undefined
+          }
+        });
+      }
+    });
+
+    await client.prompt({ sessionId: "session-1", text: "ピコ" });
+
+    expect(thinkingLevel).toBe("medium");
+  });
+
   it("keeps the SDK session alive until all sessions are disposed", async () => {
     let disposed = false;
     const client = createPiAgentTurnClient({

@@ -157,13 +157,15 @@ export function createResidentPcmFrameSource(
   config: PicoConfig,
   signal: AbortSignal,
   spawnAudioProcess: SpawnAudioProcess = spawn as SpawnAudioProcess,
-  platform: Platform = process.platform
+  platform: Platform = process.platform,
+  now: () => string = defaultNow
 ): AsyncIterable<VoicePcmFrame> {
   return readPcmFrames(
     createResidentAudioInputPlan(config, platform),
     config,
     signal,
-    spawnAudioProcess
+    spawnAudioProcess,
+    now
   );
 }
 
@@ -397,7 +399,8 @@ async function* readPcmFrames(
   plan: ResidentAudioInputPlan,
   config: PicoConfig,
   signal: AbortSignal,
-  spawnAudioProcess: SpawnAudioProcess
+  spawnAudioProcess: SpawnAudioProcess,
+  now: () => string
 ): AsyncIterable<VoicePcmFrame> {
   if (signal.aborted) {
     throw new Error(`pico resident voice ${plan.provider} input was aborted before startup`);
@@ -415,6 +418,7 @@ async function* readPcmFrames(
   let frameIndex = 0;
   let pending = Buffer.alloc(0);
   let childFailure: Error | undefined;
+  const captureStartedAtMs = Date.parse(now());
   const abort = (): void => {
     child.kill("SIGTERM");
   };
@@ -456,7 +460,9 @@ async function* readPcmFrames(
           encoding: "pcm16le",
           sampleRateHz: config.voice.echoControl.sampleRateHz,
           channels: config.voice.echoControl.channels,
-          capturedAt: new Date().toISOString(),
+          capturedAt: new Date(
+            captureStartedAtMs + (frameIndex - 1) * config.voice.echoControl.frameMs
+          ).toISOString(),
           durationMs: config.voice.echoControl.frameMs
         };
       }
@@ -472,6 +478,8 @@ async function* readPcmFrames(
     child.kill("SIGTERM");
   }
 }
+
+const defaultNow = (): string => new Date().toISOString();
 
 function playRawPcm(
   plan: Extract<ResidentAudioOutputPlan, { readonly provider: "alsa" }>,

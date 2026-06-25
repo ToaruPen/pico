@@ -8,6 +8,7 @@ import {
 
 import { registerPicoExtensionWithRuntime } from "../index.js";
 import type { SessionLifecycle } from "../modules/session/index.js";
+import type { DeferredToolCoordinator } from "./deferred-tool-coordinator.js";
 import type { PiAgentTurnClient } from "./voice-resident.js";
 import type { VoiceStageProbe } from "./voice-stage-probe.js";
 
@@ -21,10 +22,12 @@ export type PiAgentSdkSession = {
 export type PiAgentSessionFactory = (input: {
   readonly resourceLoader: unknown;
   readonly sessionManager: unknown;
+  readonly thinkingLevel?: "low" | "medium" | "high" | "xhigh";
 }) => Promise<{ readonly session: PiAgentSdkSession }>;
 
 export type PiAgentResourceLoaderFactoryInput = {
   readonly cwd: string;
+  readonly sessionId: string;
   readonly extensionFactories: readonly ((pi: ExtensionAPI) => void)[];
 };
 
@@ -36,6 +39,9 @@ export type PiAgentTurnClientOptions = {
   readonly cwd: string;
   readonly sessionLifecycle: SessionLifecycle;
   readonly voiceProbe?: VoiceStageProbe;
+  readonly deferredTools?: {
+    readonly coordinator: Pick<DeferredToolCoordinator, "enqueue">;
+  };
   readonly createAgentSession?: PiAgentSessionFactory;
   readonly createResourceLoader?: (
     input: PiAgentResourceLoaderFactoryInput
@@ -117,7 +123,7 @@ async function getOrCreateTurnSession(
     return existing;
   }
 
-  const created = createTurnSession(options);
+  const created = createTurnSession(options, sessionId);
   sessions.set(sessionId, created);
 
   try {
@@ -128,34 +134,51 @@ async function getOrCreateTurnSession(
   }
 }
 
-async function createTurnSession(options: PiAgentTurnClientOptions): Promise<PiAgentSdkSession> {
-  const resourceLoader = createTurnResourceLoader(options);
+async function createTurnSession(
+  options: PiAgentTurnClientOptions,
+  sessionId: string
+): Promise<PiAgentSdkSession> {
+  const resourceLoader = createTurnResourceLoader(options, sessionId);
   await resourceLoader.reload?.();
 
   const createAgentSession = options.createAgentSession ?? createDefaultPiAgentSession;
   const { session } = await createAgentSession({
     resourceLoader,
-    sessionManager: options.sessionManager ?? SessionManager.inMemory()
+    sessionManager: options.sessionManager ?? SessionManager.inMemory(),
+    thinkingLevel: "medium"
   });
 
   return session;
 }
 
-function createTurnResourceLoader(options: PiAgentTurnClientOptions): PiAgentResourceLoader {
+function createTurnResourceLoader(
+  options: PiAgentTurnClientOptions,
+  sessionId: string
+): PiAgentResourceLoader {
   return (
     options.createResourceLoader?.({
       cwd: options.cwd,
+      sessionId,
       extensionFactories: [
         (pi) =>
           registerPicoExtensionWithRuntime(pi, {
             sessionLifecycle: options.sessionLifecycle,
             ...(options.voiceProbe === undefined ? {} : { voiceProbe: options.voiceProbe }),
+            toolProfile: "voice_resident",
+            ...(options.deferredTools === undefined
+              ? {}
+              : {
+                  deferredTools: {
+                    sessionId,
+                    coordinator: options.deferredTools.coordinator
+                  }
+                }),
             sessionTool: {
               allowCutoff: false
             }
           })
       ]
-    }) ?? createDefaultResourceLoader(options)
+    }) ?? createDefaultResourceLoader(options, sessionId)
   );
 }
 
@@ -235,7 +258,10 @@ function throwIfSignalAborted(signal: AbortSignal | undefined): void {
   }
 }
 
-function createDefaultResourceLoader(options: PiAgentTurnClientOptions): PiAgentResourceLoader {
+function createDefaultResourceLoader(
+  options: PiAgentTurnClientOptions,
+  sessionId: string
+): PiAgentResourceLoader {
   return new DefaultResourceLoader({
     cwd: options.cwd,
     agentDir: getAgentDir(),
@@ -244,6 +270,15 @@ function createDefaultResourceLoader(options: PiAgentTurnClientOptions): PiAgent
         registerPicoExtensionWithRuntime(pi, {
           sessionLifecycle: options.sessionLifecycle,
           ...(options.voiceProbe === undefined ? {} : { voiceProbe: options.voiceProbe }),
+          toolProfile: "voice_resident",
+          ...(options.deferredTools === undefined
+            ? {}
+            : {
+                deferredTools: {
+                  sessionId,
+                  coordinator: options.deferredTools.coordinator
+                }
+              }),
           sessionTool: {
             allowCutoff: false
           }

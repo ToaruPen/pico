@@ -2,6 +2,11 @@ import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-
 import { Type } from "typebox";
 
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../config/index.js";
+import type {
+  DeferredToolCoordinator,
+  DeferredToolEnqueueResult,
+  DeferredToolExecutionResult
+} from "./deferred-tool-coordinator.js";
 import { createPicoPerceptionService, type PicoPerceptionService } from "./perception-service.js";
 import type { VoiceStageProbe } from "./voice-stage-probe.js";
 
@@ -11,6 +16,11 @@ export type PicoPerceptionToolOptions = {
   readonly service?: PicoPerceptionService;
   readonly loadConfig?: () => PicoConfig;
   readonly probe?: VoiceStageProbe;
+};
+
+export type PicoDeferredPerceptionToolOptions = PicoPerceptionToolOptions & {
+  readonly coordinator: Pick<DeferredToolCoordinator, "enqueue">;
+  readonly sessionId: string;
 };
 
 export function createPicoCameraSnapshotTool(
@@ -85,6 +95,43 @@ export function createPicoCameraSceneDescriptionTool(
   };
 }
 
+export function createPicoCameraSceneDescriptionDeferredTool(
+  options: PicoDeferredPerceptionToolOptions
+): ToolDefinition<typeof emptyParameters> {
+  const getService = createLazyServiceResolver(options);
+
+  return {
+    name: "pico_camera_scene_description_deferred",
+    label: "Pico Camera Scene Deferred",
+    description:
+      "Queue one bounded Tapo camera scene description for resident voice without blocking the current voice turn.",
+    promptSnippet:
+      "Queue a camera scene check when staff asks what the camera can currently see; continue the voice conversation while it runs.",
+    promptGuidelines: [
+      "Use pico_camera_scene_description_deferred only for explicit staff camera/scene requests in resident voice.",
+      "Tell staff briefly that you will check and report back; do not wait for the camera result in the same turn.",
+      "Do not identify children, infer private traits, score behavior, diagnose, or make final safety decisions."
+    ],
+    parameters: emptyParameters,
+    executionMode: "sequential",
+    execute(toolCallId) {
+      const result = options.coordinator.enqueue({
+        kind: "camera_scene_description",
+        toolCallId,
+        sessionId: options.sessionId,
+        execute: () => executeDeferredSceneDescription(getService)
+      });
+
+      return Promise.resolve(
+        textResult({
+          tool: "pico_camera_scene_description_deferred",
+          result: formatDeferredToolEnqueueResult(result)
+        })
+      );
+    }
+  };
+}
+
 function createLazyServiceResolver(
   options: PicoPerceptionToolOptions
 ): () => PicoPerceptionService {
@@ -137,4 +184,40 @@ function textResult(value: unknown): AgentToolResult<Record<string, never>> {
     content: [{ type: "text", text: JSON.stringify(value) }],
     details: {}
   };
+}
+
+async function executeDeferredSceneDescription(
+  getService: () => PicoPerceptionService
+): Promise<DeferredToolExecutionResult> {
+  let service: PicoPerceptionService;
+
+  try {
+    service = getService();
+  } catch {
+    return {
+      status: "failed",
+      summary: "pico perception service configuration failed"
+    };
+  }
+
+  const result = await service.describeCameraScene();
+
+  if (result.status === "failed") {
+    return {
+      status: "failed",
+      summary: result.reason
+    };
+  }
+
+  return {
+    status: "completed",
+    capturedAt: result.capturedAt,
+    summary: result.scene.summary
+  };
+}
+
+function formatDeferredToolEnqueueResult(
+  result: DeferredToolEnqueueResult
+): DeferredToolEnqueueResult {
+  return result;
 }

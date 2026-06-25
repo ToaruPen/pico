@@ -273,6 +273,30 @@ describe("pico extension", () => {
       }
     });
   });
+
+  it("uses a deferred resident-safe tool profile for voice resident sessions", () => {
+    const capture = createCapturedExtensionApi();
+
+    registerPicoExtensionWithRuntime(extensionApiFromCapture(capture) as never, {
+      toolProfile: "voice_resident",
+      deferredTools: {
+        sessionId: "session-1",
+        coordinator: {
+          enqueue: () => ({
+            status: "queued",
+            kind: "camera_scene_description",
+            jobId: "deferred-job-1",
+            sessionId: "session-1"
+          })
+        } as never
+      }
+    });
+
+    expect(capture.tools.map((tool) => tool.name).sort()).toEqual([
+      "pico_camera_scene_description_deferred",
+      "pico_session"
+    ]);
+  });
 });
 
 function extractToolJson(result: unknown): unknown {

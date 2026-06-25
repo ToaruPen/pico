@@ -2,7 +2,9 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
 import { definePicoConfig } from "../src/config/index.js";
+import type { DeferredToolCoordinator } from "../src/runtime/deferred-tool-coordinator.js";
 import {
+  createPicoCameraSceneDescriptionDeferredTool,
   createPicoCameraSceneDescriptionTool,
   createPicoCameraSnapshotTool,
   createPicoPersonDetectionTool
@@ -194,5 +196,52 @@ describe("pico perception tools", () => {
         }
       }
     });
+  });
+
+  it("queues deferred camera scene descriptions without waiting for VLM completion", async () => {
+    let serviceCalls = 0;
+    const coordinator: Pick<DeferredToolCoordinator, "enqueue"> = {
+      enqueue: (input) => {
+        void input.execute().catch(() => undefined);
+
+        return {
+          status: "queued",
+          kind: "camera_scene_description",
+          jobId: "deferred-job-1",
+          sessionId: input.sessionId
+        };
+      }
+    };
+    const tool = createPicoCameraSceneDescriptionDeferredTool({
+      sessionId: "session-1",
+      coordinator,
+      service: {
+        captureSceneSnapshot: () => Promise.reject(new Error("unused")),
+        detectPeople: () => Promise.reject(new Error("unused")),
+        describeCameraScene: () => {
+          serviceCalls += 1;
+          return new Promise(() => undefined);
+        }
+      }
+    });
+
+    const result = await tool.execute(
+      "tool-call-1",
+      {},
+      undefined,
+      undefined,
+      {} as ExtensionContext
+    );
+
+    expect(extractToolJson(result)).toEqual({
+      tool: "pico_camera_scene_description_deferred",
+      result: {
+        status: "queued",
+        kind: "camera_scene_description",
+        jobId: "deferred-job-1",
+        sessionId: "session-1"
+      }
+    });
+    expect(serviceCalls).toBe(1);
   });
 });

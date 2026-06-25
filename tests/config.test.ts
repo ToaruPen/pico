@@ -152,6 +152,12 @@ voice:
     singleInstanceLockPath: tmp/pico-custom-resident.lock
     minTriggerConfidence: 0.72
     shutdownGraceMs: 3000
+    vad:
+      provider: ten_vad
+      jsPath: vendors/ten-vad/ten_vad.js
+      wasmPath: vendors/ten-vad/ten_vad.wasm
+      hopSize: 160
+      threshold: 0.5
     utteranceWindow:
       minSpeechMs: 300
       silenceMs: 700
@@ -293,6 +299,13 @@ audit:
           singleInstanceLockPath: join(dirname(path), "tmp/pico-custom-resident.lock"),
           minTriggerConfidence: 0.72,
           shutdownGraceMs: 3000,
+          vad: {
+            provider: "ten_vad",
+            jsPath: join(dirname(path), "vendors/ten-vad/ten_vad.js"),
+            wasmPath: join(dirname(path), "vendors/ten-vad/ten_vad.wasm"),
+            hopSize: 160,
+            threshold: 0.5
+          },
           utteranceWindow: {
             minSpeechMs: 300,
             silenceMs: 700,
@@ -603,6 +616,12 @@ vision:
 voice:
   resident:
     singleInstanceLockPath: tmp/pico-resident.lock
+    vad:
+      provider: ten_vad
+      jsPath: vendors/ten-vad/ten_vad.js
+      wasmPath: vendors/ten-vad/ten_vad.wasm
+      hopSize: 160
+      threshold: 0.5
   stt:
     mlxWhisper:
       localBaseUrl: http://127.0.0.1:8765
@@ -616,7 +635,67 @@ voice:
       join(root, "models/person-detector.mlmodel")
     );
     expect(config.voice.resident.singleInstanceLockPath).toBe(join(root, "tmp/pico-resident.lock"));
+    expect(config.voice.resident.vad).toEqual({
+      provider: "ten_vad",
+      jsPath: join(root, "vendors/ten-vad/ten_vad.js"),
+      wasmPath: join(root, "vendors/ten-vad/ten_vad.wasm"),
+      hopSize: 160,
+      threshold: 0.5
+    });
     expect(config.voice.stt.mlxWhisper?.samplePcm16lePath).toBe(join(root, "samples/warmup.pcm"));
+  });
+
+  it("rejects ten_vad when echo-control frames do not match TEN frame requirements", () => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          resident: {
+            vad: {
+              provider: "ten_vad",
+              jsPath: "vendors/ten-vad/ten_vad.js",
+              wasmPath: "vendors/ten-vad/ten_vad.wasm",
+              hopSize: 256
+            }
+          }
+        }
+      })
+    ).toThrow("pico config voice.echoControl.frameMs must be 16 for ten_vad hopSize 256");
+
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          resident: {
+            vad: {
+              provider: "ten_vad",
+              jsPath: "vendors/ten-vad/ten_vad.js",
+              wasmPath: "vendors/ten-vad/ten_vad.wasm",
+              hopSize: 160
+            }
+          },
+          echoControl: {
+            sampleRateHz: 48_000
+          }
+        }
+      })
+    ).toThrow("pico config voice.echoControl.sampleRateHz must be 16000 for ten_vad");
+
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          resident: {
+            vad: {
+              provider: "ten_vad",
+              jsPath: "vendors/ten-vad/ten_vad.js",
+              wasmPath: "vendors/ten-vad/ten_vad.wasm",
+              hopSize: 160
+            }
+          },
+          echoControl: {
+            channels: 2
+          }
+        }
+      })
+    ).toThrow("pico config voice.echoControl.channels must be 1 for ten_vad");
   });
 
   it("rejects partial Tapo camera credentials at the config boundary", () => {

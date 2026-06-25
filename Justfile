@@ -39,11 +39,34 @@ smoke-pi-runtime:
 resident-voice-launchd action:
   npm run resident:voice:launchd -- {{action}}
 
+voice-status:
+  npm run resident:voice:launchd -- status
+
+voice-normal:
+  npm run resident:voice:launchd -- install
+
+voice-stop:
+  npm run resident:voice:launchd -- stop
+
+voice-dev:
+  -npm run resident:voice:launchd -- stop
+  npm run resident:voice:dev-terminal -- --terminal=terminal
+
+voice-dev-kitty:
+  -npm run resident:voice:launchd -- stop
+  npm run resident:voice:dev-terminal -- --terminal=kitty
+
+dev-session:
+  npm run resident:voice:dev-terminal
+
 resident-voice-dev-terminal:
   npm run resident:voice:dev-terminal
 
 field-voice-echo-pickup:
   npm run field:voice-echo-pickup
+
+field-resident-voice-deferred-rallies:
+  npm run field:resident-voice-deferred-rallies
 
 ast:
   npm run ast:test

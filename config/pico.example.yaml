@@ -84,6 +84,14 @@ voice:
     singleInstanceLockPath: tmp/pico-voice-resident.lock
     minTriggerConfidence: 0.5
     shutdownGraceMs: 5000
+    vad:
+      provider: energy
+      minRmsDb: -55
+      # provider: ten_vad
+      # jsPath: vendors/ten-vad/ten_vad.js
+      # wasmPath: vendors/ten-vad/ten_vad.wasm
+      # hopSize: 160
+      # threshold: 0.5
     utteranceWindow:
       minSpeechMs: 300
       silenceMs: 700
