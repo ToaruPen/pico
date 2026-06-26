@@ -34,7 +34,8 @@ export type VoicePlaybackSink = {
 };
 
 export type VoiceResidentActivationSource = {
-  readonly take: (input: { readonly now: string }) => ResidentActivationEvent | undefined;
+  readonly peek: (input: { readonly now: string }) => ResidentActivationEvent | undefined;
+  readonly acknowledge: (activationId: string) => void;
 };
 
 export type VoiceResidentActivation =
@@ -446,7 +447,19 @@ function armPushToTalkActivation(
     return;
   }
 
-  const activation = options.activation.source.take({ now: now() });
+  const pendingActivation = state.pushToTalk.pendingActivation;
+  const nowTimestamp = now();
+
+  if (pendingActivation !== undefined) {
+    if (Date.parse(nowTimestamp) > Date.parse(pendingActivation.expiresAt)) {
+      options.activation.source.acknowledge(pendingActivation.id);
+      state.pushToTalk.pendingActivation = undefined;
+    }
+
+    return;
+  }
+
+  const activation = options.activation.source.peek({ now: nowTimestamp });
 
   if (activation === undefined) {
     return;
@@ -738,9 +751,11 @@ function ensurePushToTalkVoiceSession(
   state.pushToTalk.pendingActivation = undefined;
 
   if (Date.parse(now()) > Date.parse(activation.expiresAt)) {
+    options.activation.source.acknowledge(activation.id);
     return undefined;
   }
 
+  options.activation.source.acknowledge(activation.id);
   const currentSessionId = state.activeSession.getActiveSessionId();
 
   if (currentSessionId !== undefined) {

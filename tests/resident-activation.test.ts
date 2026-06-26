@@ -93,6 +93,25 @@ describe("resident push-to-talk activation", () => {
     expect(queue.take({ now: "2026-06-27T00:00:02.100Z" })?.id).toBe("activation-2");
   });
 
+  it("peeks pending activations without acknowledging them", () => {
+    const queue = createResidentActivationQueue({
+      debounceMs: 800,
+      activationWindowMs: 8_000,
+      now: sequenceNow(["2026-06-27T00:00:00.000Z"])
+    });
+
+    expect(queue.requestActivation()).toEqual({
+      status: "accepted",
+      activationId: "activation-1"
+    });
+    expect(queue.peek({ now: "2026-06-27T00:00:00.100Z" })?.id).toBe("activation-1");
+    expect(queue.peek({ now: "2026-06-27T00:00:00.200Z" })?.id).toBe("activation-1");
+
+    queue.acknowledge("activation-1");
+
+    expect(queue.peek({ now: "2026-06-27T00:00:00.300Z" })).toBeUndefined();
+  });
+
   it("rejects activation token files that are readable by other users", async () => {
     const directory = mkdtempSync(join(tmpdir(), "pico-activation-test-"));
     const authTokenPath = join(directory, "activation-token");

@@ -86,10 +86,12 @@ voice:
     shutdownGraceMs: 5000
     activation:
       # Default wake-word mode. For an 8BitDo Dual Super Buttons workflow, map
-      # the button to a global hotkey in a bridge app and have that hotkey run:
-      # /usr/bin/curl -fsS -X POST \
-      #   -H "Authorization: Bearer $(cat ~/.pico/resident-voice/activation-token)" \
-      #   http://127.0.0.1:8781/v1/resident-voice/activate
+      # the button to a global hotkey in a bridge app and have that hotkey run a
+      # local wrapper so the bearer token never appears in argv. Example wrapper:
+      # token="$(cat "$HOME/.pico/resident-voice/activation-token")"
+      # printf 'header = "Authorization: Bearer %s"\n' "$token" \
+      #   | /usr/bin/curl -fsS -X POST -K - \
+      #       http://127.0.0.1:8781/v1/resident-voice/activate
       mode: wake_word
       # mode: push_to_talk
       # provider: loopback_http

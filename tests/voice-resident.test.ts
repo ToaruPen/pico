@@ -1863,6 +1863,72 @@ describe("voice resident runtime", () => {
     expect(lifecycle.read("session-1")?.trigger.kind).toBe("button_trigger");
   });
 
+  it("keeps push-to-talk activations unacknowledged until a turn is consumed", async () => {
+    const lifecycle = createSessionLifecycle({
+      ending: {
+        mode: "timed",
+        durationMs: 60_000
+      }
+    });
+    const acknowledgedActivations: string[] = [];
+    const activation = {
+      id: "activation-1",
+      occurredAt: "2026-06-18T00:00:00.000Z",
+      expiresAt: "2026-06-18T00:00:08.000Z",
+      trigger: {
+        kind: "button_trigger" as const,
+        label: "push_to_talk",
+        source: "loopback_http"
+      }
+    };
+
+    const result = await runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [
+        silenceFrame("silence-after-button-1", 0),
+        silenceFrame("silence-after-button-2", 10)
+      ],
+      utteranceWindow: {
+        minSpeechMs: 10,
+        silenceMs: 20,
+        maxUtteranceMs: 1_000,
+        minRmsDb: -50
+      },
+      triggerPhrases: ["ピコ"],
+      activation: {
+        mode: "push_to_talk",
+        source: {
+          peek: () => activation,
+          acknowledge: (activationId) => {
+            acknowledgedActivations.push(activationId);
+          }
+        }
+      },
+      sessionLifecycle: lifecycle,
+      echoControl: createIdleEchoControl(),
+      stt: {
+        warmup: () => {
+          throw new Error("warmup is not part of resident runtime");
+        },
+        transcribe: () => {
+          throw new Error("silence must not reach STT");
+        }
+      },
+      tts: createSuccessfulTts("unused"),
+      playback: {
+        play: () => Promise.resolve()
+      },
+      piAgent: {
+        prompt: () => {
+          throw new Error("silence must not reach Pi Agent");
+        }
+      }
+    });
+
+    expect(result.startedSessions).toBe(0);
+    expect(acknowledgedActivations).toEqual([]);
+  });
+
   it("continues listening after STT failures", async () => {
     let sttCalls = 0;
 
@@ -2154,12 +2220,30 @@ function pcmFrame(id: string, offsetMs: number, sample: number): VoicePcmFrame {
 }
 
 function createSequenceActivationSource(
-  values: readonly ReturnType<VoiceResidentActivationSource["take"]>[]
+  values: readonly ReturnType<VoiceResidentActivationSource["peek"]>[]
 ): VoiceResidentActivationSource {
   const remaining = [...values];
+  let pending: ReturnType<VoiceResidentActivationSource["peek"]> | undefined;
 
   return {
-    take: () => remaining.shift()
+    peek: () => {
+      if (pending !== undefined) {
+        return pending;
+      }
+
+      const activation = remaining.shift();
+
+      if (activation !== undefined) {
+        pending = activation;
+      }
+
+      return activation;
+    },
+    acknowledge: (activationId) => {
+      if (pending?.id === activationId) {
+        pending = undefined;
+      }
+    }
   };
 }
 

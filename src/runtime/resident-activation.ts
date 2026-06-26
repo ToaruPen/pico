@@ -13,6 +13,8 @@ export type ResidentActivationEvent = {
 
 export type ResidentActivationQueue = {
   readonly requestActivation: () => ResidentActivationRequestResult;
+  readonly peek: (input: { readonly now: string }) => ResidentActivationEvent | undefined;
+  readonly acknowledge: (activationId: string) => void;
   readonly take: (input: { readonly now: string }) => ResidentActivationEvent | undefined;
 };
 
@@ -54,6 +56,25 @@ export function createResidentActivationQueue(
   let pending: ResidentActivationEvent | undefined;
   let lastAcceptedAtMs: number | undefined;
   let nextActivationNumber = 1;
+  const peekPending = (input: { readonly now: string }): ResidentActivationEvent | undefined => {
+    if (pending === undefined) {
+      return undefined;
+    }
+
+    const activation = pending;
+
+    if (Date.parse(input.now) > Date.parse(activation.expiresAt)) {
+      pending = undefined;
+      return undefined;
+    }
+
+    return activation;
+  };
+  const acknowledgePending = (activationId: string): void => {
+    if (pending?.id === activationId) {
+      pending = undefined;
+    }
+  };
 
   return {
     requestActivation() {
@@ -91,16 +112,13 @@ export function createResidentActivationQueue(
         activationId: id
       };
     },
+    peek: peekPending,
+    acknowledge: acknowledgePending,
     take(input) {
-      if (pending === undefined) {
-        return undefined;
-      }
+      const activation = peekPending(input);
 
-      const activation = pending;
-      pending = undefined;
-
-      if (Date.parse(input.now) > Date.parse(activation.expiresAt)) {
-        return undefined;
+      if (activation !== undefined) {
+        acknowledgePending(activation.id);
       }
 
       return activation;
@@ -150,6 +168,7 @@ export async function createLoopbackHttpResidentActivationServer(
   try {
     throwIfActivationStartupAborted(options.signal);
     await listen(server, options.port, options.host);
+    throwIfActivationStartupAborted(options.signal);
 
     return {
       url: buildServerUrl(options.host, server.address()),
