@@ -8,7 +8,11 @@ import {
   type VoicePcmFrame
 } from "../src/modules/voice/echo-control.js";
 import type { SttClient, TtsAudioChunk, TtsClient } from "../src/modules/voice/index.js";
-import { runVoiceResidentRuntime, type VoicePlaybackSink } from "../src/runtime/voice-resident.js";
+import {
+  runVoiceResidentRuntime,
+  type VoicePlaybackSink,
+  type VoiceResidentActivationSource
+} from "../src/runtime/voice-resident.js";
 
 describe("voice resident runtime", () => {
   it("buffers speech frames into one utterance before sending audio to STT", async () => {
@@ -1702,6 +1706,163 @@ describe("voice resident runtime", () => {
     expect(lifecycle.read("session-1")).toBeUndefined();
   });
 
+  it("sends only post-activation utterances in push-to-talk mode", async () => {
+    const lifecycle = createSessionLifecycle({
+      ending: {
+        mode: "timed",
+        durationMs: 60_000
+      }
+    });
+    const prompts: string[] = [];
+    const spokenTexts: string[] = [];
+    const activations = createSequenceActivationSource([
+      undefined,
+      {
+        id: "activation-1",
+        occurredAt: "2026-06-18T00:00:00.500Z",
+        expiresAt: "2026-06-18T00:00:08.500Z",
+        trigger: {
+          kind: "button_trigger",
+          label: "push_to_talk",
+          source: "loopback_http"
+        }
+      }
+    ]);
+
+    const result = await runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [sampleNearEndFrame("ambient-child-voice"), sampleNearEndFrame("button-turn")],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      activation: {
+        mode: "push_to_talk",
+        source: activations
+      },
+      sessionLifecycle: lifecycle,
+      echoControl: createIdleEchoControl(),
+      stt: (() => {
+        const texts = ["周りの声です", "今日の予定を確認して"];
+
+        return {
+          warmup: () => {
+            throw new Error("warmup is not part of resident runtime");
+          },
+          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
+        };
+      })(),
+      tts: {
+        synthesize: (request) => {
+          spokenTexts.push(request.text);
+          return createSuccessfulTts("予定を確認します。").synthesize(request);
+        }
+      },
+      playback: {
+        play: () => Promise.resolve()
+      },
+      piAgent: {
+        prompt: (input) => {
+          prompts.push(input.text);
+          return Promise.resolve({ text: "予定を確認します。" });
+        }
+      },
+      wakeAcknowledgement: {
+        enabled: true
+      }
+    });
+
+    expect(result.startedSessions).toBe(1);
+    expect(result.completedTurns).toBe(1);
+    expect(prompts).toEqual(["今日の予定を確認して"]);
+    expect(spokenTexts).toEqual(["予定を確認します。"]);
+    expect(lifecycle.read("session-1")?.trigger).toEqual({
+      kind: "button_trigger",
+      label: "push_to_talk",
+      source: "loopback_http"
+    });
+    expect(lifecycle.read("session-1")?.entries).toEqual([
+      {
+        id: "session-1-entry-1",
+        role: "staff",
+        content: "今日の予定を確認して"
+      },
+      {
+        id: "session-1-entry-2",
+        role: "assistant",
+        content: "予定を確認します。"
+      }
+    ]);
+  });
+
+  it("drops speech buffered before a push-to-talk activation", async () => {
+    const lifecycle = createSessionLifecycle({
+      ending: {
+        mode: "timed",
+        durationMs: 60_000
+      }
+    });
+    const prompts: string[] = [];
+    const sttDurations: number[] = [];
+    const activations = createSequenceActivationSource([
+      undefined,
+      {
+        id: "activation-1",
+        occurredAt: "2026-06-18T00:00:00.010Z",
+        expiresAt: "2026-06-18T00:00:08.010Z",
+        trigger: {
+          kind: "button_trigger",
+          label: "push_to_talk",
+          source: "loopback_http"
+        }
+      }
+    ]);
+
+    await runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [
+        speechFrame("speech-before-button", 0),
+        speechFrame("speech-after-button", 10),
+        silenceFrame("silence-after-button-1", 20),
+        silenceFrame("silence-after-button-2", 30)
+      ],
+      utteranceWindow: {
+        minSpeechMs: 10,
+        silenceMs: 20,
+        maxUtteranceMs: 1_000,
+        minRmsDb: -50
+      },
+      triggerPhrases: ["ピコ"],
+      activation: {
+        mode: "push_to_talk",
+        source: activations
+      },
+      sessionLifecycle: lifecycle,
+      echoControl: createIdleEchoControl(),
+      stt: {
+        warmup: () => {
+          throw new Error("warmup is not part of resident runtime");
+        },
+        transcribe: (request) => {
+          sttDurations.push((request.audio.byteLength / 2 / 16_000) * 1_000);
+          return Promise.resolve(successfulTranscript("ボタン後の発話です"));
+        }
+      },
+      tts: createSuccessfulTts("了解です。"),
+      playback: {
+        play: () => Promise.resolve()
+      },
+      piAgent: {
+        prompt: (input) => {
+          prompts.push(input.text);
+          return Promise.resolve({ text: "了解です。" });
+        }
+      }
+    });
+
+    expect(sttDurations).toEqual([30]);
+    expect(prompts).toEqual(["ボタン後の発話です"]);
+    expect(lifecycle.read("session-1")?.trigger.kind).toBe("button_trigger");
+  });
+
   it("continues listening after STT failures", async () => {
     let sttCalls = 0;
 
@@ -1989,6 +2150,16 @@ function pcmFrame(id: string, offsetMs: number, sample: number): VoicePcmFrame {
     channels: 1,
     capturedAt: addTestMilliseconds("2026-06-18T00:00:00.000Z", offsetMs),
     durationMs
+  };
+}
+
+function createSequenceActivationSource(
+  values: readonly ReturnType<VoiceResidentActivationSource["take"]>[]
+): VoiceResidentActivationSource {
+  const remaining = [...values];
+
+  return {
+    take: () => remaining.shift()
   };
 }
 

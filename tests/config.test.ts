@@ -152,6 +152,14 @@ voice:
     singleInstanceLockPath: tmp/pico-custom-resident.lock
     minTriggerConfidence: 0.72
     shutdownGraceMs: 3000
+    activation:
+      mode: push_to_talk
+      provider: loopback_http
+      host: 127.0.0.1
+      port: 8781
+      authTokenPath: tmp/pico-activation-token
+      debounceMs: 800
+      activationWindowMs: 8000
     vad:
       provider: ten_vad
       jsPath: vendors/ten-vad/ten_vad.js
@@ -299,6 +307,15 @@ audit:
           singleInstanceLockPath: join(dirname(path), "tmp/pico-custom-resident.lock"),
           minTriggerConfidence: 0.72,
           shutdownGraceMs: 3000,
+          activation: {
+            mode: "push_to_talk",
+            provider: "loopback_http",
+            host: "127.0.0.1",
+            port: 8781,
+            authTokenPath: join(dirname(path), "tmp/pico-activation-token"),
+            debounceMs: 800,
+            activationWindowMs: 8000
+          },
           vad: {
             provider: "ten_vad",
             jsPath: join(dirname(path), "vendors/ten-vad/ten_vad.js"),
@@ -408,7 +425,10 @@ audit:
           enabled: false,
           singleInstanceLockPath: "tmp/pico-voice-resident.lock",
           minTriggerConfidence: 0.5,
-          shutdownGraceMs: 5_000
+          shutdownGraceMs: 5_000,
+          activation: {
+            mode: "wake_word"
+          }
         },
         probes: {
           enabled: true
@@ -485,6 +505,24 @@ audit:
     ).toThrow(
       "pico config voice.resident.utteranceWindow.maxUtteranceMs must be a positive integer <= 60000"
     );
+  });
+
+  it("rejects remote push-to-talk activation bind hosts", () => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          resident: {
+            activation: {
+              mode: "push_to_talk",
+              provider: "loopback_http",
+              host: "0.0.0.0",
+              port: 8781,
+              authTokenPath: "/tmp/pico-activation-token"
+            }
+          }
+        }
+      })
+    ).toThrow("pico config voice.resident.activation.host must be 127.0.0.1 or ::1");
   });
 
   it("rejects unsupported Mem0 embedder providers at the config boundary", () => {

@@ -84,6 +84,20 @@ voice:
     singleInstanceLockPath: tmp/pico-voice-resident.lock
     minTriggerConfidence: 0.5
     shutdownGraceMs: 5000
+    activation:
+      # Default wake-word mode. For an 8BitDo Dual Super Buttons workflow, map
+      # the button to a global hotkey in a bridge app and have that hotkey run:
+      # /usr/bin/curl -fsS -X POST \
+      #   -H "Authorization: Bearer $(cat ~/.pico/resident-voice/activation-token)" \
+      #   http://127.0.0.1:8781/v1/resident-voice/activate
+      mode: wake_word
+      # mode: push_to_talk
+      # provider: loopback_http
+      # host: 127.0.0.1
+      # port: 8781
+      # authTokenPath: ~/.pico/resident-voice/activation-token
+      # debounceMs: 800
+      # activationWindowMs: 8000
     vad:
       provider: energy
       minRmsDb: -55

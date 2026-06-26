@@ -168,9 +168,24 @@ export type PicoVoiceResidentConfig = {
   readonly singleInstanceLockPath: string;
   readonly minTriggerConfidence: number;
   readonly shutdownGraceMs: number;
+  readonly activation: PicoVoiceResidentActivationConfig;
   readonly vad: PicoVoiceResidentVadConfig;
   readonly utteranceWindow: PicoVoiceUtteranceWindowConfig;
 };
+
+export type PicoVoiceResidentActivationConfig =
+  | {
+      readonly mode: "wake_word";
+    }
+  | {
+      readonly mode: "push_to_talk";
+      readonly provider: "loopback_http";
+      readonly host: "127.0.0.1" | "::1";
+      readonly port: number;
+      readonly authTokenPath: string;
+      readonly debounceMs: number;
+      readonly activationWindowMs: number;
+    };
 
 export type PicoVoiceResidentVadConfig =
   | {
@@ -326,6 +341,9 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
       singleInstanceLockPath: "tmp/pico-voice-resident.lock",
       minTriggerConfidence: 0.5,
       shutdownGraceMs: 5_000,
+      activation: {
+        mode: "wake_word"
+      },
       vad: {
         provider: "energy",
         minRmsDb: -55
@@ -734,6 +752,7 @@ function defineVoiceResidentConfig(
   );
   const definedUtteranceWindow = defineVoiceUtteranceWindowConfig(utteranceWindow);
   const vad = readOptionalRecord(input.vad, "pico config voice.resident.vad");
+  const activation = readOptionalRecord(input.activation, "pico config voice.resident.activation");
 
   requireResidentVoiceAudio(enabled, audioInput, audioOutput);
 
@@ -757,9 +776,78 @@ function defineVoiceResidentConfig(
         "pico config voice.resident.shutdownGraceMs",
         maxNodeTimeoutMs
       ) ?? 5_000,
+    activation: defineVoiceResidentActivationConfig(activation),
     vad: defineVoiceResidentVadConfig(vad, definedUtteranceWindow),
     utteranceWindow: definedUtteranceWindow
   };
+}
+
+function defineVoiceResidentActivationConfig(
+  input: Record<string, unknown> | undefined
+): PicoVoiceResidentActivationConfig {
+  if (input === undefined) {
+    return emptyPicoConfig.voice.resident.activation;
+  }
+
+  const mode =
+    readOptionalString(input.mode, "pico config voice.resident.activation.mode") ?? "wake_word";
+
+  if (mode === "wake_word") {
+    return { mode };
+  }
+
+  if (mode !== "push_to_talk") {
+    throw new Error("pico config voice.resident.activation.mode must be wake_word or push_to_talk");
+  }
+
+  const provider = requireString(input.provider, "pico config voice.resident.activation.provider");
+
+  if (provider !== "loopback_http") {
+    throw new Error("pico config voice.resident.activation.provider must be loopback_http");
+  }
+
+  return {
+    mode,
+    provider,
+    host: requireLoopbackActivationHost(input.host),
+    port: requireTcpPort(input.port, "pico config voice.resident.activation.port"),
+    authTokenPath: requireString(
+      input.authTokenPath,
+      "pico config voice.resident.activation.authTokenPath"
+    ),
+    debounceMs:
+      readOptionalBoundedPositiveInteger(
+        input.debounceMs,
+        "pico config voice.resident.activation.debounceMs",
+        maxNodeTimeoutMs
+      ) ?? 800,
+    activationWindowMs:
+      readOptionalBoundedPositiveInteger(
+        input.activationWindowMs,
+        "pico config voice.resident.activation.activationWindowMs",
+        maxNodeTimeoutMs
+      ) ?? 8_000
+  };
+}
+
+function requireLoopbackActivationHost(value: unknown): "127.0.0.1" | "::1" {
+  const host = requireString(value, "pico config voice.resident.activation.host");
+
+  if (host !== "127.0.0.1" && host !== "::1") {
+    throw new Error("pico config voice.resident.activation.host must be 127.0.0.1 or ::1");
+  }
+
+  return host;
+}
+
+function requireTcpPort(value: unknown, label: string): number {
+  const port = requireNonNegativeInteger(value, label);
+
+  if (port < 1 || port > maxTcpPort) {
+    throw new Error(`${label} must be between 1 and ${maxTcpPort}`);
+  }
+
+  return port;
 }
 
 function defineVoiceResidentVadConfig(
@@ -1418,6 +1506,16 @@ function resolveConfigRelativePaths(config: PicoConfig, baseDirectory: string): 
           baseDirectory,
           config.voice.resident.singleInstanceLockPath
         ),
+        activation:
+          config.voice.resident.activation.mode === "push_to_talk"
+            ? {
+                ...config.voice.resident.activation,
+                authTokenPath: resolveConfigRelativePath(
+                  baseDirectory,
+                  config.voice.resident.activation.authTokenPath
+                )
+              }
+            : config.voice.resident.activation,
         vad:
           config.voice.resident.vad.provider === "ten_vad"
             ? {

@@ -17,6 +17,7 @@ import type {
   TtsSynthesisSuccess
 } from "../modules/voice/index.js";
 import type { DeferredToolDeliverableResult } from "./deferred-tool-coordinator.js";
+import type { ResidentActivationEvent } from "./resident-activation.js";
 import type { SpeechActivityGate, SpeechActivityGateResult } from "./speech-activity-gate.js";
 import { recordVoiceStageProbe, type VoiceStageProbe } from "./voice-stage-probe.js";
 import {
@@ -31,6 +32,19 @@ export type VoiceFrameSource = AsyncIterable<VoicePcmFrame> | Iterable<VoicePcmF
 export type VoicePlaybackSink = {
   readonly play: (chunk: TtsAudioChunk, startedAt: string) => Promise<void>;
 };
+
+export type VoiceResidentActivationSource = {
+  readonly take: (input: { readonly now: string }) => ResidentActivationEvent | undefined;
+};
+
+export type VoiceResidentActivation =
+  | {
+      readonly mode: "wake_word";
+    }
+  | {
+      readonly mode: "push_to_talk";
+      readonly source: VoiceResidentActivationSource;
+    };
 
 export type PiAgentTurnClient = {
   readonly prompt: (input: {
@@ -112,6 +126,7 @@ export type VoiceResidentRuntimeOptions = {
   readonly signal?: AbortSignal;
   readonly endedSessionIds?: readonly string[];
   readonly minTriggerConfidence?: number;
+  readonly activation?: VoiceResidentActivation;
   readonly utteranceWindow: VoiceUtteranceWindowConfig;
   readonly monotonicNow?: () => number;
 };
@@ -147,6 +162,11 @@ type PendingSessionState = {
   readonly activeSession: ActiveSessionState;
   readonly pendingCutoffSessionIds: Set<string>;
   readonly farewelledSessionIds: Set<string>;
+  readonly pushToTalk: PushToTalkActivationState;
+};
+
+type PushToTalkActivationState = {
+  pendingActivation: ResidentActivationEvent | undefined;
 };
 
 type ActiveVoiceSessionResult =
@@ -181,6 +201,9 @@ export async function runVoiceResidentRuntime(
   };
   const pendingCutoffSessionIds = new Set(options.endedSessionIds ?? []);
   const farewelledSessionIds = new Set<string>();
+  const pushToTalk: PushToTalkActivationState = {
+    pendingActivation: undefined
+  };
   let activeSessionId: string | undefined;
   const utteranceAssembler = createVoiceUtteranceAssembler(options.utteranceWindow);
   const activeSession = {
@@ -211,6 +234,7 @@ export async function runVoiceResidentRuntime(
         activeSession,
         pendingCutoffSessionIds,
         farewelledSessionIds,
+        pushToTalk,
         utteranceAssembler,
         currentActiveSessionId: activeSessionId
       });
@@ -220,7 +244,8 @@ export async function runVoiceResidentRuntime(
     await flushPendingUtteranceWindow(utteranceAssembler, options, counters, now, {
       activeSession,
       pendingCutoffSessionIds,
-      farewelledSessionIds
+      farewelledSessionIds,
+      pushToTalk
     });
 
     activeSessionId = collectEndedActiveSession(options.sessionLifecycle, activeSessionId, {
@@ -240,7 +265,8 @@ export async function runVoiceResidentRuntime(
       await flushPendingUtteranceWindow(utteranceAssembler, options, counters, now, {
         activeSession,
         pendingCutoffSessionIds,
-        farewelledSessionIds
+        farewelledSessionIds,
+        pushToTalk
       });
     } finally {
       activeSessionId = await runShutdownCleanup(
@@ -389,6 +415,7 @@ async function processNearEndFrame(
     readonly utteranceAssembler: VoiceUtteranceAssembler;
   }
 ): Promise<void> {
+  armPushToTalkActivation(rawFrame, options, now, state);
   const echoResult = await processEchoControlledFrame(rawFrame, options, now);
 
   if (echoResult.action === "suppress") {
@@ -405,6 +432,29 @@ async function processNearEndFrame(
     now,
     state
   );
+}
+
+function armPushToTalkActivation(
+  rawFrame: VoicePcmFrame,
+  options: VoiceResidentRuntimeOptions,
+  now: () => string,
+  state: PendingSessionState & {
+    readonly utteranceAssembler: VoiceUtteranceAssembler;
+  }
+): void {
+  if (options.activation?.mode !== "push_to_talk") {
+    return;
+  }
+
+  const activation = options.activation.source.take({ now: now() });
+
+  if (activation === undefined) {
+    return;
+  }
+
+  state.utteranceAssembler.reset();
+  state.pushToTalk.pendingActivation = activation;
+  recordTriggerProbe(activation.trigger.label, options, () => rawFrame.capturedAt);
 }
 
 async function processTranscribedUtterances(
@@ -437,13 +487,7 @@ async function processTranscribedUtterance(
     return;
   }
 
-  const activeSession = ensureActiveVoiceSession(
-    transcript,
-    options,
-    counters,
-    now,
-    state.activeSession
-  );
+  const activeSession = ensureActiveVoiceSession(transcript, options, counters, now, state);
 
   if (activeSession === undefined) {
     return;
@@ -638,9 +682,13 @@ function ensureActiveVoiceSession(
   options: VoiceResidentRuntimeOptions,
   counters: VoiceResidentCounters,
   now: () => string,
-  activeSession: ActiveSessionState
+  state: PendingSessionState
 ): ActiveVoiceSessionResult | undefined {
-  const currentSessionId = activeSession.getActiveSessionId();
+  if (options.activation?.mode === "push_to_talk") {
+    return ensurePushToTalkVoiceSession(options, counters, now, state);
+  }
+
+  const currentSessionId = state.activeSession.getActiveSessionId();
 
   if (currentSessionId !== undefined) {
     return {
@@ -660,7 +708,7 @@ function ensureActiveVoiceSession(
   }
 
   const started = options.sessionLifecycle.start(buildVoiceTrigger(trigger));
-  activeSession.setActiveSessionId(started.id);
+  state.activeSession.setActiveSessionId(started.id);
   counters.startedSessions += 1;
   recordSessionStartProbe(started.id, options, now);
 
@@ -668,6 +716,48 @@ function ensureActiveVoiceSession(
     kind: "started",
     sessionId: started.id,
     trigger
+  };
+}
+
+function ensurePushToTalkVoiceSession(
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string,
+  state: PendingSessionState
+): ActiveVoiceSessionResult | undefined {
+  if (options.activation?.mode !== "push_to_talk") {
+    return undefined;
+  }
+
+  const activation = state.pushToTalk.pendingActivation;
+
+  if (activation === undefined) {
+    return undefined;
+  }
+
+  state.pushToTalk.pendingActivation = undefined;
+
+  if (Date.parse(now()) > Date.parse(activation.expiresAt)) {
+    return undefined;
+  }
+
+  const currentSessionId = state.activeSession.getActiveSessionId();
+
+  if (currentSessionId !== undefined) {
+    return {
+      kind: "active",
+      sessionId: currentSessionId
+    };
+  }
+
+  const started = options.sessionLifecycle.start(activation.trigger);
+  state.activeSession.setActiveSessionId(started.id);
+  counters.startedSessions += 1;
+  recordSessionStartProbe(started.id, options, now);
+
+  return {
+    kind: "active",
+    sessionId: started.id
   };
 }
 

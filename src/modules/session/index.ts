@@ -5,6 +5,7 @@ export type SessionStartTriggerKind =
   | "wake_name"
   | "greeting"
   | "bell"
+  | "button_trigger"
   | "line_command"
   | "schedule"
   | "tool_event";
@@ -80,6 +81,7 @@ const sessionStartTriggerKinds = new Set<SessionStartTriggerKind>([
   "wake_name",
   "greeting",
   "bell",
+  "button_trigger",
   "line_command",
   "schedule",
   "tool_event"

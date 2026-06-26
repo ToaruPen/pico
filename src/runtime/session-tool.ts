@@ -23,6 +23,7 @@ const picoSessionParameters = Type.Object({
       Type.Literal("wake_name"),
       Type.Literal("greeting"),
       Type.Literal("bell"),
+      Type.Literal("button_trigger"),
       Type.Literal("line_command"),
       Type.Literal("schedule"),
       Type.Literal("tool_event")
