@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 
 import { parse } from "yaml";
@@ -1510,7 +1511,7 @@ function resolveConfigRelativePaths(config: PicoConfig, baseDirectory: string): 
           config.voice.resident.activation.mode === "push_to_talk"
             ? {
                 ...config.voice.resident.activation,
-                authTokenPath: resolveConfigRelativePath(
+                authTokenPath: resolveConfigHomeOrRelativePath(
                   baseDirectory,
                   config.voice.resident.activation.authTokenPath
                 )
@@ -1548,6 +1549,18 @@ function resolveConfigRelativePaths(config: PicoConfig, baseDirectory: string): 
 
 function resolveConfigRelativePath(baseDirectory: string, path: string): string {
   return isAbsolute(path) ? path : resolve(baseDirectory, path);
+}
+
+function resolveConfigHomeOrRelativePath(baseDirectory: string, path: string): string {
+  if (path === "~") {
+    return homedir();
+  }
+
+  if (path.startsWith("~/")) {
+    return resolve(homedir(), path.slice(2));
+  }
+
+  return resolveConfigRelativePath(baseDirectory, path);
 }
 
 function optionalStringProperty(

@@ -113,6 +113,25 @@ describe("resident push-to-talk activation", () => {
       })
     ).rejects.toThrow("pico resident activation token file must have 0600 permissions");
   });
+
+  it("does not read activation token files after startup has already been aborted", async () => {
+    const abortController = new AbortController();
+    abortController.abort();
+
+    await expect(
+      createLoopbackHttpResidentActivationServer({
+        host: "127.0.0.1",
+        port: 0,
+        authTokenPath: "/tmp/pico-missing-activation-token",
+        queue: createResidentActivationQueue({
+          debounceMs: 800,
+          activationWindowMs: 8_000,
+          now: () => "2026-06-27T00:00:00.000Z"
+        }),
+        signal: abortController.signal
+      })
+    ).rejects.toThrow("pico resident activation server startup was aborted");
+  });
 });
 
 async function startActivationServer(

@@ -142,26 +142,32 @@ async function runResidentVoice(config: PicoConfig, signal: AbortSignal): Promis
   const activation = await createConfiguredActivation(config, signal, writeProcessLine);
 
   try {
+    const frames = createResidentPcmFrameSource(config, signal);
+    const echoControl = createConfiguredEchoControl(config);
+    const playback = createResidentPlaybackSink(config);
+    const piAgent = createPiAgentTurnClient({
+      cwd: process.cwd(),
+      sessionLifecycle,
+      deferredTools: {
+        coordinator: deferredTools
+      },
+      ...(audit === undefined ? {} : { voiceProbe: { audit } })
+    });
+    const speechActivity = await createConfiguredSpeechActivityGate(config);
+
     await runVoiceResidentRuntime({
-      frames: createResidentPcmFrameSource(config, signal),
+      frames,
       triggerPhrases: [
         ...config.session.startTriggers.wakeNames,
         ...config.session.startTriggers.greetings
       ],
       sessionLifecycle,
-      echoControl: createConfiguredEchoControl(config),
-      speechActivity: await createConfiguredSpeechActivityGate(config),
+      echoControl,
+      speechActivity,
       stt,
       tts,
-      playback: createResidentPlaybackSink(config),
-      piAgent: createPiAgentTurnClient({
-        cwd: process.cwd(),
-        sessionLifecycle,
-        deferredTools: {
-          coordinator: deferredTools
-        },
-        ...(audit === undefined ? {} : { voiceProbe: { audit } })
-      }),
+      playback,
+      piAgent,
       memoryWorker,
       deferredTools,
       wakeAcknowledgement: {

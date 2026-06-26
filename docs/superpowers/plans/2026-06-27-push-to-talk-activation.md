@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Configuration Contract
+## Task 1: Configuration Contract
 
 **Files:**
 - Modify: `src/config/index.ts`
@@ -22,7 +22,7 @@
 - [x] Reject non-loopback hosts and invalid ports at config parse time.
 - [x] Add config tests for defaults, valid push-to-talk YAML, and invalid remote bind hosts.
 
-### Task 2: Activation Endpoint
+## Task 2: Activation Endpoint
 
 **Files:**
 - Create: `src/runtime/resident-activation.ts`
@@ -33,7 +33,7 @@
 - [x] Return typed results: `accepted`, `ignored_debounce`, `ignored_active`, `unauthorized`, or `not_found`.
 - [x] Close the HTTP server on abort/shutdown and fail closed on bind errors.
 
-### Task 3: Runtime Push-To-Talk Gate
+## Task 3: Runtime Push-To-Talk Gate
 
 **Files:**
 - Modify: `src/runtime/voice-resident.ts`
@@ -45,7 +45,7 @@
 - [x] Ensure wake acknowledgement is not run for push-to-talk starts.
 - [x] Debounce duplicate activations and keep the active/pending turn semantics deterministic.
 
-### Task 4: Resident Wiring And Verification
+## Task 4: Resident Wiring And Verification
 
 **Files:**
 - Modify: `scripts/resident/voice.ts`

@@ -111,7 +111,12 @@ export function createResidentActivationQueue(
 export async function createLoopbackHttpResidentActivationServer(
   options: LoopbackHttpResidentActivationServerOptions
 ): Promise<ResidentActivationServer> {
+  throwIfActivationStartupAborted(options.signal);
+
   const token = readActivationToken(options.authTokenPath);
+
+  throwIfActivationStartupAborted(options.signal);
+
   const server = createServer((request, response) => {
     if (request.url !== activationPath) {
       writeJson(response, 404, { status: "not_found" });
@@ -132,22 +137,29 @@ export async function createLoopbackHttpResidentActivationServer(
     writeJson(response, result.status === "accepted" ? 202 : 200, result);
   });
 
-  if (options.signal !== undefined) {
-    options.signal.addEventListener(
-      "abort",
-      () => {
-        server.close();
-      },
-      { once: true }
-    );
-  }
+  const closeOnAbort = (): void => {
+    void close(server).catch(() => undefined);
+  };
+
+  options.signal?.addEventListener("abort", closeOnAbort, { once: true });
+
+  throwIfActivationStartupAborted(options.signal);
 
   await listen(server, options.port, options.host);
 
   return {
     url: buildServerUrl(options.host, server.address()),
-    close: () => close(server)
+    close: async () => {
+      options.signal?.removeEventListener("abort", closeOnAbort);
+      await close(server);
+    }
   };
+}
+
+function throwIfActivationStartupAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new Error("pico resident activation server startup was aborted");
+  }
 }
 
 function readActivationToken(path: string): string {

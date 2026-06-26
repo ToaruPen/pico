@@ -1,5 +1,5 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -428,6 +428,10 @@ audit:
           shutdownGraceMs: 5_000,
           activation: {
             mode: "wake_word"
+          },
+          vad: {
+            provider: "energy",
+            minRmsDb: -55
           }
         },
         probes: {
@@ -523,6 +527,24 @@ audit:
         }
       })
     ).toThrow("pico config voice.resident.activation.host must be 127.0.0.1 or ::1");
+  });
+
+  it("expands push-to-talk activation token paths under the user home directory", () => {
+    const path = temporaryConfigFile(`
+voice:
+  resident:
+    activation:
+      mode: push_to_talk
+      provider: loopback_http
+      host: 127.0.0.1
+      port: 8781
+      authTokenPath: ~/.pico/resident-voice/activation-token
+`);
+
+    expect(loadPicoConfig({ path }).voice.resident.activation).toMatchObject({
+      mode: "push_to_talk",
+      authTokenPath: join(homedir(), ".pico/resident-voice/activation-token")
+    });
   });
 
   it("rejects unsupported Mem0 embedder providers at the config boundary", () => {
