@@ -271,15 +271,20 @@ async function createConfiguredActivation(
     signal
   });
 
-  writeProcessLine(`[pico] resident push-to-talk activation: ${server.url}\n`);
+  try {
+    writeProcessLine(`[pico] resident push-to-talk activation: ${server.url}\n`);
 
-  return {
-    runtime: {
-      mode: "push_to_talk",
-      source: queue
-    },
-    close: () => server.close()
-  };
+    return {
+      runtime: {
+        mode: "push_to_talk",
+        source: queue
+      },
+      close: () => server.close()
+    };
+  } catch (error) {
+    await server.close();
+    throw error;
+  }
 }
 
 function writeResidentVoiceMetricEvent(
