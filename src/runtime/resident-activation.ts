@@ -142,18 +142,23 @@ export async function createLoopbackHttpResidentActivationServer(
   };
 
   options.signal?.addEventListener("abort", closeOnAbort, { once: true });
-
-  throwIfActivationStartupAborted(options.signal);
-
-  await listen(server, options.port, options.host);
-
-  return {
-    url: buildServerUrl(options.host, server.address()),
-    close: async () => {
-      options.signal?.removeEventListener("abort", closeOnAbort);
-      await close(server);
-    }
+  const closeServer = async (): Promise<void> => {
+    options.signal?.removeEventListener("abort", closeOnAbort);
+    await close(server);
   };
+
+  try {
+    throwIfActivationStartupAborted(options.signal);
+    await listen(server, options.port, options.host);
+
+    return {
+      url: buildServerUrl(options.host, server.address()),
+      close: closeServer
+    };
+  } catch (error) {
+    await closeServer();
+    throw error;
+  }
 }
 
 function throwIfActivationStartupAborted(signal: AbortSignal | undefined): void {
