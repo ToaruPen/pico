@@ -451,12 +451,12 @@ function armPushToTalkActivation(
   const nowTimestamp = now();
 
   if (pendingActivation !== undefined) {
-    if (Date.parse(nowTimestamp) > Date.parse(pendingActivation.expiresAt)) {
-      options.activation.source.acknowledge(pendingActivation.id);
-      state.pushToTalk.pendingActivation = undefined;
+    if (Date.parse(nowTimestamp) <= Date.parse(pendingActivation.expiresAt)) {
+      return;
     }
 
-    return;
+    options.activation.source.acknowledge(pendingActivation.id);
+    state.pushToTalk.pendingActivation = undefined;
   }
 
   const activation = options.activation.source.peek({ now: nowTimestamp });

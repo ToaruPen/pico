@@ -1929,6 +1929,89 @@ describe("voice resident runtime", () => {
     expect(acknowledgedActivations).toEqual([]);
   });
 
+  it("rearms a fresh push-to-talk activation after an expired pending activation", async () => {
+    const lifecycle = createSessionLifecycle({
+      ending: {
+        mode: "timed",
+        durationMs: 60_000
+      }
+    });
+    const prompts: string[] = [];
+    const acknowledgedActivations: string[] = [];
+    const activations = createSequenceActivationSource([
+      {
+        id: "activation-expired",
+        occurredAt: "2026-06-17T23:59:51.000Z",
+        expiresAt: "2026-06-17T23:59:59.000Z",
+        trigger: {
+          kind: "button_trigger",
+          label: "push_to_talk",
+          source: "loopback_http"
+        }
+      },
+      {
+        id: "activation-fresh",
+        occurredAt: "2026-06-18T00:00:00.000Z",
+        expiresAt: "2026-06-18T00:00:08.000Z",
+        trigger: {
+          kind: "button_trigger",
+          label: "push_to_talk",
+          source: "loopback_http"
+        }
+      }
+    ]);
+    const activationSource: VoiceResidentActivationSource = {
+      peek: activations.peek,
+      acknowledge: (activationId) => {
+        acknowledgedActivations.push(activationId);
+        activations.acknowledge(activationId);
+      }
+    };
+
+    await runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [
+        silenceFrame("silence-with-expired-activation", 0),
+        speechFrame("speech-after-fresh-activation", 10),
+        silenceFrame("silence-after-fresh-activation-1", 20),
+        silenceFrame("silence-after-fresh-activation-2", 30)
+      ],
+      utteranceWindow: {
+        minSpeechMs: 10,
+        silenceMs: 20,
+        maxUtteranceMs: 1_000,
+        minRmsDb: -50
+      },
+      triggerPhrases: ["ピコ"],
+      activation: {
+        mode: "push_to_talk",
+        source: activationSource
+      },
+      sessionLifecycle: lifecycle,
+      echoControl: createIdleEchoControl(),
+      stt: {
+        warmup: () => {
+          throw new Error("warmup is not part of resident runtime");
+        },
+        transcribe: () => Promise.resolve(successfulTranscript("再度ボタン後の発話です"))
+      },
+      tts: createSuccessfulTts("了解です。"),
+      playback: {
+        play: () => Promise.resolve()
+      },
+      piAgent: {
+        prompt: (input) => {
+          prompts.push(input.text);
+          return Promise.resolve({ text: "了解です。" });
+        }
+      }
+    });
+
+    expect(prompts).toEqual(["再度ボタン後の発話です"]);
+    expect(acknowledgedActivations).toEqual(["activation-expired", "activation-fresh"]);
+    expect(lifecycle.read("session-1")?.trigger.kind).toBe("button_trigger");
+  });
+
   it("continues listening after STT failures", async () => {
     let sttCalls = 0;
 
