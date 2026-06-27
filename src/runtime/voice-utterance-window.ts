@@ -18,6 +18,7 @@ export type VoiceUtteranceAssembler = {
     echoVoiceActivity: boolean
   ) => readonly TranscribedUtterance[];
   readonly flush: () => readonly TranscribedUtterance[];
+  readonly reset: () => void;
 };
 
 export function createVoiceUtteranceAssembler(
@@ -68,8 +69,15 @@ function defineVoiceUtteranceAssembler(
 
       return bufferedWindowMs() >= maxUtteranceMs ? flush() : [];
     },
-    flush
+    flush,
+    reset
   };
+
+  function reset(): void {
+    bufferedFrames.splice(0, bufferedFrames.length);
+    bufferedSpeechMs = 0;
+    trailingSilenceMs = 0;
+  }
 
   function flush(): readonly TranscribedUtterance[] {
     if (bufferedFrames.length === 0) {

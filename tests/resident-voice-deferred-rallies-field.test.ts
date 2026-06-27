@@ -1,8 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { runResidentVoiceDeferredRalliesField } from "../scripts/field/resident-voice-deferred-rallies.js";
 
 describe("resident voice deferred rallies field", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("runs multiple resident voice rallies through deferred tool delivery", async () => {
     await expect(runResidentVoiceDeferredRalliesField()).resolves.toMatchObject({
       status: "passed",
@@ -23,5 +27,14 @@ describe("resident voice deferred rallies field", () => {
         ]
       }
     });
+  });
+
+  it("does not depend on wall-clock timers for deferred result delivery", async () => {
+    const setTimeout = vi.spyOn(globalThis, "setTimeout");
+
+    await expect(runResidentVoiceDeferredRalliesField()).resolves.toMatchObject({
+      status: "passed"
+    });
+    expect(setTimeout.mock.calls.filter(([, delay]) => delay === 5 || delay === 10)).toEqual([]);
   });
 });

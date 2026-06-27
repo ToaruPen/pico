@@ -21,6 +21,10 @@ import {
 import { createDeferredToolCoordinator } from "../../src/runtime/deferred-tool-coordinator.js";
 import { createPiAgentTurnClient } from "../../src/runtime/pi-agent-turn.js";
 import {
+  createLoopbackHttpResidentActivationServer,
+  createResidentActivationQueue
+} from "../../src/runtime/resident-activation.js";
+import {
   createResidentPcmFrameSource,
   createResidentPlaybackSink
 } from "../../src/runtime/resident-audio-io.js";
@@ -44,7 +48,10 @@ import {
   createEnergySpeechActivityGate,
   createTenWasmSpeechActivityGate
 } from "../../src/runtime/speech-activity-gate.js";
-import { runVoiceResidentRuntime } from "../../src/runtime/voice-resident.js";
+import {
+  runVoiceResidentRuntime,
+  type VoiceResidentActivation
+} from "../../src/runtime/voice-resident.js";
 
 const config = loadPicoConfigFromEnvironment();
 const residentVoiceMetricStages = new Set([
@@ -132,40 +139,53 @@ async function runResidentVoice(config: PicoConfig, signal: AbortSignal): Promis
     signal
   });
 
-  await runVoiceResidentRuntime({
-    frames: createResidentPcmFrameSource(config, signal),
-    triggerPhrases: [
-      ...config.session.startTriggers.wakeNames,
-      ...config.session.startTriggers.greetings
-    ],
-    sessionLifecycle,
-    echoControl: createConfiguredEchoControl(config),
-    speechActivity: await createConfiguredSpeechActivityGate(config),
-    stt,
-    tts,
-    playback: createResidentPlaybackSink(config),
-    piAgent: createPiAgentTurnClient({
+  const activation = await createConfiguredActivation(config, signal, writeProcessLine);
+
+  try {
+    const frames = createResidentPcmFrameSource(config, signal);
+    const echoControl = createConfiguredEchoControl(config);
+    const playback = createResidentPlaybackSink(config);
+    const piAgent = createPiAgentTurnClient({
       cwd: process.cwd(),
       sessionLifecycle,
       deferredTools: {
         coordinator: deferredTools
       },
       ...(audit === undefined ? {} : { voiceProbe: { audit } })
-    }),
-    memoryWorker,
-    deferredTools,
-    wakeAcknowledgement: {
-      enabled: true
-    },
-    farewell: {
-      enabled: true
-    },
-    console: createResidentVoiceRuntimeConsoleSink(logRunMode, fileLog, stdoutProbeMode),
-    minTriggerConfidence: config.voice.resident.minTriggerConfidence,
-    utteranceWindow: config.voice.resident.utteranceWindow,
-    ...(audit === undefined ? {} : { probe: { audit } }),
-    signal
-  });
+    });
+    const speechActivity = await createConfiguredSpeechActivityGate(config);
+
+    await runVoiceResidentRuntime({
+      frames,
+      triggerPhrases: [
+        ...config.session.startTriggers.wakeNames,
+        ...config.session.startTriggers.greetings
+      ],
+      sessionLifecycle,
+      echoControl,
+      speechActivity,
+      stt,
+      tts,
+      playback,
+      piAgent,
+      memoryWorker,
+      deferredTools,
+      wakeAcknowledgement: {
+        enabled: config.voice.resident.activation.mode === "wake_word"
+      },
+      farewell: {
+        enabled: true
+      },
+      console: createResidentVoiceRuntimeConsoleSink(logRunMode, fileLog, stdoutProbeMode),
+      minTriggerConfidence: config.voice.resident.minTriggerConfidence,
+      activation: activation.runtime,
+      utteranceWindow: config.voice.resident.utteranceWindow,
+      ...(audit === undefined ? {} : { probe: { audit } }),
+      signal
+    });
+  } finally {
+    await activation.close();
+  }
 }
 
 function createResidentVoiceRuntimeConsoleSink(
@@ -219,6 +239,51 @@ function readResidentVoiceRunId(value: string | undefined): string | undefined {
     return requireResidentVoiceRunId(value);
   } catch {
     throw new Error("PICO_RESIDENT_VOICE_RUN_ID must be a path-safe identifier");
+  }
+}
+
+async function createConfiguredActivation(
+  config: PicoConfig,
+  signal: AbortSignal,
+  writeProcessLine: (line: string) => void
+): Promise<{
+  readonly runtime: VoiceResidentActivation;
+  readonly close: () => Promise<void>;
+}> {
+  const activation = config.voice.resident.activation;
+
+  if (activation.mode === "wake_word") {
+    return {
+      runtime: activation,
+      close: () => Promise.resolve()
+    };
+  }
+
+  const queue = createResidentActivationQueue({
+    debounceMs: activation.debounceMs,
+    activationWindowMs: activation.activationWindowMs
+  });
+  const server = await createLoopbackHttpResidentActivationServer({
+    host: activation.host,
+    port: activation.port,
+    authTokenPath: activation.authTokenPath,
+    queue,
+    signal
+  });
+
+  try {
+    writeProcessLine(`[pico] resident push-to-talk activation: ${server.url}\n`);
+
+    return {
+      runtime: {
+        mode: "push_to_talk",
+        source: queue
+      },
+      close: () => server.close()
+    };
+  } catch (error) {
+    await server.close();
+    throw error;
   }
 }
 

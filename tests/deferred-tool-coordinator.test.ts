@@ -54,6 +54,7 @@ describe("deferred tool coordinator", () => {
       }
     ]);
     coordinator.acknowledgeDelivered([queued.jobId]);
+    expect(coordinator.pendingJobCount()).toBe(0);
     expect(
       coordinator.collectDeliverableResults({
         sessionId: "session-1",
@@ -105,6 +106,7 @@ describe("deferred tool coordinator", () => {
       }
     ]);
     coordinator.acknowledgeDelivered([queued.jobId]);
+    expect(coordinator.pendingJobCount()).toBe(0);
     expect(
       coordinator.collectDeliverableResults({
         sessionId: "session-1",
@@ -173,6 +175,7 @@ describe("deferred tool coordinator", () => {
         now: "2026-06-23T00:00:01.000Z"
       })
     ).toEqual([]);
+    expect(coordinator.pendingJobCount()).toBe(0);
     expect(
       coordinator.collectDeliverableResults({
         sessionId: "session-1",
@@ -198,6 +201,7 @@ describe("deferred tool coordinator", () => {
         })
     });
     coordinator.cancelSession("session-1", "session_closed");
+    expect(coordinator.pendingJobCount()).toBe(0);
     resolveJob?.(completedResult("2026-06-23T00:00:01.000Z"));
     await coordinator.waitForIdle();
 
@@ -234,6 +238,31 @@ describe("deferred tool coordinator", () => {
       kind: "camera_scene_description",
       reason: "resource_in_flight"
     });
+  });
+
+  it("evicts terminal failed jobs after delivery acknowledgement", async () => {
+    const coordinator = createDeferredToolCoordinator({
+      now: sequenceNow([
+        "2026-06-23T00:00:00.000Z",
+        "2026-06-23T00:00:00.250Z",
+        "2026-06-23T00:00:00.500Z"
+      ])
+    });
+
+    const queued = coordinator.enqueue({
+      kind: "camera_scene_description",
+      toolCallId: "tool-call-1",
+      sessionId: "session-1",
+      execute: () => Promise.reject(new Error("vlm tunnel unavailable"))
+    });
+    await coordinator.waitForIdle();
+
+    if (queued.status !== "queued") {
+      throw new Error("expected deferred tool job to be queued");
+    }
+    coordinator.acknowledgeDelivered([queued.jobId]);
+
+    expect(coordinator.pendingJobCount()).toBe(0);
   });
 });
 
