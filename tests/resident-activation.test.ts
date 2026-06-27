@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -131,6 +131,29 @@ describe("resident push-to-talk activation", () => {
         })
       })
     ).rejects.toThrow("pico resident activation token file must have 0600 permissions");
+  });
+
+  it("rejects activation token symlinks", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-activation-test-"));
+    const realTokenPath = join(directory, "real-activation-token");
+    const authTokenPath = join(directory, "activation-token");
+
+    writeFileSync(realTokenPath, "secret-token\n");
+    chmodSync(realTokenPath, 0o600);
+    symlinkSync(realTokenPath, authTokenPath);
+
+    await expect(
+      createLoopbackHttpResidentActivationServer({
+        host: "127.0.0.1",
+        port: 0,
+        authTokenPath,
+        queue: createResidentActivationQueue({
+          debounceMs: 800,
+          activationWindowMs: 8_000,
+          now: () => "2026-06-27T00:00:00.000Z"
+        })
+      })
+    ).rejects.toThrow("pico resident activation token file must not be a symbolic link");
   });
 
   it("does not read activation token files after startup has already been aborted", async () => {

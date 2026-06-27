@@ -517,6 +517,23 @@ audit:
         voice: {
           resident: {
             activation: {
+              provider: "loopback_http",
+              host: "127.0.0.1",
+              port: 8781,
+              authTokenPath: "/tmp/pico-activation-token"
+            }
+          }
+        }
+      })
+    ).toThrow(
+      "pico config voice.resident.activation.mode is required when activation is configured"
+    );
+
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          resident: {
+            activation: {
               mode: "push_to_talk",
               provider: "loopback_http",
               host: "0.0.0.0",

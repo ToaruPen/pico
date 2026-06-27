@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
@@ -187,19 +187,49 @@ function throwIfActivationStartupAborted(signal: AbortSignal | undefined): void 
 }
 
 function readActivationToken(path: string): string {
-  const mode = statSync(path).mode & 0o777;
+  const fd = openActivationTokenFile(path);
 
-  if (mode !== 0o600) {
-    throw new Error("pico resident activation token file must have 0600 permissions");
+  try {
+    const stat = fstatSync(fd);
+
+    if (!stat.isFile()) {
+      throw new Error("pico resident activation token file must be a regular file");
+    }
+
+    const mode = stat.mode & 0o777;
+
+    if (mode !== 0o600) {
+      throw new Error("pico resident activation token file must have 0600 permissions");
+    }
+
+    const token = readFileSync(fd, "utf8").trim();
+
+    if (token === "") {
+      throw new Error("pico resident activation token file must not be empty");
+    }
+
+    return token;
+  } finally {
+    closeSync(fd);
   }
+}
 
-  const token = readFileSync(path, "utf8").trim();
+function openActivationTokenFile(path: string): number {
+  try {
+    return openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ELOOP") {
+      throw new Error("pico resident activation token file must not be a symbolic link", {
+        cause: error
+      });
+    }
 
-  if (token === "") {
-    throw new Error("pico resident activation token file must not be empty");
+    throw error;
   }
+}
 
-  return token;
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 function writeJson(

@@ -790,8 +790,13 @@ function defineVoiceResidentActivationConfig(
     return emptyPicoConfig.voice.resident.activation;
   }
 
-  const mode =
-    readOptionalString(input.mode, "pico config voice.resident.activation.mode") ?? "wake_word";
+  const mode = readOptionalString(input.mode, "pico config voice.resident.activation.mode");
+
+  if (mode === undefined) {
+    throw new Error(
+      "pico config voice.resident.activation.mode is required when activation is configured"
+    );
+  }
 
   if (mode === "wake_word") {
     return { mode };
