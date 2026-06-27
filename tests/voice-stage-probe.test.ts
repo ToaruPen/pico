@@ -60,6 +60,37 @@ describe("voice stage probe", () => {
     expect(event?.attributes["pico.voice.stage_duration_ms"]).toBe(1007.515792036429);
   });
 
+  it("drops non-finite diagnostic attributes without dropping the stage event", () => {
+    const audit = createStructuredAuditLog();
+
+    recordVoiceStageProbe(
+      { audit },
+      {
+        stage: "speech_gate",
+        status: "suppressed",
+        startedAt: "2026-06-18T00:00:00.000Z",
+        durationMs: 0,
+        attributes: {
+          "pico.voice.frame_count": 1,
+          "pico.voice.rms_db": Number.NEGATIVE_INFINITY,
+          "pico.voice.speech_detected": false
+        }
+      }
+    );
+
+    expect(audit.entries()).toEqual([
+      expect.objectContaining({
+        attributes: {
+          "pico.voice.stage": "speech_gate",
+          "pico.voice.stage_status": "suppressed",
+          "pico.voice.stage_duration_ms": 0,
+          "pico.voice.frame_count": 1,
+          "pico.voice.speech_detected": false
+        }
+      })
+    ]);
+  });
+
   it("rejects non-finite or oversized stage durations", () => {
     expect(() =>
       recordVoiceStageProbe(

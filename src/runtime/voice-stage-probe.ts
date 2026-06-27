@@ -5,8 +5,10 @@ import type {
 } from "../modules/audit/index.js";
 
 export type VoiceRuntimeStage =
+  | "startup_warmup"
   | "mic_capture"
   | "echo_control"
+  | "speech_gate"
   | "utterance_window"
   | "stt"
   | "trigger_match"
@@ -35,8 +37,10 @@ export type VoiceStageProbeInput = {
 };
 
 const voiceRuntimeStages = new Set<VoiceRuntimeStage>([
+  "startup_warmup",
   "mic_capture",
   "echo_control",
+  "speech_gate",
   "utterance_window",
   "stt",
   "trigger_match",
@@ -57,6 +61,9 @@ const voiceStageAttributeKeys = new Set([
   "pico.voice.sample_rate_hz",
   "pico.voice.channels",
   "pico.voice.suppressed_frame_count",
+  "pico.voice.speech_detected",
+  "pico.voice.speech_probability",
+  "pico.voice.rms_db",
   "pico.voice.triggered",
   "pico.voice.entry_count",
   "pico.voice.chunk_count",
@@ -146,6 +153,10 @@ function normalizeVoiceStageAttributes(
   for (const [key, value] of Object.entries(attributes)) {
     if (!voiceStageAttributeKeys.has(key)) {
       throw new Error("pico voice stage probe attribute is not allowed");
+    }
+
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      continue;
     }
 
     normalized[key] = value;

@@ -35,8 +35,10 @@ provider へ自動で切り替えない。
 1. `voice.audio` が 10ms 程度の短い PCM frame を継続取得する。
 2. frame は必ず `voice.echoControl.processNearEnd` を通る。
 3. `suppress` された frame は STT に渡さない。
-4. `pass` された frame は energy VAD と configured silence threshold で
-   utterance window に集約する。
+4. `pass` された frame は configured speech gate (`energy` または明示設定された
+   `ten_vad`) と configured silence threshold で utterance window に集約する。
+   `ten_vad` は 16kHz mono frame 契約を config 境界で検証し、provider の自動
+   fallback は行わない。
 5. utterance window が閉じた時だけ `voice.stt` へ渡す。10ms frame を直接
    Whisper に渡さない。
 6. session 開始前の transcript は trigger 判定だけに使い、保存しない。

@@ -25,6 +25,7 @@ const voiceStageAttributeNames = {
   errorCode: "pico.voice.error_code"
 } as const;
 const summaryVoiceStages = new Set([
+  "startup_warmup",
   "utterance_window",
   "stt",
   "trigger_match",

@@ -18,6 +18,7 @@ import {
   defineAivisSpeechService,
   defineMlxWhisperSidecar
 } from "../../src/modules/voice/index.js";
+import { createDeferredToolCoordinator } from "../../src/runtime/deferred-tool-coordinator.js";
 import { createPiAgentTurnClient } from "../../src/runtime/pi-agent-turn.js";
 import {
   createResidentPcmFrameSource,
@@ -38,10 +39,17 @@ import {
   type ResidentVoiceLogRunMode,
   requireResidentVoiceRunId
 } from "../../src/runtime/resident-voice-log-files.js";
+import { warmResidentVoiceStartupProviders } from "../../src/runtime/resident-voice-startup-warmup.js";
+import {
+  createEnergySpeechActivityGate,
+  createTenWasmSpeechActivityGate
+} from "../../src/runtime/speech-activity-gate.js";
 import { runVoiceResidentRuntime } from "../../src/runtime/voice-resident.js";
 
 const config = loadPicoConfigFromEnvironment();
 const residentVoiceMetricStages = new Set([
+  "startup_warmup",
+  "speech_gate",
   "utterance_window",
   "stt",
   "trigger_match",
@@ -111,6 +119,18 @@ async function runResidentVoice(config: PicoConfig, signal: AbortSignal): Promis
     ...(audit === undefined ? {} : { audit })
   });
   const memoryWorker = createResidentMemoryWorker(config);
+  const deferredTools = createDeferredToolCoordinator();
+  const stt = createConfiguredStt(config);
+  const tts = createConfiguredTts(config);
+
+  await warmResidentVoiceStartupProviders({
+    clients: {
+      stt,
+      tts
+    },
+    ...(audit === undefined ? {} : { probe: { audit } }),
+    signal
+  });
 
   await runVoiceResidentRuntime({
     frames: createResidentPcmFrameSource(config, signal),
@@ -120,15 +140,20 @@ async function runResidentVoice(config: PicoConfig, signal: AbortSignal): Promis
     ],
     sessionLifecycle,
     echoControl: createConfiguredEchoControl(config),
-    stt: createConfiguredStt(config),
-    tts: createConfiguredTts(config),
+    speechActivity: await createConfiguredSpeechActivityGate(config),
+    stt,
+    tts,
     playback: createResidentPlaybackSink(config),
     piAgent: createPiAgentTurnClient({
       cwd: process.cwd(),
       sessionLifecycle,
+      deferredTools: {
+        coordinator: deferredTools
+      },
       ...(audit === undefined ? {} : { voiceProbe: { audit } })
     }),
     memoryWorker,
+    deferredTools,
     wakeAcknowledgement: {
       enabled: true
     },
@@ -279,6 +304,23 @@ function createConfiguredEchoControl(config: PicoConfig): EchoControlProvider {
     provider: echoControl.provider,
     mode: echoControl.mode,
     providerEndpoint: echoControl.providerEndpoint
+  });
+}
+
+async function createConfiguredSpeechActivityGate(config: PicoConfig) {
+  const vad = config.voice.resident.vad;
+
+  if (vad.provider === "energy") {
+    return createEnergySpeechActivityGate({
+      minRmsDb: vad.minRmsDb
+    });
+  }
+
+  return createTenWasmSpeechActivityGate({
+    jsPath: vad.jsPath,
+    wasmPath: vad.wasmPath,
+    hopSize: vad.hopSize,
+    threshold: vad.threshold
   });
 }
 

@@ -16,6 +16,8 @@ import type {
   TtsClient,
   TtsSynthesisSuccess
 } from "../modules/voice/index.js";
+import type { DeferredToolDeliverableResult } from "./deferred-tool-coordinator.js";
+import type { SpeechActivityGate, SpeechActivityGateResult } from "./speech-activity-gate.js";
 import { recordVoiceStageProbe, type VoiceStageProbe } from "./voice-stage-probe.js";
 import {
   createVoiceUtteranceAssembler,
@@ -34,6 +36,7 @@ export type PiAgentTurnClient = {
   readonly prompt: (input: {
     readonly sessionId: string;
     readonly text: string;
+    readonly deferredToolResults?: readonly DeferredToolDeliverableResult[];
     readonly signal?: AbortSignal;
   }) => Promise<{ readonly text: string }>;
   readonly disposeSession?: (sessionId: string) => void | Promise<void>;
@@ -83,11 +86,21 @@ export type VoiceResidentRuntimeOptions = {
   readonly triggerPhrases: readonly string[];
   readonly sessionLifecycle: SessionLifecycle;
   readonly echoControl: EchoControlProvider;
+  readonly speechActivity?: SpeechActivityGate;
   readonly stt: SttClient;
   readonly tts: TtsClient;
   readonly playback: VoicePlaybackSink;
   readonly piAgent: PiAgentTurnClient;
   readonly memoryWorker?: VoiceResidentMemoryWorker;
+  readonly deferredTools?: {
+    readonly collectDeliverableResults: (input: {
+      readonly sessionId: string;
+      readonly activeSessionId: string | undefined;
+      readonly now: string;
+    }) => readonly DeferredToolDeliverableResult[];
+    readonly acknowledgeDelivered?: (jobIds: readonly string[]) => void;
+    readonly cancelSession?: (sessionId: string, reason: "session_closed" | "shutdown") => void;
+  };
   readonly console?: VoiceResidentConsoleSink;
   readonly wakeAcknowledgement?: {
     readonly enabled: boolean;
@@ -212,7 +225,8 @@ export async function runVoiceResidentRuntime(
 
     activeSessionId = collectEndedActiveSession(options.sessionLifecycle, activeSessionId, {
       pendingCutoffSessionIds,
-      piAgent: options.piAgent
+      piAgent: options.piAgent,
+      deferredTools: options.deferredTools
     });
     await enqueueEndedSessions(
       options,
@@ -278,6 +292,7 @@ async function collectFirstShutdownCleanupError(
     options.memoryWorker?.close?.();
   });
   await recordCleanupError(errors, () => options.echoControl.flush());
+  await recordCleanupError(errors, () => options.speechActivity?.close?.());
 
   return errors[0];
 }
@@ -308,7 +323,8 @@ async function processResidentFrameIteration(
     state.currentActiveSessionId,
     {
       pendingCutoffSessionIds: state.pendingCutoffSessionIds,
-      piAgent: options.piAgent
+      piAgent: options.piAgent,
+      deferredTools: options.deferredTools
     }
   );
   state.activeSession.setActiveSessionId(activeSessionId);
@@ -343,6 +359,10 @@ async function cleanupActiveSessionForShutdown(
   now: () => string
 ): Promise<string | undefined> {
   if (options.memoryWorker === undefined) {
+    if (activeSessionId !== undefined) {
+      cancelDeferredToolSession(options.deferredTools, activeSessionId, "shutdown");
+    }
+
     return activeSessionId;
   }
 
@@ -351,7 +371,8 @@ async function cleanupActiveSessionForShutdown(
     activeSessionId,
     {
       pendingCutoffSessionIds,
-      piAgent: options.piAgent
+      piAgent: options.piAgent,
+      deferredTools: options.deferredTools
     }
   );
   await enqueueEndedSessions(options, pendingCutoffSessionIds, counters, now, farewelledSessionIds);
@@ -375,8 +396,10 @@ async function processNearEndFrame(
     return;
   }
 
+  const speechResult = await processSpeechActivityFrame(echoResult, options, now);
+
   await processTranscribedUtterances(
-    state.utteranceAssembler.accept(echoResult.frame, echoResult.diagnostics.voiceActivity),
+    state.utteranceAssembler.accept(echoResult.frame, speechResult.speech),
     options,
     counters,
     now,
@@ -406,7 +429,11 @@ async function processTranscribedUtterance(
   recordUtteranceWindowProbe(utterance, options);
   const transcript = await transcribePassedFrame(utterance, options, counters, now);
 
-  if (transcript === undefined || transcript.text === "") {
+  if (
+    transcript === undefined ||
+    transcript.text === "" ||
+    isLikelyNoSpeechHallucination(transcript.text)
+  ) {
     return;
   }
 
@@ -435,7 +462,8 @@ async function processTranscribedUtterance(
   state.activeSession.setActiveSessionId(
     collectEndedActiveSession(options.sessionLifecycle, activeSession.sessionId, {
       pendingCutoffSessionIds: state.pendingCutoffSessionIds,
-      piAgent: options.piAgent
+      piAgent: options.piAgent,
+      deferredTools: options.deferredTools
     })
   );
   await enqueueEndedSessions(
@@ -446,6 +474,18 @@ async function processTranscribedUtterance(
     state.farewelledSessionIds
   );
 }
+
+function isLikelyNoSpeechHallucination(text: string): boolean {
+  const normalized = text.trim().replaceAll(/\s+/gu, "");
+
+  return noSpeechHallucinationTranscripts.has(normalized);
+}
+
+const noSpeechHallucinationTranscripts = new Set([
+  "ご視聴ありがとうございました",
+  "ご視聴ありがとうございます",
+  "ご清聴ありがとうございました"
+]);
 
 function recordUtteranceWindowProbe(
   utterance: TranscribedUtterance,
@@ -506,6 +546,42 @@ async function processEchoControlledFrame(
   });
 
   return echoResult;
+}
+
+async function processSpeechActivityFrame(
+  echoResult: Extract<EchoControlResult, { readonly action: "pass" }>,
+  options: VoiceResidentRuntimeOptions,
+  now: () => string
+): Promise<SpeechActivityGateResult> {
+  if (options.speechActivity === undefined) {
+    return {
+      speech: echoResult.diagnostics.voiceActivity,
+      provider: "energy",
+      rmsDb: Number.NaN
+    };
+  }
+
+  const stageStartedAt = now();
+  const result = await options.speechActivity.process(echoResult.frame);
+
+  recordVoiceStageProbe(options.probe ?? {}, {
+    stage: "speech_gate",
+    status: result.speech ? "ok" : "suppressed",
+    startedAt: stageStartedAt,
+    durationMs: 0,
+    attributes: {
+      "pico.voice.frame_count": 1,
+      "pico.voice.sample_rate_hz": echoResult.frame.sampleRateHz,
+      "pico.voice.channels": echoResult.frame.channels,
+      "pico.voice.speech_detected": result.speech,
+      "pico.voice.rms_db": result.rmsDb,
+      ...(result.probability === undefined
+        ? {}
+        : { "pico.voice.speech_probability": result.probability })
+    }
+  });
+
+  return result;
 }
 
 async function transcribePassedFrame(
@@ -645,6 +721,7 @@ async function runWakeAcknowledgement(
   const response = await requestPiAgentResponse(
     sessionId,
     prompt,
+    [],
     options,
     counters,
     piStageStartedAt,
@@ -715,6 +792,7 @@ async function runActiveVoiceTurn(
 
   const piStageStartedAt = now();
   const piStageStartedMs = (options.monotonicNow ?? defaultMonotonicNow)();
+  const turnRequest = createActiveVoiceTurnRequest(transcript, options, activeSessionId, now);
   recordResidentConsoleEvent(options.console, {
     kind: "staff_transcript",
     occurredAt: piStageStartedAt,
@@ -723,7 +801,8 @@ async function runActiveVoiceTurn(
   });
   const response = await requestPiAgentResponse(
     activeSessionId,
-    transcript,
+    turnRequest.prompt,
+    turnRequest.deferredResults,
     options,
     counters,
     piStageStartedAt,
@@ -772,13 +851,57 @@ async function runActiveVoiceTurn(
     }
   });
   await playTtsChunks(ttsResult.chunks, options, now);
+  acknowledgeDeferredToolDelivery(options, turnRequest.deferredResults);
   refreshSessionActivityQuietly(options.sessionLifecycle, activeSessionId);
   counters.completedTurns += 1;
+}
+
+function createActiveVoiceTurnRequest(
+  transcript: string,
+  options: VoiceResidentRuntimeOptions,
+  activeSessionId: string,
+  now: () => string
+): {
+  readonly prompt: string;
+  readonly deferredResults: readonly DeferredToolDeliverableResult[];
+} {
+  const deferredResults = collectDeferredResultsForActiveTurn(options, activeSessionId, now);
+
+  return {
+    prompt: transcript,
+    deferredResults
+  };
+}
+
+function acknowledgeDeferredToolDelivery(
+  options: VoiceResidentRuntimeOptions,
+  results: readonly DeferredToolDeliverableResult[]
+): void {
+  try {
+    options.deferredTools?.acknowledgeDelivered?.(results.map((result) => result.jobId));
+  } catch {
+    return;
+  }
+}
+
+function collectDeferredResultsForActiveTurn(
+  options: VoiceResidentRuntimeOptions,
+  activeSessionId: string,
+  now: () => string
+): readonly DeferredToolDeliverableResult[] {
+  return (
+    options.deferredTools?.collectDeliverableResults({
+      sessionId: activeSessionId,
+      activeSessionId,
+      now: now()
+    }) ?? []
+  );
 }
 
 async function requestPiAgentResponse(
   sessionId: string,
   transcript: string,
+  deferredToolResults: readonly DeferredToolDeliverableResult[],
   options: VoiceResidentRuntimeOptions,
   counters: VoiceResidentCounters,
   startedAt: string,
@@ -795,6 +918,7 @@ async function requestPiAgentResponse(
     const response = await options.piAgent.prompt({
       sessionId,
       text: transcript,
+      ...(deferredToolResults.length === 0 ? {} : { deferredToolResults }),
       ...(options.signal === undefined ? {} : { signal: options.signal })
     });
     const completedAt = (options.now ?? defaultNow)();
@@ -960,6 +1084,7 @@ function collectEndedActiveSession(
   options: {
     readonly pendingCutoffSessionIds: Set<string>;
     readonly piAgent: PiAgentTurnClient;
+    readonly deferredTools?: VoiceResidentRuntimeOptions["deferredTools"];
   }
 ): string | undefined {
   if (activeSessionId === undefined) {
@@ -969,6 +1094,7 @@ function collectEndedActiveSession(
   const session = lifecycle.read(activeSessionId);
 
   if (session === undefined) {
+    cancelDeferredToolSession(options.deferredTools, activeSessionId, "session_closed");
     disposeSessionQuietly(options.piAgent, activeSessionId);
     return undefined;
   }
@@ -977,6 +1103,7 @@ function collectEndedActiveSession(
     return activeSessionId;
   }
 
+  cancelDeferredToolSession(options.deferredTools, activeSessionId, "session_closed");
   options.pendingCutoffSessionIds.add(activeSessionId);
 
   return undefined;
@@ -988,6 +1115,7 @@ function endActiveSessionForShutdown(
   options: {
     readonly pendingCutoffSessionIds: Set<string>;
     readonly piAgent: PiAgentTurnClient;
+    readonly deferredTools?: VoiceResidentRuntimeOptions["deferredTools"];
   }
 ): string | undefined {
   if (activeSessionId === undefined) {
@@ -997,6 +1125,7 @@ function endActiveSessionForShutdown(
   const session = lifecycle.read(activeSessionId);
 
   if (session === undefined) {
+    cancelDeferredToolSession(options.deferredTools, activeSessionId, "shutdown");
     disposeSessionQuietly(options.piAgent, activeSessionId);
     return undefined;
   }
@@ -1005,9 +1134,22 @@ function endActiveSessionForShutdown(
     lifecycle.end(activeSessionId);
   }
 
+  cancelDeferredToolSession(options.deferredTools, activeSessionId, "shutdown");
   options.pendingCutoffSessionIds.add(activeSessionId);
 
   return undefined;
+}
+
+function cancelDeferredToolSession(
+  deferredTools: VoiceResidentRuntimeOptions["deferredTools"] | undefined,
+  sessionId: string,
+  reason: "session_closed" | "shutdown"
+): void {
+  try {
+    deferredTools?.cancelSession?.(sessionId, reason);
+  } catch {
+    return;
+  }
 }
 
 async function enqueueEndedSessions(
@@ -1103,6 +1245,7 @@ async function runFarewellTurn(
   const response = await requestPiAgentResponse(
     sessionId,
     farewellPrompt,
+    [],
     options,
     counters,
     piStageStartedAt,

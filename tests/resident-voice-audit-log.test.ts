@@ -33,6 +33,35 @@ describe("resident voice audit log", () => {
     ]);
   });
 
+  it("mirrors startup warmup stage events in summary mode", () => {
+    const writes: string[] = [];
+    const audit = createResidentVoiceAuditLog({
+      stdoutEnabled: true,
+      writeStdout: (line) => {
+        writes.push(line);
+      }
+    });
+
+    audit.record({
+      category: "transport_event",
+      name: "voice.runtime.stage",
+      severity: "info",
+      occurredAt: "2026-06-22T00:00:00.000Z",
+      summary: "Pico voice runtime stage completed.",
+      attributes: {
+        "pico.voice.stage": "startup_warmup",
+        "pico.voice.stage_status": "ok",
+        "pico.voice.stage_duration_ms": 250,
+        "pico.voice.chunk_count": 1,
+        "pico.voice.utterance_duration_ms": 120
+      }
+    });
+
+    expect(writes).toEqual([
+      "[pico voice] 2026-06-22T00:00:00.000Z stage=startup_warmup status=ok duration_ms=250 utterance_ms=120 chunk_count=1\n"
+    ]);
+  });
+
   it("suppresses high-volume successful frame stages in summary mode", () => {
     const writes: string[] = [];
     const audit = createResidentVoiceAuditLog({

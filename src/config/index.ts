@@ -168,8 +168,22 @@ export type PicoVoiceResidentConfig = {
   readonly singleInstanceLockPath: string;
   readonly minTriggerConfidence: number;
   readonly shutdownGraceMs: number;
+  readonly vad: PicoVoiceResidentVadConfig;
   readonly utteranceWindow: PicoVoiceUtteranceWindowConfig;
 };
+
+export type PicoVoiceResidentVadConfig =
+  | {
+      readonly provider: "energy";
+      readonly minRmsDb: number;
+    }
+  | {
+      readonly provider: "ten_vad";
+      readonly jsPath: string;
+      readonly wasmPath: string;
+      readonly hopSize: 160 | 256;
+      readonly threshold: number;
+    };
 
 export type PicoVoiceUtteranceWindowConfig = {
   readonly minSpeechMs: number;
@@ -312,6 +326,10 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
       singleInstanceLockPath: "tmp/pico-voice-resident.lock",
       minTriggerConfidence: 0.5,
       shutdownGraceMs: 5_000,
+      vad: {
+        provider: "energy",
+        minRmsDb: -55
+      },
       utteranceWindow: {
         minSpeechMs: 300,
         silenceMs: 700,
@@ -662,14 +680,17 @@ function defineVoiceSection(root: Record<string, unknown>): PicoConfig["voice"] 
   const resident = readOptionalRecord(voice?.resident, "pico config voice.resident");
   const probes = readOptionalRecord(voice?.probes, "pico config voice.probes");
   const echoControl = readOptionalRecord(voice?.echoControl, "pico config voice.echoControl");
-
-  return {
+  const voiceConfig: PicoConfig["voice"] = {
     resident: defineVoiceResidentConfig(resident),
     probes: defineVoiceProbeConfig(probes),
     echoControl: defineEchoControlConfig(echoControl),
     stt: defineVoiceSttConfig(voice),
     tts: defineVoiceTtsConfig(voice)
   };
+
+  requireVoiceResidentVadFrameContract(voiceConfig);
+
+  return voiceConfig;
 }
 
 function defineVoiceSttConfig(
@@ -711,6 +732,8 @@ function defineVoiceResidentConfig(
     input.utteranceWindow,
     "pico config voice.resident.utteranceWindow"
   );
+  const definedUtteranceWindow = defineVoiceUtteranceWindowConfig(utteranceWindow);
+  const vad = readOptionalRecord(input.vad, "pico config voice.resident.vad");
 
   requireResidentVoiceAudio(enabled, audioInput, audioOutput);
 
@@ -734,8 +757,73 @@ function defineVoiceResidentConfig(
         "pico config voice.resident.shutdownGraceMs",
         maxNodeTimeoutMs
       ) ?? 5_000,
-    utteranceWindow: defineVoiceUtteranceWindowConfig(utteranceWindow)
+    vad: defineVoiceResidentVadConfig(vad, definedUtteranceWindow),
+    utteranceWindow: definedUtteranceWindow
   };
+}
+
+function defineVoiceResidentVadConfig(
+  input: Record<string, unknown> | undefined,
+  utteranceWindow: PicoVoiceUtteranceWindowConfig
+): PicoVoiceResidentVadConfig {
+  if (input === undefined) {
+    return {
+      provider: "energy",
+      minRmsDb: utteranceWindow.minRmsDb
+    };
+  }
+
+  const provider =
+    readOptionalString(input.provider, "pico config voice.resident.vad.provider") ?? "energy";
+
+  if (provider === "energy") {
+    return {
+      provider,
+      minRmsDb:
+        readOptionalRmsDatabase(input.minRmsDb, "pico config voice.resident.vad.minRmsDb") ??
+        utteranceWindow.minRmsDb
+    };
+  }
+
+  if (provider === "ten_vad") {
+    return {
+      provider,
+      jsPath: requireString(input.jsPath, "pico config voice.resident.vad.jsPath"),
+      wasmPath: requireString(input.wasmPath, "pico config voice.resident.vad.wasmPath"),
+      hopSize: requireTenVadHopSize(input.hopSize, "pico config voice.resident.vad.hopSize"),
+      threshold:
+        readOptionalConfidenceThreshold(
+          input.threshold,
+          "pico config voice.resident.vad.threshold"
+        ) ?? 0.5
+    };
+  }
+
+  throw new Error("pico config voice.resident.vad.provider must be energy or ten_vad");
+}
+
+function requireVoiceResidentVadFrameContract(voice: PicoConfig["voice"]): void {
+  const vad = voice.resident.vad;
+
+  if (vad.provider !== "ten_vad") {
+    return;
+  }
+
+  if (voice.echoControl.sampleRateHz !== 16_000) {
+    throw new Error("pico config voice.echoControl.sampleRateHz must be 16000 for ten_vad");
+  }
+
+  if (voice.echoControl.channels !== 1) {
+    throw new Error("pico config voice.echoControl.channels must be 1 for ten_vad");
+  }
+
+  const requiredFrameMs = vad.hopSize === 160 ? 10 : 16;
+
+  if (voice.echoControl.frameMs !== requiredFrameMs) {
+    throw new Error(
+      `pico config voice.echoControl.frameMs must be ${String(requiredFrameMs)} for ten_vad hopSize ${String(vad.hopSize)}`
+    );
+  }
 }
 
 function defineVoiceUtteranceWindowConfig(
@@ -1329,7 +1417,18 @@ function resolveConfigRelativePaths(config: PicoConfig, baseDirectory: string): 
         singleInstanceLockPath: resolveConfigRelativePath(
           baseDirectory,
           config.voice.resident.singleInstanceLockPath
-        )
+        ),
+        vad:
+          config.voice.resident.vad.provider === "ten_vad"
+            ? {
+                ...config.voice.resident.vad,
+                jsPath: resolveConfigRelativePath(baseDirectory, config.voice.resident.vad.jsPath),
+                wasmPath: resolveConfigRelativePath(
+                  baseDirectory,
+                  config.voice.resident.vad.wasmPath
+                )
+              }
+            : config.voice.resident.vad
       },
       stt: {
         ...config.voice.stt,
@@ -1816,6 +1915,16 @@ function requireNonNegativeInteger(value: unknown, label: string): number {
   }
 
   return parsed;
+}
+
+function requireTenVadHopSize(value: unknown, label: string): 160 | 256 {
+  const parsed = readOptionalNumber(value, label);
+
+  if (parsed === 160 || parsed === 256) {
+    return parsed;
+  }
+
+  throw new Error(`${label} must be 160 or 256`);
 }
 
 function readOptionalNonNegativeInteger(value: unknown, label: string): number | undefined {

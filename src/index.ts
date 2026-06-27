@@ -12,7 +12,9 @@ import { createMemoryModule } from "./modules/memory/index.js";
 import { createSessionModule, type SessionLifecycle } from "./modules/session/index.js";
 import { createTransportModule } from "./modules/transport/index.js";
 import { PicoModuleRegistry } from "./orchestrator/registry.js";
+import type { DeferredToolCoordinator } from "./runtime/deferred-tool-coordinator.js";
 import {
+  createPicoCameraSceneDescriptionDeferredTool,
   createPicoCameraSceneDescriptionTool,
   createPicoCameraSnapshotTool,
   createPicoPersonDetectionTool
@@ -78,6 +80,11 @@ export type PicoExtensionRuntimeOptions = {
   readonly sessionLifecycle?: SessionLifecycle;
   readonly loadConfig?: () => PicoConfig;
   readonly voiceProbe?: VoiceStageProbe;
+  readonly toolProfile?: "default" | "voice_resident";
+  readonly deferredTools?: {
+    readonly sessionId: string;
+    readonly coordinator: Pick<DeferredToolCoordinator, "enqueue">;
+  };
   readonly sessionTool?: {
     readonly allowCutoff?: boolean;
   };
@@ -87,6 +94,14 @@ export function registerPicoExtensionWithRuntime(
   pi: ExtensionAPI,
   options: PicoExtensionRuntimeOptions = {}
 ): void {
+  registerSessionRuntimeTool(pi, options);
+  registerPerceptionRuntimeTools(pi, options);
+  pi.on("before_agent_start", (event: BeforeAgentStartEvent) => ({
+    systemPrompt: buildPicoExtensionSystemPrompt(event.systemPrompt)
+  }));
+}
+
+function registerSessionRuntimeTool(pi: ExtensionAPI, options: PicoExtensionRuntimeOptions): void {
   pi.registerTool(
     createPicoSessionTool({
       ...(options.sessionLifecycle === undefined ? {} : { lifecycle: options.sessionLifecycle }),
@@ -96,16 +111,31 @@ export function registerPicoExtensionWithRuntime(
         : { allowCutoff: options.sessionTool.allowCutoff })
     })
   );
+}
+
+function registerPerceptionRuntimeTools(
+  pi: ExtensionAPI,
+  options: PicoExtensionRuntimeOptions
+): void {
+  const toolProfile = options.toolProfile ?? "default";
   const perceptionToolOptions = {
-    ...(options.voiceProbe === undefined ? {} : { probe: options.voiceProbe })
+    ...(options.voiceProbe === undefined ? {} : { probe: options.voiceProbe }),
+    ...(options.loadConfig === undefined ? {} : { loadConfig: options.loadConfig })
   };
 
-  pi.registerTool(createPicoCameraSnapshotTool(perceptionToolOptions));
-  pi.registerTool(createPicoPersonDetectionTool(perceptionToolOptions));
-  pi.registerTool(createPicoCameraSceneDescriptionTool(perceptionToolOptions));
-  pi.on("before_agent_start", (event: BeforeAgentStartEvent) => ({
-    systemPrompt: buildPicoExtensionSystemPrompt(event.systemPrompt)
-  }));
+  if (toolProfile === "voice_resident" && options.deferredTools !== undefined) {
+    pi.registerTool(
+      createPicoCameraSceneDescriptionDeferredTool({
+        ...perceptionToolOptions,
+        sessionId: options.deferredTools.sessionId,
+        coordinator: options.deferredTools.coordinator
+      })
+    );
+  } else {
+    pi.registerTool(createPicoCameraSnapshotTool(perceptionToolOptions));
+    pi.registerTool(createPicoPersonDetectionTool(perceptionToolOptions));
+    pi.registerTool(createPicoCameraSceneDescriptionTool(perceptionToolOptions));
+  }
 }
 
 export default function registerPicoExtension(pi: ExtensionAPI): void {

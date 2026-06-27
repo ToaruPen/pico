@@ -273,6 +273,80 @@ describe("pico extension", () => {
       }
     });
   });
+
+  it("uses a deferred resident-safe tool profile for voice resident sessions", () => {
+    const capture = createCapturedExtensionApi();
+
+    registerPicoExtensionWithRuntime(extensionApiFromCapture(capture) as never, {
+      toolProfile: "voice_resident",
+      deferredTools: {
+        sessionId: "session-1",
+        coordinator: {
+          enqueue: () => ({
+            status: "queued",
+            kind: "camera_scene_description",
+            jobId: "deferred-job-1",
+            sessionId: "session-1"
+          })
+        } as never
+      }
+    });
+
+    expect(capture.tools.map((tool) => tool.name).sort()).toEqual([
+      "pico_camera_scene_description_deferred",
+      "pico_session"
+    ]);
+  });
+
+  it("passes injected config loading into default perception tools", async () => {
+    const capture = createCapturedExtensionApi();
+    let loadConfigCalls = 0;
+
+    registerPicoExtensionWithRuntime(extensionApiFromCapture(capture) as never, {
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      loadConfig: () => {
+        loadConfigCalls += 1;
+        throw new Error("test config loader reached");
+      }
+    });
+
+    const perceptionTools = capture.tools.filter((tool) =>
+      ["pico_camera_scene_description", "pico_camera_snapshot", "pico_person_detection"].includes(
+        tool.name
+      )
+    );
+
+    for (const tool of perceptionTools) {
+      await tool.execute("tool-call-config", {}, undefined, undefined, {} as ExtensionContext);
+    }
+
+    expect(perceptionTools.map((tool) => tool.name).sort()).toEqual([
+      "pico_camera_scene_description",
+      "pico_camera_snapshot",
+      "pico_person_detection"
+    ]);
+    expect(loadConfigCalls).toBe(3);
+  });
+
+  it("falls back to default perception tools when the voice resident profile has no deferred coordinator", () => {
+    const capture = createCapturedExtensionApi();
+
+    registerPicoExtensionWithRuntime(extensionApiFromCapture(capture) as never, {
+      toolProfile: "voice_resident"
+    });
+
+    expect(capture.tools.map((tool) => tool.name).sort()).toEqual([
+      "pico_camera_scene_description",
+      "pico_camera_snapshot",
+      "pico_person_detection",
+      "pico_session"
+    ]);
+  });
 });
 
 function extractToolJson(result: unknown): unknown {
