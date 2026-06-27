@@ -51,6 +51,7 @@ export type DeferredToolCoordinator = {
   readonly acknowledgeDelivered: (jobIds: readonly string[]) => void;
   readonly cancelSession: (sessionId: string, reason: DeferredToolCancellationReason) => void;
   readonly waitForIdle: () => Promise<void>;
+  readonly pendingJobCount: () => number;
 };
 
 export type DeferredToolCancellationReason = "session_closed" | "shutdown" | "superseded";
@@ -130,13 +131,13 @@ export function createDeferredToolCoordinator(
     collectDeliverableResults(input) {
       const deliverable: DeferredToolDeliverableResult[] = [];
 
-      for (const job of jobs.values()) {
+      for (const [jobId, job] of jobs.entries()) {
         const result = collectDeliverableJob(job, input, maxResultAgeMs);
 
         if (result !== undefined) {
           deliverable.push(result);
         } else if (job.state === "suppressed") {
-          jobs.delete(job.jobId);
+          jobs.delete(jobId);
         }
       }
 
@@ -152,17 +153,21 @@ export function createDeferredToolCoordinator(
       }
     },
     cancelSession(sessionId) {
-      for (const job of [...jobs.values()]) {
+      for (const [jobId, job] of jobs.entries()) {
         if (
           job.sessionId === sessionId &&
           (job.state === "running" || job.state === "completed" || job.state === "failed")
         ) {
-          jobs.delete(job.jobId);
+          job.state = "cancelled";
+          jobs.delete(jobId);
         }
       }
     },
     async waitForIdle() {
       await Promise.all([...inFlightOperations]);
+    },
+    pendingJobCount() {
+      return jobs.size;
     }
   };
 }

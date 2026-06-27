@@ -103,15 +103,14 @@ export async function runResidentVoiceDeferredRalliesField(): Promise<ResidentVo
     service: {
       captureSceneSnapshot: () => Promise.reject(new Error("unused")),
       detectPeople: () => Promise.reject(new Error("unused")),
-      describeCameraScene: async () => {
-        await delay(5);
+      describeCameraScene: () => {
         const sceneDescription =
           sceneDescriptions.length === 0
             ? "1回目: 机の上に教材が見えます。"
             : "2回目: 入口付近は落ち着いています。";
         sceneDescriptions.push(sceneDescription);
 
-        return {
+        return Promise.resolve({
           status: "passed",
           sourceId: "pseudo-tapo-main",
           streamPurpose: "scene",
@@ -131,7 +130,7 @@ export async function runResidentVoiceDeferredRalliesField(): Promise<ResidentVo
               purpose: "staff_requested_snapshot"
             }
           }
-        };
+        });
       }
     }
   });
@@ -139,12 +138,12 @@ export async function runResidentVoiceDeferredRalliesField(): Promise<ResidentVo
   const result = await runVoiceResidentRuntime({
     now: fixedNow(),
     monotonicNow: sequenceNumber([1_000, 1_120, 1_240, 1_360, 1_480, 1_600, 1_720, 1_840]),
-    frames: injectedFrames([
+    frames: [
       speechFrame("wake", 0),
       speechFrame("staff-tool-1", 1_000),
       speechFrame("staff-result-and-tool-2", 2_000),
       speechFrame("staff-result-2", 3_000)
-    ]),
+    ],
     utteranceWindow: {
       minSpeechMs: 1,
       silenceMs: 1,
@@ -164,7 +163,7 @@ export async function runResidentVoiceDeferredRalliesField(): Promise<ResidentVo
     stt: createScriptedStt(sttTranscripts, sttTranscriptsReturned),
     tts: createRecordingTts(ttsRequests),
     playback: {
-      play: () => Promise.resolve()
+      play: () => coordinator.waitForIdle()
     },
     piAgent: {
       prompt: async (input) => {
@@ -352,13 +351,6 @@ function arraysEqual(left: readonly string[], right: readonly string[]): boolean
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-async function* injectedFrames(frames: readonly VoicePcmFrame[]): AsyncIterable<VoicePcmFrame> {
-  for (const frame of frames) {
-    await delay(10);
-    yield frame;
-  }
-}
-
 function speechFrame(id: string, offsetMs: number): VoicePcmFrame {
   return {
     id,
@@ -441,12 +433,6 @@ function sequenceNumber(values: readonly number[]): () => number {
 
 function addMilliseconds(timestamp: string, milliseconds: number): string {
   return new Date(Date.parse(timestamp) + milliseconds).toISOString();
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
 }
 
 function isDirectExecution(): boolean {

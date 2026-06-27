@@ -75,6 +75,7 @@ describe("speech activity gate", () => {
       readonly samples: readonly number[];
     }> = [];
     const module = createInMemoryTenVadModule(calls);
+
     const gate = await createTenWasmSpeechActivityGate({
       jsPath: "/tmp/ten_vad.js",
       wasmPath: "/tmp/ten_vad.wasm",
@@ -89,6 +90,38 @@ describe("speech activity gate", () => {
     });
 
     expect(calls[1]?.samples).toEqual(Array.from({ length: 160 }, () => 3_000));
+  });
+
+  it("rejects frames that do not match the TEN VAD frame contract", async () => {
+    const module = createInMemoryTenVadModule([]);
+    const gate = await createTenWasmSpeechActivityGate({
+      jsPath: "/tmp/ten_vad.js",
+      wasmPath: "/tmp/ten_vad.wasm",
+      hopSize: 160,
+      threshold: 0.5,
+      moduleFactory: () => module
+    });
+
+    await expect(
+      gate.process({
+        ...pcmFrame("wrong-sample-rate", 3_000),
+        sampleRateHz: 24_000
+      })
+    ).rejects.toThrow("pico voice TEN VAD requires mono 16 kHz PCM16LE frames");
+    await expect(
+      gate.process({
+        ...pcmFrame("wrong-channel-count", 3_000),
+        channels: 2
+      })
+    ).rejects.toThrow("pico voice TEN VAD requires mono 16 kHz PCM16LE frames");
+    await expect(
+      gate.process({
+        ...pcmFrame("wrong-frame-size", 3_000),
+        audio: new Uint8Array(10)
+      })
+    ).rejects.toThrow("pico voice TEN VAD requires exactly 160 samples per frame");
+
+    await gate.close?.();
   });
 });
 

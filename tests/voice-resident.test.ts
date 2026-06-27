@@ -907,6 +907,60 @@ describe("voice resident runtime", () => {
     });
   });
 
+  it("drains deferred tool jobs during shutdown cleanup before returning", async () => {
+    const lifecycle = createSessionLifecycle({
+      ending: {
+        mode: "timed",
+        durationMs: 60_000
+      }
+    });
+    const events: string[] = [];
+    let resolveIdle: (() => void) | undefined;
+
+    await runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: lifecycle,
+      echoControl: createIdleEchoControl(),
+      stt: (() => {
+        const texts = ["ピコ", "終了前の会話です。"];
+
+        return {
+          warmup: () => {
+            throw new Error("warmup is not part of resident runtime");
+          },
+          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
+        };
+      })(),
+      tts: createSuccessfulTts("はい。"),
+      playback: {
+        play: () => Promise.resolve()
+      },
+      piAgent: {
+        prompt: () => Promise.resolve({ text: "はい。" })
+      },
+      deferredTools: {
+        collectDeliverableResults: () => [],
+        cancelSession: (sessionId, reason) => {
+          events.push(`cancel:${sessionId}:${reason}`);
+        },
+        waitForIdle: () =>
+          new Promise<void>((resolve) => {
+            events.push("wait:start");
+            resolveIdle = () => {
+              events.push("wait:done");
+              resolve();
+            };
+            queueMicrotask(() => resolveIdle?.());
+          })
+      }
+    });
+
+    expect(events).toEqual(["cancel:session-1:shutdown", "wait:start", "wait:done"]);
+  });
+
   it("measures Pi Agent response duration with monotonic time instead of wall-clock timestamps", async () => {
     const consoleEvents: unknown[] = [];
 
@@ -1204,6 +1258,11 @@ describe("voice resident runtime", () => {
           collectDeliverableResults: () => [],
           cancelSession: (sessionId, reason) => {
             cancelled.push(`${sessionId}:${reason}`);
+          },
+          waitForIdle: () => {
+            cancelled.push("waitForIdle");
+
+            return Promise.resolve();
           }
         },
         memoryWorker: {
@@ -1227,7 +1286,7 @@ describe("voice resident runtime", () => {
     });
 
     expect(enqueuedSessions).toEqual(["session-1"]);
-    expect(cancelled).toEqual(["session-1:shutdown"]);
+    expect(cancelled).toEqual(["session-1:shutdown", "waitForIdle"]);
     expect(lifecycle.read("session-1")).toBeUndefined();
     expect(disposedAll).toBe(1);
   });

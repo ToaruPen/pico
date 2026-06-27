@@ -115,6 +115,7 @@ export type VoiceResidentRuntimeOptions = {
     }) => readonly DeferredToolDeliverableResult[];
     readonly acknowledgeDelivered?: (jobIds: readonly string[]) => void;
     readonly cancelSession?: (sessionId: string, reason: "session_closed" | "shutdown") => void;
+    readonly waitForIdle?: () => Promise<void>;
   };
   readonly console?: VoiceResidentConsoleSink;
   readonly wakeAcknowledgement?: {
@@ -315,6 +316,7 @@ async function collectFirstShutdownCleanupError(
   const errors: Error[] = [];
 
   await recordCleanupError(errors, () => options.piAgent.disposeAll?.());
+  await recordCleanupError(errors, () => options.deferredTools?.waitForIdle?.());
   await recordCleanupError(errors, () => {
     options.memoryWorker?.close?.();
   });

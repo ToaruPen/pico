@@ -109,30 +109,32 @@ export async function createTenWasmSpeechActivityGate(
 
   return {
     process(frame) {
-      const normalized = defineTenVadFrame(frame, hopSize);
-      const samples = readPcm16leSamples(normalized.audio);
-      module.HEAP16.set(samples, audioPointer >> 1);
+      return Promise.resolve().then(() => {
+        const normalized = defineTenVadFrame(frame, hopSize);
+        const samples = readPcm16leSamples(normalized.audio);
+        module.HEAP16.set(samples, audioPointer >> 1);
 
-      const processResult = module._ten_vad_process(
-        handle,
-        audioPointer,
-        hopSize,
-        probabilityPointer,
-        flagPointer
-      );
+        const processResult = module._ten_vad_process(
+          handle,
+          audioPointer,
+          hopSize,
+          probabilityPointer,
+          flagPointer
+        );
 
-      if (processResult !== 0) {
-        throw new Error(`pico voice TEN VAD process failed: ${processResult}`);
-      }
+        if (processResult !== 0) {
+          throw new Error(`pico voice TEN VAD process failed: ${processResult}`);
+        }
 
-      const probability = module.HEAPF32[probabilityPointer >> 2] ?? 0;
-      const flag = module.HEAP32[flagPointer >> 2] ?? 0;
+        const probability = module.HEAPF32[probabilityPointer >> 2] ?? 0;
+        const flag = module.HEAP32[flagPointer >> 2] ?? 0;
 
-      return Promise.resolve({
-        speech: flag === 1,
-        provider: "ten_vad",
-        rmsDb: calculatePcm16leRmsDatabase(normalized.audio),
-        probability
+        return {
+          speech: flag === 1,
+          provider: "ten_vad",
+          rmsDb: calculatePcm16leRmsDatabase(normalized.audio),
+          probability
+        };
       });
     },
     close() {

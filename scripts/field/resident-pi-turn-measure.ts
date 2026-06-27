@@ -23,6 +23,7 @@ export type ResidentPiTurnMeasureReport =
 
 const prompt =
   "Reply in Japanese with exactly one short sentence of 12 characters or fewer. Do not use tools.";
+const turnDeadlineMs = 30_000;
 
 export async function runResidentPiTurnMeasure(): Promise<ResidentPiTurnMeasureReport> {
   const lifecycle = createSessionLifecycle({
@@ -43,10 +44,24 @@ export async function runResidentPiTurnMeasure(): Promise<ResidentPiTurnMeasureR
   const startedAt = performance.now();
 
   try {
-    const response = await client.prompt({
-      sessionId: started.id,
-      text: prompt
-    });
+    const response = await withDeadline(
+      client.prompt({
+        sessionId: started.id,
+        text: prompt
+      }),
+      turnDeadlineMs
+    );
+    const violation = validateScriptedReply(response.text);
+
+    if (violation !== undefined) {
+      return {
+        status: "failed",
+        thinkingLevel: "medium",
+        durationMs: Math.round(performance.now() - startedAt),
+        reason: violation,
+        sessionId: started.id
+      };
+    }
 
     return {
       status: "passed",
@@ -86,6 +101,35 @@ function closeStartedSessionQuietly(
   } catch {
     return;
   }
+}
+
+async function withDeadline<T>(input: Promise<T>, deadlineMs: number): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+
+  try {
+    return await Promise.race([
+      input,
+      new Promise<T>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("turn_timeout")), deadlineMs);
+      })
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+function validateScriptedReply(text: string): "reply_contract_violation" | undefined {
+  const trimmed = text.trim();
+
+  if (trimmed.length === 0 || trimmed.length > 12) {
+    return "reply_contract_violation";
+  }
+
+  const sentenceBoundaryCount = trimmed.match(/[.。！？!?]/gu)?.length ?? 0;
+
+  return sentenceBoundaryCount > 1 ? "reply_contract_violation" : undefined;
 }
 
 function isDirectExecution(): boolean {

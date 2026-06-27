@@ -367,25 +367,27 @@ describe("resident audio I/O plans", () => {
         "2026-06-18T00:00:10.000Z"
       ])
     )[Symbol.asyncIterator]();
-    const firstFrame = iterator.next();
-    const secondFrame = iterator.next();
+    try {
+      const firstFrame = iterator.next();
+      const secondFrame = iterator.next();
 
-    process.stdout.write(Buffer.alloc(640, 7));
+      process.stdout.write(Buffer.alloc(640, 7));
 
-    const first = await firstFrame;
-    const second = await secondFrame;
+      const first = await firstFrame;
+      const second = await secondFrame;
 
-    if (first.done === true || second.done === true) {
-      throw new Error("expected two AVFoundation PCM frames");
+      if (first.done === true || second.done === true) {
+        throw new Error("expected two AVFoundation PCM frames");
+      }
+
+      expect(first.value.capturedAt).toBe("2026-06-18T00:00:00.000Z");
+      expect(second.value.capturedAt).toBe("2026-06-18T00:00:00.010Z");
+    } finally {
+      abortController.abort();
+      process.stdout.end();
+      process.emitClose(0, undefined);
+      await iterator.return?.();
     }
-
-    expect(first.value.capturedAt).toBe("2026-06-18T00:00:00.000Z");
-    expect(second.value.capturedAt).toBe("2026-06-18T00:00:00.010Z");
-
-    abortController.abort();
-    process.stdout.end();
-    process.emitClose(0, undefined);
-    await iterator.return?.();
   });
 
   it("fails clearly when the capture clock returns an invalid timestamp", async () => {
