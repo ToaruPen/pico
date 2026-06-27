@@ -64,7 +64,27 @@ export async function runResidentPiTurnMeasure(): Promise<ResidentPiTurnMeasureR
       sessionId: started.id
     };
   } finally {
+    closeStartedSessionQuietly(lifecycle, started.id);
     await client.disposeAll?.();
+  }
+}
+
+function closeStartedSessionQuietly(
+  lifecycle: ReturnType<typeof createSessionLifecycle>,
+  sessionId: string
+): void {
+  try {
+    const session = lifecycle.read(sessionId);
+
+    if (session?.state === "active") {
+      lifecycle.end(sessionId);
+    }
+
+    if (lifecycle.read(sessionId)?.state === "ended") {
+      lifecycle.acknowledgeCutoff(sessionId);
+    }
+  } catch {
+    return;
   }
 }
 

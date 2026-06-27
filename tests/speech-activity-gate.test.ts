@@ -65,6 +65,31 @@ describe("speech activity gate", () => {
       }
     ]);
   });
+
+  it("copies TEN VAD samples from sliced PCM frames with odd byte offsets", async () => {
+    const calls: Array<{
+      readonly createHandlePointer?: number;
+      readonly destroyHandlePointer?: number;
+      readonly hopSize: number;
+      readonly threshold: number;
+      readonly samples: readonly number[];
+    }> = [];
+    const module = createInMemoryTenVadModule(calls);
+    const gate = await createTenWasmSpeechActivityGate({
+      jsPath: "/tmp/ten_vad.js",
+      wasmPath: "/tmp/ten_vad.wasm",
+      hopSize: 160,
+      threshold: 0.5,
+      moduleFactory: () => module
+    });
+
+    await expect(gate.process(oddOffsetPcmFrame("speech", 3_000))).resolves.toMatchObject({
+      speech: true,
+      provider: "ten_vad"
+    });
+
+    expect(calls[1]?.samples).toEqual(Array.from({ length: 160 }, () => 3_000));
+  });
 });
 
 function pcmFrame(id: string, sample: number) {
@@ -87,6 +112,27 @@ function pcmFrame(id: string, sample: number) {
     channels: 1,
     capturedAt: "2026-06-18T00:00:00.000Z",
     durationMs
+  };
+}
+
+function oddOffsetPcmFrame(id: string, sample: number) {
+  const base = new Uint8Array(1 + 160 * 2);
+  const audio = base.subarray(1);
+  const view = new DataView(audio.buffer, audio.byteOffset, audio.byteLength);
+
+  for (let index = 0; index < 160; index += 1) {
+    view.setInt16(index * 2, sample, true);
+  }
+
+  return {
+    id,
+    direction: "near_end" as const,
+    audio,
+    encoding: "pcm16le" as const,
+    sampleRateHz: 16_000,
+    channels: 1,
+    capturedAt: "2026-06-18T00:00:00.000Z",
+    durationMs: 10
   };
 }
 

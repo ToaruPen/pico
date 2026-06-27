@@ -45,9 +45,9 @@ Create the provider contract:
 ```ts
 export type SpeechActivityGateResult = {
   readonly speech: boolean;
+  readonly provider: "energy" | "ten_vad";
   readonly probability?: number;
   readonly rmsDb: number;
-  readonly reason: "energy_threshold" | "ten_vad";
 };
 
 export type SpeechActivityGate = {

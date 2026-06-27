@@ -36,6 +36,7 @@ export type PiAgentTurnClient = {
   readonly prompt: (input: {
     readonly sessionId: string;
     readonly text: string;
+    readonly deferredToolResults?: readonly DeferredToolDeliverableResult[];
     readonly signal?: AbortSignal;
   }) => Promise<{ readonly text: string }>;
   readonly disposeSession?: (sessionId: string) => void | Promise<void>;
@@ -358,6 +359,10 @@ async function cleanupActiveSessionForShutdown(
   now: () => string
 ): Promise<string | undefined> {
   if (options.memoryWorker === undefined) {
+    if (activeSessionId !== undefined) {
+      cancelDeferredToolSession(options.deferredTools, activeSessionId, "shutdown");
+    }
+
     return activeSessionId;
   }
 
@@ -716,6 +721,7 @@ async function runWakeAcknowledgement(
   const response = await requestPiAgentResponse(
     sessionId,
     prompt,
+    [],
     options,
     counters,
     piStageStartedAt,
@@ -796,6 +802,7 @@ async function runActiveVoiceTurn(
   const response = await requestPiAgentResponse(
     activeSessionId,
     turnRequest.prompt,
+    turnRequest.deferredResults,
     options,
     counters,
     piStageStartedAt,
@@ -861,7 +868,7 @@ function createActiveVoiceTurnRequest(
   const deferredResults = collectDeferredResultsForActiveTurn(options, activeSessionId, now);
 
   return {
-    prompt: appendDeferredResultsToPrompt(transcript, deferredResults),
+    prompt: transcript,
     deferredResults
   };
 }
@@ -870,7 +877,11 @@ function acknowledgeDeferredToolDelivery(
   options: VoiceResidentRuntimeOptions,
   results: readonly DeferredToolDeliverableResult[]
 ): void {
-  options.deferredTools?.acknowledgeDelivered?.(results.map((result) => result.jobId));
+  try {
+    options.deferredTools?.acknowledgeDelivered?.(results.map((result) => result.jobId));
+  } catch {
+    return;
+  }
 }
 
 function collectDeferredResultsForActiveTurn(
@@ -887,28 +898,10 @@ function collectDeferredResultsForActiveTurn(
   );
 }
 
-function appendDeferredResultsToPrompt(
-  transcript: string,
-  results: readonly DeferredToolDeliverableResult[]
-): string {
-  if (results.length === 0) {
-    return transcript;
-  }
-
-  return [
-    transcript,
-    "",
-    "Deferred tool results ready for this voice session:",
-    ...results.map(
-      (result) =>
-        `- ${result.kind} status=${result.status} capturedAt=${result.capturedAt} completedAt=${result.completedAt} summary=${result.summary}`
-    )
-  ].join("\n");
-}
-
 async function requestPiAgentResponse(
   sessionId: string,
   transcript: string,
+  deferredToolResults: readonly DeferredToolDeliverableResult[],
   options: VoiceResidentRuntimeOptions,
   counters: VoiceResidentCounters,
   startedAt: string,
@@ -925,6 +918,7 @@ async function requestPiAgentResponse(
     const response = await options.piAgent.prompt({
       sessionId,
       text: transcript,
+      ...(deferredToolResults.length === 0 ? {} : { deferredToolResults }),
       ...(options.signal === undefined ? {} : { signal: options.signal })
     });
     const completedAt = (options.now ?? defaultNow)();
@@ -1151,7 +1145,11 @@ function cancelDeferredToolSession(
   sessionId: string,
   reason: "session_closed" | "shutdown"
 ): void {
-  deferredTools?.cancelSession?.(sessionId, reason);
+  try {
+    deferredTools?.cancelSession?.(sessionId, reason);
+  } catch {
+    return;
+  }
 }
 
 async function enqueueEndedSessions(
@@ -1247,6 +1245,7 @@ async function runFarewellTurn(
   const response = await requestPiAgentResponse(
     sessionId,
     farewellPrompt,
+    [],
     options,
     counters,
     piStageStartedAt,

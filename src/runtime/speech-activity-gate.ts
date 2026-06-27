@@ -110,11 +110,7 @@ export async function createTenWasmSpeechActivityGate(
   return {
     process(frame) {
       const normalized = defineTenVadFrame(frame, hopSize);
-      const samples = new Int16Array(
-        normalized.audio.buffer,
-        normalized.audio.byteOffset,
-        normalized.audio.byteLength / 2
-      );
+      const samples = readPcm16leSamples(normalized.audio);
       module.HEAP16.set(samples, audioPointer >> 1);
 
       const processResult = module._ten_vad_process(
@@ -147,6 +143,17 @@ export async function createTenWasmSpeechActivityGate(
       module._free(handlePointer);
     }
   };
+}
+
+function readPcm16leSamples(audio: Uint8Array): Int16Array {
+  const view = new DataView(audio.buffer, audio.byteOffset, audio.byteLength);
+  const samples = new Int16Array(audio.byteLength / 2);
+
+  for (let index = 0; index < samples.length; index += 1) {
+    samples[index] = view.getInt16(index * 2, true);
+  }
+
+  return samples;
 }
 
 export function calculatePcm16leRmsDatabase(audio: Uint8Array): number {

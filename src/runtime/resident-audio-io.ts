@@ -445,6 +445,10 @@ async function* readPcmFrames(
   signal.addEventListener("abort", abort, { once: true });
 
   try {
+    if (Number.isNaN(captureStartedAtMs)) {
+      throw new Error("pico resident voice capture clock returned an invalid ISO timestamp");
+    }
+
     for await (const chunk of stdout) {
       pending = Buffer.concat([pending, chunk as Buffer]);
 

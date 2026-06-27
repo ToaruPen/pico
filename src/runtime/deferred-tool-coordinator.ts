@@ -135,6 +135,8 @@ export function createDeferredToolCoordinator(
 
         if (result !== undefined) {
           deliverable.push(result);
+        } else if (job.state === "suppressed") {
+          jobs.delete(job.jobId);
         }
       }
 
@@ -145,17 +147,17 @@ export function createDeferredToolCoordinator(
         const job = jobs.get(jobId);
 
         if (job?.state === "completed" || job?.state === "failed") {
-          job.state = "delivered";
+          jobs.delete(jobId);
         }
       }
     },
     cancelSession(sessionId) {
-      for (const job of jobs.values()) {
+      for (const job of [...jobs.values()]) {
         if (
           job.sessionId === sessionId &&
           (job.state === "running" || job.state === "completed" || job.state === "failed")
         ) {
-          job.state = "cancelled";
+          jobs.delete(job.jobId);
         }
       }
     },

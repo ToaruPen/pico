@@ -388,6 +388,51 @@ describe("resident audio I/O plans", () => {
     await iterator.return?.();
   });
 
+  it("fails clearly when the capture clock returns an invalid timestamp", async () => {
+    const config = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: {
+            provider: "avfoundation",
+            device: ":0"
+          },
+          audioOutput: {
+            provider: "afplay",
+            route: "system_default"
+          }
+        },
+        echoControl: {
+          sampleRateHz: 16000,
+          channels: 1,
+          frameMs: 10
+        }
+      }
+    });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const spawn = vi.fn(() => process.child);
+    const abortController = new AbortController();
+    const iterator: AsyncIterator<VoicePcmFrame> = createResidentPcmFrameSource(
+      config,
+      abortController.signal,
+      spawn,
+      "darwin",
+      () => "not-an-iso-timestamp"
+    )[Symbol.asyncIterator]();
+    const firstFrame = iterator.next();
+
+    process.stdout.write(Buffer.alloc(320, 7));
+
+    await expect(firstFrame).rejects.toThrow(
+      "pico resident voice capture clock returned an invalid ISO timestamp"
+    );
+
+    abortController.abort();
+    process.stdout.end();
+    process.emitClose(0, undefined);
+    await iterator.return?.();
+  });
+
   it("fails before spawning when the input signal is already aborted", async () => {
     const config = definePicoConfig({
       voice: {

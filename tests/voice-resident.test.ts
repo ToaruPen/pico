@@ -500,14 +500,25 @@ describe("voice resident runtime", () => {
     ]);
   });
 
-  it("injects deliverable deferred tool results into the next active Pi Agent turn", async () => {
+  it("passes deliverable deferred tool results separately from the active turn transcript", async () => {
     const lifecycle = createSessionLifecycle({
       ending: {
         mode: "timed",
         durationMs: 60_000
       }
     });
-    const prompts: string[] = [];
+    const deferredResult = {
+      jobId: "deferred-job-1",
+      kind: "camera_scene_description" as const,
+      status: "completed" as const,
+      capturedAt: "2026-06-18T00:00:02.000Z",
+      completedAt: "2026-06-18T00:00:03.000Z",
+      summary: "撮影時点では机の上に教材が見えました。"
+    };
+    const prompts: Array<{
+      readonly text: string;
+      readonly deferredToolResults: unknown;
+    }> = [];
 
     await runVoiceResidentRuntime({
       now: fixedNow(),
@@ -532,7 +543,10 @@ describe("voice resident runtime", () => {
       },
       piAgent: {
         prompt: (input) => {
-          prompts.push(input.text);
+          prompts.push({
+            text: input.text,
+            deferredToolResults: input.deferredToolResults
+          });
           return Promise.resolve({ text: "確認結果を伝えます。" });
         }
       },
@@ -543,27 +557,16 @@ describe("voice resident runtime", () => {
             activeSessionId: "session-1"
           });
 
-          return [
-            {
-              jobId: "deferred-job-1",
-              kind: "camera_scene_description",
-              status: "completed",
-              capturedAt: "2026-06-18T00:00:02.000Z",
-              completedAt: "2026-06-18T00:00:03.000Z",
-              summary: "撮影時点では机の上に教材が見えました。"
-            }
-          ];
+          return [deferredResult];
         }
       }
     });
 
     expect(prompts).toEqual([
-      [
-        "それで、さっきの確認は？",
-        "",
-        "Deferred tool results ready for this voice session:",
-        "- camera_scene_description status=completed capturedAt=2026-06-18T00:00:02.000Z completedAt=2026-06-18T00:00:03.000Z summary=撮影時点では机の上に教材が見えました。"
-      ].join("\n")
+      {
+        text: "それで、さっきの確認は？",
+        deferredToolResults: [deferredResult]
+      }
     ]);
     expect(lifecycle.read("session-1")?.entries[0]).toEqual({
       id: "session-1-entry-1",
@@ -629,6 +632,57 @@ describe("voice resident runtime", () => {
 
     expect(result.failedTurns).toBe(1);
     expect(acknowledged).toEqual([]);
+  });
+
+  it("keeps the completed turn when deferred delivery acknowledgement fails", async () => {
+    const result = await runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      echoControl: createIdleEchoControl(),
+      stt: (() => {
+        const texts = ["ピコ", "結果は？"];
+
+        return {
+          warmup: () => {
+            throw new Error("warmup is not part of resident runtime");
+          },
+          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
+        };
+      })(),
+      tts: createSuccessfulTts("確認しました。"),
+      playback: {
+        play: () => Promise.resolve()
+      },
+      piAgent: {
+        prompt: () => Promise.resolve({ text: "確認しました。" })
+      },
+      deferredTools: {
+        collectDeliverableResults: () => [
+          {
+            jobId: "deferred-job-1",
+            kind: "camera_scene_description",
+            status: "completed",
+            capturedAt: "2026-06-18T00:00:02.000Z",
+            completedAt: "2026-06-18T00:00:03.000Z",
+            summary: "撮影時点では机の上に教材が見えました。"
+          }
+        ],
+        acknowledgeDelivered: () => {
+          throw new Error("deferred acknowledgement store unavailable");
+        }
+      }
+    });
+
+    expect(result.completedTurns).toBe(1);
+    expect(result.failedTurns).toBe(0);
   });
 
   it("does not acknowledge deferred tool delivery when TTS synthesis fails", async () => {
@@ -797,6 +851,56 @@ describe("voice resident runtime", () => {
     });
 
     expect(cancelled).toEqual(["session-1:session_closed"]);
+  });
+
+  it("keeps active session close cleanup running when deferred cancellation fails", async () => {
+    const lifecycle = createSessionLifecycle({
+      ending: {
+        mode: "timed",
+        durationMs: 60_000
+      }
+    });
+
+    await expect(
+      runVoiceResidentRuntime({
+        now: fixedNow(),
+        frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
+        utteranceWindow: perFrameCompatibleUtteranceWindow(),
+        triggerPhrases: ["ピコ"],
+        sessionLifecycle: lifecycle,
+        echoControl: createIdleEchoControl(),
+        stt: (() => {
+          const texts = ["ピコ", "この会話は終わりです。"];
+
+          return {
+            warmup: () => {
+              throw new Error("warmup is not part of resident runtime");
+            },
+            transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
+          };
+        })(),
+        tts: createSuccessfulTts("はい。"),
+        playback: {
+          play: () => Promise.resolve()
+        },
+        piAgent: {
+          prompt: () => {
+            lifecycle.end("session-1");
+
+            return Promise.resolve({ text: "はい。" });
+          }
+        },
+        deferredTools: {
+          collectDeliverableResults: () => [],
+          cancelSession: () => {
+            throw new Error("deferred cancellation store unavailable");
+          }
+        }
+      })
+    ).resolves.toMatchObject({
+      completedTurns: 1,
+      failedTurns: 0
+    });
   });
 
   it("measures Pi Agent response duration with monotonic time instead of wall-clock timestamps", async () => {
@@ -1122,6 +1226,46 @@ describe("voice resident runtime", () => {
     expect(cancelled).toEqual(["session-1:shutdown"]);
     expect(lifecycle.read("session-1")).toBeUndefined();
     expect(disposedAll).toBe(1);
+  });
+
+  it("cancels deferred jobs during shutdown even without a memory worker", async () => {
+    const cancelled: string[] = [];
+
+    const result = await runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [sampleNearEndFrame("mic-trigger")],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      echoControl: createIdleEchoControl(),
+      stt: successfulStt("ピコ"),
+      tts: createSuccessfulTts("unused"),
+      playback: {
+        play: () => Promise.resolve()
+      },
+      piAgent: {
+        prompt: () => {
+          throw new Error("wake-only shutdown should not prompt Pi Agent");
+        }
+      },
+      deferredTools: {
+        collectDeliverableResults: () => [],
+        cancelSession: (sessionId, reason) => {
+          cancelled.push(`${sessionId}:${reason}`);
+        }
+      },
+      wakeAcknowledgement: {
+        enabled: false
+      }
+    });
+
+    expect(result.startedSessions).toBe(1);
+    expect(cancelled).toEqual(["session-1:shutdown"]);
   });
 
   it("does not send suppressed microphone frames to STT", async () => {

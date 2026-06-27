@@ -13,7 +13,10 @@ import type {
   TtsClient,
   TtsSynthesisResult
 } from "../../src/modules/voice/index.js";
-import { createDeferredToolCoordinator } from "../../src/runtime/deferred-tool-coordinator.js";
+import {
+  createDeferredToolCoordinator,
+  type DeferredToolDeliverableResult
+} from "../../src/runtime/deferred-tool-coordinator.js";
 import { createPicoCameraSceneDescriptionDeferredTool } from "../../src/runtime/perception-tool.js";
 import {
   runVoiceResidentRuntime,
@@ -37,6 +40,7 @@ export type ResidentVoiceDeferredRalliesReport = {
     readonly failedTurns: number;
     readonly sttTranscriptsReturned: readonly string[];
     readonly piAgentPrompts: readonly string[];
+    readonly piAgentDeferredResultSummaries: readonly string[];
     readonly piAgentResponses: readonly string[];
     readonly queuedDeferredJobs: readonly string[];
     readonly deliveredDeferredJobs: readonly string[];
@@ -66,6 +70,7 @@ export async function runResidentVoiceDeferredRalliesField(): Promise<ResidentVo
   ];
   const sttTranscriptsReturned: string[] = [];
   const piAgentPrompts: string[] = [];
+  const piAgentDeferredResultSummaries: string[] = [];
   const piAgentResponses: string[] = [];
   const queuedDeferredJobs: string[] = [];
   const deliveredDeferredJobs: string[] = [];
@@ -164,7 +169,9 @@ export async function runResidentVoiceDeferredRalliesField(): Promise<ResidentVo
     piAgent: {
       prompt: async (input) => {
         piAgentPrompts.push(input.text);
-        const response = await respondAsToolCallingAgent(input.text, deferredTool);
+        const deferredResults = input.deferredToolResults ?? [];
+        piAgentDeferredResultSummaries.push(...deferredResults.map((result) => result.summary));
+        const response = await respondAsToolCallingAgent(input.text, deferredResults, deferredTool);
         piAgentResponses.push(response.text);
 
         if (response.queuedJobId !== undefined) {
@@ -200,6 +207,7 @@ export async function runResidentVoiceDeferredRalliesField(): Promise<ResidentVo
     failedTurns: result.failedTurns,
     sttTranscriptsReturned,
     piAgentPrompts,
+    piAgentDeferredResultSummaries,
     piAgentResponses,
     queuedDeferredJobs,
     deliveredDeferredJobs,
@@ -218,6 +226,7 @@ export async function runResidentVoiceDeferredRalliesField(): Promise<ResidentVo
 
 async function respondAsToolCallingAgent(
   prompt: string,
+  deferredResults: readonly DeferredToolDeliverableResult[],
   deferredTool: ReturnType<typeof createPicoCameraSceneDescriptionDeferredTool>
 ): Promise<{
   readonly text: string;
@@ -228,7 +237,7 @@ async function respondAsToolCallingAgent(
   }
 
   if (
-    prompt.includes("1回目: 机の上に教材が見えます。") &&
+    deferredResults.some((result) => result.summary.includes("1回目: 机の上に教材が見えます。")) &&
     prompt.startsWith("結果を教えて。もう一度見て。")
   ) {
     return queueDeferredSceneCheck(
@@ -238,7 +247,9 @@ async function respondAsToolCallingAgent(
     );
   }
 
-  if (prompt.includes("2回目: 入口付近は落ち着いています。")) {
+  if (
+    deferredResults.some((result) => result.summary.includes("2回目: 入口付近は落ち着いています。"))
+  ) {
     return {
       text: "2回目は入口付近が落ち着いています。"
     };
@@ -311,15 +322,30 @@ function matchesExpected(
   expected: ResidentVoiceDeferredRalliesReport["expected"],
   observed: ResidentVoiceDeferredRalliesReport["observed"]
 ): boolean {
-  return (
-    observed.startedSessions === expected.startedSessions &&
-    observed.completedTurns === expected.completedTurns &&
-    observed.failedFrames === 0 &&
-    observed.failedTurns === 0 &&
-    arraysEqual(observed.queuedDeferredJobs, expected.queuedDeferredJobs) &&
-    arraysEqual(observed.deliveredDeferredJobs, expected.deliveredDeferredJobs) &&
-    arraysEqual(observed.acknowledgedDeferredJobs, expected.acknowledgedDeferredJobs)
-  );
+  const checks = [
+    observed.startedSessions === expected.startedSessions,
+    observed.completedTurns === expected.completedTurns,
+    observed.failedFrames === 0,
+    observed.failedTurns === 0,
+    arraysEqual(observed.queuedDeferredJobs, expected.queuedDeferredJobs),
+    arraysEqual(observed.deliveredDeferredJobs, expected.deliveredDeferredJobs),
+    arraysEqual(observed.acknowledgedDeferredJobs, expected.acknowledgedDeferredJobs),
+    arraysEqual(observed.sceneDescriptions, [
+      "1回目: 机の上に教材が見えます。",
+      "2回目: 入口付近は落ち着いています。"
+    ]),
+    arraysEqual(observed.piAgentDeferredResultSummaries, [
+      "1回目: 机の上に教材が見えます。",
+      "2回目: 入口付近は落ち着いています。"
+    ]),
+    arraysEqual(observed.ttsRequests, [
+      "確認します。",
+      "1回目は教材が見えました。もう一度確認します。",
+      "2回目は入口付近が落ち着いています。"
+    ])
+  ];
+
+  return checks.every(Boolean);
 }
 
 function arraysEqual(left: readonly string[], right: readonly string[]): boolean {

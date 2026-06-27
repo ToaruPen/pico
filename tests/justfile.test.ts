@@ -22,5 +22,11 @@ describe("justfile", () => {
     expect(justfile).toContain("voice-dev:");
     expect(justfile).toContain("-npm run resident:voice:launchd -- stop");
     expect(justfile).toContain("resident:voice:dev-terminal -- --terminal=terminal");
+    expect(justfile).toContain("voice-dev-kitty:");
+    expect(justfile).toContain("resident:voice:dev-terminal -- --terminal=kitty");
+    expect(justfile).toContain("resident-voice-dev-terminal:");
+    expect(justfile).toContain("npm run resident:voice:dev-terminal");
+    expect(justfile).toContain("field-resident-voice-deferred-rallies:");
+    expect(justfile).toContain("npm run field:resident-voice-deferred-rallies");
   });
 });

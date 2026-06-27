@@ -119,20 +119,18 @@ function registerPerceptionRuntimeTools(
 ): void {
   const toolProfile = options.toolProfile ?? "default";
   const perceptionToolOptions = {
-    ...(options.voiceProbe === undefined ? {} : { probe: options.voiceProbe })
+    ...(options.voiceProbe === undefined ? {} : { probe: options.voiceProbe }),
+    ...(options.loadConfig === undefined ? {} : { loadConfig: options.loadConfig })
   };
 
-  if (toolProfile === "voice_resident") {
-    if (options.deferredTools !== undefined) {
-      pi.registerTool(
-        createPicoCameraSceneDescriptionDeferredTool({
-          ...perceptionToolOptions,
-          sessionId: options.deferredTools.sessionId,
-          coordinator: options.deferredTools.coordinator,
-          ...(options.loadConfig === undefined ? {} : { loadConfig: options.loadConfig })
-        })
-      );
-    }
+  if (toolProfile === "voice_resident" && options.deferredTools !== undefined) {
+    pi.registerTool(
+      createPicoCameraSceneDescriptionDeferredTool({
+        ...perceptionToolOptions,
+        sessionId: options.deferredTools.sessionId,
+        coordinator: options.deferredTools.coordinator
+      })
+    );
   } else {
     pi.registerTool(createPicoCameraSnapshotTool(perceptionToolOptions));
     pi.registerTool(createPicoPersonDetectionTool(perceptionToolOptions));
