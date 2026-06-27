@@ -30,7 +30,7 @@
 
 - [x] Implement a loopback HTTP activation server that accepts only `POST /v1/resident-voice/activate`.
 - [x] Require `Authorization: Bearer <token>` from a `0600` token file.
-- [x] Return typed results: `accepted`, `ignored_debounce`, `ignored_active`, `unauthorized`, or `not_found`.
+- [x] Return typed results: `accepted`, `ignored_debounce`, `ignored_active`, `unauthorized`, `not_found`, or `method_not_allowed`.
 - [x] Close the HTTP server on abort/shutdown and fail closed on bind errors.
 
 ## Task 3: Runtime Push-To-Talk Gate
