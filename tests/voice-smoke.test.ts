@@ -13,8 +13,8 @@ describe("voice provider smoke configuration", () => {
     await expect(runVoiceProviderSmoke(definePicoConfig({}))).resolves.toEqual({
       stt: {
         status: "skipped",
-        provider: "mlx-whisper",
-        reason: "Set voice.stt.mlxWhisper in pico config to run the mlx-whisper STT smoke."
+        provider: "apple-speech",
+        reason: "Set voice.stt.appleSpeech in pico config to run the Apple Speech STT smoke."
       },
       tts: {
         status: "skipped",
@@ -24,13 +24,13 @@ describe("voice provider smoke configuration", () => {
     });
   });
 
-  it("builds explicit mlx-whisper and Aivis Speech smoke plans from YAML config", () => {
+  it("builds explicit Apple Speech and Aivis Speech smoke plans from YAML config", () => {
     const plan = buildVoiceSmokePlan(
       definePicoConfig({
         voice: {
           stt: {
-            mlxWhisper: {
-              localBaseUrl: " http://127.0.0.1:8765 ",
+            appleSpeech: {
+              localBaseUrl: " http://127.0.0.1:8766 ",
               samplePcm16lePath: " ./samples/known-ja.pcm ",
               sampleRateHz: 16_000,
               channels: 1
@@ -53,10 +53,14 @@ describe("voice provider smoke configuration", () => {
       sampleRateHz: 16_000,
       channels: 1,
       sidecar: {
-        provider: "mlx-whisper",
-        localBaseUrl: "http://127.0.0.1:8765",
-        modelRepo: "mlx-community/whisper-large-v3-turbo",
-        language: "ja"
+        id: "local-apple-speech",
+        provider: "apple-speech",
+        localBaseUrl: "http://127.0.0.1:8766",
+        language: "ja-JP",
+        timeoutMs: 30_000,
+        warmup: {
+          audioSeconds: 0.25
+        }
       }
     });
     expect(plan.tts).toMatchObject({
@@ -85,21 +89,26 @@ describe("voice provider smoke configuration", () => {
     ).toThrow("pico config voice.tts.aivis.speakerId must be a non-negative integer");
   });
 
-  it("rejects partial provider smoke configuration", () => {
-    expect(() =>
-      definePicoConfig({
-        voice: {
-          stt: {
-            mlxWhisper: {
-              localBaseUrl: "http://127.0.0.1:8765"
+  it("uses a distinct skip reason when Apple Speech has no smoke sample", () => {
+    expect(
+      buildVoiceSmokePlan(
+        definePicoConfig({
+          voice: {
+            stt: {
+              appleSpeech: {
+                localBaseUrl: "http://127.0.0.1:8766"
+              }
             }
           }
-        }
-      })
-    ).toThrow(
-      "pico config voice.stt.mlxWhisper.samplePcm16lePath is required when voice.stt.mlxWhisper is set"
-    );
+        })
+      ).stt
+    ).toEqual({
+      status: "skip",
+      reason: "Set voice.stt.appleSpeech.samplePcm16lePath to run the Apple Speech STT smoke."
+    });
+  });
 
+  it("rejects partial TTS provider smoke configuration", () => {
     expect(() =>
       definePicoConfig({
         voice: {
@@ -117,7 +126,7 @@ describe("voice provider smoke configuration", () => {
     const report = {
       stt: {
         status: "skipped",
-        provider: "mlx-whisper"
+        provider: "apple-speech"
       },
       tts: {
         status: "failed",
@@ -131,7 +140,7 @@ describe("voice provider smoke configuration", () => {
     const nonFailingReport = {
       stt: {
         status: "skipped",
-        provider: "mlx-whisper"
+        provider: "apple-speech"
       },
       tts: {
         status: "passed",

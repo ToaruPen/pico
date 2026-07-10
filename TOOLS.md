@@ -13,7 +13,8 @@ instructions.
 
 - `just --list`: show available repo tasks.
 - `just check`: run the full local gate.
-- `just ci`: run the parallel CI gate shape locally.
+- `just ci`: run the Linux CI job's parallel TypeScript gate shape locally.
+- `just apple-speech-check`: run the isolated macOS 26 Swift sidecar gate.
 - `just typecheck`: run TypeScript type checking.
 - `just lint`: run type-aware ESLint.
 - `just ast`: run ast-grep rule tests and scans.
@@ -49,7 +50,7 @@ ast-grep rule and test instead of relying on AGENTS.md prose.
 - Vision provider: `Qwen/Qwen3.5-9B` through Ollama `qwen3.5:9b`.
 - Vision host: protected Windows GPU host reached through Tailscale or
   Cloudflare-protected SSH tunneling.
-- STT candidate: `mlx-whisper`.
+- STT provider: Apple Speech through the loopback Swift sidecar.
 - TTS candidate: Aivis Speech.
 - Camera candidate: Tapo C210 through RTSP first, ONVIF only when bounded PTZ is
   needed.

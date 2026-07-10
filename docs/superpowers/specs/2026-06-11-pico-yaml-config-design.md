@@ -9,7 +9,7 @@ Pico should load local provider settings from one repository-local YAML config f
 - Add a tracked example file at `config/pico.example.yaml`.
 - Support an ignored local file at `config/pico.local.yaml`.
 - Let `PICO_CONFIG_PATH` point to another config file when needed.
-- Load Tapo RTSP, Ollama VLM, mlx-whisper STT, and Aivis Speech TTS smoke settings through one central config boundary.
+- Load Tapo RTSP, Ollama VLM, Apple Speech STT, and Aivis Speech TTS smoke settings through one central config boundary.
 - Keep missing optional provider settings as explicit skipped smoke sections.
 
 ## Non-Goals
@@ -64,11 +64,10 @@ vision:
 
 voice:
   stt:
-    mlxWhisper:
-      id: local-mlx-whisper
-      localBaseUrl: http://127.0.0.1:8765
-      modelRepo: mlx-community/whisper-large-v3-turbo
-      language: ja
+    appleSpeech:
+      id: local-apple-speech
+      localBaseUrl: http://127.0.0.1:8766
+      language: ja-JP
       timeoutMs: 30000
       warmupAudioSeconds: 0.25
       samplePcm16lePath: /tmp/pico-known-ja.pcm
@@ -86,6 +85,12 @@ voice:
 ## Error Handling
 
 Invalid configured values fail fast with field-specific errors. Missing optional provider sections do not fail; they produce skipped smoke plans. Partial provider sections fail because they are actionable configuration mistakes.
+
+`voice.stt.appleSpeech.language`, `sampleRateHz`, and `channels` may be omitted,
+but any explicit values must be `ja-JP`, `16000`, and `1`. The removed
+`voice.stt.mlxWhisper` key fails with a migration error instead of silently
+selecting another provider. `samplePcm16lePath` is optional for resident and
+real-microphone paths and is required only when the provider smoke reads a file.
 
 Tapo stream selection is purpose-specific. `camera.tapo.streams.scene` is used
 for high-quality single-frame scene understanding and defaults to `stream1`.

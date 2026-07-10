@@ -5,16 +5,15 @@ import { pathToFileURL } from "node:url";
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
 import {
   type AivisSpeechServiceConfig,
+  type AppleSpeechSidecarConfig,
   createAivisSpeechTtsClient,
-  createMlxWhisperSttClient,
+  createAppleSpeechSttClient,
   defineAivisSpeechService,
-  defineMlxWhisperSidecar,
-  type MlxWhisperSidecarConfig,
+  defineAppleSpeechSidecar,
   type SttTranscriptionRequest
 } from "../../src/modules/voice/index.js";
 
-const defaultMlxWhisperModelRepo = "mlx-community/whisper-large-v3-turbo";
-const defaultLanguage = "ja";
+const defaultLanguage = "ja-JP";
 const defaultTimeoutMs = 30_000;
 const defaultWarmupAudioSeconds = 0.25;
 const defaultSampleRateHz = 16_000;
@@ -30,7 +29,7 @@ export type VoiceSmokeReport = {
 
 export type VoiceSmokeSectionReport = {
   readonly status: VoiceSmokeStatus;
-  readonly provider: "mlx-whisper" | "aivis-speech";
+  readonly provider: "apple-speech" | "aivis-speech";
   readonly reason?: string;
   readonly details?: Record<string, unknown>;
 };
@@ -38,7 +37,7 @@ export type VoiceSmokeSectionReport = {
 type SttSmokePlan =
   | {
       readonly status: "run";
-      readonly sidecar: MlxWhisperSidecarConfig;
+      readonly sidecar: AppleSpeechSidecarConfig;
       readonly samplePath: string;
       readonly sampleRateHz: number;
       readonly channels: number;
@@ -90,7 +89,7 @@ async function runSttSmoke(plan: SttSmokePlan): Promise<VoiceSmokeSectionReport>
   if (plan.status === "skip") {
     return {
       status: "skipped",
-      provider: "mlx-whisper",
+      provider: "apple-speech",
       reason: plan.reason
     };
   }
@@ -101,7 +100,7 @@ async function runSttSmoke(plan: SttSmokePlan): Promise<VoiceSmokeSectionReport>
     audio = await readFile(plan.samplePath);
   } catch (error) {
     return voiceSmokeFailure(
-      "mlx-whisper",
+      "apple-speech",
       `pico voice STT smoke could not read PCM16LE sample: ${errorMessage(error)}`
     );
   }
@@ -112,25 +111,24 @@ async function runSttSmoke(plan: SttSmokePlan): Promise<VoiceSmokeSectionReport>
     sampleRateHz: plan.sampleRateHz,
     channels: plan.channels
   };
-  const result = await createMlxWhisperSttClient(plan.sidecar).transcribe(request);
+  const result = await createAppleSpeechSttClient(plan.sidecar).transcribe(request);
 
   if (!result.ok) {
     return voiceSmokeFailure(
-      "mlx-whisper",
+      "apple-speech",
       `pico voice STT smoke failed: ${result.reason}: ${result.message}`
     );
   }
 
   if (result.text.trim() === "") {
-    return voiceSmokeFailure("mlx-whisper", "pico voice STT smoke produced an empty transcript");
+    return voiceSmokeFailure("apple-speech", "pico voice STT smoke produced an empty transcript");
   }
 
   return {
     status: "passed",
-    provider: "mlx-whisper",
+    provider: "apple-speech",
     details: {
       sidecarId: result.source.sidecarId,
-      modelRepo: result.source.modelRepo,
       language: result.language,
       confidence: result.confidence,
       durationMs: result.durationMs,
@@ -185,21 +183,28 @@ async function runTtsSmoke(plan: TtsSmokePlan): Promise<VoiceSmokeSectionReport>
 }
 
 function buildSttSmokePlan(config: PicoConfig): SttSmokePlan {
-  const mlxWhisper = config.voice.stt.mlxWhisper;
+  const appleSpeech = config.voice.stt.appleSpeech;
 
-  if (mlxWhisper === undefined) {
+  if (appleSpeech === undefined) {
     return {
       status: "skip",
-      reason: "Set voice.stt.mlxWhisper in pico config to run the mlx-whisper STT smoke."
+      reason: "Set voice.stt.appleSpeech in pico config to run the Apple Speech STT smoke."
+    };
+  }
+
+  if (appleSpeech.samplePcm16lePath === undefined) {
+    return {
+      status: "skip",
+      reason: "Set voice.stt.appleSpeech.samplePcm16lePath to run the Apple Speech STT smoke."
     };
   }
 
   return {
     status: "run",
-    sidecar: buildMlxWhisperSidecar(mlxWhisper),
-    samplePath: mlxWhisper.samplePcm16lePath,
-    sampleRateHz: mlxWhisper.sampleRateHz ?? defaultSampleRateHz,
-    channels: mlxWhisper.channels ?? defaultChannels
+    sidecar: buildAppleSpeechSidecar(appleSpeech),
+    samplePath: appleSpeech.samplePcm16lePath,
+    sampleRateHz: appleSpeech.sampleRateHz ?? defaultSampleRateHz,
+    channels: appleSpeech.channels ?? defaultChannels
   };
 }
 
@@ -226,18 +231,17 @@ function buildTtsSmokePlan(config: PicoConfig): TtsSmokePlan {
   };
 }
 
-function buildMlxWhisperSidecar(
-  config: PicoConfig["voice"]["stt"]["mlxWhisper"]
-): MlxWhisperSidecarConfig {
+function buildAppleSpeechSidecar(
+  config: PicoConfig["voice"]["stt"]["appleSpeech"]
+): AppleSpeechSidecarConfig {
   if (config === undefined) {
-    throw new Error("pico mlx-whisper smoke config is required");
+    throw new Error("pico Apple Speech smoke config is required");
   }
 
-  return defineMlxWhisperSidecar({
-    id: config.id ?? "local-mlx-whisper",
-    provider: "mlx-whisper",
+  return defineAppleSpeechSidecar({
+    id: config.id ?? "local-apple-speech",
+    provider: "apple-speech",
     localBaseUrl: config.localBaseUrl,
-    modelRepo: config.modelRepo ?? defaultMlxWhisperModelRepo,
     language: config.language ?? defaultLanguage,
     timeoutMs: config.timeoutMs ?? defaultTimeoutMs,
     warmup: {

@@ -25,7 +25,7 @@ export type PicoConfig = DeepReadonly<{
     probes: PicoVoiceProbeConfig;
     echoControl: PicoEchoControlConfig;
     stt: {
-      mlxWhisper?: PicoMlxWhisperConfig;
+      appleSpeech?: PicoAppleSpeechConfig;
     };
     tts: {
       aivis?: PicoAivisConfig;
@@ -246,16 +246,15 @@ export type PicoEchoControlConfig = {
   };
 };
 
-export type PicoMlxWhisperConfig = {
+export type PicoAppleSpeechConfig = {
   readonly id?: string;
   readonly localBaseUrl: string;
-  readonly modelRepo?: string;
-  readonly language?: string;
+  readonly language?: "ja-JP";
   readonly timeoutMs?: number;
   readonly warmupAudioSeconds?: number;
-  readonly samplePcm16lePath: string;
-  readonly sampleRateHz?: number;
-  readonly channels?: number;
+  readonly samplePcm16lePath?: string;
+  readonly sampleRateHz?: 16_000;
+  readonly channels?: 1;
 };
 
 export type PicoAivisConfig = {
@@ -707,6 +706,7 @@ function defineVoiceSection(root: Record<string, unknown>): PicoConfig["voice"] 
     tts: defineVoiceTtsConfig(voice)
   };
 
+  requireAppleSpeechFrameContract(voiceConfig);
   requireVoiceResidentVadFrameContract(voiceConfig);
 
   return voiceConfig;
@@ -716,10 +716,15 @@ function defineVoiceSttConfig(
   voice: Record<string, unknown> | undefined
 ): PicoConfig["voice"]["stt"] {
   const stt = readOptionalRecord(voice?.stt, "pico config voice.stt");
-  const mlxWhisper = readOptionalRecord(stt?.mlxWhisper, "pico config voice.stt.mlxWhisper");
+  if (stt !== undefined && Object.hasOwn(stt, "mlxWhisper")) {
+    throw new Error(
+      "pico config voice.stt.mlxWhisper was removed; migrate to voice.stt.appleSpeech"
+    );
+  }
+  const appleSpeech = readOptionalRecord(stt?.appleSpeech, "pico config voice.stt.appleSpeech");
 
   return {
-    ...(mlxWhisper === undefined ? {} : { mlxWhisper: defineMlxWhisperConfig(mlxWhisper) })
+    ...(appleSpeech === undefined ? {} : { appleSpeech: defineAppleSpeechConfig(appleSpeech) })
   };
 }
 
@@ -917,6 +922,20 @@ function requireVoiceResidentVadFrameContract(voice: PicoConfig["voice"]): void 
     throw new Error(
       `pico config voice.echoControl.frameMs must be ${String(requiredFrameMs)} for ten_vad hopSize ${String(vad.hopSize)}`
     );
+  }
+}
+
+function requireAppleSpeechFrameContract(voice: PicoConfig["voice"]): void {
+  if (voice.stt.appleSpeech === undefined) {
+    return;
+  }
+
+  if (voice.echoControl.sampleRateHz !== 16_000) {
+    throw new Error("pico config voice.echoControl.sampleRateHz must be 16000 for Apple Speech");
+  }
+
+  if (voice.echoControl.channels !== 1) {
+    throw new Error("pico config voice.echoControl.channels must be 1 for Apple Speech");
   }
 }
 
@@ -1412,40 +1431,69 @@ function defineDisabledPersonDetectionConfig(
   }) as PicoPersonDetectionConfig;
 }
 
-function defineMlxWhisperConfig(input: Record<string, unknown>): PicoMlxWhisperConfig {
+function defineAppleSpeechConfig(input: Record<string, unknown>): PicoAppleSpeechConfig {
+  const language = readOptionalAppleSpeechLanguage(input.language);
+  const sampleRateHz = readOptionalAppleSpeechSampleRate(input.sampleRateHz);
+  const channels = readOptionalAppleSpeechChannels(input.channels);
+
   return {
-    ...optionalStringProperty(input, "id", "pico config voice.stt.mlxWhisper.id"),
-    localBaseUrl: requireLocalBaseUrl(
+    ...optionalStringProperty(input, "id", "pico config voice.stt.appleSpeech.id"),
+    localBaseUrl: requireAppleSpeechBaseUrl(
       input.localBaseUrl,
-      "pico config voice.stt.mlxWhisper.localBaseUrl"
+      "pico config voice.stt.appleSpeech.localBaseUrl"
     ),
-    ...optionalStringProperty(input, "modelRepo", "pico config voice.stt.mlxWhisper.modelRepo"),
-    ...optionalStringProperty(input, "language", "pico config voice.stt.mlxWhisper.language"),
+    ...(language === undefined ? {} : { language }),
     ...optionalPositiveIntegerProperty(
       input,
       "timeoutMs",
-      "pico config voice.stt.mlxWhisper.timeoutMs"
+      "pico config voice.stt.appleSpeech.timeoutMs"
     ),
     ...optionalPositiveNumberProperty(
       input,
       "warmupAudioSeconds",
-      "pico config voice.stt.mlxWhisper.warmupAudioSeconds"
+      "pico config voice.stt.appleSpeech.warmupAudioSeconds"
     ),
-    samplePcm16lePath: requireString(
-      input.samplePcm16lePath,
-      "pico config voice.stt.mlxWhisper.samplePcm16lePath"
-    ),
-    ...optionalPositiveIntegerProperty(
+    ...optionalStringProperty(
       input,
-      "sampleRateHz",
-      "pico config voice.stt.mlxWhisper.sampleRateHz"
+      "samplePcm16lePath",
+      "pico config voice.stt.appleSpeech.samplePcm16lePath"
     ),
-    ...optionalPositiveIntegerProperty(
-      input,
-      "channels",
-      "pico config voice.stt.mlxWhisper.channels"
-    )
+    ...(sampleRateHz === undefined ? {} : { sampleRateHz }),
+    ...(channels === undefined ? {} : { channels })
   };
+}
+
+function readOptionalAppleSpeechLanguage(value: unknown): "ja-JP" | undefined {
+  const language = readOptionalString(value, "pico config voice.stt.appleSpeech.language");
+
+  if (language !== undefined && language !== "ja-JP") {
+    throw new Error("pico config voice.stt.appleSpeech.language must be ja-JP");
+  }
+
+  return language;
+}
+
+function readOptionalAppleSpeechSampleRate(value: unknown): 16_000 | undefined {
+  const sampleRateHz = readOptionalPositiveInteger(
+    value,
+    "pico config voice.stt.appleSpeech.sampleRateHz"
+  );
+
+  if (sampleRateHz !== undefined && sampleRateHz !== 16_000) {
+    throw new Error("pico config voice.stt.appleSpeech.sampleRateHz must be 16000");
+  }
+
+  return sampleRateHz;
+}
+
+function readOptionalAppleSpeechChannels(value: unknown): 1 | undefined {
+  const channels = readOptionalPositiveInteger(value, "pico config voice.stt.appleSpeech.channels");
+
+  if (channels !== undefined && channels !== 1) {
+    throw new Error("pico config voice.stt.appleSpeech.channels must be 1");
+  }
+
+  return channels;
 }
 
 function defineAivisConfig(input: Record<string, unknown>): PicoAivisConfig {
@@ -1536,15 +1584,19 @@ function resolveConfigRelativePaths(config: PicoConfig, baseDirectory: string): 
       },
       stt: {
         ...config.voice.stt,
-        ...(config.voice.stt.mlxWhisper === undefined
+        ...(config.voice.stt.appleSpeech === undefined
           ? {}
           : {
-              mlxWhisper: {
-                ...config.voice.stt.mlxWhisper,
-                samplePcm16lePath: resolveConfigRelativePath(
-                  baseDirectory,
-                  config.voice.stt.mlxWhisper.samplePcm16lePath
-                )
+              appleSpeech: {
+                ...config.voice.stt.appleSpeech,
+                ...(config.voice.stt.appleSpeech.samplePcm16lePath === undefined
+                  ? {}
+                  : {
+                      samplePcm16lePath: resolveConfigRelativePath(
+                        baseDirectory,
+                        config.voice.stt.appleSpeech.samplePcm16lePath
+                      )
+                    })
               }
             })
       }
@@ -1708,6 +1760,17 @@ function requireLocalBaseUrl(value: unknown, label: string): string {
   requireHttpUrl(parsedUrl, label);
   requireOriginUrl(parsedUrl, label);
   requireLocalTunnelUrl(parsedUrl, label);
+
+  return localBaseUrl;
+}
+
+function requireAppleSpeechBaseUrl(value: unknown, label: string): string {
+  const localBaseUrl = requireLocalBaseUrl(value, label);
+  const parsedUrl = new URL(localBaseUrl);
+
+  if (parsedUrl.protocol !== "http:" || parsedUrl.hostname !== "127.0.0.1") {
+    throw new Error(`${label} must use an http://127.0.0.1 origin`);
+  }
 
   return localBaseUrl;
 }

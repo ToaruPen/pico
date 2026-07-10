@@ -81,14 +81,14 @@ describe("live voice turn runtime", () => {
         return Promise.resolve({
           ok: true,
           text: "こんにちは",
-          language: "ja",
+          language: "ja-JP",
           confidence: 0.8,
           durationMs: 300,
           segments: [],
           source: {
-            sidecarId: "local-mlx-whisper",
-            provider: "mlx-whisper",
-            modelRepo: "mlx-community/whisper-large-v3-turbo"
+            sidecarId: "local-apple-speech",
+            provider: "apple-speech",
+            language: "ja-JP"
           }
         });
       }
@@ -321,9 +321,9 @@ describe("live voice turn runtime", () => {
               reason: "backend_error",
               message: "STT sidecar failed",
               source: {
-                sidecarId: "local-mlx-whisper",
-                provider: "mlx-whisper",
-                modelRepo: "mlx-community/whisper-large-v3-turbo"
+                sidecarId: "local-apple-speech",
+                provider: "apple-speech",
+                language: "ja-JP"
               }
             })
         },
@@ -435,14 +435,14 @@ function successfulStt(text: string): SttClient {
       Promise.resolve({
         ok: true,
         text,
-        language: "ja",
+        language: "ja-JP",
         confidence: 0.8,
         durationMs: 300,
         segments: [],
         source: {
-          sidecarId: "local-mlx-whisper",
-          provider: "mlx-whisper",
-          modelRepo: "mlx-community/whisper-large-v3-turbo"
+          sidecarId: "local-apple-speech",
+          provider: "apple-speech",
+          language: "ja-JP"
         }
       })
   };
@@ -462,14 +462,14 @@ function sequentialStt(texts: readonly string[]): SttClient {
       return Promise.resolve({
         ok: true,
         text,
-        language: "ja",
+        language: "ja-JP",
         confidence: 0.8,
         durationMs: 300,
         segments: [],
         source: {
-          sidecarId: "local-mlx-whisper",
-          provider: "mlx-whisper",
-          modelRepo: "mlx-community/whisper-large-v3-turbo"
+          sidecarId: "local-apple-speech",
+          provider: "apple-speech",
+          language: "ja-JP"
         }
       });
     }

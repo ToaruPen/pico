@@ -1,16 +1,21 @@
 # Pico Foundation Implementation Plan
 
 Date: 2026-06-10
-Status: Current
+Status: Historical
+
+> This plan records the foundation decisions made in June 2026. The current
+> STT provider contract is defined by
+> [Apple Speech STT Migration Design](../specs/2026-07-11-apple-speech-stt-migration-design.md),
+> which supersedes the MLX Whisper selection below.
 
 ## Goal
 
 Build `pico` as a Pi Agent-centered domain extension for one resident AI
 support staff member in an after-school care facility.
 
-This plan describes the current implementation baseline and the next build
-steps. It intentionally keeps only the active layout, active decisions, and
-current provider selections.
+This plan describes the implementation baseline and next build steps at the
+time it was written. Later specifications supersede provider decisions where
+they say so explicitly.
 
 ## Current Baseline
 
@@ -182,7 +187,7 @@ Do not carry forward:
 - Daemon pipeline events.
 - Any compatibility provider paths.
 
-### STT / mlx-whisper
+### STT / mlx-whisper (historical)
 
 Source implementation references:
 

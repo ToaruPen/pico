@@ -19,7 +19,7 @@ only active decisions and relevant source references.
 | memory | In-process short-term memory first | Active interaction continuity only. |
 | long_memory | SQLite + FTS5 + explicit Mem0/Qdrant secondary index | SQLite is the durable source of truth; vector retrieval is replaceable. |
 | local_models | Selected provider boundary | Model access is explicit, not automatically switched. |
-| STT | `mlx-whisper` | Current local STT baseline. |
+| STT | Apple Speech | Current Japanese STT through a loopback Swift sidecar on macOS 26. |
 | TTS | Aivis Speech | Current local Japanese TTS baseline. |
 | vision | Qwen/Qwen3.5-9B via remote Windows Ollama | Use Ollama `qwen3.5:9b` on a protected Windows GPU host. |
 | camera | RTSP snapshot first | Add ONVIF only for bounded PTZ work. |
@@ -70,14 +70,21 @@ Sources:
 
 Selected provider:
 
-- `mlx-whisper`
+- Apple Speech `SpeechAnalyzer` / `SpeechTranscriber`
+- Fixed `ja-JP`, PCM16LE, 16 kHz, mono contract through the loopback Swift
+  sidecar
 
 Sources:
 
 - Author-local archived references, not included in this repository:
   - `0029-mlx-whisper-stt-on-apple-silicon.md`
   - `0041-provider-selectable-stt-with-apple-speechanalyzer.md`
-- `mlx-whisper`: https://pypi.org/project/mlx-whisper/
+- Migration decision and runtime contract:
+  `docs/superpowers/specs/2026-07-11-apple-speech-stt-migration-design.md`
+- Apple SpeechAnalyzer:
+  https://developer.apple.com/documentation/speech/speechanalyzer
+- Apple SpeechTranscriber:
+  https://developer.apple.com/documentation/speech/speechtranscriber
 
 ## TTS
 

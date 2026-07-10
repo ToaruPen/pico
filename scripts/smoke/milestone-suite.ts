@@ -295,7 +295,7 @@ function failedConfigProviderSections(error: unknown): readonly PicoMilestoneSmo
   const reason = `pico config load failed: ${errorMessage(error)}`;
 
   return [
-    failedSection("voice_stt", "mlx-whisper", reason),
+    failedSection("voice_stt", "apple-speech", reason),
     failedSection("voice_tts", "aivis-speech", reason),
     failedSection("resident_audio_input", "resident-audio-input", reason),
     failedSection("tapo_snapshot", "tapo-rtsp", reason),
@@ -339,7 +339,7 @@ async function runVoiceSections(
     return [toSection("voice_stt", report.stt), toSection("voice_tts", report.tts)];
   } catch (error) {
     return [
-      failedSection("voice_stt", "mlx-whisper", errorMessage(error)),
+      failedSection("voice_stt", "apple-speech", errorMessage(error)),
       failedSection("voice_tts", "aivis-speech", errorMessage(error))
     ];
   }

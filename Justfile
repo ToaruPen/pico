@@ -72,7 +72,11 @@ ast:
   npm run ast:test
   npm run ast
 
+apple-speech-check:
+  bash scripts/ci/run-apple-speech-gates.sh
+
 check:
+  if [ "$(uname -s)" = "Darwin" ]; then bash scripts/ci/run-apple-speech-gates.sh; fi
   npm run check
 
 ci:

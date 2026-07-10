@@ -128,10 +128,12 @@ voice:
     diagnostics:
       enabled: true
   stt:
-    mlxWhisper:
-      localBaseUrl: http://127.0.0.1:8765
+    appleSpeech:
+      localBaseUrl: http://127.0.0.1:8766
       samplePcm16lePath: /tmp/pico-known-ja.pcm
-      # Optional defaults: language=ja, sampleRateHz=16000, channels=1.
+      # Optional defaults: id=local-apple-speech, language=ja-JP,
+      # timeoutMs=30000, warmupAudioSeconds=0.25, sampleRateHz=16000, channels=1.
+      # samplePcm16lePath is only required by the provider smoke command.
   tts:
     aivis:
       localBaseUrl: http://127.0.0.1:10101

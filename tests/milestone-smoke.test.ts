@@ -1,8 +1,8 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 
 import {
   type PicoMilestoneSmokeDependencies,
@@ -33,7 +33,7 @@ function configuredSectionDependencies(): PicoMilestoneSmokeDependencies {
       Promise.resolve({
         stt: {
           status: "skipped",
-          provider: "mlx-whisper",
+          provider: "apple-speech",
           reason: "STT sidecar is not configured."
         },
         tts: {
@@ -138,8 +138,20 @@ function requireSection(
 }
 
 describe("pico milestone smoke suite", () => {
+  const isolatedConfigDirectory = mkdtempSync(join(tmpdir(), "pico-milestone-empty-config-"));
+  const isolatedConfigPath = join(isolatedConfigDirectory, "pico.local.yaml");
+
+  writeFileSync(isolatedConfigPath, "{}\n");
+
+  afterAll(() => {
+    rmSync(isolatedConfigDirectory, { recursive: true });
+  });
+
   it("reports all milestone sections with deterministic memory and audit evidence", async () => {
-    const report = await runPicoMilestoneSmokeSuite({}, configuredSectionDependencies());
+    const report = await runPicoMilestoneSmokeSuite(
+      { PICO_CONFIG_PATH: isolatedConfigPath },
+      configuredSectionDependencies()
+    );
 
     expect(report.status).toBe("skipped");
     expect(picoMilestoneSmokeExitCode(report)).toBe(0);
@@ -149,14 +161,14 @@ describe("pico milestone smoke suite", () => {
 
   it("returns a failing process code when any milestone section fails", async () => {
     const report = await runPicoMilestoneSmokeSuite(
-      {},
+      { PICO_CONFIG_PATH: isolatedConfigPath },
       {
         runPiRuntimeCommand: () => piPassed,
         runVoiceProviderSmoke: () =>
           Promise.resolve({
             stt: {
               status: "skipped",
-              provider: "mlx-whisper"
+              provider: "apple-speech"
             },
             tts: {
               status: "skipped",
@@ -212,6 +224,7 @@ describe("pico milestone smoke suite", () => {
 
   it("passes the suite environment into the Pi runtime command", async () => {
     const suiteEnvironment = {
+      PICO_CONFIG_PATH: isolatedConfigPath,
       PICO_PI_AGENT_TOKEN: "configured-for-test"
     } as NodeJS.ProcessEnv;
     let observedEnvironment: NodeJS.ProcessEnv | undefined;
@@ -257,7 +270,7 @@ vision:
           return Promise.resolve({
             stt: {
               status: "skipped",
-              provider: "mlx-whisper"
+              provider: "apple-speech"
             },
             tts: {
               status: "skipped",
@@ -402,7 +415,7 @@ audit:
 
   it("maps a passing Mem0 runtime smoke section into the milestone report", async () => {
     const report = await runPicoMilestoneSmokeSuite(
-      {},
+      { PICO_CONFIG_PATH: isolatedConfigPath },
       {
         ...configuredSectionDependencies(),
         runMem0RuntimeSmoke: () =>
@@ -436,7 +449,7 @@ audit:
 
   it("maps a failed Mem0 runtime smoke section into the milestone report status", async () => {
     const report = await runPicoMilestoneSmokeSuite(
-      {},
+      { PICO_CONFIG_PATH: isolatedConfigPath },
       {
         ...configuredSectionDependencies(),
         runMem0RuntimeSmoke: () =>
@@ -459,7 +472,7 @@ audit:
 
   it("normalizes thrown Pi runtime errors into a failed section", async () => {
     const report = await runPicoMilestoneSmokeSuite(
-      {},
+      { PICO_CONFIG_PATH: isolatedConfigPath },
       {
         ...configuredSectionDependencies(),
         runPiRuntimeCommand: () => {
@@ -479,7 +492,10 @@ audit:
   });
 
   it("reports audit OTel evidence from mapped audit records", async () => {
-    const report = await runPicoMilestoneSmokeSuite({}, configuredSectionDependencies());
+    const report = await runPicoMilestoneSmokeSuite(
+      { PICO_CONFIG_PATH: isolatedConfigPath },
+      configuredSectionDependencies()
+    );
     const auditSection = requireSection(report, "audit_otel");
 
     expect(auditSection.details).toMatchObject({
@@ -627,7 +643,7 @@ audit:
 
   it("classifies missing Pi Agent model credentials as an actionable skip", async () => {
     const report = await runPicoMilestoneSmokeSuite(
-      {},
+      { PICO_CONFIG_PATH: isolatedConfigPath },
       {
         runPiRuntimeCommand: () => ({
           status: 2,
@@ -639,7 +655,7 @@ audit:
           Promise.resolve({
             stt: {
               status: "skipped",
-              provider: "mlx-whisper"
+              provider: "apple-speech"
             },
             tts: {
               status: "skipped",

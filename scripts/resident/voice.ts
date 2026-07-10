@@ -14,9 +14,9 @@ import {
   type AivisSpeechServiceConfig,
   checkAivisSpeechServiceHealth,
   createAivisSpeechTtsClient,
-  createMlxWhisperSttClient,
+  createAppleSpeechSttClient,
   defineAivisSpeechService,
-  defineMlxWhisperSidecar
+  defineAppleSpeechSidecar
 } from "../../src/modules/voice/index.js";
 import { createDeferredToolCoordinator } from "../../src/runtime/deferred-tool-coordinator.js";
 import { createPiAgentTurnClient } from "../../src/runtime/pi-agent-turn.js";
@@ -390,22 +390,21 @@ async function createConfiguredSpeechActivityGate(config: PicoConfig) {
 }
 
 function createConfiguredStt(config: PicoConfig) {
-  const mlxWhisper = config.voice.stt.mlxWhisper;
+  const appleSpeech = config.voice.stt.appleSpeech;
 
-  if (mlxWhisper === undefined) {
-    throw new Error("pico resident voice requires voice.stt.mlxWhisper config");
+  if (appleSpeech === undefined) {
+    throw new Error("pico resident voice requires voice.stt.appleSpeech config");
   }
 
-  return createMlxWhisperSttClient(
-    defineMlxWhisperSidecar({
-      id: mlxWhisper.id ?? "local-mlx-whisper",
-      provider: "mlx-whisper",
-      localBaseUrl: mlxWhisper.localBaseUrl,
-      modelRepo: mlxWhisper.modelRepo ?? "mlx-community/whisper-large-v3-turbo",
-      language: mlxWhisper.language ?? "ja",
-      timeoutMs: mlxWhisper.timeoutMs ?? 30_000,
+  return createAppleSpeechSttClient(
+    defineAppleSpeechSidecar({
+      id: appleSpeech.id ?? "local-apple-speech",
+      provider: "apple-speech",
+      localBaseUrl: appleSpeech.localBaseUrl,
+      language: appleSpeech.language ?? "ja-JP",
+      timeoutMs: appleSpeech.timeoutMs ?? 30_000,
       warmup: {
-        audioSeconds: mlxWhisper.warmupAudioSeconds ?? 0.25
+        audioSeconds: appleSpeech.warmupAudioSeconds ?? 0.25
       }
     })
   );

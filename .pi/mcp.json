@@ -1,0 +1,28 @@
+{
+  "settings": {
+    "toolPrefix": "server",
+    "disableProxyTool": true
+  },
+  "mcpServers": {
+    "stackchan": {
+      "url": "http://127.0.0.1:18767/mcp",
+      "auth": "bearer",
+      "bearerTokenEnv": "STACKCHAN_TOKEN",
+      "lifecycle": "lazy",
+      "exposeResources": false,
+      "directTools": [
+        "get_status",
+        "get_device_info",
+        "take_photo",
+        "set_volume",
+        "set_brightness",
+        "move_head",
+        "get_head_angles",
+        "set_avatar",
+        "set_mouth",
+        "set_blink",
+        "say"
+      ]
+    }
+  }
+}
