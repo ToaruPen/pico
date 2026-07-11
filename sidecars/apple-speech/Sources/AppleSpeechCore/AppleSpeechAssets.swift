@@ -18,6 +18,9 @@ public enum AppleSpeechAssets {
   }
 
   public static func install(localeIdentifier: String) async throws {
+    guard localeIdentifier == AppleSpeechConstants.locale else {
+      throw SidecarServiceError.modelLoad
+    }
     guard
       SpeechTranscriber.isAvailable,
       let supportedLocale = await SpeechTranscriber.supportedLocale(
@@ -118,6 +121,9 @@ public enum AppleSpeechAssets {
     _ inputFormat: AVAudioFormat,
     bestAvailableFormat: AVAudioFormat?
   ) -> Bool {
-    bestAvailableFormat == inputFormat
+    guard let bestAvailableFormat else { return false }
+    return bestAvailableFormat.commonFormat == inputFormat.commonFormat
+      && bestAvailableFormat.sampleRate == inputFormat.sampleRate
+      && bestAvailableFormat.channelCount == inputFormat.channelCount
   }
 }

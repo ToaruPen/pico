@@ -32,12 +32,14 @@ Run all local checks:
 just check
 ```
 
-Run the TypeScript gates in the same parallel shape as the Linux CI job. On
-macOS, `just check` additionally owns the Apple Speech gate:
+Run the TypeScript gates in the same parallel shape as the Linux CI job:
 
 ```bash
 just ci
 ```
+
+`just ci` is TypeScript-only. On macOS, use `just check` above to run both the
+TypeScript gates and the Apple Speech gate.
 
 Run the milestone smoke suite after local credentials and hardware/provider
 sidecars are configured. Smoke commands are regression and readiness gates, not
@@ -119,8 +121,8 @@ The tracked `.pi/mcp.json` reads only `STACKCHAN_TOKEN`; it does not contain the
 token. It keeps the MCP endpoint on loopback and selects a bounded direct-tool
 set instead of all gateway hardware and configuration tools.
 
-The adapter needs cached MCP metadata before it can register direct tools. Prime
-that cache in a trusted interactive session with all model-callable tools
+The adapter requires cached MCP metadata before it can register direct tools.
+Prime that cache in a trusted interactive session with all model-callable tools
 disabled, then restart Pi:
 
 ```text

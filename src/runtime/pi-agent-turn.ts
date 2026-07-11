@@ -88,11 +88,11 @@ export type PiAgentTurnClientOptions = {
 export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAgentTurnClient {
   const sessions = new Map<string, Promise<PiAgentSdkSession>>();
   const sessionDisposals = new Map<string, Promise<void>>();
-  const activeTurns = new Set<string>();
+  const activeTurns = new Map<string, Promise<void>>();
 
   return {
     async prompt(input) {
-      claimTurn(activeTurns, sessionDisposals, input.sessionId);
+      const releaseTurn = claimTurn(activeTurns, sessionDisposals, input.sessionId);
       const output: string[] = [];
       let unsubscribe: (() => void) | undefined;
       let abortHandle: PromptAbortHandle | undefined;
@@ -115,13 +115,21 @@ export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAg
         }
         throw error;
       } finally {
-        abortHandle?.remove();
-        unsubscribe?.();
-        activeTurns.delete(input.sessionId);
+        try {
+          abortHandle?.remove();
+          unsubscribe?.();
+        } finally {
+          releaseTurn();
+        }
       }
     },
     async disposeSession(sessionId) {
-      const disposal = getOrStartSessionDisposal(sessions, sessionDisposals, sessionId);
+      const disposal = getOrStartSessionDisposal(
+        sessions,
+        sessionDisposals,
+        activeTurns,
+        sessionId
+      );
 
       if (disposal === undefined) {
         return;
@@ -134,7 +142,12 @@ export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAg
 
       const results = await Promise.allSettled(
         sessionIds.map(async (sessionId) => {
-          const disposal = getOrStartSessionDisposal(sessions, sessionDisposals, sessionId);
+          const disposal = getOrStartSessionDisposal(
+            sessions,
+            sessionDisposals,
+            activeTurns,
+            sessionId
+          );
           if (disposal !== undefined) {
             await awaitSessionDisposal(sessionDisposals, sessionId, disposal);
           }
@@ -178,10 +191,10 @@ function formatPromptForSdkSession(
 }
 
 function claimTurn(
-  activeTurns: Set<string>,
+  activeTurns: Map<string, Promise<void>>,
   sessionDisposals: Map<string, Promise<void>>,
   sessionId: string
-): void {
+): () => void {
   if (sessionDisposals.has(sessionId)) {
     throw new Error("pico resident Pi Agent session is being disposed");
   }
@@ -190,7 +203,18 @@ function claimTurn(
     throw new Error("pico resident Pi Agent turn is already active for this session");
   }
 
-  activeTurns.add(sessionId);
+  let resolveTurn: (() => void) | undefined;
+  const settled = new Promise<void>((resolve) => {
+    resolveTurn = resolve;
+  });
+  activeTurns.set(sessionId, settled);
+
+  return () => {
+    if (activeTurns.get(sessionId) === settled) {
+      activeTurns.delete(sessionId);
+    }
+    resolveTurn?.();
+  };
 }
 
 async function getOrCreateTurnSession(
@@ -220,6 +244,7 @@ async function getOrCreateTurnSession(
 function getOrStartSessionDisposal(
   sessions: Map<string, Promise<PiAgentSdkSession>>,
   sessionDisposals: Map<string, Promise<void>>,
+  activeTurns: Map<string, Promise<void>>,
   sessionId: string
 ): Promise<void> | undefined {
   const existing = sessionDisposals.get(sessionId);
@@ -232,7 +257,12 @@ function getOrStartSessionDisposal(
     return undefined;
   }
 
-  const disposal = disposePendingSession(sessions, sessionId, pendingSession);
+  const disposal = disposePendingSession(
+    sessions,
+    sessionId,
+    pendingSession,
+    activeTurns.get(sessionId)
+  );
   sessionDisposals.set(sessionId, disposal);
   return disposal;
 }
@@ -254,9 +284,11 @@ async function awaitSessionDisposal(
 async function disposePendingSession(
   sessions: Map<string, Promise<PiAgentSdkSession>>,
   sessionId: string,
-  pendingSession: Promise<PiAgentSdkSession>
+  pendingSession: Promise<PiAgentSdkSession>,
+  activeTurn: Promise<void> | undefined
 ): Promise<void> {
   try {
+    await activeTurn;
     await shutdownAndDisposeSession(await pendingSession);
   } finally {
     if (sessions.get(sessionId) === pendingSession) {

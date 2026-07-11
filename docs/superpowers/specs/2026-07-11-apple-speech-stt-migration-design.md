@@ -43,8 +43,9 @@ text、language、confidence、duration、確定 segment を返す。失敗 code
 ## Runtime boundary
 
 sidecar は同時に 1 件だけ transcription admission を許可する。処理中の追加 request は
-body を展開する前に busy として拒否し、resident 側で暗黙に再試行しない。timeout または
-cancellation 時は Speech analyzer と result consumer を終了させる。
+body を展開する前に HTTP 429 で busy として拒否する。wire payload は 4 種の failure code
+契約を維持して `backend_error` と固定 message を返し、resident 側で暗黙に再試行しない。
+timeout または cancellation 時は Speech analyzer と result consumer を終了させる。
 
 sidecar の起動・再起動は pico の TypeScript process が所有しない。operator は release
 binary を trusted user process として先に起動し、次の順に readiness を確認する。

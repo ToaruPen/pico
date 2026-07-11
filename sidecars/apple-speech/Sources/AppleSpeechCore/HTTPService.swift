@@ -60,7 +60,7 @@ public struct SidecarHTTPHandler: HTTPHandler {
       }
       return failureResponse(for: .modelLoad, status: .serviceUnavailable)
     case (.POST, "/v1/transcriptions"):
-      return await handleTranscription(request)
+      return try await handleTranscription(request)
     case (_, "/health"), (_, "/ready"), (_, "/v1/transcriptions"):
       return failureResponse(for: .invalidRequest, status: .methodNotAllowed)
     default:
@@ -68,14 +68,14 @@ public struct SidecarHTTPHandler: HTTPHandler {
     }
   }
 
-  private func handleTranscription(_ request: HTTPRequest) async -> HTTPResponse {
+  private func handleTranscription(_ request: HTTPRequest) async throws -> HTTPResponse {
     guard isJSONContentType(request.headers[.contentType]) else {
       return failureResponse(for: .invalidRequest, status: .unsupportedMediaType)
     }
 
     guard
-      let response = await admission.perform({
-        await handleAdmittedTranscription(request)
+      let response = try await admission.perform({
+        try await handleAdmittedTranscription(request)
       })
     else {
       return failureResponse(for: .busy, status: .tooManyRequests)
@@ -92,12 +92,14 @@ public struct SidecarHTTPHandler: HTTPHandler {
     return mediaType.caseInsensitiveCompare("application/json") == .orderedSame
   }
 
-  private func handleAdmittedTranscription(_ request: HTTPRequest) async -> HTTPResponse {
+  private func handleAdmittedTranscription(_ request: HTTPRequest) async throws -> HTTPResponse {
     do {
       let body = try await bodyReader(request.bodySequence)
       let validated = try WireContract.decodeAndValidate(body)
       let result = try await service.transcribe(validated)
       return jsonResponse(status: .ok, body: try WireContract.encodeSuccess(result))
+    } catch is CancellationError {
+      throw CancellationError()
     } catch let error as BodyReadError {
       switch error {
       case .tooLarge:
@@ -125,6 +127,8 @@ public struct SidecarHTTPHandler: HTTPHandler {
         }
         body.append(chunk)
       }
+    } catch is CancellationError {
+      throw CancellationError()
     } catch let error as BodyReadError {
       throw error
     } catch {
@@ -172,12 +176,12 @@ private actor TranscriptionAdmission {
   private var requestInFlight = false
 
   func perform<Result: Sendable>(
-    _ operation: @Sendable () async -> Result
-  ) async -> Result? {
+    _ operation: @Sendable () async throws -> Result
+  ) async rethrows -> Result? {
     guard !requestInFlight else { return nil }
     requestInFlight = true
     defer { requestInFlight = false }
-    return await operation()
+    return try await operation()
   }
 }
 

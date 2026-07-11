@@ -25,6 +25,16 @@ public enum CommandLineError: Error, Equatable, Sendable {
   case invalidArguments
 }
 
+public func commandFailureReason(_ error: any Error) -> String {
+  if error is CommandLineError {
+    return "invalid command line"
+  }
+  if let serviceError = error as? SidecarServiceError {
+    return serviceError.payload.message
+  }
+  return "command failed"
+}
+
 public enum CommandLineParser {
   public static func parse(_ arguments: [String]) throws -> SidecarCommand {
     guard let command = arguments.first else {

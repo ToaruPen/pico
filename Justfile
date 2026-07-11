@@ -76,7 +76,7 @@ apple-speech-check:
   bash scripts/ci/run-apple-speech-gates.sh
 
 check:
-  if [ "$(uname -s)" = "Darwin" ]; then bash scripts/ci/run-apple-speech-gates.sh; fi
+  if [ "$(uname -s)" = "Darwin" ]; then just apple-speech-check; fi
   npm run check
 
 ci:

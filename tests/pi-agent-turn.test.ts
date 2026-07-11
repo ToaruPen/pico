@@ -865,8 +865,10 @@ describe("Pi Agent turn adapter", () => {
     expect(createdSessions).toBe(2);
   });
 
-  it("keeps the turn claim until an active prompt settles after disposal", async () => {
+  it("waits for an active prompt to settle before disposing its SDK session", async () => {
     let createdSessions = 0;
+    let disposedSessions = 0;
+    const events: string[] = [];
     let notifyPromptStarted: (() => void) | undefined;
     let releasePrompt: (() => void) | undefined;
     const promptStarted = new Promise<void>((resolve) => {
@@ -894,16 +896,26 @@ describe("Pi Agent turn adapter", () => {
           session: {
             ...createSdkToolState(),
             bindExtensions: () => Promise.resolve(),
-            extensionRunner: inactiveExtensionRunner,
-            subscribe: () => () => undefined,
-            prompt: () => {
-              if (sessionNumber === 1) {
-                notifyPromptStarted?.();
-                return promptGate;
+            extensionRunner: {
+              hasHandlers: () => true,
+              emit: () => {
+                events.push("session_shutdown");
+                return Promise.resolve();
               }
-              return Promise.resolve();
             },
-            dispose: () => undefined
+            subscribe: () => () => undefined,
+            prompt: async () => {
+              if (sessionNumber === 1) {
+                events.push("prompt:start");
+                notifyPromptStarted?.();
+                await promptGate;
+                events.push("prompt:end");
+              }
+            },
+            dispose: () => {
+              events.push("dispose");
+              disposedSessions += 1;
+            }
           }
         });
       }
@@ -911,17 +923,77 @@ describe("Pi Agent turn adapter", () => {
 
     const first = client.prompt({ sessionId: "session-1", text: "一回目" });
     await promptStarted;
-    await client.disposeSession?.("session-1");
+    const keyedDisposal = client.disposeSession?.("session-1");
+    const allSessionDisposal = client.disposeAll?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
 
+    expect(disposedSessions).toBe(0);
+    expect(events).toEqual(["prompt:start"]);
     await expect(client.prompt({ sessionId: "session-1", text: "二回目" })).rejects.toThrow(
-      "pico resident Pi Agent turn is already active for this session"
+      "pico resident Pi Agent session is being disposed"
     );
-    expect(createdSessions).toBe(1);
 
     releasePrompt?.();
-    await first;
+    await Promise.all([first, keyedDisposal, allSessionDisposal]);
+
+    expect(disposedSessions).toBe(1);
+    expect(createdSessions).toBe(1);
+    expect(events).toEqual(["prompt:start", "prompt:end", "session_shutdown", "dispose"]);
+
     await client.prompt({ sessionId: "session-1", text: "三回目" });
     expect(createdSessions).toBe(2);
+  });
+
+  it("releases an active turn when SDK subscription cleanup fails", async () => {
+    let disposedSessions = 0;
+    let notifyPromptStarted: (() => void) | undefined;
+    let releasePrompt: (() => void) | undefined;
+    const promptStarted = new Promise<void>((resolve) => {
+      notifyPromptStarted = resolve;
+    });
+    const promptGate = new Promise<void>((resolve) => {
+      releasePrompt = resolve;
+    });
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      createResourceLoader: () => ({
+        reload: () => Promise.resolve()
+      }),
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: () => () => {
+              throw new Error("subscription cleanup failed");
+            },
+            prompt: async () => {
+              notifyPromptStarted?.();
+              await promptGate;
+            },
+            dispose: () => {
+              disposedSessions += 1;
+            }
+          }
+        })
+    });
+
+    const prompt = client.prompt({ sessionId: "session-1", text: "ピコ" });
+    await promptStarted;
+    const disposal = client.disposeSession?.("session-1");
+
+    releasePrompt?.();
+    await expect(prompt).rejects.toThrow("subscription cleanup failed");
+    await disposal;
+
+    expect(disposedSessions).toBe(1);
   });
 
   it("disables pico_session cutoff in resident SDK sessions", async () => {

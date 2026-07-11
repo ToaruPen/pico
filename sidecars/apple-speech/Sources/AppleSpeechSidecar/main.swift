@@ -9,10 +9,8 @@ struct AppleSpeechSidecarEntryPoint {
     do {
       let command = try CommandLineParser.parse(Array(CommandLine.arguments.dropFirst()))
       try await run(command)
-    } catch is CommandLineError {
-      fail("invalid command line")
     } catch {
-      fail("command failed")
+      fail(commandFailureReason(error))
     }
   }
 

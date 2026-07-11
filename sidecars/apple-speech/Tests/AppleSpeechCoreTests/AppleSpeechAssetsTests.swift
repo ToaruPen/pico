@@ -5,6 +5,13 @@ import Testing
 
 @Suite("Apple Speech asset installation")
 struct AppleSpeechAssetsTests {
+  @Test("rejects a non-fixed locale before asset installation")
+  func rejectsNonFixedInstallLocale() async {
+    await #expect(throws: SidecarServiceError.modelLoad) {
+      try await AppleSpeechAssets.install(localeIdentifier: "en-US")
+    }
+  }
+
   @Test("requires Apple's compatibility resolver to select the fixed PCM format")
   func requiresResolvedFixedInputFormat() throws {
     let fixedFormat = try #require(
@@ -23,14 +30,40 @@ struct AppleSpeechAssetsTests {
         interleaved: false
       )
     )
-    let incompatibleFormat = try #require(
+    let equivalentInterleavedFixedFormat = try #require(
       AVAudioFormat(
         commonFormat: .pcmFormatInt16,
-        sampleRate: 8_000,
+        sampleRate: 16_000,
         channels: 1,
-        interleaved: false
+        interleaved: true
       )
     )
+    let incompatibleFormats = try [
+      #require(
+        AVAudioFormat(
+          commonFormat: .pcmFormatInt16,
+          sampleRate: 8_000,
+          channels: 1,
+          interleaved: false
+        )
+      ),
+      #require(
+        AVAudioFormat(
+          commonFormat: .pcmFormatInt16,
+          sampleRate: 16_000,
+          channels: 2,
+          interleaved: false
+        )
+      ),
+      #require(
+        AVAudioFormat(
+          commonFormat: .pcmFormatFloat32,
+          sampleRate: 16_000,
+          channels: 1,
+          interleaved: false
+        )
+      )
+    ]
 
     #expect(
       AppleSpeechAssets.isSelectedInputFormat(
@@ -39,16 +72,24 @@ struct AppleSpeechAssetsTests {
       )
     )
     #expect(
-      !AppleSpeechAssets.isSelectedInputFormat(
+      AppleSpeechAssets.isSelectedInputFormat(
         fixedFormat,
-        bestAvailableFormat: incompatibleFormat
+        bestAvailableFormat: equivalentInterleavedFixedFormat
       )
     )
+    for incompatibleFormat in incompatibleFormats {
+      #expect(
+        !AppleSpeechAssets.isSelectedInputFormat(
+          fixedFormat,
+          bestAvailableFormat: incompatibleFormat
+        )
+      )
+    }
     #expect(!AppleSpeechAssets.isSelectedInputFormat(fixedFormat, bestAvailableFormat: nil))
   }
 
-  @Test("accepts no installation request only after installed status is confirmed")
-  func acceptsNoRequestAfterConcurrentInstallation() async throws {
+  @Test("accepts a nil request after external installation is confirmed")
+  func acceptsNilRequestAfterExternalInstallation() async throws {
     let requests = CallCounter()
 
     try await AppleSpeechAssets.ensureInstalled(

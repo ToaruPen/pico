@@ -4,6 +4,13 @@ import Testing
 
 @Suite("Sidecar command line")
 struct CommandLineTests {
+  @Test("maps command failures to bounded operator messages")
+  func mapsCommandFailureMessages() {
+    #expect(commandFailureReason(CommandLineError.invalidArguments) == "invalid command line")
+    #expect(commandFailureReason(SidecarServiceError.modelLoad) == "speech assets are unavailable")
+    #expect(commandFailureReason(TestCommandError()) == "command failed")
+  }
+
   @Test("parses the supported commands")
   func parsesSupportedCommands() throws {
     #expect(try CommandLineParser.parse(["--version"]) == .version)
@@ -50,3 +57,5 @@ struct CommandLineTests {
     }
   }
 }
+
+private struct TestCommandError: Error {}

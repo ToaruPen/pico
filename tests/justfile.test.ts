@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 
 describe("justfile", () => {
   it("exposes the resident voice development session as just dev-session", () => {
@@ -48,18 +49,32 @@ describe("justfile", () => {
 
   it("runs the Apple Speech gate from the standard check on Darwin", () => {
     const justfile = readFileSync("Justfile", "utf8");
-    const checkRecipe = justfile.slice(justfile.indexOf("check:"), justfile.indexOf("\nci:"));
-    const appleSpeechGate =
-      'if [ "$(uname -s)" = "Darwin" ]; then bash scripts/ci/run-apple-speech-gates.sh; fi';
+    const checkRecipe = justfile.slice(justfile.indexOf("\ncheck:"), justfile.indexOf("\nci:"));
+    const appleSpeechGate = 'if [ "$(uname -s)" = "Darwin" ]; then just apple-speech-check; fi';
 
     expect(checkRecipe).toContain(appleSpeechGate);
     expect(checkRecipe.indexOf(appleSpeechGate)).toBeLessThan(checkRecipe.indexOf("npm run check"));
   });
 
   it("runs the Apple Speech gate in macOS CI", () => {
-    const workflow = readFileSync(".github/workflows/ci.yml", "utf8");
+    const workflow = parse(readFileSync(".github/workflows/ci.yml", "utf8")) as {
+      readonly jobs?: Readonly<
+        Record<
+          string,
+          {
+            readonly "runs-on"?: string;
+            readonly steps?: readonly { readonly run?: string }[];
+          }
+        >
+      >;
+    };
+    const appleSpeechJob = workflow.jobs?.["apple-speech"];
 
-    expect(workflow).toContain("runs-on: macos-26");
-    expect(workflow).toContain("run: bash scripts/ci/run-apple-speech-gates.sh");
+    expect(appleSpeechJob?.["runs-on"]).toBe("macos-26");
+    expect(
+      appleSpeechJob?.steps?.some(
+        (step) => step.run === "bash scripts/ci/run-apple-speech-gates.sh"
+      )
+    ).toBe(true);
   });
 });

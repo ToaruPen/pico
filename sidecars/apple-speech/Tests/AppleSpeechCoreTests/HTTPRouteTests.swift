@@ -81,6 +81,35 @@ struct HTTPRouteTests {
     #expect((body["error"] as? [String: Any])?["code"] as? String == "invalid_request")
   }
 
+  @Test("service cancellation propagates beyond the HTTP error envelope")
+  func serviceCancellationPropagates() async {
+    let handler = SidecarHTTPHandler(service: CancellingService())
+
+    await #expect(throws: CancellationError.self) {
+      _ = try await handler.handleRequest(
+        request(
+          method: .POST,
+          path: "/v1/transcriptions",
+          body: try validRequestBody()
+        )
+      )
+    }
+  }
+
+  @Test("body-read cancellation propagates beyond the HTTP error envelope")
+  func bodyReadCancellationPropagates() async {
+    let handler = SidecarHTTPHandler(
+      service: UnreadyService(),
+      bodyReader: { _ in throw CancellationError() }
+    )
+
+    await #expect(throws: CancellationError.self) {
+      _ = try await handler.handleRequest(
+        request(method: .POST, path: "/v1/transcriptions")
+      )
+    }
+  }
+
   @Test("unsupported paths and methods return bounded JSON errors")
   func rejectsUnsupportedRoutes() async throws {
     let handler = SidecarHTTPHandler(service: UnreadyService())
@@ -115,6 +144,27 @@ struct HTTPRouteTests {
     let object = try JSONSerialization.jsonObject(with: await response.bodyData)
     return try #require(object as? [String: Any])
   }
+
+  private func validRequestBody() throws -> Data {
+    try JSONEncoder().encode(
+      TranscriptionRequest(
+        provider: AppleSpeechConstants.provider,
+        language: AppleSpeechConstants.locale,
+        timeoutMs: 25_000,
+        audio: AudioRequest(
+          encoding: AppleSpeechConstants.encoding,
+          sampleRateHz: AppleSpeechConstants.sampleRateHz,
+          channels: AppleSpeechConstants.channels,
+          dataBase64: "AAA="
+        ),
+        normalization: AudioNormalization(
+          targetEncoding: AppleSpeechConstants.encoding,
+          targetSampleRateHz: AppleSpeechConstants.sampleRateHz,
+          targetChannels: AppleSpeechConstants.channels
+        )
+      )
+    )
+  }
 }
 
 private actor UnreadyService: AppleSpeechServing {
@@ -123,5 +173,13 @@ private actor UnreadyService: AppleSpeechServing {
   func transcribe(_ request: ValidatedTranscriptionRequest) async throws -> TranscriptionResult {
     Issue.record("transcribe must not run in route-error tests")
     throw SidecarServiceError.backendError
+  }
+}
+
+private actor CancellingService: AppleSpeechServing {
+  func isReady() async -> Bool { true }
+
+  func transcribe(_ request: ValidatedTranscriptionRequest) async throws -> TranscriptionResult {
+    throw CancellationError()
   }
 }

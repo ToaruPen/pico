@@ -24,8 +24,14 @@ struct HTTPAdmissionTests {
     await service.waitUntilTranscribing()
 
     let rejected = try await handler.handleRequest(makeTranscriptionRequest())
+    let failure = try JSONDecoder().decode(
+      TranscriptionFailureResponse.self,
+      from: await rejected.bodyData
+    )
 
     #expect(rejected.statusCode == .tooManyRequests)
+    #expect(failure.error.code == .backendError)
+    #expect(failure.error.message == "speech backend is busy")
     #expect(await bodyReads.count == 1)
 
     await service.finishTranscribing()

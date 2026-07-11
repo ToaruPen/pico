@@ -31,6 +31,8 @@ public actor AppleSpeechEngine: AppleSpeechServing {
         localeIdentifier: localeIdentifier
       )
       return try await performTranscription(request, transcriber: transcriber)
+    } catch is CancellationError {
+      throw CancellationError()
     } catch let error as SidecarServiceError {
       throw error
     } catch {

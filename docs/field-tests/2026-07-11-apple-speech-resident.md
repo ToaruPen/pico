@@ -66,13 +66,14 @@ npx jiti .pico-local/apple-speech-integration/resident-real.ts
 
 ### Swift and sidecar
 
-- Swift tests: 26 tests / 9 suites passed。
+- Swift tests: 30 tests / 9 suites passed。
 - Release build with warnings-as-errors: passed。
 - CLI、HTTP admission、malformed / oversized request gate: passed。
 - `/health`: HTTP 200、`status=ok`。
 - `/ready`: HTTP 200、`ready=true`。
 - `SpeechAnalyzer.bestAvailableAudioFormat` は固定入力と同じ 16 kHz、signed Int16、mono を
-  選択した。
+  選択した。resolver の `isInterleaved=true` は mono では同じ sample layout になるため、
+  sample type、rate、channels の一致を確認して受け入れる。
 
 ### Japanese provider smoke
 
@@ -116,6 +117,17 @@ PCM を現在の runtime へ投入する結合試験を分離した。使用し�
 - Pi Agent: 1 call、32,348 ms、non-empty response
 - Aivis Speech: 1 call、3 chunks、7106 ms audio、wall 2468 ms
 - Speaker playback: 3 calls、9679 ms、all exit 0
+
+PR review 修正と release binary 差し替え後にも、同じ実 microphone PCM で再検証した。
+
+- processed frames: 2
+- started sessions: 1
+- completed turns: 1
+- failed / suppressed frames and turns: 0
+- Apple Speech: 2 calls、total wall 198 ms、confidence 0.902 / 0.902
+- Pi Agent: 1 call、13,827 ms、non-empty response
+- Aivis Speech: 1 call、3 chunks、5713 ms audio、wall 2010 ms
+- Speaker playback: 3 calls、8331 ms、all exit 0
 
 ### Resident process and memory observation
 
