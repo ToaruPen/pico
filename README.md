@@ -178,9 +178,10 @@ Configure these sections in `config/pico.local.yaml` as needed:
 
 ### Apple Speech sidecar
 
-Apple Speech STT requires macOS 26 and a selected developer directory containing
-Swift Testing support (`Testing.framework` and `lib_TestingInterop`), supplied
-by a compatible Xcode 26 or Command Line Tools installation. Build and validate
+Apple Speech STT requires macOS 26 and a compatible selected Xcode 26 or Command
+Line Tools installation. Xcode toolchains resolve Swift Testing through SwiftPM;
+when the selected Command Line Tools expose both `Testing.framework` and
+`lib_TestingInterop`, the gate adds their explicit link paths. Build and validate
 the Swift sidecar, install the Japanese speech assets, and check readiness before
 starting the resident voice process:
 

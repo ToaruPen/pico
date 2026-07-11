@@ -26,21 +26,25 @@ fail() {
 
 trap cleanup EXIT
 
-if [[ ! -d "$testing_frameworks/Testing.framework" ]]; then
-  fail "Swift Testing framework was not found under the selected developer directory"
-fi
-if [[ ! -f "$testing_libraries/lib_TestingInterop.dylib" ]]; then
-  fail "Swift Testing interoperability library was not found under the selected developer directory"
+swift_test_arguments=(--scratch-path "$build_dir")
+if [[ -d "$testing_frameworks/Testing.framework" || -f "$testing_libraries/lib_TestingInterop.dylib" ]]; then
+  if [[ ! -d "$testing_frameworks/Testing.framework" ]]; then
+    fail "Swift Testing framework was not found under the selected developer directory"
+  fi
+  if [[ ! -f "$testing_libraries/lib_TestingInterop.dylib" ]]; then
+    fail "Swift Testing interoperability library was not found under the selected developer directory"
+  fi
+  swift_test_arguments+=(
+    -Xswiftc -F -Xswiftc "$testing_frameworks"
+    -Xlinker -F -Xlinker "$testing_frameworks"
+    -Xlinker -rpath -Xlinker "$testing_frameworks"
+    -Xlinker -rpath -Xlinker "$testing_libraries"
+  )
 fi
 
 cd "$package_dir"
 
-swift test \
-  --scratch-path "$build_dir" \
-  -Xswiftc -F -Xswiftc "$testing_frameworks" \
-  -Xlinker -F -Xlinker "$testing_frameworks" \
-  -Xlinker -rpath -Xlinker "$testing_frameworks" \
-  -Xlinker -rpath -Xlinker "$testing_libraries"
+swift test "${swift_test_arguments[@]}"
 
 swift build --scratch-path "$build_dir" -c release -Xswiftc -warnings-as-errors
 binary_dir="$(swift build --scratch-path "$build_dir" -c release --show-bin-path)"
