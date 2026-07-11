@@ -520,6 +520,70 @@ describe("Pi Agent turn adapter", () => {
     expect(disposed).toBe(true);
   });
 
+  it("blocks new sessions while concurrent all-session disposal is in progress", async () => {
+    let createdSessions = 0;
+    let notifyShutdownStarted: (() => void) | undefined;
+    let releaseShutdown: (() => void) | undefined;
+    const shutdownStarted = new Promise<void>((resolve) => {
+      notifyShutdownStarted = resolve;
+    });
+    const shutdownGate = new Promise<void>((resolve) => {
+      releaseShutdown = resolve;
+    });
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      createResourceLoader: () => ({
+        reload: () => Promise.resolve()
+      }),
+      createAgentSession: () => {
+        createdSessions += 1;
+
+        return Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: {
+              hasHandlers: () => true,
+              emit: () => {
+                notifyShutdownStarted?.();
+                return shutdownGate;
+              }
+            },
+            subscribe: () => () => undefined,
+            prompt: () => Promise.resolve(),
+            dispose: () => undefined
+          }
+        });
+      }
+    });
+
+    await client.prompt({ sessionId: "session-1", text: "一回目" });
+    const firstDisposal = client.disposeAll?.();
+    await shutdownStarted;
+    const secondDisposal = client.disposeAll?.();
+
+    try {
+      await expect(
+        client.prompt({ sessionId: "session-2", text: "破棄中の新規セッション" })
+      ).rejects.toThrow("pico resident Pi Agent sessions are being disposed");
+      expect(createdSessions).toBe(1);
+    } finally {
+      releaseShutdown?.();
+      await Promise.allSettled([firstDisposal, secondDisposal]);
+      await client.disposeAll?.();
+    }
+
+    await client.prompt({ sessionId: "session-2", text: "破棄完了後" });
+    expect(createdSessions).toBe(2);
+    await client.disposeAll?.();
+  });
+
   it("shuts down extension lifecycle before disposing an SDK session", async () => {
     const events: string[] = [];
     const client = createPiAgentTurnClient({

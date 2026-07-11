@@ -89,10 +89,16 @@ export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAg
   const sessions = new Map<string, Promise<PiAgentSdkSession>>();
   const sessionDisposals = new Map<string, Promise<void>>();
   const activeTurns = new Map<string, Promise<void>>();
+  let activeDisposeAllCalls = 0;
 
   return {
     async prompt(input) {
-      const releaseTurn = claimTurn(activeTurns, sessionDisposals, input.sessionId);
+      const releaseTurn = claimTurn(
+        activeTurns,
+        sessionDisposals,
+        activeDisposeAllCalls > 0,
+        input.sessionId
+      );
       const output: string[] = [];
       let unsubscribe: (() => void) | undefined;
       let abortHandle: PromptAbortHandle | undefined;
@@ -138,27 +144,33 @@ export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAg
       await awaitSessionDisposal(sessionDisposals, sessionId, disposal);
     },
     async disposeAll() {
-      const sessionIds = [...sessions.keys()];
+      activeDisposeAllCalls += 1;
 
-      const results = await Promise.allSettled(
-        sessionIds.map(async (sessionId) => {
-          const disposal = getOrStartSessionDisposal(
-            sessions,
-            sessionDisposals,
-            activeTurns,
-            sessionId
-          );
-          if (disposal !== undefined) {
-            await awaitSessionDisposal(sessionDisposals, sessionId, disposal);
-          }
-        })
-      );
-      const failure = results.find(
-        (result): result is PromiseRejectedResult => result.status === "rejected"
-      );
+      try {
+        const sessionIds = [...sessions.keys()];
 
-      if (failure !== undefined) {
-        throw failure.reason;
+        const results = await Promise.allSettled(
+          sessionIds.map(async (sessionId) => {
+            const disposal = getOrStartSessionDisposal(
+              sessions,
+              sessionDisposals,
+              activeTurns,
+              sessionId
+            );
+            if (disposal !== undefined) {
+              await awaitSessionDisposal(sessionDisposals, sessionId, disposal);
+            }
+          })
+        );
+        const failure = results.find(
+          (result): result is PromiseRejectedResult => result.status === "rejected"
+        );
+
+        if (failure !== undefined) {
+          throw failure.reason;
+        }
+      } finally {
+        activeDisposeAllCalls -= 1;
       }
     }
   };
@@ -193,10 +205,15 @@ function formatPromptForSdkSession(
 function claimTurn(
   activeTurns: Map<string, Promise<void>>,
   sessionDisposals: Map<string, Promise<void>>,
+  isDisposingAll: boolean,
   sessionId: string
 ): () => void {
   if (sessionDisposals.has(sessionId)) {
     throw new Error("pico resident Pi Agent session is being disposed");
+  }
+
+  if (isDisposingAll) {
+    throw new Error("pico resident Pi Agent sessions are being disposed");
   }
 
   if (activeTurns.has(sessionId)) {

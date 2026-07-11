@@ -60,31 +60,45 @@ fi
 grep -Fxq "pico-apple-speech-sidecar: invalid command line" "$temporary_dir/invalid.stderr" \
   || fail "invalid command line stderr was not sanitized"
 
-port=$((20000 + ($$ % 30000)))
-base_url="http://127.0.0.1:$port"
-"$binary" serve \
-  --host 127.0.0.1 \
-  --port "$port" \
-  --locale ja-JP \
-  --analysis-timeout-ms 25000 \
-  >"$temporary_dir/server.stdout" \
-  2>"$temporary_dir/server.stderr" &
-server_pid=$!
-
 server_ready=false
-for _ in {1..100}; do
-  if curl --silent --show-error --fail --max-time 1 \
-    "$base_url/health" >"$temporary_dir/health.json" 2>/dev/null; then
-    server_ready=true
+base_url=""
+for attempt in {0..4}; do
+  port=$((20000 + (($$ + attempt) % 30000)))
+  base_url="http://127.0.0.1:$port"
+  "$binary" serve \
+    --host 127.0.0.1 \
+    --port "$port" \
+    --locale ja-JP \
+    --analysis-timeout-ms 25000 \
+    >"$temporary_dir/server.$attempt.stdout" \
+    2>"$temporary_dir/server.$attempt.stderr" &
+  server_pid=$!
+
+  for _ in {1..100}; do
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      break
+    fi
+    if lsof -nP -a -p "$server_pid" -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 \
+      && curl --silent --show-error --fail --max-time 1 \
+        "$base_url/health" >"$temporary_dir/health.json" 2>/dev/null \
+      && grep -Fq '"provider":"apple-speech"' "$temporary_dir/health.json" \
+      && grep -Fq '"status":"ok"' "$temporary_dir/health.json" \
+      && kill -0 "$server_pid" 2>/dev/null; then
+      server_ready=true
+      break
+    fi
+    sleep 0.05
+  done
+
+  if [[ "$server_ready" == true ]]; then
     break
   fi
-  if ! kill -0 "$server_pid" 2>/dev/null; then
-    fail "server exited before the health check"
-  fi
-  sleep 0.05
+
+  kill "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
+  server_pid=""
 done
 [[ "$server_ready" == true ]] || fail "health endpoint did not become available"
-grep -Fq '"status":"ok"' "$temporary_dir/health.json" || fail "health response was malformed"
 
 ready_status="$(
   curl --silent --show-error --max-time 5 \
