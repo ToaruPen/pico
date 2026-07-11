@@ -40,7 +40,7 @@ provider へ自動で切り替えない。
    `ten_vad` は 16kHz mono frame 契約を config 境界で検証し、provider の自動
    fallback は行わない。
 5. utterance window が閉じた時だけ `voice.stt` へ渡す。10ms frame を直接
-   Whisper に渡さない。
+   STT sidecar に渡さない。
 6. session 開始前の transcript は trigger 判定だけに使い、保存しない。
 7. wake name、greeting、将来の bell/tool event など trusted trigger が成立したら session を開始する。
 8. active session 中の staff utterance を session entry として append する。
@@ -232,9 +232,9 @@ user LaunchAgent から起動する経路は、direct resident voice harness の
   `provider: alsa` と ALSA device を明示する。
 - `voice.resident.utteranceWindow`。`minSpeechMs`、`silenceMs`、
   `maxUtteranceMs`、`minRmsDb` で常時待受の VAD/windowing を調整する。
-- trigger confidence。`mlx-whisper` sidecar の現行 smoke では成功時 confidence
-  が `0.5` として返るため、default は `0.5` とし、施設環境で false trigger が
-  多ければ local config で上げる。
+- trigger confidence。provider が返す `0...1` の confidence に対する default は
+  `0.5` とし、日本語 Apple Speech の実地結果と施設環境の false trigger / false
+  reject を見て local config で調整する。特定 provider の固定返値を根拠にしない。
 - probe enablement and sink。
 
 resident config が不足している場合は起動時に失敗する。field script の env-only
@@ -268,7 +268,7 @@ field validation は実機で以下を確認する。
 - real microphone capture。
   `npm run smoke:resident-audio-input` は短時間の bounded capture から
   RMS/peak dB と `minRmsDb` 閾値判定だけを報告し、音声 payload は出さない。
-- mlx-whisper STT。
+- Apple Speech STT。
 - Aivis Speech TTS playback。
 - echo control による自己音声抑制。
 - Pi Agent SDK turn。

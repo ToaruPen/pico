@@ -2104,9 +2104,9 @@ describe("voice resident runtime", () => {
                 reason: "backend_error",
                 message: "sidecar unavailable",
                 source: {
-                  sidecarId: "local-mlx-whisper",
-                  provider: "mlx-whisper",
-                  modelRepo: "mlx-community/whisper-large-v3-turbo"
+                  sidecarId: "local-apple-speech",
+                  provider: "apple-speech",
+                  language: "ja-JP"
                 }
               });
             }
@@ -2294,14 +2294,14 @@ function successfulTranscript(text: string, confidence = 0.9) {
   return {
     ok: true as const,
     text,
-    language: "ja",
+    language: "ja-JP",
     confidence,
     durationMs: 100,
     segments: [],
     source: {
-      sidecarId: "local-mlx-whisper",
-      provider: "mlx-whisper" as const,
-      modelRepo: "mlx-community/whisper-large-v3-turbo"
+      sidecarId: "local-apple-speech",
+      provider: "apple-speech" as const,
+      language: "ja-JP"
     }
   };
 }

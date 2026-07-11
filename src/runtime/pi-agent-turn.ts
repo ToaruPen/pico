@@ -15,7 +15,39 @@ import type {
 import type { PiAgentTurnClient } from "./voice-resident.js";
 import type { VoiceStageProbe } from "./voice-stage-probe.js";
 
+export const residentPiAgentToolNames = Object.freeze([
+  "pico_session",
+  "pico_camera_scene_description_deferred",
+  "stackchan_get_status",
+  "stackchan_get_device_info",
+  "stackchan_take_photo",
+  "stackchan_set_volume",
+  "stackchan_set_brightness",
+  "stackchan_move_head",
+  "stackchan_get_head_angles",
+  "stackchan_set_avatar",
+  "stackchan_set_mouth",
+  "stackchan_set_blink",
+  "stackchan_say"
+] as const);
+
+const residentPiAgentToolNamesWithoutDeferred = Object.freeze(
+  residentPiAgentToolNames.filter(
+    (toolName) => toolName !== "pico_camera_scene_description_deferred"
+  )
+);
+
 export type PiAgentSdkSession = {
+  readonly bindExtensions: (bindings: { readonly mode: "print" }) => Promise<void>;
+  readonly extensionRunner: {
+    readonly hasHandlers: (eventType: "session_shutdown") => boolean;
+    readonly emit: (event: {
+      readonly type: "session_shutdown";
+      readonly reason: "quit";
+    }) => Promise<unknown>;
+  };
+  readonly getActiveToolNames: () => string[];
+  readonly setActiveToolsByName: (toolNames: string[]) => void;
   readonly subscribe: (listener: (event: unknown) => void) => (() => void) | undefined;
   readonly prompt: (text: string) => Promise<void>;
   readonly dispose: () => void;
@@ -26,6 +58,7 @@ export type PiAgentSessionFactory = (input: {
   readonly resourceLoader: unknown;
   readonly sessionManager: unknown;
   readonly thinkingLevel?: "low" | "medium" | "high" | "xhigh";
+  readonly tools?: readonly string[];
 }) => Promise<{ readonly session: PiAgentSdkSession }>;
 
 export type PiAgentResourceLoaderFactoryInput = {
@@ -54,11 +87,18 @@ export type PiAgentTurnClientOptions = {
 
 export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAgentTurnClient {
   const sessions = new Map<string, Promise<PiAgentSdkSession>>();
-  const activeTurns = new Set<string>();
+  const sessionDisposals = new Map<string, Promise<void>>();
+  const activeTurns = new Map<string, Promise<void>>();
+  let activeDisposeAllCalls = 0;
 
   return {
     async prompt(input) {
-      claimTurn(activeTurns, input.sessionId);
+      const releaseTurn = claimTurn(
+        activeTurns,
+        sessionDisposals,
+        activeDisposeAllCalls > 0,
+        input.sessionId
+      );
       const output: string[] = [];
       let unsubscribe: (() => void) | undefined;
       let abortHandle: PromptAbortHandle | undefined;
@@ -81,29 +121,56 @@ export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAg
         }
         throw error;
       } finally {
-        abortHandle?.remove();
-        unsubscribe?.();
-        activeTurns.delete(input.sessionId);
+        try {
+          abortHandle?.remove();
+          unsubscribe?.();
+        } finally {
+          releaseTurn();
+        }
       }
     },
     async disposeSession(sessionId) {
-      const session = await sessions.get(sessionId);
+      const disposal = getOrStartSessionDisposal(
+        sessions,
+        sessionDisposals,
+        activeTurns,
+        sessionId
+      );
 
-      if (session === undefined) {
+      if (disposal === undefined) {
         return;
       }
 
-      activeTurns.delete(sessionId);
-      session.dispose();
-      sessions.delete(sessionId);
+      await awaitSessionDisposal(sessionDisposals, sessionId, disposal);
     },
     async disposeAll() {
-      const pendingSessions = [...sessions.values()];
-      activeTurns.clear();
-      sessions.clear();
+      activeDisposeAllCalls += 1;
 
-      for (const session of await Promise.all(pendingSessions)) {
-        session.dispose();
+      try {
+        const sessionIds = [...sessions.keys()];
+
+        const results = await Promise.allSettled(
+          sessionIds.map(async (sessionId) => {
+            const disposal = getOrStartSessionDisposal(
+              sessions,
+              sessionDisposals,
+              activeTurns,
+              sessionId
+            );
+            if (disposal !== undefined) {
+              await awaitSessionDisposal(sessionDisposals, sessionId, disposal);
+            }
+          })
+        );
+        const failure = results.find(
+          (result): result is PromiseRejectedResult => result.status === "rejected"
+        );
+
+        if (failure !== undefined) {
+          throw failure.reason;
+        }
+      } finally {
+        activeDisposeAllCalls -= 1;
       }
     }
   };
@@ -135,12 +202,36 @@ function formatPromptForSdkSession(
   ].join("\n");
 }
 
-function claimTurn(activeTurns: Set<string>, sessionId: string): void {
+function claimTurn(
+  activeTurns: Map<string, Promise<void>>,
+  sessionDisposals: Map<string, Promise<void>>,
+  isDisposingAll: boolean,
+  sessionId: string
+): () => void {
+  if (sessionDisposals.has(sessionId)) {
+    throw new Error("pico resident Pi Agent session is being disposed");
+  }
+
+  if (isDisposingAll) {
+    throw new Error("pico resident Pi Agent sessions are being disposed");
+  }
+
   if (activeTurns.has(sessionId)) {
     throw new Error("pico resident Pi Agent turn is already active for this session");
   }
 
-  activeTurns.add(sessionId);
+  let resolveTurn: (() => void) | undefined;
+  const settled = new Promise<void>((resolve) => {
+    resolveTurn = resolve;
+  });
+  activeTurns.set(sessionId, settled);
+
+  return () => {
+    if (activeTurns.get(sessionId) === settled) {
+      activeTurns.delete(sessionId);
+    }
+    resolveTurn?.();
+  };
 }
 
 async function getOrCreateTurnSession(
@@ -160,8 +251,66 @@ async function getOrCreateTurnSession(
   try {
     return await created;
   } catch (error) {
-    sessions.delete(sessionId);
+    if (sessions.get(sessionId) === created) {
+      sessions.delete(sessionId);
+    }
     throw error;
+  }
+}
+
+function getOrStartSessionDisposal(
+  sessions: Map<string, Promise<PiAgentSdkSession>>,
+  sessionDisposals: Map<string, Promise<void>>,
+  activeTurns: Map<string, Promise<void>>,
+  sessionId: string
+): Promise<void> | undefined {
+  const existing = sessionDisposals.get(sessionId);
+  if (existing !== undefined) {
+    return existing;
+  }
+
+  const pendingSession = sessions.get(sessionId);
+  if (pendingSession === undefined) {
+    return undefined;
+  }
+
+  const disposal = disposePendingSession(
+    sessions,
+    sessionId,
+    pendingSession,
+    activeTurns.get(sessionId)
+  );
+  sessionDisposals.set(sessionId, disposal);
+  return disposal;
+}
+
+async function awaitSessionDisposal(
+  sessionDisposals: Map<string, Promise<void>>,
+  sessionId: string,
+  disposal: Promise<void>
+): Promise<void> {
+  try {
+    await disposal;
+  } finally {
+    if (sessionDisposals.get(sessionId) === disposal) {
+      sessionDisposals.delete(sessionId);
+    }
+  }
+}
+
+async function disposePendingSession(
+  sessions: Map<string, Promise<PiAgentSdkSession>>,
+  sessionId: string,
+  pendingSession: Promise<PiAgentSdkSession>,
+  activeTurn: Promise<void> | undefined
+): Promise<void> {
+  try {
+    await activeTurn;
+    await shutdownAndDisposeSession(await pendingSession);
+  } finally {
+    if (sessions.get(sessionId) === pendingSession) {
+      sessions.delete(sessionId);
+    }
   }
 }
 
@@ -169,6 +318,7 @@ async function createTurnSession(
   options: PiAgentTurnClientOptions,
   sessionId: string
 ): Promise<PiAgentSdkSession> {
+  const requiredToolNames = requiredResidentPiAgentToolNames(options);
   const resourceLoader = createTurnResourceLoader(options, sessionId);
   await resourceLoader.reload?.();
 
@@ -176,10 +326,54 @@ async function createTurnSession(
   const { session } = await createAgentSession({
     resourceLoader,
     sessionManager: options.sessionManager ?? SessionManager.inMemory(),
-    thinkingLevel: "medium"
+    thinkingLevel: "medium",
+    tools: [...requiredToolNames]
   });
 
+  try {
+    await session.bindExtensions({ mode: "print" });
+    enforceResidentPiAgentTools(session, requiredToolNames);
+  } catch (error) {
+    await Promise.allSettled([shutdownAndDisposeSession(session)]);
+    throw error;
+  }
+
   return session;
+}
+
+function requiredResidentPiAgentToolNames(options: PiAgentTurnClientOptions): readonly string[] {
+  return options.deferredTools === undefined
+    ? residentPiAgentToolNamesWithoutDeferred
+    : residentPiAgentToolNames;
+}
+
+function enforceResidentPiAgentTools(
+  session: PiAgentSdkSession,
+  requiredToolNames: readonly string[]
+): void {
+  session.setActiveToolsByName([...requiredToolNames]);
+  const activeToolNames = session.getActiveToolNames();
+  const activeToolNameSet = new Set(activeToolNames);
+  const requiredToolNameSet = new Set(requiredToolNames);
+  const missingToolNames = requiredToolNames.filter((toolName) => !activeToolNameSet.has(toolName));
+  const unexpectedToolNames = activeToolNames.filter(
+    (toolName) => !requiredToolNameSet.has(toolName)
+  );
+
+  if (missingToolNames.length === 0 && unexpectedToolNames.length === 0) {
+    return;
+  }
+
+  const violations = [
+    ...(missingToolNames.length === 0
+      ? []
+      : [`missing required tools: ${missingToolNames.join(", ")}`]),
+    ...(unexpectedToolNames.length === 0
+      ? []
+      : [`retained forbidden tools: ${unexpectedToolNames.join(", ")}`])
+  ];
+
+  throw new Error(`pico resident Pi Agent session ${violations.join("; ")}`);
 }
 
 function createTurnResourceLoader(
@@ -321,8 +515,23 @@ function createDefaultResourceLoader(
 function createDefaultPiAgentSession(input: {
   readonly resourceLoader: unknown;
   readonly sessionManager: unknown;
+  readonly thinkingLevel?: "low" | "medium" | "high" | "xhigh";
+  readonly tools?: readonly string[];
 }): Promise<{ readonly session: PiAgentSdkSession }> {
   return createDefaultAgentSession(input as never);
+}
+
+async function shutdownAndDisposeSession(session: PiAgentSdkSession): Promise<void> {
+  try {
+    if (session.extensionRunner.hasHandlers("session_shutdown")) {
+      await session.extensionRunner.emit({
+        type: "session_shutdown",
+        reason: "quit"
+      });
+    }
+  } finally {
+    session.dispose();
+  }
 }
 
 function readTextDelta(event: unknown): string | undefined {

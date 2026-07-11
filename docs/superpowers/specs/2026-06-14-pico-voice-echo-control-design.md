@@ -1,7 +1,7 @@
 # Pico Voice Echo Control Design
 
 Date: 2026-06-14
-Updated: 2026-06-16
+Updated: 2026-07-11
 Status: Approved for implementation
 
 ## Purpose
@@ -24,7 +24,9 @@ The 2026-06-14 live voice field test proved:
 
 - Aivis Speech synthesis can produce audible speaker output.
 - AVFoundation microphone capture can record real user speech.
-- The mlx-whisper sidecar can transcribe that real microphone input.
+- The then-current mlx-whisper sidecar could transcribe that real microphone
+  input. Apple Speech supersedes that provider without changing the echo-control
+  boundary.
 
 It did not prove that `pico` can safely listen while or after it speaks. Speaker
 audio can leak back into the microphone and cause false wake phrases, false
@@ -86,9 +88,10 @@ Owns echo-safe microphone processing:
 
 ### voice.stt
 
-Remains the mlx-whisper transcription adapter. It receives already-approved
-audio frames and returns text, language, confidence, duration, segments, and
-provider source metadata.
+Uses the Apple Speech transcription adapter. It receives already-approved audio
+frames and returns text, language, confidence, duration, segments, and provider
+source metadata. The provider change does not move AEC, audio I/O, or trigger
+policy into the STT adapter.
 
 ### voice.tts
 

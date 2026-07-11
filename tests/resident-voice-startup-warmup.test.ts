@@ -53,11 +53,11 @@ describe("resident voice startup warmup", () => {
               Promise.resolve({
                 ok: false,
                 reason: "backend_error",
-                message: "mlx sidecar unavailable",
+                message: "Apple Speech sidecar unavailable",
                 source: {
-                  sidecarId: "local-mlx-whisper",
-                  provider: "mlx-whisper",
-                  modelRepo: "mlx-community/whisper-large-v3-turbo"
+                  sidecarId: "local-apple-speech",
+                  provider: "apple-speech",
+                  language: "ja-JP"
                 }
               }),
             transcribe: () => {
@@ -71,7 +71,7 @@ describe("resident voice startup warmup", () => {
         probe: { audit }
       })
     ).rejects.toThrow(
-      "pico resident voice STT warmup failed: backend_error: mlx sidecar unavailable"
+      "pico resident voice STT warmup failed: backend_error: Apple Speech sidecar unavailable"
     );
 
     expect(
@@ -97,14 +97,14 @@ function createSuccessfulClients(calls: string[]): ResidentVoiceStartupWarmupCli
         return Promise.resolve({
           ok: true,
           text: "",
-          language: "ja",
+          language: "ja-JP",
           confidence: 0.5,
           durationMs: 80,
           segments: [],
           source: {
-            sidecarId: "local-mlx-whisper",
-            provider: "mlx-whisper",
-            modelRepo: "mlx-community/whisper-large-v3-turbo"
+            sidecarId: "local-apple-speech",
+            provider: "apple-speech",
+            language: "ja-JP"
           }
         });
       },

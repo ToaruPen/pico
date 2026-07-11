@@ -15,9 +15,9 @@ import {
 } from "../../src/modules/voice/echo-control.js";
 import {
   createAivisSpeechTtsClient,
-  createMlxWhisperSttClient,
+  createAppleSpeechSttClient,
   defineAivisSpeechService,
-  defineMlxWhisperSidecar,
+  defineAppleSpeechSidecar,
   type SttTranscriptionRequest,
   type TtsAudioChunk
 } from "../../src/modules/voice/index.js";
@@ -62,7 +62,7 @@ export type VoiceEchoPickupFieldPlan =
   | {
       readonly status: "run";
       readonly echoControl: PicoConfig["voice"]["echoControl"];
-      readonly stt: NonNullable<PicoConfig["voice"]["stt"]["mlxWhisper"]>;
+      readonly stt: NonNullable<PicoConfig["voice"]["stt"]["appleSpeech"]>;
       readonly tts: NonNullable<PicoConfig["voice"]["tts"]["aivis"]>;
       readonly triggerPhrases: readonly string[];
     }
@@ -72,9 +72,8 @@ export type VoiceEchoPickupFieldPlan =
     };
 
 const missingProviderReason =
-  "Set voice.echoControl, voice.stt.mlxWhisper, and voice.tts.aivis to run the voice echo pickup field test.";
-const defaultMlxWhisperModelRepo = "mlx-community/whisper-large-v3-turbo";
-const defaultLanguage = "ja";
+  "Set voice.echoControl, voice.stt.appleSpeech, and voice.tts.aivis to run the voice echo pickup field test.";
+const defaultLanguage = "ja-JP";
 const defaultTimeoutMs = 30_000;
 const defaultWarmupAudioSeconds = 0.25;
 const defaultText = "おはようピコ。これはエコー拾い込み確認です。";
@@ -86,7 +85,7 @@ const defaultPlaybackDelayMs = 500;
 
 export function buildVoiceEchoPickupFieldPlan(config: PicoConfig): VoiceEchoPickupFieldPlan {
   const echoControl = config.voice.echoControl;
-  const stt = config.voice.stt.mlxWhisper;
+  const stt = config.voice.stt.appleSpeech;
   const tts = config.voice.tts.aivis;
 
   if (!echoControl.enabled || stt === undefined || tts === undefined) {
@@ -359,12 +358,11 @@ async function transcribeResumeWindow(
 }
 
 function createFieldSttClient(plan: Extract<VoiceEchoPickupFieldPlan, { readonly status: "run" }>) {
-  return createMlxWhisperSttClient(
-    defineMlxWhisperSidecar({
-      id: plan.stt.id ?? "local-mlx-whisper",
-      provider: "mlx-whisper",
+  return createAppleSpeechSttClient(
+    defineAppleSpeechSidecar({
+      id: plan.stt.id ?? "local-apple-speech",
+      provider: "apple-speech",
       localBaseUrl: plan.stt.localBaseUrl,
-      modelRepo: plan.stt.modelRepo ?? defaultMlxWhisperModelRepo,
       language: plan.stt.language ?? defaultLanguage,
       timeoutMs: plan.stt.timeoutMs ?? defaultTimeoutMs,
       warmup: {

@@ -185,11 +185,10 @@ voice:
     diagnostics:
       enabled: true
   stt:
-    mlxWhisper:
-      id: local-mlx
-      localBaseUrl: http://127.0.0.1:8765
-      modelRepo: mlx-community/whisper-large-v3-turbo
-      language: ja
+    appleSpeech:
+      id: local-apple-speech
+      localBaseUrl: http://127.0.0.1:8766
+      language: ja-JP
       timeoutMs: 30000
       warmupAudioSeconds: 0.25
       samplePcm16lePath: /tmp/pico-known-ja.pcm
@@ -347,9 +346,15 @@ audit:
           }
         },
         stt: {
-          mlxWhisper: {
+          appleSpeech: {
+            id: "local-apple-speech",
+            localBaseUrl: "http://127.0.0.1:8766",
+            language: "ja-JP",
+            timeoutMs: 30_000,
+            warmupAudioSeconds: 0.25,
             samplePcm16lePath: "/tmp/pico-known-ja.pcm",
-            sampleRateHz: 16_000
+            sampleRateHz: 16_000,
+            channels: 1
           }
         },
         tts: {
@@ -472,14 +477,13 @@ audit:
       definePicoConfig({
         voice: {
           stt: {
-            mlxWhisper: {
-              localBaseUrl: "https://stt.example.com",
-              samplePcm16lePath: "/tmp/pico-known-ja.pcm"
+            appleSpeech: {
+              localBaseUrl: "https://stt.example.com"
             }
           }
         }
       })
-    ).toThrow("pico config voice.stt.mlxWhisper.localBaseUrl must use a local SSH tunnel URL");
+    ).toThrow("pico config voice.stt.appleSpeech.localBaseUrl must use a local SSH tunnel URL");
 
     expect(() =>
       definePicoConfig({
@@ -493,6 +497,112 @@ audit:
         }
       })
     ).toThrow("pico config voice.tts.aivis.localBaseUrl must use a local SSH tunnel URL");
+  });
+
+  it("accepts minimal Apple Speech config without a smoke sample", () => {
+    expect(
+      definePicoConfig({
+        voice: {
+          stt: {
+            appleSpeech: {
+              localBaseUrl: " http://127.0.0.1:8766 "
+            }
+          }
+        }
+      }).voice.stt.appleSpeech
+    ).toEqual({
+      localBaseUrl: "http://127.0.0.1:8766"
+    });
+  });
+
+  it.each([
+    "http://localhost:8766",
+    "http://[::1]:8766",
+    "https://127.0.0.1:8766"
+  ])("rejects Apple Speech URLs the IPv4 HTTP sidecar cannot serve: %s", (localBaseUrl) => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          stt: {
+            appleSpeech: {
+              localBaseUrl
+            }
+          }
+        }
+      })
+    ).toThrow("pico config voice.stt.appleSpeech.localBaseUrl must use an http://127.0.0.1 origin");
+  });
+
+  it.each([
+    ["language", "en-US", "pico config voice.stt.appleSpeech.language must be ja-JP"],
+    ["sampleRateHz", 48_000, "pico config voice.stt.appleSpeech.sampleRateHz must be 16000"],
+    ["channels", 2, "pico config voice.stt.appleSpeech.channels must be 1"]
+  ])("rejects unsupported Apple Speech %s", (key, value, message) => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          stt: {
+            appleSpeech: {
+              localBaseUrl: "http://127.0.0.1:8766",
+              [key]: value
+            }
+          }
+        }
+      })
+    ).toThrow(message);
+  });
+
+  it.each([
+    [
+      "sampleRateHz",
+      48_000,
+      "pico config voice.echoControl.sampleRateHz must be 16000 for Apple Speech"
+    ],
+    ["channels", 2, "pico config voice.echoControl.channels must be 1 for Apple Speech"]
+  ])("rejects Apple Speech with incompatible echo-control %s", (key, value, message) => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          echoControl: {
+            [key]: value
+          },
+          stt: {
+            appleSpeech: {
+              localBaseUrl: "http://127.0.0.1:8766"
+            }
+          }
+        }
+      })
+    ).toThrow(message);
+  });
+
+  it("rejects the removed MLX Whisper config key with a migration error", () => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          stt: {
+            mlxWhisper: {
+              localBaseUrl: "http://127.0.0.1:8765"
+            }
+          }
+        }
+      })
+    ).toThrow("pico config voice.stt.mlxWhisper was removed; migrate to voice.stt.appleSpeech");
+
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          stt: {
+            appleSpeech: {
+              localBaseUrl: "http://127.0.0.1:8766"
+            },
+            mlxWhisper: {
+              localBaseUrl: "http://127.0.0.1:8765"
+            }
+          }
+        }
+      })
+    ).toThrow("pico config voice.stt.mlxWhisper was removed; migrate to voice.stt.appleSpeech");
   });
 
   it("rejects unbounded resident utterance window settings", () => {
@@ -700,8 +810,8 @@ voice:
       hopSize: 160
       threshold: 0.5
   stt:
-    mlxWhisper:
-      localBaseUrl: http://127.0.0.1:8765
+    appleSpeech:
+      localBaseUrl: http://127.0.0.1:8766
       samplePcm16lePath: samples/warmup.pcm
 `);
 
@@ -719,7 +829,7 @@ voice:
       hopSize: 160,
       threshold: 0.5
     });
-    expect(config.voice.stt.mlxWhisper?.samplePcm16lePath).toBe(join(root, "samples/warmup.pcm"));
+    expect(config.voice.stt.appleSpeech?.samplePcm16lePath).toBe(join(root, "samples/warmup.pcm"));
   });
 
   it("rejects ten_vad when echo-control frames do not match TEN frame requirements", () => {

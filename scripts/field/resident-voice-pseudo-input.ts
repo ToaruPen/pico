@@ -219,14 +219,14 @@ function successfulTranscript(text: string): SttTranscriptionResult {
   return {
     ok: true,
     text,
-    language: "ja",
+    language: "ja-JP",
     confidence: 0.9,
     durationMs: 100,
     segments: [],
     source: {
-      sidecarId: "pseudo-mlx-whisper",
-      provider: "mlx-whisper",
-      modelRepo: "mlx-community/whisper-large-v3-turbo"
+      sidecarId: "pseudo-apple-speech",
+      provider: "apple-speech",
+      language: "ja-JP"
     }
   };
 }

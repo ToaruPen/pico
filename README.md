@@ -32,11 +32,14 @@ Run all local checks:
 just check
 ```
 
-Run the same parallel gate shape used by CI:
+Run the TypeScript gates in the same parallel shape as the Linux CI job:
 
 ```bash
 just ci
 ```
+
+`just ci` is TypeScript-only. On macOS, use `just check` above to run both the
+TypeScript gates and the Apple Speech gate.
 
 Run the milestone smoke suite after local credentials and hardware/provider
 sidecars are configured. Smoke commands are regression and readiness gates, not
@@ -100,6 +103,46 @@ credentials:
 just smoke-pi-runtime
 ```
 
+To expose the selected StackChan tools to Pi Agent, install the verified MCP
+adapter version once and export the local gateway bearer token before starting
+Pi or the resident voice process:
+
+```bash
+node_modules/.bin/pi install npm:pi-mcp-adapter@2.11.0
+export STACKCHAN_TOKEN='<local gateway token>'
+```
+
+This intentionally installs the verified third-party adapter in Pi's user
+package scope, so it is trusted code for every Pi session owned by that local
+user and has the same process privileges as Pi. The model-callable tool
+allowlist below limits agent actions; it is not a sandbox for extension code.
+
+The tracked `.pi/mcp.json` reads only `STACKCHAN_TOKEN`; it does not contain the
+token. It keeps the MCP endpoint on loopback and selects a bounded direct-tool
+set instead of all gateway hardware and configuration tools.
+
+The adapter requires cached MCP metadata before it can register direct tools.
+Prime that cache in a trusted interactive session with all model-callable tools
+disabled, then restart Pi:
+
+```text
+node_modules/.bin/pi --no-tools
+/mcp reconnect stackchan
+/quit
+```
+
+For an ad-hoc Pi session, use `--tools` with only the direct tools needed for
+that session. For example, a harmless status check uses
+`--tools stackchan_get_status`. Do not enable the generic `mcp` proxy tool. The
+resident SDK path enforces its own exact tool allowlist and refuses to send the
+first prompt when the required direct tools are unavailable; built-in file and
+shell tools are not part of that resident allowlist.
+
+The adapter expires cached metadata after seven days. If resident startup
+reports `missing required tools`, repeat the trusted `--no-tools` cache-prime
+session above, exit Pi, and restart the resident process. Do not work around a
+missing direct-tool cache by enabling the generic proxy.
+
 To pass explicit Pi provider/model flags, run:
 
 ```bash
@@ -121,8 +164,10 @@ Configure these sections in `config/pico.local.yaml` as needed:
 
 - `voice.tts.aivis` for Aivis Speech TTS. Choose a style id from
   `curl -s http://127.0.0.1:10101/speakers`.
-- `voice.stt.mlxWhisper` for mlx-whisper STT. `samplePcm16lePath` must point to
-  a PCM16LE mono 16 kHz sample.
+- `voice.stt.appleSpeech` for the local Apple Speech sidecar. The resident and
+  real-microphone field paths do not require a sample file;
+  `samplePcm16lePath` is optional and, when set for provider smoke, must point
+  to a PCM16LE mono 16 kHz sample.
 - `voice.resident.audioInput` and `voice.resident.audioOutput` for the direct
   resident voice harness. Use `avfoundation` plus `afplay` with
   explicit `route: system_default` on macOS, and `alsa` plus `alsa` with explicit
@@ -132,6 +177,46 @@ Configure these sections in `config/pico.local.yaml` as needed:
 - `camera.tapo` for one Tapo RTSP JPEG frame.
 - `vision.ollama` for `qwen3.5:9b` through the protected local tunnel.
 - `camera.tapo` plus `vision.ollama` for camera-to-VLM scene smoke.
+
+### Apple Speech sidecar
+
+Apple Speech STT requires macOS 26 and a compatible selected Xcode 26 or Command
+Line Tools installation. Xcode toolchains resolve Swift Testing through SwiftPM;
+when the selected Command Line Tools expose both `Testing.framework` and
+`lib_TestingInterop`, the gate adds their explicit link paths. Build and validate
+the Swift sidecar, install the Japanese speech assets, and check readiness before
+starting the resident voice process:
+
+```bash
+just apple-speech-check
+cd sidecars/apple-speech
+swift build -c release -Xswiftc -warnings-as-errors
+binary="$(swift build -c release --show-bin-path)/pico-apple-speech-sidecar"
+"$binary" install-assets --locale ja-JP
+"$binary" preflight --locale ja-JP
+"$binary" serve \
+  --host 127.0.0.1 \
+  --port 8766 \
+  --locale ja-JP \
+  --analysis-timeout-ms 25000
+```
+
+Keep that terminal running. In a second terminal, verify liveness and installed
+asset readiness before starting a provider smoke or resident process:
+
+```bash
+curl --fail http://127.0.0.1:8766/health
+curl --fail http://127.0.0.1:8766/ready
+PICO_CONFIG_PATH=config/pico.local.yaml just smoke-voice-providers
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice
+```
+
+The sidecar accepts only loopback traffic and the fixed `ja-JP`, PCM16LE,
+16 kHz, mono contract. It processes one transcription at a time and returns a
+busy response to additional concurrent requests. Pico does not spawn or restart
+the sidecar: keep the release binary running in a dedicated trusted user process
+before launching `resident:voice`. Asset, locale, port, or binary changes take
+effect after the sidecar and resident process are restarted.
 
 Pi Agent is the runtime owner. Start Pi Agent with this package available so it
 loads the pico extension from `package.json` `pi.extensions`; do not treat

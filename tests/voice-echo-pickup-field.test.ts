@@ -13,7 +13,7 @@ describe("voice echo pickup field harness", () => {
     expect(buildVoiceEchoPickupFieldPlan(definePicoConfig({}))).toEqual({
       status: "skip",
       reason:
-        "Set voice.echoControl, voice.stt.mlxWhisper, and voice.tts.aivis to run the voice echo pickup field test."
+        "Set voice.echoControl, voice.stt.appleSpeech, and voice.tts.aivis to run the voice echo pickup field test."
     });
   });
 
@@ -28,9 +28,8 @@ describe("voice echo pickup field harness", () => {
             providerEndpoint: "http://127.0.0.1:8770"
           },
           stt: {
-            mlxWhisper: {
-              localBaseUrl: "http://127.0.0.1:8765",
-              samplePcm16lePath: "/tmp/pico-known-ja.pcm"
+            appleSpeech: {
+              localBaseUrl: "http://127.0.0.1:8766"
             }
           },
           tts: {
@@ -59,8 +58,7 @@ describe("voice echo pickup field harness", () => {
         }
       },
       stt: {
-        localBaseUrl: "http://127.0.0.1:8765",
-        samplePcm16lePath: "/tmp/pico-known-ja.pcm"
+        localBaseUrl: "http://127.0.0.1:8766"
       },
       tts: {
         localBaseUrl: "http://127.0.0.1:10101",

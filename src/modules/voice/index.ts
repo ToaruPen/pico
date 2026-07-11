@@ -3,24 +3,21 @@ import type { FuturePicoModuleMetadata } from "../../orchestrator/contracts.js";
 export const voiceModuleMetadata = {
   kind: "voice",
   status: "planned",
-  summary: "Voice input and output through mlx-whisper and Aivis Speech.",
-  selectedProvider: "mlx-whisper for STT and Aivis Speech for TTS",
+  summary: "Voice input and output through Apple Speech and Aivis Speech.",
+  selectedProvider: "Apple Speech for STT and Aivis Speech for TTS",
   capabilities: []
 } as const satisfies FuturePicoModuleMetadata;
 
-export type MlxWhisperSidecarConfigInput = {
+export type AppleSpeechSidecarConfig = {
   readonly id: string;
-  readonly provider: "mlx-whisper";
+  readonly provider: "apple-speech";
   readonly localBaseUrl: string;
-  readonly modelRepo: string;
-  readonly language: string;
+  readonly language: "ja-JP";
   readonly timeoutMs: number;
   readonly warmup: {
     readonly audioSeconds: number;
   };
 };
-
-export type MlxWhisperSidecarConfig = MlxWhisperSidecarConfigInput;
 
 export type SttTranscriptionRequest = {
   readonly audio: Uint8Array;
@@ -138,8 +135,8 @@ export type AivisSpeechServiceHealth =
 
 type SttTranscriptionSource = {
   readonly sidecarId: string;
-  readonly provider: "mlx-whisper";
-  readonly modelRepo: string;
+  readonly provider: "apple-speech";
+  readonly language: string;
 };
 
 type TtsSynthesisSource = {
@@ -148,7 +145,7 @@ type TtsSynthesisSource = {
   readonly speakerId: number;
 };
 
-type ParsedMlxWhisperSidecarResponse =
+type ParsedAppleSpeechSidecarResponse =
   | {
       readonly ok: true;
       readonly text: string;
@@ -163,7 +160,7 @@ type ParsedMlxWhisperSidecarResponse =
       readonly message: string;
     };
 
-const MLX_WHISPER_TARGET_SAMPLE_RATE_HZ = 16_000;
+const APPLE_SPEECH_SAMPLE_RATE_HZ = 16_000;
 const PCM16LE_BYTES_PER_SAMPLE = 2;
 const AIVIS_DEFAULT_VOICE: AivisSpeechVoiceParameters = {
   speedScale: 1,
@@ -191,7 +188,7 @@ const TRAILING_SENTENCE_CLOSERS = new Set([
   "〛"
 ]);
 
-export function defineMlxWhisperSidecar(input: unknown): MlxWhisperSidecarConfig {
+export function defineAppleSpeechSidecar(input: unknown): AppleSpeechSidecarConfig {
   if (input === undefined) {
     throw new Error("pico STT sidecar config is required");
   }
@@ -201,10 +198,9 @@ export function defineMlxWhisperSidecar(input: unknown): MlxWhisperSidecarConfig
 
   return {
     id: requireString(config.id, "pico STT sidecar id is required"),
-    provider: requireMlxWhisperProvider(config.provider),
+    provider: requireAppleSpeechProvider(config.provider),
     localBaseUrl: requireLocalSidecarBaseUrl(config.localBaseUrl),
-    modelRepo: requireString(config.modelRepo, "pico STT sidecar modelRepo is required"),
-    language: requireString(config.language, "pico STT sidecar language is required"),
+    language: requireAppleSpeechLanguage(config.language),
     timeoutMs: requirePositiveInteger(config.timeoutMs, "pico STT sidecar timeoutMs is required"),
     warmup: {
       audioSeconds: requirePositiveNumber(
@@ -235,24 +231,20 @@ export function defineAivisSpeechService(input: unknown): AivisSpeechServiceConf
   };
 }
 
-export function createMlxWhisperSttClient(
-  sidecar: MlxWhisperSidecarConfig,
+export function createAppleSpeechSttClient(
+  sidecar: AppleSpeechSidecarConfig,
   fetchImplementation: typeof fetch = fetch
 ): SttClient {
   return {
     warmup() {
-      return transcribeWithMlxWhisperSidecar(
+      return transcribeWithAppleSpeechSidecar(
         buildWarmupRequest(sidecar),
         sidecar,
         fetchImplementation
       );
     },
     transcribe(request) {
-      if (request.audio.length === 0) {
-        return Promise.resolve(emptyTranscription(sidecar));
-      }
-
-      return transcribeWithMlxWhisperSidecar(request, sidecar, fetchImplementation);
+      return transcribeWithAppleSpeechSidecar(request, sidecar, fetchImplementation);
     }
   };
 }
@@ -427,9 +419,9 @@ function pushSentenceSegment(segments: string[], text: string): void {
   }
 }
 
-async function transcribeWithMlxWhisperSidecar(
+async function transcribeWithAppleSpeechSidecar(
   request: SttTranscriptionRequest,
-  sidecar: MlxWhisperSidecarConfig,
+  sidecar: AppleSpeechSidecarConfig,
   fetchImplementation: typeof fetch
 ): Promise<SttTranscriptionResult> {
   const source = transcriptionSource(sidecar);
@@ -459,34 +451,13 @@ async function transcribeWithMlxWhisperSidecar(
       signal: abortController.signal
     });
 
-    if (!response.ok) {
-      return {
-        ok: false,
-        reason: "backend_error",
-        message: `pico STT mlx-whisper sidecar request failed with status ${response.status}`,
-        source
-      };
-    }
-
-    const parsed = parseMlxWhisperSidecarResponse((await response.json()) as unknown);
-
-    if (!parsed.ok) {
-      return {
-        ...parsed,
-        source
-      };
-    }
-
-    return {
-      ...parsed,
-      source
-    };
+    return await mapAppleSpeechResponse(response, source);
   } catch (error) {
     if (isAbortError(error)) {
       return {
         ok: false,
         reason: "timeout",
-        message: "pico STT mlx-whisper sidecar request timed out",
+        message: "pico STT Apple Speech sidecar request timed out",
         source
       };
     }
@@ -502,51 +473,74 @@ async function transcribeWithMlxWhisperSidecar(
   }
 }
 
-function buildWarmupRequest(sidecar: MlxWhisperSidecarConfig): SttTranscriptionRequest {
+async function mapAppleSpeechResponse(
+  response: Response,
+  source: SttTranscriptionSource
+): Promise<SttTranscriptionResult> {
+  let payload: unknown;
+  try {
+    payload = (await response.json()) as unknown;
+  } catch (error) {
+    if (!response.ok) {
+      return {
+        ok: false,
+        reason: "backend_error",
+        message: `pico STT Apple Speech sidecar request failed with status ${response.status}`,
+        source
+      };
+    }
+    throw error;
+  }
+
+  const parsed = parseAppleSpeechSidecarResponse(payload);
+
+  if (!response.ok && parsed.ok) {
+    return {
+      ok: false,
+      reason: "backend_error",
+      message: `pico STT Apple Speech sidecar request failed with status ${response.status}`,
+      source
+    };
+  }
+
+  return {
+    ...parsed,
+    source
+  };
+}
+
+function buildWarmupRequest(sidecar: AppleSpeechSidecarConfig): SttTranscriptionRequest {
   const frameCount = Math.max(
     1,
-    Math.round(sidecar.warmup.audioSeconds * MLX_WHISPER_TARGET_SAMPLE_RATE_HZ)
+    Math.round(sidecar.warmup.audioSeconds * APPLE_SPEECH_SAMPLE_RATE_HZ)
   );
 
   return {
     audio: new Uint8Array(frameCount * PCM16LE_BYTES_PER_SAMPLE),
     encoding: "pcm16le",
-    sampleRateHz: MLX_WHISPER_TARGET_SAMPLE_RATE_HZ,
+    sampleRateHz: APPLE_SPEECH_SAMPLE_RATE_HZ,
     channels: 1
   };
 }
 
-function emptyTranscription(sidecar: MlxWhisperSidecarConfig): SttTranscriptionSuccess {
-  return {
-    ok: true,
-    text: "",
-    language: sidecar.language,
-    confidence: 0,
-    durationMs: 0,
-    segments: [],
-    source: transcriptionSource(sidecar)
-  };
-}
-
-function transcriptionSource(sidecar: MlxWhisperSidecarConfig): SttTranscriptionSource {
+function transcriptionSource(sidecar: AppleSpeechSidecarConfig): SttTranscriptionSource {
   return {
     sidecarId: sidecar.id,
     provider: sidecar.provider,
-    modelRepo: sidecar.modelRepo
+    language: sidecar.language
   };
 }
 
-function buildTranscriptionUrl(sidecar: MlxWhisperSidecarConfig): string {
+function buildTranscriptionUrl(sidecar: AppleSpeechSidecarConfig): string {
   return new URL("/v1/transcriptions", sidecar.localBaseUrl).toString();
 }
 
 function buildTranscriptionRequestBody(
   request: SttTranscriptionRequest,
-  sidecar: MlxWhisperSidecarConfig
+  sidecar: AppleSpeechSidecarConfig
 ): Record<string, unknown> {
   return {
     provider: sidecar.provider,
-    modelRepo: sidecar.modelRepo,
     language: sidecar.language,
     timeoutMs: sidecar.timeoutMs,
     audio: {
@@ -557,56 +551,62 @@ function buildTranscriptionRequestBody(
     },
     normalization: {
       targetEncoding: "pcm16le",
-      targetSampleRateHz: MLX_WHISPER_TARGET_SAMPLE_RATE_HZ,
+      targetSampleRateHz: APPLE_SPEECH_SAMPLE_RATE_HZ,
       targetChannels: 1
     }
   };
 }
 
 function validatePcm16leRequest(request: SttTranscriptionRequest): string | undefined {
+  const encoding: unknown = request.encoding;
+
   if (
-    !Number.isInteger(request.sampleRateHz) ||
-    request.sampleRateHz < 1 ||
-    !Number.isInteger(request.channels) ||
-    request.channels < 1 ||
+    encoding !== "pcm16le" ||
+    request.sampleRateHz !== APPLE_SPEECH_SAMPLE_RATE_HZ ||
+    request.channels !== 1 ||
     request.audio.byteLength === 0 ||
-    request.audio.byteLength % (request.channels * PCM16LE_BYTES_PER_SAMPLE) !== 0
+    request.audio.byteLength % PCM16LE_BYTES_PER_SAMPLE !== 0
   ) {
-    return "pico STT transcription request must be PCM16LE audio with positive metadata";
+    return "pico Apple Speech STT request must be non-empty 16 kHz mono PCM16LE audio with an even byte length";
   }
 
   return undefined;
 }
 
-export function parseMlxWhisperSidecarResponse(
+export function parseAppleSpeechSidecarResponse(
   responsePayload: unknown
-): ParsedMlxWhisperSidecarResponse {
+): ParsedAppleSpeechSidecarResponse {
   const response = requireRecord(
     responsePayload,
-    "pico STT mlx-whisper sidecar response is malformed"
+    "pico STT Apple Speech sidecar response is malformed"
   );
-  if (response.provider !== "mlx-whisper") {
-    throw new Error("pico STT mlx-whisper sidecar response is malformed");
+  if (response.provider !== "apple-speech") {
+    throw new Error("pico STT Apple Speech sidecar response is malformed");
   }
 
   if (response.ok === true) {
-    return parseMlxWhisperSuccessResponse(response.result);
+    requireExactRecordKeys(response, ["provider", "ok", "result"]);
+    return parseAppleSpeechSuccessResponse(response.result);
   }
 
   if (response.ok === false) {
-    return parseMlxWhisperFailureResponse(response.error);
+    requireExactRecordKeys(response, ["provider", "ok", "error"]);
+    return parseAppleSpeechFailureResponse(response.error);
   }
 
-  throw new Error("pico STT mlx-whisper sidecar response is malformed");
+  throw new Error("pico STT Apple Speech sidecar response is malformed");
 }
 
-function parseMlxWhisperSuccessResponse(resultPayload: unknown): ParsedMlxWhisperSidecarResponse {
-  const result = requireRecord(resultPayload, "pico STT mlx-whisper sidecar response is malformed");
-  const text = requireTranscriptText(result.text);
-  const language = requireString(
-    result.language,
-    "pico STT mlx-whisper sidecar response is malformed"
+function parseAppleSpeechSuccessResponse(resultPayload: unknown): ParsedAppleSpeechSidecarResponse {
+  const result = requireRecord(
+    resultPayload,
+    "pico STT Apple Speech sidecar response is malformed"
   );
+  requireExactRecordKeys(result, ["text", "language", "confidence", "durationMs", "segments"]);
+  const text = requireTranscriptText(result.text);
+  if (result.language !== "ja-JP") {
+    throw new Error("pico STT Apple Speech sidecar response is malformed");
+  }
   const confidence = requireProbability(result.confidence);
   const durationMs = requireNonNegativeNumber(result.durationMs);
   const segments = requireTranscriptSegments(result.segments);
@@ -614,39 +614,41 @@ function parseMlxWhisperSuccessResponse(resultPayload: unknown): ParsedMlxWhispe
   return {
     ok: true,
     text,
-    language,
+    language: result.language,
     confidence,
     durationMs,
     segments
   };
 }
 
-function parseMlxWhisperFailureResponse(errorPayload: unknown): ParsedMlxWhisperSidecarResponse {
-  const error = requireRecord(errorPayload, "pico STT mlx-whisper sidecar response is malformed");
+function parseAppleSpeechFailureResponse(errorPayload: unknown): ParsedAppleSpeechSidecarResponse {
+  const error = requireRecord(errorPayload, "pico STT Apple Speech sidecar response is malformed");
+  requireExactRecordKeys(error, ["code", "message"]);
 
   return {
     ok: false,
     reason: requireSidecarErrorCode(error.code),
-    message: requireString(error.message, "pico STT mlx-whisper sidecar response is malformed")
+    message: requireString(error.message, "pico STT Apple Speech sidecar response is malformed")
   };
 }
 
 function requireTranscriptSegments(value: unknown): readonly SttTranscriptSegment[] {
   if (!Array.isArray(value)) {
-    throw new Error("pico STT mlx-whisper sidecar response is malformed");
+    throw new Error("pico STT Apple Speech sidecar response is malformed");
   }
 
   return value.map(requireTranscriptSegment);
 }
 
 function requireTranscriptSegment(value: unknown): SttTranscriptSegment {
-  const segment = requireRecord(value, "pico STT mlx-whisper sidecar response is malformed");
+  const segment = requireRecord(value, "pico STT Apple Speech sidecar response is malformed");
+  requireExactRecordKeys(segment, ["text", "startMs", "endMs", "confidence"]);
   const text = requireTranscriptText(segment.text);
   const startMs = requireNonNegativeNumber(segment.startMs);
   const endMs = requireNonNegativeNumber(segment.endMs);
 
   if (endMs < startMs) {
-    throw new Error("pico STT mlx-whisper sidecar response is malformed");
+    throw new Error("pico STT Apple Speech sidecar response is malformed");
   }
 
   return {
@@ -659,7 +661,7 @@ function requireTranscriptSegment(value: unknown): SttTranscriptSegment {
 
 function requireTranscriptText(value: unknown): string {
   if (typeof value !== "string") {
-    throw new Error("pico STT mlx-whisper sidecar response is malformed");
+    throw new Error("pico STT Apple Speech sidecar response is malformed");
   }
 
   return value.trim();
@@ -677,6 +679,20 @@ function requireRecord(value: unknown, message: string): Record<string, unknown>
   return value;
 }
 
+function requireExactRecordKeys(
+  record: Record<string, unknown>,
+  expectedKeys: readonly string[]
+): void {
+  const actualKeys = Object.keys(record);
+
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    expectedKeys.some((key) => !Object.hasOwn(record, key))
+  ) {
+    throw new Error("pico STT Apple Speech sidecar response is malformed");
+  }
+}
+
 function requireString(value: unknown, message: string): string {
   if (typeof value !== "string") {
     throw new Error(message);
@@ -691,12 +707,22 @@ function requireString(value: unknown, message: string): string {
   return trimmed;
 }
 
-function requireMlxWhisperProvider(value: unknown): "mlx-whisper" {
-  if (value === "mlx-whisper") {
+function requireAppleSpeechProvider(value: unknown): "apple-speech" {
+  if (value === "apple-speech") {
     return value;
   }
 
-  throw new Error("pico STT sidecar provider must be mlx-whisper");
+  throw new Error("pico STT sidecar provider must be apple-speech");
+}
+
+function requireAppleSpeechLanguage(value: unknown): "ja-JP" {
+  const language = requireString(value, "pico STT sidecar language is required");
+
+  if (language !== "ja-JP") {
+    throw new Error("pico STT sidecar language must be ja-JP");
+  }
+
+  return language;
 }
 
 function requireLocalSidecarBaseUrl(value: unknown): string {
@@ -711,6 +737,10 @@ function requireLocalSidecarBaseUrl(value: unknown): string {
   requireHttpUrl(parsedUrl);
   requireOriginUrl(parsedUrl);
   requireLoopbackSidecarUrl(parsedUrl);
+
+  if (parsedUrl.protocol !== "http:" || parsedUrl.hostname !== "127.0.0.1") {
+    throw new Error("pico STT sidecar localBaseUrl must use an http://127.0.0.1 origin");
+  }
 
   return localBaseUrl;
 }
@@ -757,7 +787,7 @@ function requirePositiveNumber(value: unknown, message: string): number {
 
 function requireNonNegativeNumber(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-    throw new Error("pico STT mlx-whisper sidecar response is malformed");
+    throw new Error("pico STT Apple Speech sidecar response is malformed");
   }
 
   return value;
@@ -765,7 +795,7 @@ function requireNonNegativeNumber(value: unknown): number {
 
 function requireProbability(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
-    throw new Error("pico STT mlx-whisper sidecar response is malformed");
+    throw new Error("pico STT Apple Speech sidecar response is malformed");
   }
 
   return value;
@@ -781,15 +811,15 @@ function requireSidecarErrorCode(value: unknown): SttTranscriptionFailure["reaso
     return value;
   }
 
-  throw new Error("pico STT mlx-whisper sidecar response is malformed");
+  throw new Error("pico STT Apple Speech sidecar response is malformed");
 }
 
 function sttRequestErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim() !== "") {
-    return `pico STT mlx-whisper sidecar request failed: ${error.message}`;
+    return `pico STT Apple Speech sidecar request failed: ${error.message}`;
   }
 
-  return "pico STT mlx-whisper sidecar request failed";
+  return "pico STT Apple Speech sidecar request failed";
 }
 
 function isAbortError(error: unknown): boolean {
