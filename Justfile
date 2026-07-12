@@ -48,6 +48,12 @@ voice-normal:
 voice-stop:
   npm run resident:voice:launchd -- stop
 
+memory-status:
+  npm run resident:memory:launchd -- status
+
+memory-stop:
+  npm run resident:memory:launchd -- stop
+
 voice-dev:
   -npm run resident:voice:launchd -- stop
   npm run resident:voice:dev-terminal -- --terminal=terminal
@@ -67,6 +73,9 @@ field-voice-echo-pickup:
 
 field-resident-voice-deferred-rallies:
   npm run field:resident-voice-deferred-rallies
+
+field-session-memory-retrieval:
+  npm run field:session-memory-retrieval
 
 ast:
   npm run ast:test

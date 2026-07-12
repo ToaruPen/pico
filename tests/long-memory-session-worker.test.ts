@@ -198,7 +198,8 @@ describe("session memory worker", () => {
           database
             .prepare(`
               UPDATE long_memory_candidate_jobs
-              SET status = 'processing', processing_started_at = ?
+              SET status = 'processing', processing_started_at = ?, attempt_count = 1,
+                  next_attempt_at = '2026-06-17T10:30:00.000Z'
               WHERE id = ?
             `)
             .run("2026-06-17T10:00:00.000Z", staleJob.id);
@@ -212,17 +213,101 @@ describe("session memory worker", () => {
           now: () => "2026-06-17T10:10:00.000Z"
         });
 
+        expect(worker.recoverStaleProcessingJobs()).toEqual([
+          expect.objectContaining({
+            id: staleJob.id,
+            status: "queued",
+            attemptCount: 1,
+            nextAttemptAt: "2026-06-17T10:10:00.000Z"
+          })
+        ]);
         await expect(worker.drainUntilIdle()).resolves.toMatchObject({
           processedCount: 1,
-          recoveredCount: 1
+          recoveredCount: 0
         });
         expect(candidates.listJobs()).toEqual([
           expect.objectContaining({
             id: staleJob.id,
             status: "processed",
+            attemptCount: 2,
             processingStartedAt: "2026-06-17T10:10:00.000Z"
           })
         ]);
+      } finally {
+        candidates.close();
+      }
+    });
+  });
+
+  it("dead-letters stale processing jobs whose third attempt was already claimed", async () => {
+    await withLongMemoryDatabase(async (path) => {
+      let processCallCount = 0;
+      const audit = createStructuredAuditLog();
+      const candidates = openSessionMemoryCandidateStore(path, {
+        audit,
+        now: () => "2026-06-17T10:10:00.000Z",
+        processSession: () => {
+          processCallCount += 1;
+          return Promise.resolve([]);
+        }
+      });
+
+      try {
+        const staleJob = candidates.enqueueSessionCutoff(cutoffInput("session-exhausted-stale"));
+        const database = new DatabaseSync(path);
+
+        try {
+          database
+            .prepare(`
+              UPDATE long_memory_candidate_jobs
+              SET status = 'processing',
+                  processing_started_at = '2026-06-17T10:00:00.000Z',
+                  attempt_count = 3
+              WHERE id = ?
+            `)
+            .run(staleJob.id);
+        } finally {
+          database.close();
+        }
+
+        const worker = createSessionMemoryWorker({
+          store: candidates,
+          audit,
+          recoverProcessingOlderThanMs: 60_000,
+          now: () => "2026-06-17T10:10:00.000Z"
+        });
+
+        expect(worker.recoverStaleProcessingJobs()).toEqual([]);
+        expect(candidates.listJobs()).toEqual([
+          expect.objectContaining({
+            id: staleJob.id,
+            status: "dead_letter",
+            attemptCount: 3,
+            lastErrorCode: "extraction_failed",
+            deadLetteredAt: "2026-06-17T10:10:00.000Z",
+            purgeAfter: "2026-06-24T10:10:00.000Z"
+          })
+        ]);
+        await expect(candidates.processNextJob()).resolves.toBeUndefined();
+        expect(processCallCount).toBe(0);
+        expect(audit.entries().map((event) => event.name)).toContain(
+          "long_memory.candidate_job.dead_lettered"
+        );
+        expect(audit.entries().map((event) => event.name)).not.toContain(
+          "long_memory.worker.processing_recovered"
+        );
+
+        const verificationDatabase = new DatabaseSync(path);
+
+        try {
+          const row = verificationDatabase
+            .prepare("SELECT cutoff_json FROM long_memory_candidate_jobs WHERE id = ?")
+            .get(staleJob.id) as { readonly cutoff_json: string };
+
+          expect(JSON.parse(row.cutoff_json)).toEqual(cutoffInput("session-exhausted-stale"));
+        } finally {
+          verificationDatabase.close();
+        }
       } finally {
         candidates.close();
       }
@@ -397,6 +482,120 @@ describe("session memory worker", () => {
         expect(audit.entries().map((event) => event.name)).toContain(
           "long_memory.worker.backpressure"
         );
+      } finally {
+        candidates.close();
+      }
+    });
+  });
+
+  it("stops claiming after abort and waits for the in-flight transition", async () => {
+    await withLongMemoryDatabase(async (path) => {
+      let releaseProcessing: (() => void) | undefined;
+      const processingGate = new Promise<void>((resolve) => {
+        releaseProcessing = resolve;
+      });
+      const processedSessions: string[] = [];
+      const controller = new AbortController();
+      const candidates = openSessionMemoryCandidateStore(path, {
+        now: () => "2026-06-17T10:00:00.000Z",
+        processSession: async (session) => {
+          processedSessions.push(session.sessionId);
+          await processingGate;
+          return [draftFor(session)];
+        }
+      });
+      const worker = createSessionMemoryWorker({
+        store: candidates,
+        signal: controller.signal,
+        now: () => "2026-06-17T10:00:00.000Z"
+      });
+
+      try {
+        worker.enqueueCutoff(cutoffInput("session-in-flight"));
+        worker.enqueueCutoff(cutoffInput("session-unclaimed"));
+        const drain = worker.drainUntilIdle();
+        await Promise.resolve();
+
+        controller.abort();
+        let settled = false;
+        const settlement = drain.then(
+          () => {
+            settled = true;
+          },
+          () => {
+            settled = true;
+          }
+        );
+        await Promise.resolve();
+        expect(settled).toBe(false);
+
+        releaseProcessing?.();
+        await expect(drain).resolves.toEqual({
+          processedCount: 1,
+          recoveredCount: 0,
+          idle: false
+        });
+        await settlement;
+        expect(processedSessions).toEqual(["session-in-flight"]);
+        expect(candidates.listJobs().map((job) => job.status)).toEqual(["processed", "queued"]);
+        await expect(worker.drainOnce()).resolves.toEqual({
+          recoveredCount: 0,
+          processedJob: undefined
+        });
+      } finally {
+        releaseProcessing?.();
+        candidates.close();
+      }
+    });
+  });
+
+  it("purges expired dead-letter payloads through the worker timestamp boundary", async () => {
+    await withLongMemoryDatabase((path) => {
+      const candidates = openSessionMemoryCandidateStore(path, {
+        processSession: (session) => Promise.resolve([draftFor(session)])
+      });
+      const worker = createSessionMemoryWorker({
+        store: candidates,
+        now: () => "2026-06-24T10:00:00.000Z"
+      });
+
+      try {
+        const job = candidates.enqueueSessionCutoff(cutoffInput("session-expired"));
+        const database = new DatabaseSync(path);
+
+        try {
+          database
+            .prepare(`
+              UPDATE long_memory_candidate_jobs
+              SET status = 'dead_letter',
+                  attempt_count = 3,
+                  last_error_code = 'extraction_failed',
+                  dead_lettered_at = '2026-06-17T10:00:00.000Z',
+                  purge_after = '2026-06-24T10:00:00.000Z'
+              WHERE id = ?
+            `)
+            .run(job.id);
+        } finally {
+          database.close();
+        }
+
+        expect(worker.purgeExpiredDeadLetterPayloads()).toBe(1);
+
+        const verificationDatabase = new DatabaseSync(path);
+
+        try {
+          const row = verificationDatabase
+            .prepare("SELECT cutoff_json, purge_after FROM long_memory_candidate_jobs WHERE id = ?")
+            .get(job.id) as { readonly cutoff_json: string; readonly purge_after: string | null };
+
+          expect(row.purge_after).toBeNull();
+          expect(JSON.parse(row.cutoff_json)).toMatchObject({
+            sessionId: "session-expired",
+            retention: "dead_letter_metadata_only"
+          });
+        } finally {
+          verificationDatabase.close();
+        }
       } finally {
         candidates.close();
       }

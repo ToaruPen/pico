@@ -1276,7 +1276,12 @@ describe("voice resident runtime", () => {
               sourceEntryCount: cutoff.entries.length,
               queuedAt: "2026-06-18T00:00:00.000Z",
               processingStartedAt: undefined,
-              processedAt: undefined
+              processedAt: undefined,
+              attemptCount: 0,
+              nextAttemptAt: undefined,
+              lastErrorCode: undefined,
+              deadLetteredAt: undefined,
+              purgeAfter: undefined
             };
           }
         }
@@ -1452,7 +1457,12 @@ describe("voice resident runtime", () => {
             sourceEntryCount: cutoff.entries.length,
             queuedAt: "2026-06-18T00:00:00.000Z",
             processingStartedAt: undefined,
-            processedAt: undefined
+            processedAt: undefined,
+            attemptCount: 0,
+            nextAttemptAt: undefined,
+            lastErrorCode: undefined,
+            deadLetteredAt: undefined,
+            purgeAfter: undefined
           };
         }
       }
@@ -1512,7 +1522,12 @@ describe("voice resident runtime", () => {
             sourceEntryCount: cutoff.entries.length,
             queuedAt: "2026-06-18T00:00:00.000Z",
             processingStartedAt: undefined,
-            processedAt: undefined
+            processedAt: undefined,
+            attemptCount: 0,
+            nextAttemptAt: undefined,
+            lastErrorCode: undefined,
+            deadLetteredAt: undefined,
+            purgeAfter: undefined
           };
         }
       },
@@ -1576,7 +1591,12 @@ describe("voice resident runtime", () => {
             sourceEntryCount: cutoff.entries.length,
             queuedAt: "2026-06-18T00:00:00.000Z",
             processingStartedAt: undefined,
-            processedAt: undefined
+            processedAt: undefined,
+            attemptCount: 0,
+            nextAttemptAt: undefined,
+            lastErrorCode: undefined,
+            deadLetteredAt: undefined,
+            purgeAfter: undefined
           };
         }
       },

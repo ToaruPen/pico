@@ -40,6 +40,10 @@ export type StructuredAuditLog = {
   readonly entries: () => readonly AuditEvent[];
 };
 
+export type DrainableStructuredAuditLog = StructuredAuditLog & {
+  readonly drain: () => readonly AuditEvent[];
+};
+
 const auditEventCategories = new Set<AuditEventCategory>([
   "tool_call",
   "external_send",
@@ -110,7 +114,7 @@ export function createAuditModule(): PicoModule {
   };
 }
 
-export function createStructuredAuditLog(): StructuredAuditLog {
+export function createStructuredAuditLog(): DrainableStructuredAuditLog {
   const entries: AuditEvent[] = [];
 
   return {
@@ -122,6 +126,9 @@ export function createStructuredAuditLog(): StructuredAuditLog {
     },
     entries() {
       return Object.freeze([...entries]);
+    },
+    drain() {
+      return Object.freeze(entries.splice(0));
     }
   };
 }

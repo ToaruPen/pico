@@ -13,6 +13,7 @@ export type SessionMemoryWorkerOptions = {
   readonly recoverProcessingOlderThanMs?: number;
   readonly maxDrainJobs?: number;
   readonly now?: () => string;
+  readonly signal?: AbortSignal;
 };
 
 export type SessionMemoryEnqueueWorkerOptions = {
@@ -38,6 +39,7 @@ export type SessionMemoryWorker = {
   readonly recoverStaleProcessingJobs: () => readonly SessionMemoryCandidateJob[];
   readonly drainOnce: () => Promise<SessionMemoryDrainOnceResult>;
   readonly drainUntilIdle: () => Promise<SessionMemoryDrainReport>;
+  readonly purgeExpiredDeadLetterPayloads: () => number;
 };
 
 export type SessionMemoryEnqueueWorker = Pick<SessionMemoryWorker, "enqueueCutoff">;
@@ -70,6 +72,7 @@ export function createSessionMemoryWorker(
     "pico session memory worker maxDrainJobs"
   );
   const now = options.now ?? (() => new Date().toISOString());
+  const isAborted = (): boolean => options.signal?.aborted === true;
 
   const recoverStaleProcessingJobs = (): readonly SessionMemoryCandidateJob[] => {
     if (recoverProcessingOlderThanMs === undefined) {
@@ -80,10 +83,12 @@ export function createSessionMemoryWorker(
     const staleBefore = new Date(
       Date.parse(recoveredAt) - recoverProcessingOlderThanMs
     ).toISOString();
-    const recovered = options.store.recoverStaleProcessingJobs({
-      staleBefore,
-      recoveredAt
-    });
+    const recovered = options.store
+      .recoverStaleProcessingJobs({
+        staleBefore,
+        recoveredAt
+      })
+      .filter((job) => job.status === "queued");
 
     if (recovered.length > 0) {
       recordWorkerAudit(options.audit, "long_memory.worker.processing_recovered", recoveredAt, {
@@ -95,7 +100,22 @@ export function createSessionMemoryWorker(
   };
 
   const drainOnce = async (): Promise<SessionMemoryDrainOnceResult> => {
+    if (isAborted()) {
+      return {
+        recoveredCount: 0,
+        processedJob: undefined
+      };
+    }
+
     const recovered = recoverStaleProcessingJobs();
+
+    if (isAborted()) {
+      return {
+        recoveredCount: recovered.length,
+        processedJob: undefined
+      };
+    }
+
     const processedJob = await options.store.processNextJob();
     const occurredAt = requireIsoTimestamp(now(), "pico session memory worker timestamp");
 
@@ -122,11 +142,24 @@ export function createSessionMemoryWorker(
     },
     recoverStaleProcessingJobs,
     drainOnce,
+    purgeExpiredDeadLetterPayloads() {
+      return options.store.purgeExpiredDeadLetterPayloads({
+        now: requireIsoTimestamp(now(), "pico session memory worker timestamp")
+      });
+    },
     async drainUntilIdle() {
       let processedCount = 0;
       let recoveredCount = 0;
 
       while (processedCount < maxDrainJobs) {
+        if (isAborted()) {
+          return {
+            processedCount,
+            recoveredCount,
+            idle: options.store.countJobs(["queued", "processing"]) === 0
+          };
+        }
+
         const result = await drainOnce();
 
         recoveredCount += result.recoveredCount;
@@ -140,6 +173,14 @@ export function createSessionMemoryWorker(
         }
 
         processedCount += 1;
+
+        if (isAborted()) {
+          return {
+            processedCount,
+            recoveredCount,
+            idle: options.store.countJobs(["queued", "processing"]) === 0
+          };
+        }
 
         if (options.store.countJobs(["queued", "processing"]) === 0) {
           return {
@@ -219,11 +260,13 @@ function requirePositiveInteger(value: number, label: string): number {
 }
 
 function requireIsoTimestamp(value: string, label: string): string {
-  if (Number.isNaN(Date.parse(value))) {
+  const timestampMs = Date.parse(value);
+
+  if (Number.isNaN(timestampMs)) {
     throw new Error(`${label} is invalid`);
   }
 
-  return value;
+  return new Date(timestampMs).toISOString();
 }
 
 function recordWorkerAudit(

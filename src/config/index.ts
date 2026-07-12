@@ -5,8 +5,12 @@ import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { parse } from "yaml";
 
 export type PicoConfig = DeepReadonly<{
+  pico: {
+    model?: PicoAgentModelConfig;
+  };
   session: PicoSessionConfig;
   memory: {
+    longMemory: PicoLongMemoryConfig;
     mem0: PicoMem0Config;
   };
   audit: {
@@ -33,6 +37,12 @@ export type PicoConfig = DeepReadonly<{
   };
 }>;
 
+export type PicoAgentModelConfig = {
+  readonly provider: string;
+  readonly id: string;
+  readonly thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+};
+
 export type PicoSessionConfig = {
   readonly enabled: boolean;
   readonly startTriggers: {
@@ -53,6 +63,23 @@ export type PicoMem0Config = {
   readonly vectorStore?: PicoMem0VectorStoreConfig;
   readonly llm?: PicoMem0LlmConfig;
   readonly embedder?: PicoMem0EmbedderConfig;
+};
+
+export type PicoLongMemoryConfig =
+  | { readonly enabled: false }
+  | {
+      readonly enabled: true;
+      readonly databasePath: string;
+      readonly extraction: PicoLongMemoryExtractionConfig;
+    };
+
+export type PicoLongMemoryExtractionConfig = {
+  readonly provider: "pi_model";
+  readonly piProvider: "openai-codex";
+  readonly api: "openai-codex-responses";
+  readonly model: string;
+  readonly thinkingLevel: PicoAgentModelConfig["thinkingLevel"];
+  readonly timeoutMs: number;
 };
 
 export type PicoMem0VectorStoreConfig = {
@@ -301,8 +328,10 @@ const maxNodeTimeoutMs = 2_147_483_647;
 const maxVoiceUtteranceWindowMs = 60_000;
 const maxTcpPort = 65_535;
 const maxOllamaImageEdgePixels = 4096;
+const picoThinkingLevels = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 export const emptyPicoConfig: PicoConfig = deepFreeze({
+  pico: {},
   session: {
     enabled: true,
     startTriggers: {
@@ -316,6 +345,9 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
     }
   },
   memory: {
+    longMemory: {
+      enabled: false
+    },
     mem0: {
       enabled: false
     }
@@ -409,6 +441,7 @@ export function definePicoConfig(input: unknown): PicoConfig {
   const root = input === null || input === undefined ? {} : requireRecord(input, "pico config");
 
   return deepFreeze({
+    pico: definePicoSection(root),
     session: defineSessionSection(root),
     memory: defineMemorySection(root),
     audit: defineAuditSection(root),
@@ -416,6 +449,34 @@ export function definePicoConfig(input: unknown): PicoConfig {
     vision: defineVisionSection(root),
     voice: defineVoiceSection(root)
   });
+}
+
+function definePicoSection(root: Record<string, unknown>): PicoConfig["pico"] {
+  const pico = readOptionalRecord(root.pico, "pico config pico");
+
+  if (pico === undefined) {
+    return {};
+  }
+
+  requireKnownConfigFields(pico, "pico config pico", ["model"]);
+  const model = readOptionalRecord(pico.model, "pico config pico.model");
+
+  if (model === undefined) {
+    return {};
+  }
+
+  requireKnownConfigFields(model, "pico config pico.model", ["provider", "id", "thinkingLevel"]);
+
+  return {
+    model: {
+      provider: requireString(model.provider, "pico config pico.model.provider"),
+      id: requireString(model.id, "pico config pico.model.id"),
+      thinkingLevel: requireThinkingLevel(
+        model.thinkingLevel,
+        "pico config pico.model.thinkingLevel"
+      )
+    }
+  };
 }
 
 function defineSessionSection(root: Record<string, unknown>): PicoConfig["session"] {
@@ -479,11 +540,106 @@ function defineSessionEnding(
 
 function defineMemorySection(root: Record<string, unknown>): PicoConfig["memory"] {
   const memory = readOptionalRecord(root.memory, "pico config memory");
+  const longMemory = readOptionalRecord(memory?.longMemory, "pico config memory.longMemory");
   const mem0 = readOptionalRecord(memory?.mem0, "pico config memory.mem0");
 
   return {
+    longMemory: defineLongMemoryConfig(longMemory),
     mem0: defineMem0Config(mem0)
   };
+}
+
+function defineLongMemoryConfig(input: Record<string, unknown> | undefined): PicoLongMemoryConfig {
+  if (input === undefined) {
+    return {
+      enabled: false
+    };
+  }
+
+  const enabled =
+    readOptionalBoolean(input.enabled, "pico config memory.longMemory.enabled") ?? false;
+
+  requireKnownConfigFields(
+    input,
+    "pico config memory.longMemory",
+    enabled ? ["enabled", "databasePath", "extraction"] : ["enabled"]
+  );
+
+  if (!enabled) {
+    return { enabled };
+  }
+
+  const extraction = readOptionalRecord(
+    input.extraction,
+    "pico config memory.longMemory.extraction"
+  );
+
+  if (extraction === undefined) {
+    throw new Error(
+      "pico config memory.longMemory.extraction is required when memory.longMemory is enabled"
+    );
+  }
+
+  return {
+    enabled,
+    databasePath: requireString(input.databasePath, "pico config memory.longMemory.databasePath"),
+    extraction: defineLongMemoryExtractionConfig(extraction)
+  };
+}
+
+function defineLongMemoryExtractionConfig(
+  input: Record<string, unknown>
+): PicoLongMemoryExtractionConfig {
+  const label = "pico config memory.longMemory.extraction";
+  requireKnownConfigFields(input, label, [
+    "provider",
+    "piProvider",
+    "api",
+    "model",
+    "thinkingLevel",
+    "timeoutMs"
+  ]);
+
+  const provider = requireString(input.provider, `${label}.provider`);
+  const piProvider = requireString(input.piProvider, `${label}.piProvider`);
+  const api = requireString(input.api, `${label}.api`);
+
+  if (provider !== "pi_model") {
+    throw new Error(`${label}.provider must be pi_model`);
+  }
+
+  if (piProvider !== "openai-codex") {
+    throw new Error(`${label}.piProvider must be openai-codex`);
+  }
+
+  if (api !== "openai-codex-responses") {
+    throw new Error(`${label}.api must be openai-codex-responses`);
+  }
+
+  return {
+    provider,
+    piProvider,
+    api,
+    model: requireString(input.model, `${label}.model`),
+    thinkingLevel: requireThinkingLevel(input.thinkingLevel, `${label}.thinkingLevel`),
+    timeoutMs: requireNumber(
+      readOptionalBoundedPositiveInteger(input.timeoutMs, `${label}.timeoutMs`, maxNodeTimeoutMs),
+      `${label}.timeoutMs`
+    )
+  };
+}
+
+function requireThinkingLevel(
+  value: unknown,
+  label: string
+): PicoAgentModelConfig["thinkingLevel"] {
+  const thinkingLevel = requireString(value, label);
+
+  if (!picoThinkingLevels.has(thinkingLevel)) {
+    throw new Error(`${label} must be off, minimal, low, medium, high, xhigh, or max`);
+  }
+
+  return thinkingLevel as PicoAgentModelConfig["thinkingLevel"];
 }
 
 function defineMem0Config(input: Record<string, unknown> | undefined): PicoMem0Config {
@@ -1526,6 +1682,15 @@ function resolveConfigRelativePaths(config: PicoConfig, baseDirectory: string): 
   return deepFreeze({
     ...config,
     memory: {
+      longMemory: config.memory.longMemory.enabled
+        ? {
+            ...config.memory.longMemory,
+            databasePath: resolveConfigRelativePath(
+              baseDirectory,
+              config.memory.longMemory.databasePath
+            )
+          }
+        : config.memory.longMemory,
       mem0: {
         ...config.memory.mem0,
         ...(config.memory.mem0.historyDbPath === undefined
@@ -2214,6 +2379,20 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
   }
 
   return value as Record<string, unknown>;
+}
+
+function requireKnownConfigFields(
+  input: Record<string, unknown>,
+  label: string,
+  knownFields: readonly string[]
+): void {
+  const known = new Set(knownFields);
+
+  for (const field of Object.keys(input)) {
+    if (!known.has(field)) {
+      throw new Error(`${label} has unknown field ${field}`);
+    }
+  }
 }
 
 function parentLabel(label: string): string {

@@ -1,8 +1,9 @@
-import { DatabaseSync } from "node:sqlite";
-
 import type { StructuredAuditLog } from "../modules/audit/index.js";
-import { openSessionMemoryCandidateStore } from "../modules/long-memory/index.js";
-import type { Mem0MemoryProvider } from "../modules/long-memory/mem0.js";
+import type { FacilityMemoryExtractor } from "../modules/long-memory/extractor.js";
+import {
+  openSessionMemoryCandidateStore,
+  type SessionMemoryCandidateJobErrorCode
+} from "../modules/long-memory/index.js";
 import {
   createSessionMemoryWorker,
   type SessionMemoryDrainReport,
@@ -11,21 +12,26 @@ import {
 
 export type ResidentMemoryDrainWorkerOptions = {
   readonly databasePath: string;
-  readonly mem0Provider: Mem0MemoryProvider;
+  readonly extractor: FacilityMemoryExtractor;
   readonly audit?: StructuredAuditLog;
   readonly maxQueueDepth?: number;
   readonly recoverProcessingOlderThanMs?: number;
   readonly maxDrainJobs?: number;
   readonly now?: () => string;
+  readonly signal?: AbortSignal;
 };
 
 export type ResidentMemoryDrainReport = SessionMemoryDrainReport & {
-  readonly mem0MemoryCount: number;
+  readonly memoryWrittenCount: number;
+  readonly writtenMemoryIds?: readonly number[];
+  readonly retryScheduledCount?: number;
+  readonly deadLetterCount: number;
+  readonly lastErrorCode?: SessionMemoryCandidateJobErrorCode;
 };
 
 export type ResidentMemoryDrainWorker = Pick<
   SessionMemoryWorker,
-  "enqueueCutoff" | "recoverStaleProcessingJobs" | "drainOnce"
+  "enqueueCutoff" | "recoverStaleProcessingJobs" | "drainOnce" | "purgeExpiredDeadLetterPayloads"
 > & {
   readonly drainUntilIdle: () => Promise<ResidentMemoryDrainReport>;
   readonly close: () => void;
@@ -34,34 +40,145 @@ export type ResidentMemoryDrainWorker = Pick<
 export function createResidentMemoryDrainWorker(
   options: ResidentMemoryDrainWorkerOptions
 ): ResidentMemoryDrainWorker {
-  let mem0MemoryCount = 0;
-  const mem0Writes = openResidentMem0SessionWriteStore(options.databasePath, options.now);
-  const store = openSessionMemoryCandidateStore(options.databasePath, {
-    ...(options.audit === undefined ? {} : { audit: options.audit }),
-    ...(options.now === undefined ? {} : { now: options.now }),
-    processSession: async (session) => {
-      const existing = mem0Writes.read(session.sessionId);
+  let activeWrittenMemoryIds: Set<number> | undefined;
+  const store = openSessionMemoryCandidateStore(
+    options.databasePath,
+    defineCandidateStoreOptions(
+      options,
+      (session) => options.extractor.extract(session, options.signal),
+      (records) => {
+        for (const record of records) {
+          activeWrittenMemoryIds?.add(record.id);
+        }
+      }
+    )
+  );
+  const worker = createConfiguredSessionMemoryWorker(store, options);
+  const maxDrainJobs = options.maxDrainJobs ?? 100;
+  let closed = false;
 
-      if (existing?.status === "written") {
-        return [];
+  return {
+    enqueueCutoff: worker.enqueueCutoff,
+    recoverStaleProcessingJobs: worker.recoverStaleProcessingJobs,
+    drainOnce: worker.drainOnce,
+    purgeExpiredDeadLetterPayloads: worker.purgeExpiredDeadLetterPayloads,
+    async drainUntilIdle() {
+      const writtenMemoryIds = new Set<number>();
+      activeWrittenMemoryIds = writtenMemoryIds;
+      const beforeDeadLetters = store.countJobs(["dead_letter"]);
+      const beforeRetryJobs = countRetryScheduledJobs();
+      const attemptsBefore = new Map(
+        store.listJobs().map((job) => [job.id, job.attemptCount] as const)
+      );
+      let processedCount = 0;
+      let recoveredCount = 0;
+
+      const drainJobs = async (): Promise<ResidentMemoryDrainReport> => {
+        while (processedCount < maxDrainJobs) {
+          try {
+            const result = await worker.drainOnce();
+
+            recoveredCount += result.recoveredCount;
+
+            if (result.processedJob === undefined) {
+              return createReport(processedCount, recoveredCount);
+            }
+
+            processedCount += 1;
+
+            if (store.countJobs(["queued", "processing"]) === 0) {
+              return createReport(processedCount, recoveredCount);
+            }
+          } catch (error) {
+            const transitionedJob = [...store.listJobs()]
+              .reverse()
+              .find(
+                (job) =>
+                  job.lastErrorCode !== undefined &&
+                  job.attemptCount !== (attemptsBefore.get(job.id) ?? 0)
+              );
+
+            if (transitionedJob?.lastErrorCode === undefined) {
+              throw error;
+            }
+
+            return createReport(processedCount, recoveredCount, transitionedJob.lastErrorCode);
+          }
+        }
+
+        return createReport(processedCount, recoveredCount);
+      };
+
+      try {
+        return await drainJobs();
+      } finally {
+        if (activeWrittenMemoryIds === writtenMemoryIds) {
+          activeWrittenMemoryIds = undefined;
+        }
       }
 
-      if (existing?.status === "processing") {
-        throw new Error(
-          `pico resident memory Mem0 write is already in progress or uncertain for session ${session.sessionId}`
-        );
+      function createReport(
+        processed: number,
+        recovered: number,
+        lastErrorCode?: SessionMemoryCandidateJobErrorCode
+      ): ResidentMemoryDrainReport {
+        const retryScheduledCount = Math.max(0, countRetryScheduledJobs() - beforeRetryJobs);
+        const writtenIds = [...writtenMemoryIds];
+        const report = {
+          processedCount: processed,
+          recoveredCount: recovered,
+          idle: store.countJobs(["queued", "processing"]) === 0,
+          memoryWrittenCount: writtenIds.length,
+          deadLetterCount: store.countJobs(["dead_letter"]) - beforeDeadLetters
+        };
+
+        return {
+          ...report,
+          ...(writtenIds.length === 0 ? {} : { writtenMemoryIds: Object.freeze(writtenIds) }),
+          ...(retryScheduledCount === 0 ? {} : { retryScheduledCount }),
+          ...(lastErrorCode === undefined ? {} : { lastErrorCode })
+        };
       }
 
-      mem0Writes.begin(session.sessionId);
-      const result = await options.mem0Provider.addSessionCutoff(session);
+      function countRetryScheduledJobs(): number {
+        return store
+          .listJobs()
+          .filter((job) => job.status === "queued" && job.lastErrorCode !== undefined).length;
+      }
+    },
+    close() {
+      if (closed) {
+        return;
+      }
 
-      mem0Writes.markWritten(session.sessionId, result.memoryIds);
-      mem0MemoryCount += result.memoryIds.length;
-
-      return [];
+      closed = true;
+      store.close();
     }
-  });
-  const worker = createSessionMemoryWorker({
+  };
+}
+
+function defineCandidateStoreOptions(
+  options: ResidentMemoryDrainWorkerOptions,
+  processAutomatedSession: NonNullable<
+    Parameters<typeof openSessionMemoryCandidateStore>[1]["processAutomatedSession"]
+  >,
+  onAutomatedMemoriesWritten: NonNullable<
+    Parameters<typeof openSessionMemoryCandidateStore>[1]["onAutomatedMemoriesWritten"]
+  >
+): Parameters<typeof openSessionMemoryCandidateStore>[1] {
+  return {
+    processAutomatedSession,
+    onAutomatedMemoriesWritten,
+    ...(options.audit === undefined ? {} : { audit: options.audit }),
+    ...(options.now === undefined ? {} : { now: options.now })
+  };
+}
+
+function createConfiguredSessionMemoryWorker(
+  store: ReturnType<typeof openSessionMemoryCandidateStore>,
+  options: ResidentMemoryDrainWorkerOptions
+): SessionMemoryWorker {
+  return createSessionMemoryWorker({
     store,
     ...(options.audit === undefined ? {} : { audit: options.audit }),
     ...(options.maxQueueDepth === undefined ? {} : { maxQueueDepth: options.maxQueueDepth }),
@@ -69,118 +186,7 @@ export function createResidentMemoryDrainWorker(
       ? {}
       : { recoverProcessingOlderThanMs: options.recoverProcessingOlderThanMs }),
     ...(options.maxDrainJobs === undefined ? {} : { maxDrainJobs: options.maxDrainJobs }),
-    ...(options.now === undefined ? {} : { now: options.now })
+    ...(options.now === undefined ? {} : { now: options.now }),
+    ...(options.signal === undefined ? {} : { signal: options.signal })
   });
-
-  return {
-    enqueueCutoff: worker.enqueueCutoff,
-    recoverStaleProcessingJobs: worker.recoverStaleProcessingJobs,
-    drainOnce: worker.drainOnce,
-    async drainUntilIdle() {
-      const before = mem0MemoryCount;
-      const report = await worker.drainUntilIdle();
-
-      return {
-        ...report,
-        mem0MemoryCount: mem0MemoryCount - before
-      };
-    },
-    close() {
-      mem0Writes.close();
-      store.close();
-    }
-  };
-}
-
-type ResidentMem0SessionWriteStatus = "processing" | "written";
-
-type ResidentMem0SessionWrite = {
-  readonly sessionId: string;
-  readonly status: ResidentMem0SessionWriteStatus;
-  readonly memoryIds: readonly string[];
-};
-
-type ResidentMem0SessionWriteRow = {
-  readonly session_id: string;
-  readonly status: ResidentMem0SessionWriteStatus;
-  readonly memory_ids_json: string;
-};
-
-type ResidentMem0SessionWriteStore = {
-  readonly read: (sessionId: string) => ResidentMem0SessionWrite | undefined;
-  readonly begin: (sessionId: string) => void;
-  readonly markWritten: (sessionId: string, memoryIds: readonly string[]) => void;
-  readonly close: () => void;
-};
-
-function openResidentMem0SessionWriteStore(
-  path: string,
-  now: (() => string) | undefined
-): ResidentMem0SessionWriteStore {
-  const database = new DatabaseSync(path);
-  const timestamp = now ?? (() => new Date().toISOString());
-
-  database.exec(`
-    CREATE TABLE IF NOT EXISTS resident_mem0_session_writes (
-      session_id TEXT PRIMARY KEY,
-      status TEXT NOT NULL CHECK (status IN ('processing', 'written')),
-      memory_ids_json TEXT NOT NULL,
-      started_at TEXT NOT NULL,
-      written_at TEXT
-    );
-  `);
-
-  return {
-    read(sessionId) {
-      const row = database
-        .prepare(`
-          SELECT session_id, status, memory_ids_json
-          FROM resident_mem0_session_writes
-          WHERE session_id = ?
-        `)
-        .get(sessionId) as ResidentMem0SessionWriteRow | undefined;
-
-      if (row === undefined) {
-        return undefined;
-      }
-
-      return {
-        sessionId: row.session_id,
-        status: row.status,
-        memoryIds: parseMemoryIds(row.memory_ids_json)
-      };
-    },
-    begin(sessionId) {
-      database
-        .prepare(`
-          INSERT INTO resident_mem0_session_writes (
-            session_id, status, memory_ids_json, started_at
-          )
-          VALUES (?, 'processing', '[]', ?)
-        `)
-        .run(sessionId, timestamp());
-    },
-    markWritten(sessionId, memoryIds) {
-      database
-        .prepare(`
-          UPDATE resident_mem0_session_writes
-          SET status = 'written', memory_ids_json = ?, written_at = ?
-          WHERE session_id = ? AND status = 'processing'
-        `)
-        .run(JSON.stringify(memoryIds), timestamp(), sessionId);
-    },
-    close() {
-      database.close();
-    }
-  };
-}
-
-function parseMemoryIds(payload: string): readonly string[] {
-  const parsed: unknown = JSON.parse(payload);
-
-  if (!Array.isArray(parsed) || !parsed.every((value) => typeof value === "string")) {
-    throw new Error("pico resident memory Mem0 write row is malformed");
-  }
-
-  return Object.freeze(parsed);
 }

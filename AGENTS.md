@@ -16,10 +16,12 @@ responsible decision makers.
 - Runtime shape is one Pi package with one TypeScript extension.
 - Pi owns the production process, parent conversation session, model loop,
   tools, subagents, and normal agent cancellation. Pico owns facility audio,
-  address/attention rules, TTS/echo control, and capability restrictions.
-- `pico-runtime-profile` is startup-only. Its safe default is `worker`;
-  production resident startup must select `resident`, and trusted manual tool
-  sessions must select `interactive` explicitly.
+  address/attention rules, TTS/echo control, and facility runtime restrictions.
+- Normal Pi starts without the resident controller. `pi --pico` starts Pico in
+  the same Pi-owned runtime; the `pico` command is only a convenience alias for
+  that path. Pico's model is selected from YAML at startup.
+- Tool visibility for normal Pi, Pico, and subagents is owned by Pi settings.
+  Do not duplicate those allowlists in Pico runtime profiles or tests.
 - Internal modules are TypeScript modules under `src/`.
 - Module code uses one folder per module under `src/modules/<module>/index.ts`.
 - First-slice runtime modules are metadata/contract modules for context, memory,
@@ -67,6 +69,9 @@ responsible decision makers.
 - Human staff remain responsible for discipline, emergencies, safeguarding,
   parental communication, and final decisions.
 - Do not design durable memory around child tracking, scoring, or profiling.
+- Keep durable extraction scoped to facility knowledge. Reject explicit
+  child-profile fields structurally; do not add name, honorific, medical-term,
+  or other natural-language privacy classifiers to the memory path.
 
 ## Deterministic Checks
 

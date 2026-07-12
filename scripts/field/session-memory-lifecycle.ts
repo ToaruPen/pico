@@ -10,32 +10,34 @@ import {
   createOpenTelemetryAuditExporter,
   type OpenTelemetryAuditExporter
 } from "../../src/modules/audit/otel.js";
+import type { FacilityMemoryExtractor } from "../../src/modules/long-memory/extractor.js";
 import {
-  type LongMemoryCandidateDraft,
-  openSessionMemoryCandidateStore,
-  type SessionMemoryCutoffEntry,
+  openLongMemoryStore,
   type SessionMemoryCutoffInput
 } from "../../src/modules/long-memory/index.js";
-import { createMem0MemoryProvider, type Mem0Client } from "../../src/modules/long-memory/mem0.js";
-import { createMem0OssClient } from "../../src/modules/long-memory/mem0-runtime.js";
-import { createSessionMemoryWorker } from "../../src/modules/long-memory/session-worker.js";
+import { createPiModelFacilityMemoryExtractor } from "../../src/modules/long-memory/pi-extractor.js";
 import { createSessionLifecycle } from "../../src/modules/session/index.js";
+import {
+  createResidentMemoryDrainWorker,
+  type ResidentMemoryDrainWorker
+} from "../../src/runtime/resident-memory-worker.js";
 import { createPicoSessionTool } from "../../src/runtime/session-tool.js";
 
 export type SessionMemoryLifecycleFieldReport =
   | {
       readonly status: "passed";
-      readonly provider: "session+sqlite+mem0+otel";
+      readonly provider: "session+sqlite+otel";
       readonly details: {
         readonly runId: string;
         readonly sessionId: string;
         readonly sourceEntryCount: number;
         readonly candidateJobId: number;
-        readonly candidateCount: number;
         readonly workerProcessedCount: number;
         readonly workerRecoveredCount: number;
         readonly workerIdle: boolean;
-        readonly mem0MemoryCount: number;
+        readonly memoryWrittenCount: number;
+        readonly activeMemoryCount: number;
+        readonly provenanceKind: "session_cutoff_automation";
         readonly auditEventCount: number;
         readonly exportedOtelRecordCount: number;
         readonly databasePath: string;
@@ -43,23 +45,23 @@ export type SessionMemoryLifecycleFieldReport =
     }
   | {
       readonly status: "failed" | "skipped";
-      readonly provider: "session+sqlite+mem0+otel";
+      readonly provider: "session+sqlite+otel";
       readonly reason: string;
     };
 
 export type SessionMemoryLifecycleFieldDependencies = {
   readonly createRunId?: () => string;
   readonly databasePath?: string;
-  readonly createClient?: (
-    config: PicoConfig["memory"]["mem0"]
-  ) => Mem0Client | Promise<Mem0Client>;
+  readonly createExtractor?: (
+    config: Extract<PicoConfig["memory"]["longMemory"], { readonly enabled: true }>["extraction"]
+  ) => FacilityMemoryExtractor;
   readonly createAuditExporter?: (
     config: Required<PicoConfig["audit"]["otel"]>
   ) => OpenTelemetryAuditExporter;
   readonly appendEntries?: boolean;
 };
 
-const provider = "session+sqlite+mem0+otel" as const;
+const provider = "session+sqlite+otel" as const;
 const databasePathEnvironment = "PICO_FIELD_SESSION_MEMORY_DB_PATH";
 const defaultDatabasePath = ".pico-local/session-memory-field.sqlite";
 const defaultEndedRetentionMs = 10_000;
@@ -76,8 +78,8 @@ export async function runSessionMemoryLifecycleField(
     }
 
     return await executeSessionMemoryLifecycleField(config, dependencies);
-  } catch (error) {
-    return failed(`pico session memory lifecycle field failed: ${errorMessage(error)}`);
+  } catch {
+    return failed("pico session memory lifecycle field failed");
   }
 }
 
@@ -85,8 +87,49 @@ async function executeSessionMemoryLifecycleField(
   config: PicoConfig,
   dependencies: SessionMemoryLifecycleFieldDependencies
 ): Promise<SessionMemoryLifecycleFieldReport> {
-  const runId = dependencies.createRunId?.() ?? randomUUID();
+  const runId = createFieldRunId(dependencies);
   const audit = createStructuredAuditLog();
+  const cutoff = await createFieldCutoff(config, dependencies, runId, audit);
+
+  if (cutoff.sourceEntryIds.length === 0) {
+    return failed("pico session memory lifecycle field requires an entry-bearing cutoff");
+  }
+
+  const databasePath = resolveDatabasePath(dependencies.databasePath);
+  const databaseReportPath = resolveDatabaseReportPath(dependencies.databasePath);
+  await mkdir(dirname(databasePath), { recursive: true });
+
+  const longMemory = requireEnabledLongMemoryConfig(config);
+  const extractor = createFieldExtractor(longMemory.extraction, dependencies);
+  const worker = createResidentMemoryDrainWorker({
+    databasePath,
+    extractor,
+    audit,
+    recoverProcessingOlderThanMs: 10 * 60_000
+  });
+
+  try {
+    return await collectSessionMemoryEvidence({
+      config,
+      dependencies,
+      runId,
+      cutoff,
+      databasePath,
+      databaseReportPath,
+      audit,
+      worker
+    });
+  } finally {
+    worker.close();
+  }
+}
+
+async function createFieldCutoff(
+  config: PicoConfig,
+  dependencies: SessionMemoryLifecycleFieldDependencies,
+  runId: string,
+  audit: ReturnType<typeof createStructuredAuditLog>
+): Promise<SessionMemoryCutoffInput> {
   const lifecycle = createSessionLifecycle({
     ending: config.session.ending,
     endedSessionRetentionMs: defaultEndedRetentionMs,
@@ -110,13 +153,13 @@ async function executeSessionMemoryLifecycleField(
       action: "append",
       sessionId: session.id,
       role: "staff",
-      content: `雨の日は工作セットを早めに準備すると活動へ入りやすい。 run:${runId}`
+      content: `施設共通の継続手順として、雨の日は工作セットを早めに準備する。 run:${runId}`
     });
     await executeSessionTool(sessionTool, {
       action: "append",
       sessionId: session.id,
       role: "assistant",
-      content: `次の雨の日も工作セットを先に準備する候補として扱う。 run:${runId}`
+      content: `今後も同じ継続手順を次回以降へ引き継ぐ。 run:${runId}`
     });
   }
 
@@ -128,77 +171,95 @@ async function executeSessionMemoryLifecycleField(
     })
   );
 
-  if (cutoff.sourceEntryIds.length === 0) {
-    return failed("pico session memory lifecycle field requires an entry-bearing cutoff");
+  return cutoff;
+}
+
+type EnabledLongMemoryConfig = Extract<
+  PicoConfig["memory"]["longMemory"],
+  { readonly enabled: true }
+>;
+
+function createFieldRunId(dependencies: SessionMemoryLifecycleFieldDependencies): string {
+  return dependencies.createRunId?.() ?? randomUUID();
+}
+
+function requireEnabledLongMemoryConfig(config: PicoConfig): EnabledLongMemoryConfig {
+  if (!config.memory.longMemory.enabled) {
+    throw new Error("pico session memory lifecycle field requires memory.longMemory.enabled=true");
   }
 
-  const databasePath = resolveDatabasePath(dependencies.databasePath);
-  const databaseReportPath = resolveDatabaseReportPath(dependencies.databasePath);
-  await mkdir(dirname(databasePath), { recursive: true });
+  return config.memory.longMemory;
+}
 
-  const candidates = openSessionMemoryCandidateStore(databasePath, {
-    audit,
-    processSession: (input) => Promise.resolve(createFieldMemoryDrafts(input.entries))
+function createFieldExtractor(
+  config: EnabledLongMemoryConfig["extraction"],
+  dependencies: SessionMemoryLifecycleFieldDependencies
+): FacilityMemoryExtractor {
+  return dependencies.createExtractor?.(config) ?? createPiModelFacilityMemoryExtractor(config);
+}
+
+async function collectSessionMemoryEvidence(input: {
+  readonly config: PicoConfig;
+  readonly dependencies: SessionMemoryLifecycleFieldDependencies;
+  readonly runId: string;
+  readonly cutoff: SessionMemoryCutoffInput;
+  readonly databasePath: string;
+  readonly databaseReportPath: string;
+  readonly audit: ReturnType<typeof createStructuredAuditLog>;
+  readonly worker: ResidentMemoryDrainWorker;
+}): Promise<SessionMemoryLifecycleFieldReport> {
+  const candidateJob = input.worker.enqueueCutoff(input.cutoff);
+  const workerReport = await input.worker.drainUntilIdle();
+  const activeMemories = readWrittenMemories(
+    input.databasePath,
+    workerReport.writtenMemoryIds ?? []
+  );
+  const exportedOtelRecordCount = await exportAuditEvents(
+    input.config.audit.otel,
+    input.dependencies,
+    input.audit.entries()
+  );
+  const evidenceFailure = validateSessionMemoryLifecycleEvidence({
+    workerProcessedCount: workerReport.processedCount,
+    workerRecoveredCount: workerReport.recoveredCount,
+    workerIdle: workerReport.idle,
+    activeMemoryCount: activeMemories.length,
+    provenanceKind: activeMemories[0]?.provenance.kind,
+    exportedOtelRecordCount
   });
 
-  try {
-    const worker = createSessionMemoryWorker({
-      store: candidates,
-      audit
-    });
-    const candidateJob = worker.enqueueCutoff(cutoff);
-    const workerReport = await worker.drainUntilIdle();
-    const pendingCandidates = candidates.listPending();
-    const mem0Client =
-      dependencies.createClient === undefined
-        ? await createMem0OssClient(config.memory.mem0)
-        : await dependencies.createClient(config.memory.mem0);
-    const mem0Provider = createMem0MemoryProvider({
-      client: mem0Client,
-      scopeId: `pico-field-${runId}`,
-      audit
-    });
-    const mem0Result = await mem0Provider.addSessionCutoff(cutoff);
-    const exportedOtelRecordCount = await exportAuditEvents(
-      config.audit.otel,
-      dependencies,
-      audit.entries()
-    );
-    const candidateCount = pendingCandidates.length;
-    const mem0MemoryCount = mem0Result.memoryIds.length;
-    const evidenceFailure = validateSessionMemoryLifecycleEvidence({
-      candidateCount,
+  if (evidenceFailure !== undefined) {
+    return evidenceFailure;
+  }
+
+  return {
+    status: "passed",
+    provider,
+    details: {
+      runId: input.runId,
+      sessionId: input.cutoff.sessionId,
+      sourceEntryCount: input.cutoff.sourceEntryIds.length,
+      candidateJobId: candidateJob.id,
       workerProcessedCount: workerReport.processedCount,
       workerRecoveredCount: workerReport.recoveredCount,
       workerIdle: workerReport.idle,
-      mem0MemoryCount,
-      exportedOtelRecordCount
-    });
-
-    if (evidenceFailure !== undefined) {
-      return evidenceFailure;
+      memoryWrittenCount: workerReport.memoryWrittenCount,
+      activeMemoryCount: activeMemories.length,
+      provenanceKind: "session_cutoff_automation",
+      auditEventCount: input.audit.entries().length,
+      exportedOtelRecordCount,
+      databasePath: input.databaseReportPath
     }
+  };
+}
 
-    return {
-      status: "passed",
-      provider,
-      details: {
-        runId,
-        sessionId: cutoff.sessionId,
-        sourceEntryCount: cutoff.sourceEntryIds.length,
-        candidateJobId: candidateJob.id,
-        candidateCount,
-        workerProcessedCount: workerReport.processedCount,
-        workerRecoveredCount: workerReport.recoveredCount,
-        workerIdle: workerReport.idle,
-        mem0MemoryCount,
-        auditEventCount: audit.entries().length,
-        exportedOtelRecordCount,
-        databasePath: databaseReportPath
-      }
-    };
+function readWrittenMemories(databasePath: string, memoryIds: readonly number[]) {
+  const memories = openLongMemoryStore(databasePath);
+
+  try {
+    return memoryIds.map((id) => memories.read(id)).filter((memory) => memory !== undefined);
   } finally {
-    candidates.close();
+    memories.close();
   }
 }
 
@@ -216,8 +277,10 @@ function validateSessionMemoryLifecycleFieldReadiness(
     return skipped("Set session.enabled=true to run the session memory lifecycle field test.");
   }
 
-  if (!config.memory.mem0.enabled) {
-    return skipped("Set memory.mem0.enabled=true to run the session memory lifecycle field test.");
+  if (!config.memory.longMemory.enabled) {
+    return skipped(
+      "Set memory.longMemory.enabled=true to run the session memory lifecycle field test."
+    );
   }
 
   if (!config.audit.otel.enabled) {
@@ -228,11 +291,11 @@ function validateSessionMemoryLifecycleFieldReadiness(
 }
 
 function validateSessionMemoryLifecycleEvidence(evidence: {
-  readonly candidateCount: number;
   readonly workerProcessedCount: number;
   readonly workerRecoveredCount: number;
   readonly workerIdle: boolean;
-  readonly mem0MemoryCount: number;
+  readonly activeMemoryCount: number;
+  readonly provenanceKind: "staff_review" | "session_cutoff_automation" | undefined;
   readonly exportedOtelRecordCount: number;
 }): SessionMemoryLifecycleFieldReport | undefined {
   if (!evidence.workerIdle) {
@@ -245,12 +308,12 @@ function validateSessionMemoryLifecycleEvidence(evidence: {
     );
   }
 
-  if (evidence.candidateCount === 0) {
-    return failed("pico session memory lifecycle field requires at least one memory candidate");
+  if (evidence.activeMemoryCount === 0) {
+    return failed("pico session memory lifecycle field requires at least one active SQLite memory");
   }
 
-  if (evidence.mem0MemoryCount === 0) {
-    return failed("pico session memory lifecycle field requires at least one Mem0 memory");
+  if (evidence.provenanceKind !== "session_cutoff_automation") {
+    return failed("pico session memory lifecycle field requires automated memory provenance");
   }
 
   if (evidence.exportedOtelRecordCount === 0) {
@@ -303,19 +366,6 @@ function readObject(value: unknown): Record<string, unknown> {
   }
 
   return value as Record<string, unknown>;
-}
-
-function createFieldMemoryDrafts(
-  entries: readonly SessionMemoryCutoffEntry[]
-): readonly LongMemoryCandidateDraft[] {
-  return [
-    {
-      title: "Field session continuity note",
-      body: entries.map((entry) => `${entry.role}: ${entry.content}`).join("\n"),
-      category: "care_continuity",
-      tags: ["field-test"]
-    }
-  ];
 }
 
 async function exportAuditEvents(
@@ -445,10 +495,6 @@ export function sessionMemoryLifecycleFieldExitCode(
   report: SessionMemoryLifecycleFieldReport
 ): number {
   return report.status === "failed" ? 1 : 0;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function toError(error: unknown): Error {

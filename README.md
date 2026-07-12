@@ -131,13 +131,11 @@ node_modules/.bin/pi --no-tools
 /quit
 ```
 
-For a trusted ad-hoc Pi session, select `--pico-runtime-profile=interactive`
-and use `--tools` with only the direct tools needed for that session. For
-example, a harmless status check uses `--tools stackchan_get_status`. Do not
-enable the generic `mcp` proxy tool. The
-resident SDK path enforces its own exact tool allowlist and refuses to send the
-first prompt when the required direct tools are unavailable; built-in file and
-shell tools are not part of that resident allowlist.
+Use Pi settings to expose only the direct tools needed by each agent. For
+example, a harmless status check needs only `stackchan_get_status`. Do not
+enable the generic `mcp` proxy tool. Keep camera and Stack-chan tools exclusive
+to Pico through those settings; memory search remains available to every agent
+that loads this extension.
 
 The adapter expires cached metadata after seven days. If resident startup
 reports `missing required tools`, repeat the trusted `--no-tools` cache-prime
@@ -223,21 +221,20 @@ Pi Agent is the runtime owner. Start Pi Agent with this package available so it
 loads the pico extension from `package.json` `pi.extensions`; do not treat
 `pico` as a standalone production process.
 
-Pico runtime capabilities are selected once at Pi startup. The safe default is
-`worker`, which removes Pico, Stack-chan, and recursive subagent tools from the
-active tool set. Start the resident parent explicitly:
+Normal Pi and Pico may run at the same time. Start normal Pi with `pi`; start
+the resident Pico controller explicitly with either equivalent command:
 
 ```bash
 PICO_CONFIG_PATH=config/pico.local.yaml \
-  node_modules/.bin/pi --extension ./src/index.ts --pico-runtime-profile=resident
+  node_modules/.bin/pi --extension ./src/index.ts --pico
+PICO_CONFIG_PATH=config/pico.local.yaml pico
 ```
 
-Use `--pico-runtime-profile=interactive` only for a trusted manual Pi session
-that needs Pico tools. A Pi child started without a profile remains worker-safe.
-The resident profile uses `pi.sendUserMessage()` and Pi events inside the
-existing parent session; it does not create an integration session in Pico.
-This foundation keeps recursive subagent execution disabled in the resident
-profile until a later production-enablement review.
+`pico` delegates to `pi --pico`; it does not choose a model on the command
+line. The extension reads `pico.model.provider`, `pico.model.id`, and
+`pico.model.thinkingLevel` from YAML and fails startup if that exact model is
+unavailable. Pico uses `pi.sendUserMessage()` and Pi events inside the existing
+parent session; it does not create an integration session.
 
 The direct resident scripts remain low-level field and provider harnesses while
 resident voice integration is validated:
@@ -251,10 +248,61 @@ PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:memory
 the current terminal for direct field validation. It is not the public pico
 startup contract.
 `resident:memory` is the companion drain worker that writes queued session
-cutoffs to Mem0 and OTel/audit without adding a default job timeout. It recovers
-stale `processing` jobs after `PICO_RESIDENT_MEMORY_RECOVER_PROCESSING_OLDER_THAN_MS`
-or 10 minutes by default; this is crash recovery, not a per-job execution
-deadline.
+cutoffs to the SQLite long-memory source of truth through the configured Pi
+extractor and exports bounded OTel/audit events without adding a default job
+timeout. It recovers stale `processing` jobs after
+`PICO_RESIDENT_MEMORY_RECOVER_PROCESSING_OLDER_THAN_MS` or 10 minutes by
+default; this is crash recovery, not a per-job execution deadline. Mem0 remains
+an optional secondary integration and is not part of this first-slice drain
+path.
+
+The memory LaunchAgent definition is retained only as a field harness. The
+current rollout must not install, start, or restart it; those operations fail
+closed until Pico startup owns the memory-worker lifecycle. The remaining
+commands inspect or clean up a previously installed service. Status output is
+reduced to state, PID, last exit code, queue depth, oldest queued-job age, and
+dead-letter count; raw `launchctl` environment, arguments, and job payloads are
+not printed.
+
+```bash
+just memory-status
+just memory-stop
+PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:memory:launchd -- uninstall
+```
+
+### Long-memory operations
+
+`memory.longMemory.databasePath` is the SQLite source of truth used by both the
+memory worker and `pico_memory_search`. During migration, stop the voice process
+and any direct memory-worker harness, point this field at the existing SQLite
+file previously used by `memory.mem0.historyDbPath`, and run the deterministic
+gates. Use `resident:memory -- --once` only for the bounded field drain in this
+rollout. Do not copy or merge databases while either process is running.
+
+The worker retries transient extraction failures after 30 seconds and 2
+minutes. A third failed attempt moves the job to `dead_letter`; its payload is
+retained for seven days and then scrubbed. Policy violations go directly to a
+metadata-only dead letter. `just memory-status` is intentionally sanitized and
+shows no job payload, query, memory body, provider credential, or launchd
+environment.
+
+Every agent that loads the Pico extension receives the same
+`pico_memory_search` implementation. Pi settings decide whether the tool is
+visible to that agent. Search reads only active SQLite entries, returns bounded
+untrusted data, and does not require Mem0, Qdrant, or an embedding sidecar.
+
+Run the live end-to-end gate after provider authentication and OTel readiness:
+
+```bash
+PICO_CONFIG_PATH=config/pico.local.yaml \
+PICO_ENABLE_LIVE_SESSION_MEMORY_RETRIEVAL=1 \
+npm run field:session-memory-retrieval
+```
+
+Rotate any provider, OTel, or Stack-chan token before production use if it has
+appeared in a terminal transcript, field artifact, or shared log. The remaining
+product risks are speaker authority, emergency/handoff behavior, and retention
+of operator and session logs; this slice does not claim to solve them.
 
 For local development on macOS, open a Minecraft-server-style log terminal for
 the voice resident process:
@@ -263,7 +311,7 @@ the voice resident process:
 PICO_CONFIG_PATH=config/pico.local.yaml pico dev
 ```
 
-This opens kitty by default, starts Pi Agent with the resident profile, streams
+This opens kitty by default, starts Pi Agent with `--pico`, streams
 stdout and stderr in that terminal window, and also appends the same output to
 `~/.pico/resident-voice/development/processes/YYYY-MM-DD/<run-id>.log`. Use
 `pico dev --terminal=terminal` to open Terminal.app instead. Stop it from the

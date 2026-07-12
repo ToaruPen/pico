@@ -15,13 +15,17 @@ import { createTransportModule } from "./modules/transport/index.js";
 import { PicoModuleRegistry } from "./orchestrator/registry.js";
 import type { DeferredToolCoordinator } from "./runtime/deferred-tool-coordinator.js";
 import {
+  createPicoMemorySearchRuntime,
+  type PicoMemorySearchRuntimeOptions
+} from "./runtime/memory-tool.js";
+import {
   createPicoCameraSceneDescriptionDeferredTool,
   createPicoCameraSceneDescriptionTool,
   createPicoCameraSnapshotTool,
   createPicoPersonDetectionTool
 } from "./runtime/perception-tool.js";
 import { createPiHostTurnClient } from "./runtime/pi-host-turn.js";
-import { registerPicoRuntimeProfile } from "./runtime/pico-runtime-profile.js";
+import { registerPicoStartup } from "./runtime/pico-startup.js";
 import { createResidentVoiceService } from "./runtime/resident-voice-service.js";
 import { createPicoSessionTool } from "./runtime/session-tool.js";
 import type { VoiceStageProbe } from "./runtime/voice-stage-probe.js";
@@ -85,11 +89,12 @@ export type PicoExtensionRuntimeOptions = {
   readonly sessionLifecycle?: SessionLifecycle;
   readonly loadConfig?: () => PicoConfig;
   readonly voiceProbe?: VoiceStageProbe;
-  readonly toolProfile?: "default" | "voice_resident";
+  readonly perceptionMode?: "standard" | "resident_deferred";
   readonly deferredTools?: {
     readonly sessionId: string;
     readonly coordinator: Pick<DeferredToolCoordinator, "enqueue">;
   };
+  readonly memorySearch?: Omit<PicoMemorySearchRuntimeOptions, "loadConfig">;
   readonly sessionTool?: {
     readonly allowCutoff?: boolean;
   };
@@ -100,10 +105,20 @@ export function registerPicoExtensionWithRuntime(
   options: PicoExtensionRuntimeOptions = {}
 ): void {
   registerSessionRuntimeTool(pi, options);
+  registerMemoryRuntimeTool(pi, options);
   registerPerceptionRuntimeTools(pi, options);
   pi.on("before_agent_start", (event: BeforeAgentStartEvent) => ({
     systemPrompt: buildPicoExtensionSystemPrompt(event.systemPrompt)
   }));
+}
+
+function registerMemoryRuntimeTool(pi: ExtensionAPI, options: PicoExtensionRuntimeOptions): void {
+  const runtime = createPicoMemorySearchRuntime({
+    ...options.memorySearch,
+    ...(options.loadConfig === undefined ? {} : { loadConfig: options.loadConfig })
+  });
+  pi.registerTool(runtime.tool);
+  pi.on("session_shutdown", () => runtime.close());
 }
 
 function registerSessionRuntimeTool(pi: ExtensionAPI, options: PicoExtensionRuntimeOptions): void {
@@ -122,13 +137,13 @@ function registerPerceptionRuntimeTools(
   pi: ExtensionAPI,
   options: PicoExtensionRuntimeOptions
 ): void {
-  const toolProfile = options.toolProfile ?? "default";
+  const perceptionMode = options.perceptionMode ?? "standard";
   const perceptionToolOptions = {
     ...(options.voiceProbe === undefined ? {} : { probe: options.voiceProbe }),
     ...(options.loadConfig === undefined ? {} : { loadConfig: options.loadConfig })
   };
 
-  if (toolProfile === "voice_resident" && options.deferredTools !== undefined) {
+  if (perceptionMode === "resident_deferred" && options.deferredTools !== undefined) {
     pi.registerTool(
       createPicoCameraSceneDescriptionDeferredTool({
         ...perceptionToolOptions,
@@ -147,8 +162,8 @@ export default function registerPicoExtension(pi: ExtensionAPI): void {
   registerPicoExtensionWithRuntime(pi);
   const piAgent = createPiHostTurnClient(pi);
 
-  registerPicoRuntimeProfile(pi, {
-    createResidentController: (context) =>
+  registerPicoStartup(pi, {
+    createController: (context) =>
       createResidentVoiceService({
         piAgent,
         onError: (error) => {

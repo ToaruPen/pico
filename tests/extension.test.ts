@@ -9,7 +9,7 @@ import {
   type ToolDefinition
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-
+import { emptyPicoConfig } from "../src/config/index.js";
 import picoExtension, {
   createPicoRegistry,
   picoExtensionMetadata,
@@ -143,10 +143,10 @@ describe("pico extension", () => {
 
     picoExtension(extensionApiFromCapture(capture) as never);
 
-    expect(capture.flags.get("pico-runtime-profile")).toEqual({
-      type: "string",
-      default: "worker",
-      description: "Pico runtime profile: worker, interactive, or resident"
+    expect(capture.flags.get("pico")).toEqual({
+      type: "boolean",
+      default: false,
+      description: "Start Pico"
     });
     expect([...capture.handlers.keys()].sort()).toEqual(
       expect.arrayContaining([
@@ -155,8 +155,7 @@ describe("pico extension", () => {
         "before_agent_start",
         "message_update",
         "session_shutdown",
-        "session_start",
-        "tool_call"
+        "session_start"
       ])
     );
   });
@@ -195,6 +194,7 @@ describe("pico extension", () => {
     expect(capture.tools.map((tool) => tool.name).sort()).toEqual([
       "pico_camera_scene_description",
       "pico_camera_snapshot",
+      "pico_memory_search",
       "pico_person_detection",
       "pico_session"
     ]);
@@ -324,11 +324,11 @@ describe("pico extension", () => {
     });
   });
 
-  it("uses a deferred resident-safe tool profile for voice resident sessions", () => {
+  it("uses deferred perception tools for resident voice sessions", () => {
     const capture = createCapturedExtensionApi();
 
     registerPicoExtensionWithRuntime(extensionApiFromCapture(capture) as never, {
-      toolProfile: "voice_resident",
+      perceptionMode: "resident_deferred",
       deferredTools: {
         sessionId: "session-1",
         coordinator: {
@@ -344,6 +344,7 @@ describe("pico extension", () => {
 
     expect(capture.tools.map((tool) => tool.name).sort()).toEqual([
       "pico_camera_scene_description_deferred",
+      "pico_memory_search",
       "pico_session"
     ]);
   });
@@ -383,19 +384,67 @@ describe("pico extension", () => {
     expect(loadConfigCalls).toBe(3);
   });
 
-  it("falls back to default perception tools when the voice resident profile has no deferred coordinator", () => {
+  it("uses standard perception tools when resident deferred mode has no coordinator", () => {
     const capture = createCapturedExtensionApi();
 
     registerPicoExtensionWithRuntime(extensionApiFromCapture(capture) as never, {
-      toolProfile: "voice_resident"
+      perceptionMode: "resident_deferred"
     });
 
     expect(capture.tools.map((tool) => tool.name).sort()).toEqual([
       "pico_camera_scene_description",
       "pico_camera_snapshot",
+      "pico_memory_search",
       "pico_person_detection",
       "pico_session"
     ]);
+  });
+
+  it("closes the shared memory search store at runtime shutdown", async () => {
+    const capture = createCapturedExtensionApi();
+    let closeCalls = 0;
+
+    registerPicoExtensionWithRuntime(extensionApiFromCapture(capture) as never, {
+      loadConfig: () => ({
+        ...emptyPicoConfig,
+        memory: {
+          ...emptyPicoConfig.memory,
+          longMemory: {
+            enabled: true,
+            databasePath: "/pico/long-memory.sqlite",
+            extraction: {
+              provider: "pi_model",
+              piProvider: "openai-codex",
+              api: "openai-codex-responses",
+              model: "gpt-5.4",
+              thinkingLevel: "high",
+              timeoutMs: 60_000
+            }
+          }
+        }
+      }),
+      memorySearch: {
+        openStore: () => ({
+          searchActive: () => [],
+          close: () => {
+            closeCalls += 1;
+          }
+        })
+      }
+    });
+
+    const tool = capture.tools.find((candidate) => candidate.name === "pico_memory_search");
+    const shutdown = capture.handlers.get("session_shutdown")?.[0] as (() => void) | undefined;
+
+    if (tool === undefined || shutdown === undefined) {
+      throw new Error("memory search runtime lifecycle was not registered");
+    }
+
+    await tool.execute("call-1", { query: "雨" }, undefined, undefined, {} as ExtensionContext);
+    shutdown();
+    shutdown();
+
+    expect(closeCalls).toBe(1);
   });
 });
 

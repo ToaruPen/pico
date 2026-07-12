@@ -13,6 +13,7 @@ const testCwd = "/workspace/pico";
 
 const expectedResidentPiAgentToolNames = [
   "pico_session",
+  "pico_memory_search",
   "pico_camera_scene_description_deferred",
   "stackchan_get_status",
   "stackchan_get_device_info",
@@ -202,7 +203,7 @@ describe("Pi Agent turn adapter", () => {
     expect(registeredTools).toContain("pico_session");
   });
 
-  it("registers the voice resident tool profile for resident SDK sessions", async () => {
+  it("registers resident deferred perception tools for SDK sessions", async () => {
     const registeredTools: string[] = [];
     const client = createPiAgentTurnClient({
       cwd: testCwd,
@@ -253,6 +254,7 @@ describe("Pi Agent turn adapter", () => {
 
     expect(registeredTools.sort()).toEqual([
       "pico_camera_scene_description_deferred",
+      "pico_memory_search",
       "pico_session"
     ]);
   });
@@ -425,7 +427,7 @@ describe("Pi Agent turn adapter", () => {
       createAgentSession: () =>
         Promise.resolve({
           session: {
-            ...createSdkToolState(["pico_session", "mcp"]),
+            ...createSdkToolState(["pico_memory_search", "pico_session", "mcp"]),
             bindExtensions: () => Promise.resolve(),
             extensionRunner: inactiveExtensionRunner,
             subscribe: () => () => undefined,

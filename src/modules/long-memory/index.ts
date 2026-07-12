@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
 import type { FuturePicoModuleMetadata } from "../../orchestrator/contracts.js";
@@ -14,6 +15,21 @@ export type LongMemoryReview = {
   readonly note?: string;
 };
 
+export type LongMemoryProvenance =
+  | {
+      readonly kind: "staff_review";
+      readonly reviewedBy: string;
+      readonly reviewedAt: string;
+      readonly note?: string;
+    }
+  | {
+      readonly kind: "session_cutoff_automation";
+      readonly policyVersion: "session-cutoff-v1";
+      readonly sourceSessionId: string;
+      readonly sourceEntryIds: readonly string[];
+      readonly createdAt: string;
+    };
+
 export type ReviewedLongMemoryInput = {
   readonly title: string;
   readonly body: string;
@@ -26,6 +42,17 @@ export type ReviewedLongMemoryInput = {
   readonly sourceSessionId?: string;
   readonly importance?: number;
   readonly confidence?: number;
+};
+
+export type AutomatedLongMemoryInput = {
+  readonly title: string;
+  readonly body: string;
+  readonly category: LongMemoryCategory;
+  readonly tags?: readonly string[];
+  readonly sourceSessionId: string;
+  readonly sourceEntryIds: readonly string[];
+  readonly policyVersion: "session-cutoff-v1";
+  readonly confidence: number;
 };
 
 export type LongMemoryLifecycleMetadata = {
@@ -47,7 +74,8 @@ export type LongMemoryRecord = {
   readonly tags: readonly string[];
   readonly status: LongMemoryStatus;
   readonly correctionOf: number | undefined;
-  readonly review: LongMemoryReview;
+  readonly review: LongMemoryReview | undefined;
+  readonly provenance: LongMemoryProvenance;
   readonly lifecycle: LongMemoryLifecycleMetadata;
 };
 
@@ -77,9 +105,14 @@ export type LongMemoryStoreOptions = {
 
 export type LongMemoryStore = {
   readonly writeReviewed: (input: ReviewedLongMemoryInput) => LongMemoryRecord;
+  readonly writeAutomated: (input: AutomatedLongMemoryInput) => LongMemoryRecord;
   readonly read: (id: number) => LongMemoryRecord | undefined;
   readonly readLifecycle: (id: number) => LongMemoryLifecycleMetadata | undefined;
   readonly search: (query: string) => LongMemorySearchResult[];
+  readonly searchActive: (input: {
+    readonly query: string;
+    readonly limit: number;
+  }) => readonly LongMemoryRecord[];
   readonly runDecay: (input: LongMemoryDecayInput) => readonly LongMemoryDecayResult[];
   readonly correct: (id: number, input: ReviewedLongMemoryInput) => LongMemoryRecord;
   readonly delete: (id: number, review: LongMemoryReview) => void;
@@ -124,7 +157,35 @@ export type LongMemoryCandidateRecord = {
   readonly promotedMemoryId: number | undefined;
 };
 
-export type SessionMemoryCandidateJobStatus = "queued" | "processing" | "processed" | "failed";
+export type SessionMemoryCandidateJobStatus = "queued" | "processing" | "processed" | "dead_letter";
+
+export type SessionMemoryCandidateJobErrorCode = "extraction_failed" | "policy_violation";
+
+export class PermanentMemoryPolicyError extends Error {
+  readonly code = "policy_violation";
+}
+
+export function assertNoIndividualChildLongMemoryFields(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      assertNoIndividualChildLongMemoryFields(item);
+    }
+
+    return;
+  }
+
+  if (typeof value !== "object" || value === null) {
+    return;
+  }
+
+  for (const [key, item] of Object.entries(value)) {
+    if (isIndividualChildField(key)) {
+      throwIndividualChildPolicyError();
+    }
+
+    assertNoIndividualChildLongMemoryFields(item);
+  }
+}
 
 export type SessionMemoryCandidateJob = {
   readonly id: number;
@@ -134,14 +195,30 @@ export type SessionMemoryCandidateJob = {
   readonly queuedAt: string;
   readonly processingStartedAt: string | undefined;
   readonly processedAt: string | undefined;
+  readonly attemptCount: number;
+  readonly nextAttemptAt: string | undefined;
+  readonly lastErrorCode: SessionMemoryCandidateJobErrorCode | undefined;
+  readonly deadLetteredAt: string | undefined;
+  readonly purgeAfter: string | undefined;
 };
 
 export type SessionMemoryCandidateProcessor = (
   session: SessionMemoryCutoffInput
 ) => Promise<readonly LongMemoryCandidateDraft[]>;
 
+export type SessionMemoryAutomatedProcessor = (
+  session: SessionMemoryCutoffInput
+) => Promise<
+  readonly Pick<
+    AutomatedLongMemoryInput,
+    "title" | "body" | "category" | "tags" | "sourceEntryIds" | "confidence"
+  >[]
+>;
+
 export type SessionMemoryCandidateStoreOptions = {
-  readonly processSession: SessionMemoryCandidateProcessor;
+  readonly processSession?: SessionMemoryCandidateProcessor;
+  readonly processAutomatedSession?: SessionMemoryAutomatedProcessor;
+  readonly onAutomatedMemoriesWritten?: (records: readonly LongMemoryRecord[]) => void;
   readonly audit?: StructuredAuditLog;
   readonly now?: () => string;
 };
@@ -165,6 +242,7 @@ export type SessionMemoryCandidateStore = {
     readonly staleBefore: string;
     readonly recoveredAt: string;
   }) => readonly SessionMemoryCandidateJob[];
+  readonly purgeExpiredDeadLetterPayloads: (input: { readonly now: string }) => number;
   readonly countJobs: (statuses: readonly SessionMemoryCandidateJobStatus[]) => number;
   readonly listJobs: () => readonly SessionMemoryCandidateJob[];
   readonly listPending: () => readonly LongMemoryCandidateRecord[];
@@ -203,6 +281,12 @@ type LongMemoryRow = {
   readonly access_count: number;
   readonly decay_score: number;
   readonly status: string;
+  readonly origin_kind: string;
+  readonly origin_policy_version: string;
+  readonly origin_source_session_id: string;
+  readonly origin_source_entry_ids_json: string;
+  readonly origin_created_at: string;
+  readonly automated_fingerprint: string;
 };
 
 type LongMemoryCandidateRow = {
@@ -229,10 +313,23 @@ type SessionMemoryCandidateJobRow = {
   readonly queued_at: string;
   readonly processing_started_at: string | null;
   readonly processed_at: string | null;
+  readonly attempt_count: number;
+  readonly next_attempt_at: string | null;
+  readonly last_error_code: string | null;
+  readonly dead_lettered_at: string | null;
+  readonly purge_after: string | null;
 };
 
 type QueuedSessionMemoryCandidateJobRow = SessionMemoryCandidateJobRow & {
   readonly cutoff_json: string;
+};
+
+type MappedSessionMemoryCandidateJob = SessionMemoryCandidateJob & {
+  readonly attemptCount: number;
+  readonly nextAttemptAt: string | undefined;
+  readonly lastErrorCode: SessionMemoryCandidateJobErrorCode | undefined;
+  readonly deadLetteredAt: string | undefined;
+  readonly purgeAfter: string | undefined;
 };
 
 type NormalizedLongMemoryInput = {
@@ -245,6 +342,18 @@ type NormalizedLongMemoryInput = {
   readonly sourceSessionId: string | undefined;
   readonly importance: number;
   readonly confidence: number;
+};
+
+type NormalizedAutomatedLongMemoryInput = {
+  readonly title: string;
+  readonly body: string;
+  readonly category: LongMemoryCategory;
+  readonly tags: readonly string[];
+  readonly sourceSessionId: string;
+  readonly sourceEntryIds: readonly string[];
+  readonly policyVersion: "session-cutoff-v1";
+  readonly confidence: number;
+  readonly fingerprint: string;
 };
 
 type NormalizedLongMemoryCandidateDraft = {
@@ -273,64 +382,64 @@ const longMemoryInputKeys = new Set([
   "importance",
   "confidence"
 ]);
+const automatedLongMemoryInputKeys = new Set([
+  "title",
+  "body",
+  "category",
+  "tags",
+  "sourceSessionId",
+  "sourceEntryIds",
+  "policyVersion",
+  "confidence"
+]);
 const longMemoryCandidateDraftKeys = new Set(["title", "body", "category", "tags"]);
-const individualChildTextMarkers = [
-  "childid",
-  "childevaluation",
-  "childevaluating",
-  "childmonitor",
-  "childmonitoring",
-  "childprofile",
-  "childprofiling",
-  "childtracking",
-  "childscore",
-  "childscoring",
-  "individualchild",
-  "児童id",
-  "子どもid",
-  "個別記録",
-  "個人記録",
-  "児童評価",
-  "子ども評価",
-  "児童の評価",
-  "子どもの評価",
-  "児童監視",
-  "子ども監視",
-  "児童の監視",
-  "子どもの監視",
-  "児童プロフィール",
-  "子どもプロフィール",
-  "児童スコア",
-  "子どもスコア",
-  "児童のスコア",
-  "子どものスコア",
-  "児童追跡",
-  "子ども追跡",
-  "児童の追跡",
-  "子どもの追跡"
+const individualChildFieldPrefixes = ["child", "individualchild", "こども", "児童", "子ども"];
+const individualChildExactPurposes = new Set(["id"]);
+const individualChildFieldPurposes = [
+  "abuse",
+  "diagnosis",
+  "disability",
+  "evaluation",
+  "familycircumstances",
+  "health",
+  "monitor",
+  "monitoring",
+  "profile",
+  "record",
+  "score",
+  "scoring",
+  "tracking",
+  "診断",
+  "障害",
+  "家庭事情",
+  "健康",
+  "記録",
+  "監視",
+  "評価",
+  "スコア",
+  "虐待",
+  "追跡"
 ];
-const individualChildFieldMarkers = [
-  "childevaluation",
-  "childmonitor",
-  "childprofile",
-  "childtracking",
-  "childscore",
-  "individualchild"
-];
-const individualChildFieldNames = new Set(["childid", "profile", "tracking", "scoring"]);
 
 export function openLongMemoryStore(
   path: string,
   options: LongMemoryStoreOptions = {}
 ): LongMemoryStore {
-  const database = new DatabaseSync(path);
-  initializeLongMemorySchema(database);
+  const database = openLongMemoryDatabase(path);
   const now = options.now ?? (() => new Date().toISOString());
 
   return {
     writeReviewed(input) {
       return runInTransaction(database, () =>
         insertReviewedMemory(database, normalizeLongMemoryInput(input), 0, "create")
+      );
+    },
+    writeAutomated(input) {
+      const normalized = normalizeAutomatedLongMemoryInput(input);
+      const createdAt = requireTimestamp(now());
+
+      return runInTransaction(database, () =>
+        writeAutomatedMemory(database, normalized, createdAt)
       );
     },
     read(id) {
@@ -341,6 +450,15 @@ export function openLongMemoryStore(
     },
     search(query) {
       return searchActiveMemories(database, requireSearchQuery(query), requireTimestamp(now()));
+    },
+    searchActive(input) {
+      const query = requireSearchQuery(input.query);
+      const limit = requireSearchLimit(input.limit);
+      const accessedAt = requireTimestamp(now());
+
+      return runInTransaction(database, () =>
+        searchBoundedActiveMemories(database, query, limit, accessedAt)
+      );
     },
     runDecay(input) {
       return runInTransaction(database, () => runLongMemoryDecay(database, input));
@@ -377,8 +495,7 @@ export function openSessionMemoryCandidateQueue(
   path: string,
   options: SessionMemoryCandidateQueueOptions = {}
 ): SessionMemoryCandidateQueue {
-  const database = new DatabaseSync(path);
-  initializeLongMemorySchema(database);
+  const database = openLongMemoryDatabase(path);
   const now = options.now ?? (() => new Date().toISOString());
   const audit = options.audit;
 
@@ -402,18 +519,23 @@ export function openSessionMemoryCandidateStore(
   path: string,
   options: SessionMemoryCandidateStoreOptions
 ): SessionMemoryCandidateStore {
-  const database = new DatabaseSync(path);
-  initializeLongMemorySchema(database);
+  const database = openLongMemoryDatabase(path);
   const processSession = options.processSession;
+  const processAutomatedSession = options.processAutomatedSession;
   const now = options.now ?? (() => new Date().toISOString());
   const audit = options.audit;
+
+  if ((processSession === undefined) === (processAutomatedSession === undefined)) {
+    database.close();
+    throw new Error("pico session memory store requires exactly one processor");
+  }
 
   return {
     enqueueSessionCutoff(input) {
       return enqueueSessionMemoryCutoff(database, input, now(), audit);
     },
     async processNextJob() {
-      const processingStartedAt = now();
+      const processingStartedAt = requireTimestamp(now());
       const queuedJob = claimNextQueuedSessionMemoryCandidateJob(database, processingStartedAt);
 
       if (queuedJob === undefined) {
@@ -421,15 +543,19 @@ export function openSessionMemoryCandidateStore(
       }
 
       const job = mapSessionMemoryCandidateJob(queuedJob);
-      const processedAt = now();
       let parsedSession: SessionMemoryCutoffInput | undefined;
 
       try {
         const session = parseSessionMemoryCutoffPayload(queuedJob);
         parsedSession = session;
-        const drafts = await processSession(cloneSessionMemoryCutoffInput(session));
-        const normalizedDrafts = drafts.map((draft) => normalizeLongMemoryCandidateDraft(draft));
+        const { normalizedDrafts, normalizedAutomatedDrafts } = await processSessionMemoryDrafts(
+          session,
+          processSession,
+          processAutomatedSession
+        );
         const insertedCandidates: LongMemoryCandidateRecord[] = [];
+        const writtenMemories: LongMemoryRecord[] = [];
+        const processedAt = requireTimestamp(now());
 
         const completed = runInTransaction(database, () => {
           if (!isOwnedProcessingCandidateJob(database, job.id, processingStartedAt)) {
@@ -442,6 +568,10 @@ export function openSessionMemoryCandidateStore(
             );
           }
 
+          for (const draft of normalizedAutomatedDrafts) {
+            writtenMemories.push(writeAutomatedMemory(database, draft, processedAt));
+          }
+
           markCandidateJobProcessed(database, job.id, processedAt, processingStartedAt, session);
 
           return true;
@@ -450,6 +580,8 @@ export function openSessionMemoryCandidateStore(
         if (!completed) {
           return requireSessionMemoryCandidateJob(database, job.id);
         }
+
+        options.onAutomatedMemoriesWritten?.(Object.freeze(writtenMemories));
 
         for (const candidate of insertedCandidates) {
           recordCandidateAudit(audit, "long_memory.candidate.created", candidate.createdAt, {
@@ -462,24 +594,47 @@ export function openSessionMemoryCandidateStore(
         recordCandidateAudit(audit, "long_memory.candidate_job.processed", processedAt, {
           "pico.memory.session_id": session.sessionId,
           "pico.memory.candidate_job_id": job.id,
-          "pico.memory.candidate_count": normalizedDrafts.length
+          "pico.memory.candidate_count": normalizedDrafts.length + normalizedAutomatedDrafts.length
         });
 
         return requireSessionMemoryCandidateJob(database, job.id);
       } catch (error) {
-        const failed = runInTransaction(database, () => {
+        const transitionedAt = requireTimestamp(now());
+        const errorCode = classifySessionMemoryCandidateJobError(error);
+        const transitioned = runInTransaction(database, () => {
           if (!isOwnedProcessingCandidateJob(database, job.id, processingStartedAt)) {
             return false;
           }
 
-          markCandidateJobFailed(database, job.id, processedAt, processingStartedAt, parsedSession);
+          transitionFailedCandidateJob(database, {
+            job,
+            transitionedAt,
+            processingStartedAt,
+            session: parsedSession,
+            errorCode
+          });
 
           return true;
         });
 
-        if (!failed) {
+        if (!transitioned) {
           return requireSessionMemoryCandidateJob(database, job.id);
         }
+
+        const transitionedJob = requireSessionMemoryCandidateJob(database, job.id);
+        recordCandidateAudit(
+          audit,
+          transitionedJob.status === "dead_letter"
+            ? "long_memory.candidate_job.dead_lettered"
+            : "long_memory.candidate_job.retry_scheduled",
+          transitionedAt,
+          {
+            "pico.memory.session_id": job.sessionId,
+            "pico.memory.candidate_job_id": job.id,
+            "pico.memory.attempt_count": job.attemptCount,
+            "pico.memory.error_code": errorCode
+          }
+        );
 
         throw error;
       }
@@ -491,7 +646,19 @@ export function openSessionMemoryCandidateStore(
       return runInTransaction(database, () => {
         const staleJobs = database
           .prepare(`
-            SELECT id, session_id, status, source_entry_count, queued_at, processing_started_at, processed_at
+            SELECT
+              id,
+              session_id,
+              status,
+              source_entry_count,
+              queued_at,
+              processing_started_at,
+              processed_at,
+              attempt_count,
+              next_attempt_at,
+              last_error_code,
+              dead_lettered_at,
+              purge_after
             FROM long_memory_candidate_jobs
             WHERE status = 'processing'
               AND (
@@ -504,22 +671,63 @@ export function openSessionMemoryCandidateStore(
           .map((row) => mapSessionMemoryCandidateJob(row as SessionMemoryCandidateJobRow));
 
         for (const job of staleJobs) {
-          database
-            .prepare(`
-              UPDATE long_memory_candidate_jobs
-              SET status = 'queued', processing_started_at = NULL, processed_at = NULL
-              WHERE id = ? AND status = 'processing'
-            `)
-            .run(job.id);
-          recordCandidateAudit(audit, "long_memory.candidate_job.recovered", recoveredAt, {
-            "pico.memory.session_id": job.sessionId,
-            "pico.memory.candidate_job_id": job.id,
-            "pico.memory.source_entry_count": job.sourceEntryCount
-          });
+          if (job.attemptCount >= 3) {
+            database
+              .prepare(`
+                UPDATE long_memory_candidate_jobs
+                SET status = 'dead_letter',
+                    processing_started_at = NULL,
+                    processed_at = NULL,
+                    next_attempt_at = NULL,
+                    last_error_code = 'extraction_failed',
+                    dead_lettered_at = ?,
+                    purge_after = ?
+                WHERE id = ? AND status = 'processing'
+              `)
+              .run(recoveredAt, addMilliseconds(recoveredAt, 7 * 86_400_000), job.id);
+            recordCandidateAudit(audit, "long_memory.candidate_job.dead_lettered", recoveredAt, {
+              "pico.memory.session_id": job.sessionId,
+              "pico.memory.candidate_job_id": job.id,
+              "pico.memory.attempt_count": job.attemptCount,
+              "pico.memory.error_code": "extraction_failed"
+            });
+          } else {
+            database
+              .prepare(`
+                UPDATE long_memory_candidate_jobs
+                SET status = 'queued',
+                    processing_started_at = NULL,
+                    processed_at = NULL,
+                    next_attempt_at = ?
+                WHERE id = ? AND status = 'processing'
+              `)
+              .run(recoveredAt, job.id);
+            recordCandidateAudit(audit, "long_memory.candidate_job.recovered", recoveredAt, {
+              "pico.memory.session_id": job.sessionId,
+              "pico.memory.candidate_job_id": job.id,
+              "pico.memory.source_entry_count": job.sourceEntryCount
+            });
+          }
         }
 
-        return staleJobs;
+        return staleJobs.map((job) => requireSessionMemoryCandidateJob(database, job.id));
       });
+    },
+    purgeExpiredDeadLetterPayloads(input) {
+      const purgedAt = requireTimestamp(input.now);
+      const purgedJobs = runInTransaction(database, () =>
+        purgeExpiredDeadLetterPayloads(database, purgedAt)
+      );
+
+      for (const job of purgedJobs) {
+        recordCandidateAudit(audit, "long_memory.candidate_job.payload_purged", purgedAt, {
+          "pico.memory.session_id": job.sessionId,
+          "pico.memory.candidate_job_id": job.id,
+          "pico.memory.attempt_count": job.attemptCount
+        });
+      }
+
+      return purgedJobs.length;
     },
     countJobs(statuses) {
       return countSessionMemoryCandidateJobs(database, statuses);
@@ -607,6 +815,43 @@ export function openSessionMemoryCandidateStore(
   };
 }
 
+async function processSessionMemoryDrafts(
+  session: SessionMemoryCutoffInput,
+  processSession: SessionMemoryCandidateProcessor | undefined,
+  processAutomatedSession: SessionMemoryAutomatedProcessor | undefined
+): Promise<{
+  readonly normalizedDrafts: readonly NormalizedLongMemoryCandidateDraft[];
+  readonly normalizedAutomatedDrafts: readonly NormalizedAutomatedLongMemoryInput[];
+}> {
+  const clonedSession = cloneSessionMemoryCutoffInput(session);
+
+  if (processSession !== undefined) {
+    const drafts = await processSession(clonedSession);
+
+    return {
+      normalizedDrafts: drafts.map((draft) => normalizeLongMemoryCandidateDraft(draft)),
+      normalizedAutomatedDrafts: []
+    };
+  }
+
+  if (processAutomatedSession === undefined) {
+    throw new Error("pico session memory automated processor is unavailable");
+  }
+
+  const automatedDrafts = await processAutomatedSession(clonedSession);
+
+  return {
+    normalizedDrafts: [],
+    normalizedAutomatedDrafts: automatedDrafts.map((draft) =>
+      normalizeAutomatedLongMemoryInput({
+        ...draft,
+        sourceSessionId: session.sessionId,
+        policyVersion: "session-cutoff-v1"
+      })
+    )
+  };
+}
+
 function enqueueSessionMemoryCutoff(
   database: DatabaseSync,
   input: SessionMemoryCutoffInput,
@@ -615,26 +860,28 @@ function enqueueSessionMemoryCutoff(
 ): SessionMemoryCandidateJob {
   const session = normalizeSessionMemoryCutoffInput(input);
   const queuedAt = requireTimestamp(queuedAtInput);
-  const result = database
-    .prepare(`
-      INSERT INTO long_memory_candidate_jobs (
-        session_id,
-        status,
-        source_entry_count,
-        queued_at,
-        cutoff_json
-      )
-      VALUES (?, 'queued', ?, ?, ?)
-    `)
-    .run(session.sessionId, session.sourceEntryIds.length, queuedAt, JSON.stringify(session));
-  const job = requireSessionMemoryCandidateJob(database, Number(result.lastInsertRowid));
-  recordCandidateAudit(audit, "long_memory.candidate_job.enqueued", queuedAt, {
-    "pico.memory.session_id": job.sessionId,
-    "pico.memory.candidate_job_id": job.id,
-    "pico.memory.source_entry_count": job.sourceEntryCount
-  });
+  return runInTransaction(database, () => {
+    const result = database
+      .prepare(`
+        INSERT INTO long_memory_candidate_jobs (
+          session_id,
+          status,
+          source_entry_count,
+          queued_at,
+          cutoff_json
+        )
+        VALUES (?, 'queued', ?, ?, ?)
+      `)
+      .run(session.sessionId, session.sourceEntryIds.length, queuedAt, JSON.stringify(session));
+    const job = requireSessionMemoryCandidateJob(database, Number(result.lastInsertRowid));
+    recordCandidateAudit(audit, "long_memory.candidate_job.enqueued", queuedAt, {
+      "pico.memory.session_id": job.sessionId,
+      "pico.memory.candidate_job_id": job.id,
+      "pico.memory.source_entry_count": job.sourceEntryCount
+    });
 
-  return job;
+    return job;
+  });
 }
 
 function countSessionMemoryCandidateJobs(
@@ -666,7 +913,19 @@ function listSessionMemoryCandidateJobs(
 ): readonly SessionMemoryCandidateJob[] {
   return database
     .prepare(`
-      SELECT id, session_id, status, source_entry_count, queued_at, processing_started_at, processed_at
+      SELECT
+        id,
+        session_id,
+        status,
+        source_entry_count,
+        queued_at,
+        processing_started_at,
+        processed_at,
+        attempt_count,
+        next_attempt_at,
+        last_error_code,
+        dead_lettered_at,
+        purge_after
       FROM long_memory_candidate_jobs
       ORDER BY id
     `)
@@ -674,10 +933,40 @@ function listSessionMemoryCandidateJobs(
     .map((row) => mapSessionMemoryCandidateJob(row as SessionMemoryCandidateJobRow));
 }
 
+function openLongMemoryDatabase(path: string): DatabaseSync {
+  const database = new DatabaseSync(path);
+
+  try {
+    database.exec(`
+      PRAGMA journal_mode = WAL;
+      PRAGMA busy_timeout = 5000;
+      PRAGMA foreign_keys = OFF;
+    `);
+    runInTransaction(database, () => {
+      initializeLongMemorySchema(database);
+      assertLongMemoryForeignKeys(database);
+    });
+    database.exec("PRAGMA foreign_keys = ON");
+
+    return database;
+  } catch (error) {
+    database.close();
+    throw error;
+  }
+}
+
+function assertLongMemoryForeignKeys(database: DatabaseSync): void {
+  const violations = database.prepare("PRAGMA foreign_key_check").all();
+
+  if (violations.length > 0) {
+    throw new Error(
+      `pico long memory migration left foreign key violations: ${JSON.stringify(violations)}`
+    );
+  }
+}
+
 function initializeLongMemorySchema(database: DatabaseSync): void {
   database.exec(`
-    PRAGMA foreign_keys = ON;
-
     CREATE TABLE IF NOT EXISTS long_memory_entries (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       title TEXT NOT NULL,
@@ -700,6 +989,14 @@ function initializeLongMemorySchema(database: DatabaseSync): void {
       decay_score REAL NOT NULL DEFAULT 0 CHECK (decay_score >= 0 AND decay_score <= 1),
       archived_at TEXT NOT NULL DEFAULT '',
       deleted_at TEXT NOT NULL DEFAULT '',
+      origin_kind TEXT NOT NULL DEFAULT 'staff_review' CHECK (
+        origin_kind IN ('staff_review', 'session_cutoff_automation')
+      ),
+      origin_policy_version TEXT NOT NULL DEFAULT '',
+      origin_source_session_id TEXT NOT NULL DEFAULT '',
+      origin_source_entry_ids_json TEXT NOT NULL DEFAULT '[]',
+      origin_created_at TEXT NOT NULL DEFAULT '',
+      automated_fingerprint TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -733,15 +1030,31 @@ function initializeLongMemorySchema(database: DatabaseSync): void {
       DELETE FROM long_memory_entries_fts WHERE rowid = old.id;
     END;
 
+  `);
+  ensureLongMemoryLifecycleColumns(database);
+  ensureLongMemoryProvenanceSchema(database);
+  ensureLongMemoryCandidateSchema(database);
+  ensureSessionMemoryCandidateJobColumns(database);
+}
+
+function ensureLongMemoryCandidateSchema(database: DatabaseSync): void {
+  database.exec(`
     CREATE TABLE IF NOT EXISTS long_memory_candidate_jobs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
-      status TEXT NOT NULL CHECK (status IN ('queued', 'processing', 'processed', 'failed')),
+      status TEXT NOT NULL CHECK (status IN ('queued', 'processing', 'processed', 'dead_letter')),
       source_entry_count INTEGER NOT NULL CHECK (source_entry_count >= 0),
       queued_at TEXT NOT NULL,
       processing_started_at TEXT,
       cutoff_json TEXT NOT NULL,
-      processed_at TEXT
+      processed_at TEXT,
+      attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+      next_attempt_at TEXT,
+      last_error_code TEXT CHECK (
+        last_error_code IS NULL OR last_error_code IN ('extraction_failed', 'policy_violation')
+      ),
+      dead_lettered_at TEXT,
+      purge_after TEXT
     );
 
     CREATE TABLE IF NOT EXISTS long_memory_candidates (
@@ -770,8 +1083,55 @@ function initializeLongMemorySchema(database: DatabaseSync): void {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
   `);
-  ensureLongMemoryLifecycleColumns(database);
-  ensureSessionMemoryCandidateJobColumns(database);
+}
+
+function ensureLongMemoryProvenanceSchema(database: DatabaseSync): void {
+  const columns = new Set(
+    database
+      .prepare("PRAGMA table_info(long_memory_entries)")
+      .all()
+      .map((row) => String((row as { name: unknown }).name))
+  );
+  const migrations: Record<string, string> = {
+    origin_kind:
+      "ALTER TABLE long_memory_entries ADD COLUMN origin_kind TEXT NOT NULL DEFAULT 'staff_review'",
+    origin_policy_version:
+      "ALTER TABLE long_memory_entries ADD COLUMN origin_policy_version TEXT NOT NULL DEFAULT ''",
+    origin_source_session_id:
+      "ALTER TABLE long_memory_entries ADD COLUMN origin_source_session_id TEXT NOT NULL DEFAULT ''",
+    origin_source_entry_ids_json:
+      "ALTER TABLE long_memory_entries ADD COLUMN origin_source_entry_ids_json TEXT NOT NULL DEFAULT '[]'",
+    origin_created_at:
+      "ALTER TABLE long_memory_entries ADD COLUMN origin_created_at TEXT NOT NULL DEFAULT ''",
+    automated_fingerprint:
+      "ALTER TABLE long_memory_entries ADD COLUMN automated_fingerprint TEXT NOT NULL DEFAULT ''"
+  };
+
+  for (const [column, statement] of Object.entries(migrations)) {
+    if (!columns.has(column)) {
+      database.exec(statement);
+    }
+  }
+
+  database.exec(`
+    UPDATE long_memory_entries
+    SET origin_kind = 'staff_review'
+    WHERE origin_kind = '';
+
+    CREATE UNIQUE INDEX IF NOT EXISTS long_memory_entries_active_automated_fingerprint
+    ON long_memory_entries(automated_fingerprint)
+    WHERE automated_fingerprint <> '' AND status = 'active';
+
+    CREATE TABLE IF NOT EXISTS long_memory_automation_observations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      memory_id INTEGER NOT NULL REFERENCES long_memory_entries(id),
+      policy_version TEXT NOT NULL CHECK (policy_version = 'session-cutoff-v1'),
+      source_session_id TEXT NOT NULL,
+      source_entry_ids_json TEXT NOT NULL,
+      observed_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
 }
 
 function ensureLongMemoryLifecycleColumns(database: DatabaseSync): void {
@@ -807,6 +1167,12 @@ function ensureLongMemoryLifecycleColumns(database: DatabaseSync): void {
 }
 
 function ensureSessionMemoryCandidateJobColumns(database: DatabaseSync): void {
+  const tableSql = requireTableSql(database, "long_memory_candidate_jobs");
+
+  if (!tableSql.includes("'dead_letter'")) {
+    rebuildSessionMemoryCandidateJobs(database);
+  }
+
   const columns = new Set(
     database
       .prepare("PRAGMA table_info(long_memory_candidate_jobs)")
@@ -814,9 +1180,81 @@ function ensureSessionMemoryCandidateJobColumns(database: DatabaseSync): void {
       .map((row) => String((row as { name: unknown }).name))
   );
 
-  if (!columns.has("processing_started_at")) {
-    database.exec("ALTER TABLE long_memory_candidate_jobs ADD COLUMN processing_started_at TEXT");
+  const migrations: Record<string, string> = {
+    processing_started_at:
+      "ALTER TABLE long_memory_candidate_jobs ADD COLUMN processing_started_at TEXT",
+    attempt_count:
+      "ALTER TABLE long_memory_candidate_jobs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0)",
+    next_attempt_at: "ALTER TABLE long_memory_candidate_jobs ADD COLUMN next_attempt_at TEXT",
+    last_error_code:
+      "ALTER TABLE long_memory_candidate_jobs ADD COLUMN last_error_code TEXT CHECK (last_error_code IS NULL OR last_error_code IN ('extraction_failed', 'policy_violation'))",
+    dead_lettered_at: "ALTER TABLE long_memory_candidate_jobs ADD COLUMN dead_lettered_at TEXT",
+    purge_after: "ALTER TABLE long_memory_candidate_jobs ADD COLUMN purge_after TEXT"
+  };
+
+  for (const [column, statement] of Object.entries(migrations)) {
+    if (!columns.has(column)) {
+      database.exec(statement);
+    }
   }
+
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS long_memory_candidate_jobs_due
+    ON long_memory_candidate_jobs(status, next_attempt_at, id)
+  `);
+}
+
+function rebuildSessionMemoryCandidateJobs(database: DatabaseSync): void {
+  database.exec(`
+    ALTER TABLE long_memory_candidate_jobs RENAME TO long_memory_candidate_jobs_legacy;
+
+    CREATE TABLE long_memory_candidate_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('queued', 'processing', 'processed', 'dead_letter')),
+      source_entry_count INTEGER NOT NULL CHECK (source_entry_count >= 0),
+      queued_at TEXT NOT NULL,
+      processing_started_at TEXT,
+      cutoff_json TEXT NOT NULL,
+      processed_at TEXT,
+      attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+      next_attempt_at TEXT,
+      last_error_code TEXT CHECK (
+        last_error_code IS NULL OR last_error_code IN ('extraction_failed', 'policy_violation')
+      ),
+      dead_lettered_at TEXT,
+      purge_after TEXT
+    );
+
+    INSERT INTO long_memory_candidate_jobs (
+      id,
+      session_id,
+      status,
+      source_entry_count,
+      queued_at,
+      processing_started_at,
+      cutoff_json,
+      processed_at,
+      attempt_count,
+      last_error_code,
+      dead_lettered_at
+    )
+    SELECT
+      id,
+      session_id,
+      CASE status WHEN 'failed' THEN 'dead_letter' ELSE status END,
+      source_entry_count,
+      queued_at,
+      processing_started_at,
+      cutoff_json,
+      CASE status WHEN 'failed' THEN NULL ELSE processed_at END,
+      CASE status WHEN 'failed' THEN 3 ELSE 0 END,
+      CASE status WHEN 'failed' THEN 'extraction_failed' ELSE NULL END,
+      CASE status WHEN 'failed' THEN processed_at ELSE NULL END
+    FROM long_memory_candidate_jobs_legacy;
+
+    DROP TABLE long_memory_candidate_jobs_legacy;
+  `);
 }
 
 function ensureLongMemoryLifecycleConstraints(database: DatabaseSync): void {
@@ -845,8 +1283,6 @@ function requireTableSql(database: DatabaseSync, tableName: string): string {
 
 function rebuildLongMemoryReviewedTables(database: DatabaseSync): void {
   database.exec(`
-    PRAGMA foreign_keys = OFF;
-
     DROP TRIGGER IF EXISTS long_memory_entries_insert_fts;
     DROP TRIGGER IF EXISTS long_memory_entries_remove_fts;
 
@@ -875,6 +1311,14 @@ function rebuildLongMemoryReviewedTables(database: DatabaseSync): void {
       decay_score REAL NOT NULL DEFAULT 0 CHECK (decay_score >= 0 AND decay_score <= 1),
       archived_at TEXT NOT NULL DEFAULT '',
       deleted_at TEXT NOT NULL DEFAULT '',
+      origin_kind TEXT NOT NULL DEFAULT 'staff_review' CHECK (
+        origin_kind IN ('staff_review', 'session_cutoff_automation')
+      ),
+      origin_policy_version TEXT NOT NULL DEFAULT '',
+      origin_source_session_id TEXT NOT NULL DEFAULT '',
+      origin_source_entry_ids_json TEXT NOT NULL DEFAULT '[]',
+      origin_created_at TEXT NOT NULL DEFAULT '',
+      automated_fingerprint TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -961,17 +1405,6 @@ function rebuildLongMemoryReviewedTables(database: DatabaseSync): void {
     DROP TABLE long_memory_entry_events_legacy;
     DROP TABLE long_memory_entries_legacy;
   `);
-
-  const foreignKeyViolations = database.prepare("PRAGMA foreign_key_check").all();
-  database.exec("PRAGMA foreign_keys = ON");
-
-  if (foreignKeyViolations.length > 0) {
-    throw new Error(
-      `pico long memory migration left foreign key violations: ${JSON.stringify(
-        foreignKeyViolations
-      )}`
-    );
-  }
 }
 
 function refreshLongMemorySearchObjects(database: DatabaseSync): void {
@@ -1001,12 +1434,10 @@ function refreshLongMemorySearchObjects(database: DatabaseSync): void {
 }
 
 function normalizeLongMemoryInput(input: ReviewedLongMemoryInput): NormalizedLongMemoryInput {
-  validateLongMemoryInputKeys(input);
+  assertNoIndividualChildLongMemoryFields(input);
+  validateLongMemoryKeys(input, longMemoryInputKeys, "pico long memory input is malformed");
   const title = requireMemoryText(input.title);
   const body = requireMemoryText(input.body);
-
-  rejectIndividualChildText(title);
-  rejectIndividualChildText(body);
 
   return {
     title,
@@ -1018,6 +1449,43 @@ function normalizeLongMemoryInput(input: ReviewedLongMemoryInput): NormalizedLon
     sourceSessionId: normalizeOptionalMetadataText(input.sourceSessionId),
     importance: normalizeLifecycleScore(input.importance, "pico long memory importance"),
     confidence: normalizeLifecycleScore(input.confidence, "pico long memory confidence")
+  };
+}
+
+function normalizeAutomatedLongMemoryInput(
+  input: AutomatedLongMemoryInput
+): NormalizedAutomatedLongMemoryInput {
+  assertNoIndividualChildLongMemoryFields(input);
+  const record = requireMemoryRecord(input, "pico automated long memory input is malformed");
+  validateLongMemoryKeys(
+    record,
+    automatedLongMemoryInputKeys,
+    "pico automated long memory input is malformed"
+  );
+  const title = requireMemoryText(record.title);
+  const body = requireMemoryText(record.body);
+  const category = requireLongMemoryCategory(record.category);
+  const tags = normalizeTags(record.tags);
+  const sourceSessionId = requireMemoryText(record.sourceSessionId);
+  const sourceEntryIds = normalizeAutomatedSourceEntryIds(record.sourceEntryIds);
+  const policyVersion = requireAutomationPolicyVersion(record.policyVersion);
+  const confidence = requireLifecycleUnit(
+    record.confidence,
+    "pico automated long memory confidence is invalid"
+  );
+
+  return {
+    title,
+    body,
+    category,
+    tags,
+    sourceSessionId,
+    sourceEntryIds,
+    policyVersion,
+    confidence,
+    fingerprint: createHash("sha256")
+      .update([policyVersion, category, title, body].join("\0"))
+      .digest("hex")
   };
 }
 
@@ -1085,6 +1553,124 @@ function insertReviewedMemory(
   return record;
 }
 
+function writeAutomatedMemory(
+  database: DatabaseSync,
+  input: NormalizedAutomatedLongMemoryInput,
+  createdAt: string
+): LongMemoryRecord {
+  const existing = readActiveAutomatedMemory(database, input.fingerprint);
+
+  if (existing !== undefined) {
+    recordAutomationObservation(database, existing.id, input, createdAt);
+    return existing;
+  }
+
+  const result = database
+    .prepare(`
+      INSERT INTO long_memory_entries (
+        title,
+        body,
+        category,
+        tags_json,
+        status,
+        reviewed_by,
+        reviewed_at,
+        review_note,
+        source_session_id,
+        confidence,
+        origin_kind,
+        origin_policy_version,
+        origin_source_session_id,
+        origin_source_entry_ids_json,
+        origin_created_at,
+        automated_fingerprint
+      )
+      VALUES (?, ?, ?, ?, 'active', '', '', '', ?, ?, 'session_cutoff_automation', ?, ?, ?, ?, ?)
+    `)
+    .run(
+      input.title,
+      input.body,
+      input.category,
+      JSON.stringify(input.tags),
+      input.sourceSessionId,
+      input.confidence,
+      input.policyVersion,
+      input.sourceSessionId,
+      JSON.stringify(input.sourceEntryIds),
+      createdAt,
+      input.fingerprint
+    );
+  const id = Number(result.lastInsertRowid);
+
+  recordAutomationObservation(database, id, input, createdAt);
+
+  return requireActiveMemory(database, id);
+}
+
+function readActiveAutomatedMemory(
+  database: DatabaseSync,
+  fingerprint: string
+): LongMemoryRecord | undefined {
+  const row = database
+    .prepare(`
+      SELECT
+        id,
+        title,
+        body,
+        category,
+        tags_json,
+        correction_of,
+        reviewed_by,
+        reviewed_at,
+        review_note,
+        mem0_memory_id,
+        source_session_id,
+        importance,
+        confidence,
+        last_accessed_at,
+        access_count,
+        decay_score,
+        status,
+        origin_kind,
+        origin_policy_version,
+        origin_source_session_id,
+        origin_source_entry_ids_json,
+        origin_created_at,
+        automated_fingerprint
+      FROM long_memory_entries
+      WHERE automated_fingerprint = ? AND status = 'active'
+    `)
+    .get(fingerprint);
+
+  return row === undefined ? undefined : mapLongMemoryRow(row as LongMemoryRow);
+}
+
+function recordAutomationObservation(
+  database: DatabaseSync,
+  memoryId: number,
+  input: NormalizedAutomatedLongMemoryInput,
+  observedAt: string
+): void {
+  database
+    .prepare(`
+      INSERT INTO long_memory_automation_observations (
+        memory_id,
+        policy_version,
+        source_session_id,
+        source_entry_ids_json,
+        observed_at
+      )
+      VALUES (?, ?, ?, ?, ?)
+    `)
+    .run(
+      memoryId,
+      input.policyVersion,
+      input.sourceSessionId,
+      JSON.stringify(input.sourceEntryIds),
+      observedAt
+    );
+}
+
 function readActiveMemory(database: DatabaseSync, id: number): LongMemoryRecord | undefined {
   const row = database
     .prepare(`
@@ -1105,7 +1691,13 @@ function readActiveMemory(database: DatabaseSync, id: number): LongMemoryRecord 
         last_accessed_at,
         access_count,
         decay_score,
-        status
+        status,
+        origin_kind,
+        origin_policy_version,
+        origin_source_session_id,
+        origin_source_entry_ids_json,
+        origin_created_at,
+        automated_fingerprint
       FROM long_memory_entries
       WHERE id = ? AND status = 'active'
     `)
@@ -1142,6 +1734,123 @@ function searchActiveMemories(
       accessCount: result.lifecycle.accessCount + 1
     })
   }));
+}
+
+function searchBoundedActiveMemories(
+  database: DatabaseSync,
+  query: string,
+  limit: number,
+  accessedAt: string
+): readonly LongMemoryRecord[] {
+  const records =
+    query.length >= minimumTrigramQueryLength
+      ? searchBoundedActiveMemoriesByMatch(database, query, limit)
+      : searchBoundedActiveMemoriesByLike(database, query, limit);
+
+  recordMemoryAccess(
+    database,
+    records.map((record) => record.id),
+    accessedAt
+  );
+
+  return records.map((record) =>
+    Object.freeze({
+      ...record,
+      lifecycle: Object.freeze({
+        ...record.lifecycle,
+        lastAccessedAt: accessedAt,
+        accessCount: record.lifecycle.accessCount + 1
+      })
+    })
+  );
+}
+
+function searchBoundedActiveMemoriesByMatch(
+  database: DatabaseSync,
+  query: string,
+  limit: number
+): LongMemoryRecord[] {
+  return database
+    .prepare(`
+      SELECT
+        e.id,
+        e.title,
+        e.body,
+        e.category,
+        e.tags_json,
+        e.correction_of,
+        e.reviewed_by,
+        e.reviewed_at,
+        e.review_note,
+        e.mem0_memory_id,
+        e.source_session_id,
+        e.importance,
+        e.confidence,
+        e.last_accessed_at,
+        e.access_count,
+        e.decay_score,
+        e.status,
+        e.origin_kind,
+        e.origin_policy_version,
+        e.origin_source_session_id,
+        e.origin_source_entry_ids_json,
+        e.origin_created_at,
+        e.automated_fingerprint
+      FROM long_memory_entries_fts
+      JOIN long_memory_entries AS e ON e.id = long_memory_entries_fts.rowid
+      WHERE long_memory_entries_fts MATCH ? AND e.status = 'active'
+      ORDER BY rank, e.id
+      LIMIT ?
+    `)
+    .all(quoteFtsQuery(query), limit)
+    .map((row) => mapLongMemoryRow(row as LongMemoryRow));
+}
+
+function searchBoundedActiveMemoriesByLike(
+  database: DatabaseSync,
+  query: string,
+  limit: number
+): LongMemoryRecord[] {
+  const pattern = `%${escapeLikePattern(query)}%`;
+
+  return database
+    .prepare(`
+      SELECT
+        e.id,
+        e.title,
+        e.body,
+        e.category,
+        e.tags_json,
+        e.correction_of,
+        e.reviewed_by,
+        e.reviewed_at,
+        e.review_note,
+        e.mem0_memory_id,
+        e.source_session_id,
+        e.importance,
+        e.confidence,
+        e.last_accessed_at,
+        e.access_count,
+        e.decay_score,
+        e.status,
+        e.origin_kind,
+        e.origin_policy_version,
+        e.origin_source_session_id,
+        e.origin_source_entry_ids_json,
+        e.origin_created_at,
+        e.automated_fingerprint
+      FROM long_memory_entries_fts
+      JOIN long_memory_entries AS e ON e.id = long_memory_entries_fts.rowid
+      WHERE e.status = 'active'
+        AND (
+          long_memory_entries_fts.title LIKE ? ESCAPE '\\'
+          OR long_memory_entries_fts.body LIKE ? ESCAPE '\\'
+        )
+      ORDER BY e.id
+      LIMIT ?
+    `)
+    .all(pattern, pattern, limit)
+    .map((row) => mapLongMemoryRow(row as LongMemoryRow));
 }
 
 function searchActiveMemoriesByMatch(
@@ -1292,7 +2001,9 @@ function runLongMemoryDecay(
         last_accessed_at,
         access_count,
         decay_score,
-        status
+        status,
+        origin_kind,
+        origin_created_at
       FROM long_memory_entries
       WHERE status = 'active'
       ORDER BY id
@@ -1347,7 +2058,15 @@ function decayMemoryRow(
 }
 
 function calculateDecayScore(row: LongMemoryRow, now: string, decayWindowDays: number): number {
-  const referenceAt = row.last_accessed_at === "" ? row.reviewed_at : row.last_accessed_at;
+  const createdAt =
+    row.origin_kind === "session_cutoff_automation"
+      ? row.origin_created_at
+      : row.origin_kind === "staff_review"
+        ? row.reviewed_at
+        : "";
+  const referenceAt = requireStoredTimestamp(
+    row.last_accessed_at === "" ? createdAt : row.last_accessed_at
+  );
   const elapsedDays = Math.max(0, (Date.parse(now) - Date.parse(referenceAt)) / 86_400_000);
   const recency = clampUnit(1 - elapsedDays / decayWindowDays);
   const access = clampUnit(row.access_count / 5);
@@ -1449,6 +2168,7 @@ function recordMemoryEvent(
 }
 
 function normalizeSessionMemoryCutoffInput(input: unknown): SessionMemoryCutoffInput {
+  assertNoIndividualChildLongMemoryFields(input);
   const record = requireMemoryRecord(input, "pico session memory cutoff input is malformed");
   const sessionId = requireMemoryText(record.sessionId);
   const cutoffAt = requireTimestamp(record.cutoffAt);
@@ -1483,6 +2203,24 @@ function normalizeSourceEntryIds(value: unknown): readonly string[] {
   return Object.freeze(value.map((entryId) => requireMemoryText(entryId)));
 }
 
+function normalizeAutomatedSourceEntryIds(value: unknown): readonly string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("pico automated long memory source entries are required");
+  }
+
+  const sourceEntryIds: string[] = [];
+
+  for (let index = 0; index < value.length; index += 1) {
+    if (!(index in value)) {
+      throw new Error("pico automated long memory input is malformed");
+    }
+
+    sourceEntryIds.push(requireMemoryText(value[index]));
+  }
+
+  return Object.freeze(sourceEntryIds);
+}
+
 function normalizeSessionEntries(value: unknown): readonly SessionMemoryCutoffEntry[] {
   if (!Array.isArray(value)) {
     throw new Error("pico session memory cutoff entries are required");
@@ -1505,10 +2243,7 @@ function normalizeSessionEntries(value: unknown): readonly SessionMemoryCutoffEn
 }
 
 function normalizeSessionEntryContent(value: unknown): string {
-  const content = requireMemoryText(value);
-  rejectIndividualChildText(content);
-
-  return content;
+  return requireMemoryText(value);
 }
 
 function requireSessionEntryRole(value: unknown): SessionMemoryCutoffEntry["role"] {
@@ -1532,13 +2267,15 @@ function requireSessionEntryRecord(value: unknown, message: string): Record<stri
 }
 
 function normalizeLongMemoryCandidateDraft(draft: unknown): NormalizedLongMemoryCandidateDraft {
+  assertNoIndividualChildLongMemoryFields(draft);
   const record = requireMemoryRecord(draft, "pico long memory candidate input is malformed");
-  validateLongMemoryCandidateDraftKeys(record);
+  validateLongMemoryKeys(
+    record,
+    longMemoryCandidateDraftKeys,
+    "pico long memory candidate input is malformed"
+  );
   const title = requireMemoryText(record.title);
   const body = requireMemoryText(record.body);
-
-  rejectIndividualChildText(title);
-  rejectIndividualChildText(body);
 
   return {
     title,
@@ -1701,7 +2438,19 @@ function requireSessionMemoryCandidateJob(
 ): SessionMemoryCandidateJob {
   const row = database
     .prepare(`
-      SELECT id, session_id, status, source_entry_count, queued_at, processing_started_at, processed_at
+      SELECT
+        id,
+        session_id,
+        status,
+        source_entry_count,
+        queued_at,
+        processing_started_at,
+        processed_at,
+        attempt_count,
+        next_attempt_at,
+        last_error_code,
+        dead_lettered_at,
+        purge_after
       FROM long_memory_candidate_jobs
       WHERE id = ?
     `)
@@ -1719,7 +2468,7 @@ function claimNextQueuedSessionMemoryCandidateJob(
   processingStartedAt: string
 ): QueuedSessionMemoryCandidateJobRow | undefined {
   return runInTransaction(database, () => {
-    const row = readNextQueuedSessionMemoryCandidateJob(database);
+    const row = readNextQueuedSessionMemoryCandidateJob(database, processingStartedAt);
 
     if (row === undefined) {
       return undefined;
@@ -1728,7 +2477,10 @@ function claimNextQueuedSessionMemoryCandidateJob(
     database
       .prepare(`
         UPDATE long_memory_candidate_jobs
-        SET status = 'processing', processing_started_at = ?
+        SET status = 'processing',
+            processing_started_at = ?,
+            processed_at = NULL,
+            attempt_count = attempt_count + 1
         WHERE id = ? AND status = 'queued'
       `)
       .run(processingStartedAt, row.id);
@@ -1736,13 +2488,15 @@ function claimNextQueuedSessionMemoryCandidateJob(
     return {
       ...row,
       status: "processing",
-      processing_started_at: processingStartedAt
+      processing_started_at: processingStartedAt,
+      attempt_count: row.attempt_count + 1
     };
   });
 }
 
 function readNextQueuedSessionMemoryCandidateJob(
-  database: DatabaseSync
+  database: DatabaseSync,
+  eligibleAt: string
 ): QueuedSessionMemoryCandidateJobRow | undefined {
   const row = database
     .prepare(`
@@ -1754,13 +2508,19 @@ function readNextQueuedSessionMemoryCandidateJob(
         queued_at,
         processing_started_at,
         processed_at,
+        attempt_count,
+        next_attempt_at,
+        last_error_code,
+        dead_lettered_at,
+        purge_after,
         cutoff_json
       FROM long_memory_candidate_jobs
       WHERE status = 'queued'
+        AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
       ORDER BY id
       LIMIT 1
     `)
-    .get();
+    .get(eligibleAt);
 
   if (row === undefined) {
     return undefined;
@@ -1820,7 +2580,13 @@ function markCandidateJobProcessed(
   database
     .prepare(`
       UPDATE long_memory_candidate_jobs
-      SET status = 'processed', processed_at = ?, cutoff_json = ?
+      SET status = 'processed',
+          processed_at = ?,
+          next_attempt_at = NULL,
+          last_error_code = NULL,
+          dead_lettered_at = NULL,
+          purge_after = NULL,
+          cutoff_json = ?
       WHERE id = ? AND status = 'processing' AND processing_started_at = ?
     `)
     .run(
@@ -1835,13 +2601,15 @@ function compactProcessedCutoffPayload(session: SessionMemoryCutoffInput): Recor
   return compactCutoffPayload(session, "processed_metadata_only");
 }
 
-function compactFailedCutoffPayload(session: SessionMemoryCutoffInput): Record<string, unknown> {
-  return compactCutoffPayload(session, "failed_metadata_only");
+function compactDeadLetterCutoffPayload(
+  session: SessionMemoryCutoffInput
+): Record<string, unknown> {
+  return compactCutoffPayload(session, "dead_letter_metadata_only");
 }
 
 function compactCutoffPayload(
   session: SessionMemoryCutoffInput,
-  retention: "processed_metadata_only" | "failed_metadata_only"
+  retention: "processed_metadata_only" | "dead_letter_metadata_only"
 ): Record<string, unknown> {
   return {
     sessionId: session.sessionId,
@@ -1853,38 +2621,183 @@ function compactCutoffPayload(
   };
 }
 
-function compactUnparseableFailedCutoffPayload(
+function compactUnparseableDeadLetterCutoffPayload(
   jobId: number,
-  processedAt: string
+  sessionId: string,
+  sourceEntryCount: number,
+  deadLetteredAt: string
 ): Record<string, unknown> {
   return {
     jobId,
-    processedAt,
+    sessionId,
+    deadLetteredAt,
     sourceEntryIds: [],
-    sourceEntryCount: 0,
-    retention: "failed_unparseable_metadata_only"
+    sourceEntryCount,
+    retention: "dead_letter_metadata_only"
   };
 }
 
-function markCandidateJobFailed(
+function classifySessionMemoryCandidateJobError(
+  error: unknown
+): SessionMemoryCandidateJobErrorCode {
+  return error instanceof PermanentMemoryPolicyError ? "policy_violation" : "extraction_failed";
+}
+
+function transitionFailedCandidateJob(
   database: DatabaseSync,
-  id: number,
-  processedAt: string,
-  processingStartedAt: string,
-  session: SessionMemoryCutoffInput | undefined
+  input: {
+    readonly job: MappedSessionMemoryCandidateJob;
+    readonly transitionedAt: string;
+    readonly processingStartedAt: string;
+    readonly session: SessionMemoryCutoffInput | undefined;
+    readonly errorCode: SessionMemoryCandidateJobErrorCode;
+  }
 ): void {
-  const retentionPayload =
-    session === undefined
-      ? JSON.stringify(compactUnparseableFailedCutoffPayload(id, processedAt))
-      : JSON.stringify(compactFailedCutoffPayload(session));
+  if (input.errorCode === "policy_violation") {
+    const retentionPayload =
+      input.session === undefined
+        ? compactUnparseableDeadLetterCutoffPayload(
+            input.job.id,
+            input.job.sessionId,
+            input.job.sourceEntryCount,
+            input.transitionedAt
+          )
+        : compactDeadLetterCutoffPayload(input.session);
+
+    database
+      .prepare(`
+        UPDATE long_memory_candidate_jobs
+        SET status = 'dead_letter',
+            processed_at = NULL,
+            next_attempt_at = NULL,
+            last_error_code = ?,
+            dead_lettered_at = ?,
+            purge_after = NULL,
+            cutoff_json = ?
+        WHERE id = ? AND status = 'processing' AND processing_started_at = ?
+      `)
+      .run(
+        input.errorCode,
+        input.transitionedAt,
+        JSON.stringify(retentionPayload),
+        input.job.id,
+        input.processingStartedAt
+      );
+    return;
+  }
+
+  const retryDelayMs = retryDelayAfterAttempt(input.job.attemptCount);
+
+  if (retryDelayMs !== undefined) {
+    database
+      .prepare(`
+        UPDATE long_memory_candidate_jobs
+        SET status = 'queued',
+            processing_started_at = NULL,
+            processed_at = NULL,
+            next_attempt_at = ?,
+            last_error_code = ?,
+            dead_lettered_at = NULL,
+            purge_after = NULL
+        WHERE id = ? AND status = 'processing' AND processing_started_at = ?
+      `)
+      .run(
+        addMilliseconds(input.transitionedAt, retryDelayMs),
+        input.errorCode,
+        input.job.id,
+        input.processingStartedAt
+      );
+    return;
+  }
 
   database
     .prepare(`
       UPDATE long_memory_candidate_jobs
-      SET status = 'failed', processed_at = ?, cutoff_json = ?
+      SET status = 'dead_letter',
+          processed_at = NULL,
+          next_attempt_at = NULL,
+          last_error_code = ?,
+          dead_lettered_at = ?,
+          purge_after = ?
       WHERE id = ? AND status = 'processing' AND processing_started_at = ?
     `)
-    .run(processedAt, retentionPayload, id, processingStartedAt);
+    .run(
+      input.errorCode,
+      input.transitionedAt,
+      addMilliseconds(input.transitionedAt, 7 * 86_400_000),
+      input.job.id,
+      input.processingStartedAt
+    );
+}
+
+function retryDelayAfterAttempt(attemptCount: number): number | undefined {
+  return [30_000, 120_000][attemptCount - 1];
+}
+
+function addMilliseconds(timestamp: string, milliseconds: number): string {
+  return new Date(Date.parse(timestamp) + milliseconds).toISOString();
+}
+
+function purgeExpiredDeadLetterPayloads(
+  database: DatabaseSync,
+  purgedAt: string
+): readonly MappedSessionMemoryCandidateJob[] {
+  const rows = database
+    .prepare(`
+      SELECT
+        id,
+        session_id,
+        status,
+        source_entry_count,
+        queued_at,
+        processing_started_at,
+        processed_at,
+        attempt_count,
+        next_attempt_at,
+        last_error_code,
+        dead_lettered_at,
+        purge_after,
+        cutoff_json
+      FROM long_memory_candidate_jobs
+      WHERE status = 'dead_letter' AND purge_after IS NOT NULL AND purge_after <= ?
+      ORDER BY id
+    `)
+    .all(purgedAt) as QueuedSessionMemoryCandidateJobRow[];
+
+  for (const row of rows) {
+    let session: SessionMemoryCutoffInput | undefined;
+
+    try {
+      session = parseSessionMemoryCutoffPayload(row);
+    } catch {
+      session = undefined;
+    }
+
+    const retentionPayload =
+      session === undefined
+        ? compactUnparseableDeadLetterCutoffPayload(
+            row.id,
+            row.session_id,
+            row.source_entry_count,
+            row.dead_lettered_at ?? purgedAt
+          )
+        : compactDeadLetterCutoffPayload(session);
+
+    database
+      .prepare(`
+        UPDATE long_memory_candidate_jobs
+        SET cutoff_json = ?, purge_after = NULL
+        WHERE id = ? AND status = 'dead_letter' AND purge_after IS NOT NULL AND purge_after <= ?
+      `)
+      .run(JSON.stringify(retentionPayload), row.id, purgedAt);
+  }
+
+  return rows.map((row) =>
+    Object.freeze({
+      ...mapSessionMemoryCandidateJob(row),
+      purgeAfter: undefined
+    })
+  );
 }
 
 function recordCandidateAudit(
@@ -1929,7 +2842,7 @@ function mapLongMemoryCandidate(row: LongMemoryCandidateRow): LongMemoryCandidat
 
 function mapSessionMemoryCandidateJob(
   row: SessionMemoryCandidateJobRow
-): SessionMemoryCandidateJob {
+): MappedSessionMemoryCandidateJob {
   return Object.freeze({
     id: row.id,
     sessionId: row.session_id,
@@ -1938,11 +2851,22 @@ function mapSessionMemoryCandidateJob(
     queuedAt: requireTimestamp(row.queued_at),
     processingStartedAt:
       row.processing_started_at === null ? undefined : requireTimestamp(row.processing_started_at),
-    processedAt: row.processed_at === null ? undefined : requireTimestamp(row.processed_at)
+    processedAt: row.processed_at === null ? undefined : requireTimestamp(row.processed_at),
+    attemptCount: requireNonNegativeInteger(row.attempt_count),
+    nextAttemptAt: row.next_attempt_at === null ? undefined : requireTimestamp(row.next_attempt_at),
+    lastErrorCode:
+      row.last_error_code === null
+        ? undefined
+        : requireSessionMemoryCandidateJobErrorCode(row.last_error_code),
+    deadLetteredAt:
+      row.dead_lettered_at === null ? undefined : requireTimestamp(row.dead_lettered_at),
+    purgeAfter: row.purge_after === null ? undefined : requireTimestamp(row.purge_after)
   });
 }
 
 function mapLongMemoryRow(row: LongMemoryRow): LongMemoryRecord {
+  const provenance = mapLongMemoryProvenance(row);
+
   return Object.freeze({
     id: row.id,
     title: row.title,
@@ -1951,9 +2875,38 @@ function mapLongMemoryRow(row: LongMemoryRow): LongMemoryRecord {
     tags: Object.freeze(JSON.parse(row.tags_json) as string[]),
     status: "active" as const,
     correctionOf: row.correction_of === 0 ? undefined : row.correction_of,
-    review: normalizeStoredReview(row.reviewed_by, row.reviewed_at, row.review_note),
+    review:
+      provenance.kind === "staff_review"
+        ? normalizeStoredReview(row.reviewed_by, row.reviewed_at, row.review_note)
+        : undefined,
+    provenance,
     lifecycle: mapLifecycle(row)
   });
+}
+
+function mapLongMemoryProvenance(row: LongMemoryRow): LongMemoryProvenance {
+  if (row.origin_kind === "staff_review") {
+    const review = normalizeStoredReview(row.reviewed_by, row.reviewed_at, row.review_note);
+
+    return Object.freeze({
+      kind: "staff_review",
+      reviewedBy: review.reviewedBy,
+      reviewedAt: review.reviewedAt,
+      note: review.note
+    });
+  }
+
+  if (row.origin_kind === "session_cutoff_automation") {
+    return Object.freeze({
+      kind: "session_cutoff_automation",
+      policyVersion: requireAutomationPolicyVersion(row.origin_policy_version),
+      sourceSessionId: requireStoredRequiredText(row.origin_source_session_id),
+      sourceEntryIds: parseStoredSourceEntryIds(row.origin_source_entry_ids_json),
+      createdAt: requireStoredTimestamp(row.origin_created_at)
+    });
+  }
+
+  throw new Error("pico long memory row is malformed");
 }
 
 function mapSearchResult(row: Record<string, unknown>): LongMemorySearchResult {
@@ -1984,7 +2937,6 @@ function normalizeReview(
   note: unknown
 ): Required<LongMemoryReview> {
   const normalizedNote = note === undefined ? "" : requireMemoryText(note);
-  rejectIndividualChildText(normalizedNote);
 
   return {
     reviewedBy: requireReviewText(reviewedBy),
@@ -2045,54 +2997,56 @@ function normalizeTags(value: unknown): readonly string[] {
       throw new Error("pico long memory input is malformed");
     }
 
-    const normalized = requireMemoryText(value[index]);
-    rejectIndividualChildText(normalized);
-
-    tags.push(normalized);
+    tags.push(requireMemoryText(value[index]));
   }
 
   return Object.freeze(tags);
 }
 
-function validateLongMemoryInputKeys(input: Record<string, unknown>): void {
+function validateLongMemoryKeys(
+  input: Record<string, unknown>,
+  allowedKeys: ReadonlySet<string>,
+  malformedMessage: string
+): void {
   for (const key of Object.keys(input)) {
     if (isIndividualChildField(key)) {
-      throw new Error("pico long memory must not contain individual child profile data");
+      throwIndividualChildPolicyError();
     }
 
-    if (!longMemoryInputKeys.has(key)) {
-      throw new Error("pico long memory input is malformed");
-    }
-  }
-}
-
-function validateLongMemoryCandidateDraftKeys(input: Record<string, unknown>): void {
-  for (const key of Object.keys(input)) {
-    if (isIndividualChildField(key)) {
-      throw new Error("pico long memory must not contain individual child profile data");
-    }
-
-    if (!longMemoryCandidateDraftKeys.has(key)) {
-      throw new Error("pico long memory candidate input is malformed");
+    if (!allowedKeys.has(key)) {
+      throw new Error(malformedMessage);
     }
   }
 }
 
 function isIndividualChildField(key: string): boolean {
-  const normalized = key.toLowerCase();
+  const normalized = normalizeStructuralFieldName(key);
 
-  return (
-    individualChildFieldMarkers.some((marker) => normalized.includes(marker)) ||
-    individualChildFieldNames.has(normalized)
-  );
+  return individualChildFieldPrefixes.some((prefix) => {
+    if (!normalized.startsWith(prefix)) {
+      return false;
+    }
+
+    const purpose = normalized.slice(prefix.length);
+
+    return (
+      individualChildExactPurposes.has(purpose) ||
+      individualChildFieldPurposes.some((marker) => purpose.includes(marker))
+    );
+  });
 }
 
-function rejectIndividualChildText(value: string): void {
-  const normalized = value.toLowerCase().replaceAll(/\s|_|-/gu, "");
+function normalizeStructuralFieldName(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replaceAll(/[\p{P}\p{S}\p{Z}\s\u02bb\u02bc\ua78c]/gu, "");
+}
 
-  if (individualChildTextMarkers.some((marker) => normalized.includes(marker))) {
-    throw new Error("pico long memory must not contain individual child profile data");
-  }
+function throwIndividualChildPolicyError(): never {
+  throw new PermanentMemoryPolicyError(
+    "pico long memory must not contain structured individual child profile fields"
+  );
 }
 
 function requireLongMemoryCategory(value: unknown): LongMemoryCategory {
@@ -2112,7 +3066,22 @@ function requireLongMemoryCandidateState(value: unknown): LongMemoryCandidateSta
 }
 
 function requireSessionMemoryCandidateJobStatus(value: unknown): SessionMemoryCandidateJobStatus {
-  if (value === "queued" || value === "processing" || value === "processed" || value === "failed") {
+  if (
+    value === "queued" ||
+    value === "processing" ||
+    value === "processed" ||
+    value === "dead_letter"
+  ) {
+    return value;
+  }
+
+  throw new Error("pico session memory candidate job row is malformed");
+}
+
+function requireSessionMemoryCandidateJobErrorCode(
+  value: unknown
+): SessionMemoryCandidateJobErrorCode {
+  if (value === "extraction_failed" || value === "policy_violation") {
     return value;
   }
 
@@ -2137,12 +3106,13 @@ function requireReviewText(value: unknown): string {
 
 function requireTimestamp(value: unknown): string {
   const timestamp = requireReviewText(value);
+  const timestampMs = Date.parse(timestamp);
 
-  if (!Number.isFinite(Date.parse(timestamp))) {
+  if (!Number.isFinite(timestampMs)) {
     throw new Error("pico long memory timestamp is invalid");
   }
 
-  return timestamp;
+  return new Date(timestampMs).toISOString();
 }
 
 function requireNonEmptyTrimmedString(value: unknown, message: string): string {
@@ -2175,6 +3145,62 @@ function requireSearchQuery(value: unknown): string {
   }
 
   return query;
+}
+
+function requireSearchLimit(value: unknown): number {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+
+  throw new Error("pico long memory search limit is invalid");
+}
+
+function requireAutomationPolicyVersion(value: unknown): "session-cutoff-v1" {
+  if (value === "session-cutoff-v1") {
+    return value;
+  }
+
+  throw new Error("pico automated long memory policy version is invalid");
+}
+
+function requireStoredRequiredText(value: unknown): string {
+  const text = requireStoredText(value);
+
+  if (text === "") {
+    throw new Error("pico long memory row is malformed");
+  }
+
+  return text;
+}
+
+function requireStoredTimestamp(value: unknown): string {
+  const timestamp = requireStoredRequiredText(value);
+
+  if (!Number.isFinite(Date.parse(timestamp))) {
+    throw new Error("pico long memory row is malformed");
+  }
+
+  return timestamp;
+}
+
+function parseStoredSourceEntryIds(value: unknown): readonly string[] {
+  if (typeof value !== "string") {
+    throw new Error("pico long memory row is malformed");
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("pico long memory row is malformed");
+  }
+
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error("pico long memory row is malformed");
+  }
+
+  return Object.freeze(parsed.map((entryId) => requireStoredRequiredText(entryId)));
 }
 
 function requireDecayThreshold(value: unknown, label: string): number {

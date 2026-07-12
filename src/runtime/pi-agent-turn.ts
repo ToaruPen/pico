@@ -17,6 +17,7 @@ import type { VoiceStageProbe } from "./voice-stage-probe.js";
 
 export const residentPiAgentToolNames = Object.freeze([
   "pico_session",
+  "pico_memory_search",
   "pico_camera_scene_description_deferred",
   "stackchan_get_status",
   "stackchan_get_device_info",
@@ -389,7 +390,7 @@ function createTurnResourceLoader(
           registerPicoExtensionWithRuntime(pi, {
             sessionLifecycle: options.sessionLifecycle,
             ...(options.voiceProbe === undefined ? {} : { voiceProbe: options.voiceProbe }),
-            toolProfile: "voice_resident",
+            perceptionMode: "resident_deferred",
             ...(options.deferredTools === undefined
               ? {}
               : {
@@ -495,7 +496,7 @@ function createDefaultResourceLoader(
         registerPicoExtensionWithRuntime(pi, {
           sessionLifecycle: options.sessionLifecycle,
           ...(options.voiceProbe === undefined ? {} : { voiceProbe: options.voiceProbe }),
-          toolProfile: "voice_resident",
+          perceptionMode: "resident_deferred",
           ...(options.deferredTools === undefined
             ? {}
             : {

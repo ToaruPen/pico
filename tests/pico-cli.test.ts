@@ -3,11 +3,14 @@ import { describe, expect, it } from "vitest";
 import { createPicoCliPlan, formatPicoCliHelp } from "../src/runtime/pico-cli.js";
 
 describe("pico cli", () => {
-  it("prints help for pico help and empty invocations", () => {
+  it("starts Pi with --pico for an empty invocation without model arguments", () => {
     expect(createPicoCliPlan([])).toEqual({
-      kind: "help",
-      text: formatPicoCliHelp()
+      kind: "pi",
+      args: ["--pico"]
     });
+  });
+
+  it("prints help for explicit help invocations", () => {
     expect(createPicoCliPlan(["help"])).toEqual({
       kind: "help",
       text: formatPicoCliHelp()

@@ -1,125 +1,203 @@
 #!/usr/bin/env jiti
+import { pathToFileURL } from "node:url";
+
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
 import { type AuditEvent, createStructuredAuditLog } from "../../src/modules/audit/index.js";
 import {
   createOpenTelemetryAuditExporter,
-  type OpenTelemetryAuditExporter
+  type OpenTelemetryAuditExporter,
+  type OpenTelemetryAuditExporterOptions
 } from "../../src/modules/audit/otel.js";
-import { createMem0MemoryProvider } from "../../src/modules/long-memory/mem0.js";
-import { createMem0OssClient } from "../../src/modules/long-memory/mem0-runtime.js";
-import { createResidentMemoryDrainWorker } from "../../src/runtime/resident-memory-worker.js";
+import type { FacilityMemoryExtractor } from "../../src/modules/long-memory/extractor.js";
+import { createPiModelFacilityMemoryExtractor } from "../../src/modules/long-memory/pi-extractor.js";
+import {
+  createResidentMemoryDrainWorker,
+  type ResidentMemoryDrainWorker
+} from "../../src/runtime/resident-memory-worker.js";
 
 const defaultPollIntervalMs = 1_000;
 const defaultRecoverProcessingOlderThanMs = 10 * 60_000;
 const positiveIntegerPattern = /^[1-9]\d*$/u;
 
-const config = loadPicoConfigFromEnvironment();
-const once = process.argv.includes("--once");
-const abortController = new AbortController();
+export type ResidentMemoryRuntimeDependencies = {
+  readonly createExtractor?: (
+    config: Extract<PicoConfig["memory"]["longMemory"], { readonly enabled: true }>["extraction"]
+  ) => FacilityMemoryExtractor;
+  readonly createAuditExporter?: (
+    options: OpenTelemetryAuditExporterOptions
+  ) => OpenTelemetryAuditExporter;
+  readonly writeLine?: (line: string) => void;
+  readonly writeErrorLine?: (line: string) => void;
+};
 
-process.once("SIGINT", () => abortController.abort());
-process.once("SIGTERM", () => abortController.abort());
+export type ResidentMemoryRuntimeOptions = {
+  readonly once: boolean;
+  readonly signal: AbortSignal;
+  readonly pollIntervalMs: number;
+  readonly recoverProcessingOlderThanMs?: number;
+};
 
-await runResidentMemory(config, {
-  once,
-  signal: abortController.signal,
-  pollIntervalMs: readPollInterval(process.env.PICO_RESIDENT_MEMORY_POLL_MS)
-});
-
-async function runResidentMemory(
+export async function runResidentMemory(
   config: PicoConfig,
-  options: {
-    readonly once: boolean;
-    readonly signal: AbortSignal;
-    readonly pollIntervalMs: number;
-  }
+  options: ResidentMemoryRuntimeOptions,
+  dependencies: ResidentMemoryRuntimeDependencies = {}
 ): Promise<void> {
-  const mem0 = config.memory.mem0;
-
-  if (!mem0.enabled || mem0.historyDbPath === undefined) {
-    throw new Error("pico resident memory requires memory.mem0.enabled=true and historyDbPath");
-  }
-
-  const audit = createStructuredAuditLog();
-  const exporter = createConfiguredOtelExporter(config);
-  const mem0Client = await createMem0OssClient(mem0);
-  const worker = createResidentMemoryDrainWorker({
-    databasePath: mem0.historyDbPath,
-    mem0Provider: createMem0MemoryProvider({
-      client: mem0Client,
-      scopeId: "pico-resident",
-      audit
-    }),
-    audit,
-    recoverProcessingOlderThanMs: readRecoverProcessingOlderThan(
-      process.env.PICO_RESIDENT_MEMORY_RECOVER_PROCESSING_OLDER_THAN_MS
-    )
-  });
-  let exportedAuditCount = 0;
+  const runtime = createResidentMemoryRuntime(config, options, dependencies);
 
   try {
-    while (!options.signal.aborted) {
-      const report = await worker.drainUntilIdle();
-
-      exportedAuditCount = await exportNewAuditEvents(
-        exporter,
-        audit.entries(),
-        exportedAuditCount
-      );
-      process.stdout.write(`${JSON.stringify({ status: "drained", ...report })}\n`);
-
-      if (options.once) {
-        return;
-      }
-
-      if (report.idle || report.processedCount === 0) {
-        await delay(options.pollIntervalMs, options.signal);
-      }
-    }
+    runtime.worker.purgeExpiredDeadLetterPayloads();
+    await drainResidentMemory(runtime, options, dependencies);
   } finally {
-    worker.close();
-    await exporter?.shutdown();
+    runtime.worker.close();
+    await shutdownAuditExporter(runtime.exporter, dependencies);
   }
 }
 
-function createConfiguredOtelExporter(config: PicoConfig): OpenTelemetryAuditExporter | undefined {
+type ResidentMemoryRuntime = {
+  readonly worker: ResidentMemoryDrainWorker;
+  readonly audit: ReturnType<typeof createStructuredAuditLog>;
+  readonly exporter: OpenTelemetryAuditExporter | undefined;
+};
+
+function createResidentMemoryRuntime(
+  config: PicoConfig,
+  options: ResidentMemoryRuntimeOptions,
+  dependencies: ResidentMemoryRuntimeDependencies
+): ResidentMemoryRuntime {
+  const longMemory = requireEnabledLongMemory(config);
+  const audit = createStructuredAuditLog();
+  const extractor =
+    dependencies.createExtractor?.(longMemory.extraction) ??
+    createPiModelFacilityMemoryExtractor(longMemory.extraction);
+
+  return {
+    worker: createResidentMemoryDrainWorker({
+      databasePath: longMemory.databasePath,
+      extractor,
+      audit,
+      recoverProcessingOlderThanMs:
+        options.recoverProcessingOlderThanMs ?? defaultRecoverProcessingOlderThanMs,
+      signal: options.signal
+    }),
+    audit,
+    exporter: createConfiguredOtelExporter(config, dependencies)
+  };
+}
+
+async function drainResidentMemory(
+  runtime: ResidentMemoryRuntime,
+  options: ResidentMemoryRuntimeOptions,
+  dependencies: ResidentMemoryRuntimeDependencies
+): Promise<void> {
+  while (!options.signal.aborted) {
+    const report = await runtime.worker.drainUntilIdle();
+
+    await exportAuditEvents(runtime.exporter, runtime.audit.drain(), dependencies);
+    writeDrainReport(report, dependencies);
+
+    if (options.once) {
+      return;
+    }
+
+    if (report.idle || report.processedCount === 0) {
+      await delay(options.pollIntervalMs, options.signal);
+    }
+  }
+}
+
+function writeDrainReport(
+  report: Awaited<ReturnType<ResidentMemoryDrainWorker["drainUntilIdle"]>>,
+  dependencies: ResidentMemoryRuntimeDependencies
+): void {
+  const status = report.lastErrorCode === undefined && report.idle ? "drained" : "degraded";
+  const line = `${JSON.stringify({ status, ...report })}\n`;
+
+  if (dependencies.writeLine === undefined) {
+    process.stdout.write(line);
+    return;
+  }
+
+  dependencies.writeLine(line);
+}
+
+function requireEnabledLongMemory(
+  config: PicoConfig
+): Extract<PicoConfig["memory"]["longMemory"], { readonly enabled: true }> {
+  if (!config.memory.longMemory.enabled) {
+    throw new Error("pico resident memory requires memory.longMemory.enabled=true");
+  }
+
+  return config.memory.longMemory;
+}
+
+function createConfiguredOtelExporter(
+  config: PicoConfig,
+  dependencies: Pick<ResidentMemoryRuntimeDependencies, "createAuditExporter">
+): OpenTelemetryAuditExporter | undefined {
   const otel = config.audit.otel;
 
   if (!otel.enabled) {
     return undefined;
   }
 
-  return createOpenTelemetryAuditExporter({
+  const exporterOptions = {
     serviceName: otel.serviceName ?? "pico",
     ...(otel.endpoint === undefined ? {} : { endpoint: otel.endpoint }),
-    ...(otel.timeoutMs === undefined ? {} : { timeoutMs: otel.timeoutMs })
-  });
+    timeoutMs: otel.timeoutMs ?? 10_000
+  } satisfies OpenTelemetryAuditExporterOptions;
+
+  return (
+    dependencies.createAuditExporter?.(exporterOptions) ??
+    createOpenTelemetryAuditExporter(exporterOptions)
+  );
 }
 
-async function exportNewAuditEvents(
+async function exportAuditEvents(
   exporter: OpenTelemetryAuditExporter | undefined,
   events: readonly AuditEvent[],
-  exportedCount: number
-): Promise<number> {
+  dependencies: Pick<ResidentMemoryRuntimeDependencies, "writeErrorLine">
+): Promise<void> {
   if (exporter === undefined) {
-    return events.length;
+    return;
   }
 
-  let nextExportedCount = exportedCount;
-
-  for (const event of events.slice(exportedCount)) {
+  for (const event of events) {
     try {
       await exporter.export(event);
-      nextExportedCount += 1;
-    } catch (error) {
-      process.stderr.write(
-        `${JSON.stringify({ status: "otel_export_failed", error: String(error) })}\n`
-      );
-      break;
+    } catch {
+      writeErrorReport("otel_export_failed", dependencies);
+      return;
     }
   }
+}
 
-  return nextExportedCount;
+function writeErrorReport(
+  errorCode: "otel_export_failed" | "otel_shutdown_failed",
+  dependencies: Pick<ResidentMemoryRuntimeDependencies, "writeErrorLine">
+): void {
+  const line = `${JSON.stringify({ status: "degraded", errorCode })}\n`;
+
+  if (dependencies.writeErrorLine === undefined) {
+    process.stderr.write(line);
+    return;
+  }
+
+  dependencies.writeErrorLine(line);
+}
+
+async function shutdownAuditExporter(
+  exporter: OpenTelemetryAuditExporter | undefined,
+  dependencies: Pick<ResidentMemoryRuntimeDependencies, "writeErrorLine">
+): Promise<void> {
+  if (exporter === undefined) {
+    return;
+  }
+
+  try {
+    await exporter.shutdown();
+  } catch {
+    writeErrorReport("otel_shutdown_failed", dependencies);
+  }
 }
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {
@@ -184,4 +262,26 @@ function readPositiveInteger(value: string): number | undefined {
   }
 
   return parsed;
+}
+
+function isDirectExecution(): boolean {
+  return process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+}
+
+if (isDirectExecution()) {
+  const config = loadPicoConfigFromEnvironment();
+  const once = process.argv.includes("--once");
+  const abortController = new AbortController();
+
+  process.once("SIGINT", () => abortController.abort());
+  process.once("SIGTERM", () => abortController.abort());
+
+  await runResidentMemory(config, {
+    once,
+    signal: abortController.signal,
+    pollIntervalMs: readPollInterval(process.env.PICO_RESIDENT_MEMORY_POLL_MS),
+    recoverProcessingOlderThanMs: readRecoverProcessingOlderThan(
+      process.env.PICO_RESIDENT_MEMORY_RECOVER_PROCESSING_OLDER_THAN_MS
+    )
+  });
 }

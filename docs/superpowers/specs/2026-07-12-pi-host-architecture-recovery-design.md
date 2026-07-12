@@ -1,9 +1,14 @@
 # Pi ホスト型アーキテクチャ回復設計
 
 **日付:** 2026-07-12
-**状態:** 承認済み
+**状態:** 一部廃止。Pi ownership と単一session境界は維持するが、runtime profile設計は
+`2026-07-11-autonomous-long-memory-retrieval-design.md` の起動設計で置き換えられた。
 **対象:** `pico` resident voice の実行所有権回復
 **起点:** `origin/main` (`fdaf4955a829e4ad485a41153d38a29ce084afe3`)
+
+> 2026-07-12 decision: `worker | interactive | resident` profile とPico内のtool
+> filteringは廃止する。通常Piはcontrollerなし、`pi --pico`はYAML指定modelでPicoを
+> 起動する。tool visibilityはPi settingsが所有し、Picoで重複実装しない。
 
 ## 1. 目的
 
@@ -84,8 +89,8 @@ Codex の定期 stale-process cleanup が、所有根拠を確認したうえで
 2. **単一所有者:** Pi の機能は Pi が、施設固有機能は Pico が所有する。
 3. **ホスト API 優先:** Pico は `pi.sendUserMessage`、Pi events、`ctx.abort`、
    `appendEntry` を使い、内部 session を再生成しない。
-4. **worker はプロファイル:** worker 用の第二 extension を作らない。同じ Pico extension
-   を安全な既定値で読み込み、親だけを起動時フラグで resident profile にする。
+4. **起動とtool可視性を分離:** 通常Piはcontrollerなしで起動し、Picoだけを`--pico`で
+   明示起動する。通常Pi、Pico、subagentのtool可視性はPi設定が所有する。
 5. **復旧情報を最小化:** Pi session にない会話本文やタスク複製を保存しない。
 6. **異常残留を分離する:** 通常 abort は Pi が収束し、強制終了後の残留 process は
    Codex の定期 cleanup が最終回収する。
@@ -97,7 +102,7 @@ Codex の定期 stale-process cleanup が、所有根拠を確認したうえで
 | 本番プロセスと親 conversation session | Yes | No |
 | model/auth/provider と prompt loop | Yes | No |
 | tool registry と tool execution events | Yes | Pico tool の実装のみ |
-| subagent の生成、進捗、結果、通常 abort | Yes | worker profile の権限制約のみ |
+| subagent の生成、進捗、結果、通常 abort | Yes | No |
 | session persistence と transcript | Yes | No |
 | microphone、VAD、STT | No | Yes |
 | 名前・別名・attention window | No | Yes |
@@ -113,7 +118,7 @@ Pico は `createAgentSession()` を resident 本番起動経路から呼ばな�
 
 ```mermaid
 flowchart LR
-    A["Microphone / VAD / STT"] --> B["Pico resident profile"]
+    A["Microphone / VAD / STT"] --> B["Pico controller (--pico)"]
     B -->|"pi.sendUserMessage"| C["Existing Pi parent session"]
     C --> D["Pi tool loop"]
     D -->|"subagent tool"| E["Pi-owned worker session"]
@@ -126,11 +131,11 @@ flowchart LR
 
 1. Pi を本番ホストとして起動する。
 2. 同じ Pico extension を通常どおり読み込む。
-3. 親プロセスだけに startup-only の resident profile を明示する。
+3. Picoを担う親プロセスだけに startup-only の `--pico` flagを明示する。
 4. extension の `session_start` で Pico resident controller を一度だけ開始する。
-5. worker session は resident flag を持たないため、安全な worker profile になる。
+5. subagentを含むtool可視性は各Pi設定に従い、Pico内で上書きしない。
 
-profile は起動後に変更しない。変更には Pi プロセス再起動を必要とする。
+`--pico` の選択とYAML modelは起動後に変更しない。変更にはPiプロセス再起動を必要とする。
 
 ### 6.2 音声 turn
 
@@ -151,21 +156,13 @@ user input として扱う。
 - `session_shutdown` では新規入力を閉じ、Pico 所有の録音、タイマー、再生を drain する。
 - Pi が所有する session/subagent/process を Pico が直接 kill しない。
 
-## 7. runtime profile と worker 権限
+## 7. Pico起動とtool可視性
 
-既定 profile は worker-safe とする。resident profile は親起動時だけ明示する。
-
-| 能力 | resident parent | worker |
-|---|---:|---:|
-| microphone/STT resident loop | Allow | Deny |
-| TTS/direct speech | Allow | Deny |
-| durable memory write | Allow through parent policy | Deny |
-| subagent tool / recursive delegation | Allow when enabled | Deny |
-| read-only Pico context tools | Allow | Explicit allowlist only |
-| final user-facing response | Allow | Parentへの tool result のみ |
-
-worker が profile 情報を受け取れない場合は worker-safe に倒す。権限不足を runtime fallback
-で別 provider や別 session に切り替えない。
+通常PiはPico controllerを開始しない。`pi --pico`だけがYAML指定modelを選択してcontrollerを
+開始する。`pico` commandはこの起動経路への薄いaliasである。camera/StackChanなどagent別の
+tool可視性はPi設定で決定し、Pico runtimeにprofile、allowlist policy、fallbackを置かない。
+`pico_memory_search`はextensionへ一度登録し、extensionを読み込む通常Pi、Pico、subagentが
+同じ実装を利用できる。
 
 ## 8. 最小復旧メタデータ
 
@@ -209,10 +206,10 @@ Pi の session transcript と重複する TaskRun store は作らない。タス
 
 1. Pico extension 内に、既存 Pi session へ入力しイベントを観測する薄い resident turn
    boundary を追加する。
-2. startup-only の resident/worker profile と中央の capability policy を追加する。
+2. startup-only の `--pico` controller起動とYAML model選択を追加する。
 3. extension の session lifecycle に resident voice controller の start/stop を接続する。
 4. 本番 resident entry から embedded `createPiAgentTurnClient` 所有を外す。
-5. Pi の subagent tool を利用する前提と worker 制約を構造的テストで固定する。
+5. Pi のsubagent機構を利用し、agent別tool可視性はPi設定へ委ねる。
 6. `AGENTS.md` と必要な運用文書へ、Pi/Pico 所有権を簡潔に明記する。
 7. Pi の通常 abort と、Codex cleanup が扱う強制終了後の異常残留の境界を、再現可能な
    verification と運用文書に残す。
@@ -239,7 +236,7 @@ PRは所有権を直すために、それらを再設計と同時に抱え込ま
 
 | 状態 | 所有者 | ライフサイクル | 終了条件 |
 |---|---|---|---|
-| runtime profile | Pico extension | startup-only immutable | process exit |
+| `--pico` activation とYAML model | Pico extension | startup-only immutable | process exit |
 | resident controller instance | Pico extension | Pi session | `session_shutdown` |
 | active voice turn handle | boundary | one Pi turn | `agent_settled` または abort failure |
 | audio capture / timers | Pico controller | resident session | stop/drain |
@@ -250,7 +247,7 @@ PRは所有権を直すために、それらを再設計と同時に抱え込ま
 
 許可する変更経路:
 
-- startup CLI/config から profile を一度決定する
+- startup CLI/config からPico activationとmodelを一度決定する
 - `session_start` / `session_shutdown`
 - microphone/STT callback
 - Pi extension event callback
@@ -259,15 +256,15 @@ PRは所有権を直すために、それらを再設計と同時に抱え込ま
 
 禁止する変更経路:
 
-- 起動後の profile hot reload
+- 起動後のPico activation/model hot reload
 - 複数箇所からの resident controller 生成
 - script からの別 Pi session 生成
 - worker からの resident 能力昇格
 - Pico からの subagent process 直接管理
 - session replacement 後の古い context 保持
 
-中央 enforcement point は Pico extension が所有する単一 controller factory と capability
-policy とする。script、tool、各 module が独自に profile を解釈しない。
+中央 enforcement point はPico extensionが所有する単一controller factoryとする。
+tool可視性はPi設定が所有し、script、tool、各moduleが独自profileを解釈しない。
 
 ### 11.3 非同期所有権
 
@@ -286,8 +283,7 @@ policy とする。script、tool、各 module が独自に profile を解釈し�
 - 本番 resident startup path が `createAgentSession` または
   `createPiAgentTurnClient` を呼ばない。
 - resident voice は Pico extension の `session_start` から一度だけ開始される。
-- worker profile では microphone、TTS、durable write、recursive delegation が登録または
-  実行されない。
+- 通常PiはPico controllerを開始せず、Picoだけが`--pico`で音声resourceを所有する。
 - custom subagent runner、second integration session、TaskRun store が存在しない。
 
 ### 12.2 挙動
@@ -297,7 +293,7 @@ policy とする。script、tool、各 module が独自に profile を解釈し�
 - 同時 voice turn の扱いが決定的で、暗黙の第二 session を作らない。
 - cancel は active turn の Pi abort と Pico playback stop をそれぞれ一度だけ行う。
 - shutdown は新規入力を拒否し、Pico resource を残さず drain する。
-- worker-safe profile は resident flag 不在時の既定値である。
+- `--pico`不在時はcontrollerを開始せず、Piのtool設定を変更しない。
 
 ### 12.3 検証
 
@@ -343,4 +339,4 @@ Pico が `AgentSession` を生成して Pi をライブラリとして使う。�
 2. address/attention/status の完全移植は後続PRへ分離する。
 3. runtime は強制終了後のタスク自動再開を持たない。
 4. 強制終了後の異常残留は Codex の定期 stale-process cleanup が最終回収する。
-5. resident profile の具体的な CLI/config 表現は実装計画で既存 Pi extension API に合わせる。
+5. Pico起動は`pi --pico`、model選択はYAML、tool可視性はPi設定を正本とする。
