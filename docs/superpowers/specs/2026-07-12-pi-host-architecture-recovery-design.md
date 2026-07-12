@@ -1,7 +1,7 @@
 # Pi ホスト型アーキテクチャ回復設計
 
 **日付:** 2026-07-12  
-**状態:** 実装前レビュー待ち  
+**状態:** 承認済み
 **対象:** `pico` resident voice の実行所有権回復  
 **起点:** `origin/main` (`fdaf4955a829e4ad485a41153d38a29ce084afe3`)
 
@@ -74,9 +74,9 @@ retrospective の対象である。
    session と同じライフサイクルで保存できる。
 
 一方、親プロセスを強制終了した実験では、subagent が起動した OS 子プロセスが残った。
-したがって、通常キャンセル能力は実証済みだが、強制終了後の process-tree 収束は未証明
-である。長時間 subagent を本番有効化する前の明示的なゲートとし、Pico 側の独自 runner
-で隠さない。
+通常キャンセル能力は実証済みだが、`SIGKILL` や電源断の後に、終了した Pi 自身が残留
+process を回収することはできない。この異常残留は Pico runtime の自動再開機構で扱わず、
+Codex の定期 stale-process cleanup が、所有根拠を確認したうえで最終回収する。
 
 ## 4. 設計原則
 
@@ -87,7 +87,8 @@ retrospective の対象である。
 4. **worker はプロファイル:** worker 用の第二 extension を作らない。同じ Pico extension
    を安全な既定値で読み込み、親だけを起動時フラグで resident profile にする。
 5. **復旧情報を最小化:** Pi session にない会話本文やタスク複製を保存しない。
-6. **強制終了を成功扱いしない:** 未解決の process-tree 問題は受入条件で可視化する。
+6. **異常残留を分離する:** 通常 abort は Pi が収束し、強制終了後の残留 process は
+   Codex の定期 cleanup が最終回収する。
 
 ## 5. 所有権
 
@@ -168,8 +169,8 @@ worker が profile 情報を受け取れない場合は worker-safe に倒す。
 
 ## 8. 最小復旧メタデータ
 
-Pi の session transcript と重複する TaskRun store は作らない。必要な場合だけ、Pi の
-`appendEntry` に Pico namespaced entry を追加する。
+Pi の session transcript と重複する TaskRun store は作らない。タスクの自動再開も行わない。
+必要な場合だけ、Pi の `appendEntry` に Pico namespaced entry を追加する。
 
 保存候補は以下に限定する。
 
@@ -178,6 +179,7 @@ Pi の session transcript と重複する TaskRun store は作らない。必要
 - terminal state と `endedAt`
 - terminal reason の小さな分類
 - ユーザー通知済みかどうか
+- cleanup が process を Pico/Pi subagent 所有と判定するための非機密 owner marker
 
 保存しないもの:
 
@@ -212,7 +214,8 @@ Pi の session transcript と重複する TaskRun store は作らない。必要
 4. 本番 resident entry から embedded `createPiAgentTurnClient` 所有を外す。
 5. Pi の subagent tool を利用する前提と worker 制約を構造的テストで固定する。
 6. `AGENTS.md` と必要な運用文書へ、Pi/Pico 所有権を簡潔に明記する。
-7. Pi の通常 abort と強制終了の差を、再現可能な verification と運用上の gate として残す。
+7. Pi の通常 abort と、Codex cleanup が扱う強制終了後の異常残留の境界を、再現可能な
+   verification と運用文書に残す。
 
 ### 10.2 実装しない
 
@@ -224,6 +227,7 @@ Pi の session transcript と重複する TaskRun store は作らない。必要
 - mock/fake/fallback provider
 - address/attention/status 文法の全面移植
 - 長時間 subagent の本番有効化
+- 強制終了後のタスク自動再開
 - 強制終了 orphan 問題を Pico 独自 process manager で迂回すること
 
 呼び掛け・attention・決定的 command の既存プロダクト挙動は後続の小さなPRで移植する。最初の
@@ -302,7 +306,9 @@ policy とする。script、tool、各 module が独自に profile を解釈し�
 - production entry に embedded session owner がないことを `rg` と構造テストで確認する。
 - Pi extension loading と subagent tool 登録を実 SDK で確認する。
 - 通常 abort の収束を実 SDK で確認する。
-- 強制終了試験は、orphan が残る間は長時間 subagent 本番有効化を失敗判定にする。
+- 強制終了後に残り得る process を cleanup が安全に識別できる根拠を確認する。
+- cleanup は executable name、年齢、CPU使用率だけで generic process を自動終了しない。
+- 真の zombie (`STAT=Z`) は kill 対象にせず、親による reap が必要なものとして報告する。
 - 変更した識別子・literal を `rg` し、意図した owner/helper 以外へ増えていないことを確認する。
 
 ## 13. PR分割
@@ -310,9 +316,9 @@ policy とする。script、tool、各 module が独自に profile を解釈し�
 1. **PR 1 — Pi host ownership foundation:** 本設計の `10.1`。
 2. **PR 2 — resident interaction parity:** address/alias、attention window、
    status/cancel/end、progress 文言を小さく移植する。
-3. **PR 3 — durable recovery:** 実際に必要と証明された最小 entry のみ追加する。
-4. **Pi/platform gate:** 強制終了時の process-tree 収束を Pi 側で解決または公式に保証する。
-5. **Production enablement:** 上記 gate 後に長時間 subagent を有効化する。
+3. **Operations — stale process cleanup:** Codex schedule で候補を列挙し、所有根拠を
+   確認した process だけを `TERM` する。generic process と zombie は自動 kill しない。
+4. **Optional metadata:** 実際に必要と証明された owner marker だけを追加する。
 
 各PRは独立して review/rollback 可能にし、旧ブランチの巨大差分を再現しない。
 
@@ -329,12 +335,12 @@ RPC 再接続と音声 turn 対応付けが増える。in-process extension で�
 Pico が `AgentSession` を生成して Pi をライブラリとして使う。現在の矛盾と旧ブランチの
 重複所有を再発させるため採用しない。
 
-## 15. レビュー時の確認点
+## 15. 承認事項
 
-実装開始前に次を確認する。
+2026-07-12 に以下を承認済みとする。
 
-1. 最初のPRを ownership foundation に限定してよいか。
-2. address/attention/status の完全移植を後続PRへ分離してよいか。
-3. 強制終了ゲートを未解決のまま、長時間 subagent を本番無効に保つ判断でよいか。
-4. resident profile の具体的な CLI/config 表現は実装計画で既存 Pi extension API に合わせて
-   決めてよいか。
+1. 最初のPRを ownership foundation に限定する。
+2. address/attention/status の完全移植は後続PRへ分離する。
+3. runtime は強制終了後のタスク自動再開を持たない。
+4. 強制終了後の異常残留は Codex の定期 stale-process cleanup が最終回収する。
+5. resident profile の具体的な CLI/config 表現は実装計画で既存 Pi extension API に合わせる。
