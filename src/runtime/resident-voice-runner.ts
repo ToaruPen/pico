@@ -79,20 +79,36 @@ export async function runDirectResidentVoiceHarness(
     lock,
     abortController
   );
+  const runtime = runResidentVoiceWithProviders({
+    config,
+    signal: abortController.signal,
+    createPiAgent
+  });
+
+  await waitForDirectResidentVoiceRuntime({
+    runtime,
+    signal: abortController.signal,
+    shutdownGraceMs: config.voice.resident.shutdownGraceMs,
+    releaseLock: () => lock.release(),
+    unregisterShutdownCleanup
+  });
+}
+
+export async function waitForDirectResidentVoiceRuntime(input: {
+  readonly runtime: Promise<void>;
+  readonly signal: AbortSignal;
+  readonly shutdownGraceMs: number;
+  readonly releaseLock: () => void;
+  readonly unregisterShutdownCleanup: () => void;
+}): Promise<void> {
+  const runtimeWithRelease = input.runtime.finally(input.releaseLock);
+  // A shutdown timeout can settle first, so observe any later runtime or release failure.
+  void runtimeWithRelease.catch(() => undefined);
 
   try {
-    await withShutdownGrace(
-      runResidentVoiceWithProviders({
-        config,
-        signal: abortController.signal,
-        createPiAgent
-      }),
-      abortController.signal,
-      config.voice.resident.shutdownGraceMs
-    );
+    await withShutdownGrace(runtimeWithRelease, input.signal, input.shutdownGraceMs);
   } finally {
-    unregisterShutdownCleanup();
-    lock.release();
+    input.unregisterShutdownCleanup();
   }
 }
 
@@ -134,7 +150,6 @@ export async function runResidentVoiceWithProviders(input: {
     ending: config.session.ending,
     ...(audit === undefined ? {} : { audit })
   });
-  const memoryWorker = createResidentMemoryWorker(config);
   const deferredTools = createDeferredToolCoordinator();
   const stt = createConfiguredStt(config);
   const tts = createConfiguredTts(config);
@@ -163,6 +178,7 @@ export async function runResidentVoiceWithProviders(input: {
       ...(audit === undefined ? {} : { voiceProbe: { audit } })
     });
     const speechActivity = await createConfiguredSpeechActivityGate(config);
+    const memoryWorker = createResidentMemoryWorker(config);
 
     await runVoiceResidentRuntime({
       frames,

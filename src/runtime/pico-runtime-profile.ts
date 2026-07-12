@@ -73,9 +73,9 @@ export function registerPicoRuntimeProfile(
   });
 
   pi.on("tool_call", (event) => {
-    const profile = selectedProfile;
+    const profile = selectedProfile ?? "worker";
 
-    if (profile === undefined || isToolAllowed(profile, event.toolName)) {
+    if (isToolAllowed(profile, event.toolName)) {
       return;
     }
 

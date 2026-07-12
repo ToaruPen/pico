@@ -264,6 +264,35 @@ describe("Pico runtime profile", () => {
       });
     }
   });
+
+  it("uses the worker deny policy before session startup completes", async () => {
+    const harness = createProfileHarness({ profile: "interactive", activeTools: ["read"] });
+    registerPicoRuntimeProfile(harness.api as never, {
+      createResidentController: createCompletedController
+    });
+    const context = createContext();
+
+    for (const toolName of ["pico_session", "stackchan_say", "subagent"]) {
+      await expect(
+        harness.emit(
+          "tool_call",
+          { type: "tool_call", toolCallId: `call-${toolName}`, toolName, input: {} },
+          context
+        )
+      ).resolves.toContainEqual({
+        block: true,
+        reason: `pico worker profile denies ${toolName}`
+      });
+    }
+
+    await expect(
+      harness.emit(
+        "tool_call",
+        { type: "tool_call", toolCallId: "call-read", toolName: "read", input: {} },
+        context
+      )
+    ).resolves.toEqual([undefined]);
+  });
 });
 
 function createCompletedController(): ResidentVoiceController {

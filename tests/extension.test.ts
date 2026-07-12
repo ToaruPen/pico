@@ -149,10 +149,13 @@ describe("pico extension", () => {
     });
     expect([...capture.handlers.keys()].sort()).toEqual(
       expect.arrayContaining([
+        "agent_start",
         "agent_settled",
+        "before_agent_start",
         "message_update",
         "session_shutdown",
-        "session_start"
+        "session_start",
+        "tool_call"
       ])
     );
   });
