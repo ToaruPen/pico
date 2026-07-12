@@ -253,6 +253,38 @@ describe("plaintext identity registry store", () => {
     second.close();
   });
 
+  it("uses a single SQLite snapshot for compound reads", () => {
+    const store = createStore();
+    const identity = createIdentity("018f0f4e-0000-7000-8000-000000000019", "架空", "花子", [
+      "はな"
+    ]);
+    applyCreate(store, identity);
+    const execDescriptor = Object.getOwnPropertyDescriptor(DatabaseSync.prototype, "exec");
+    if (execDescriptor === undefined || typeof execDescriptor.value !== "function") {
+      throw new Error("missing DatabaseSync.exec descriptor");
+    }
+    const originalExec = execDescriptor.value as (this: DatabaseSync, sql: string) => void;
+    const statements: string[] = [];
+    Object.defineProperty(DatabaseSync.prototype, "exec", {
+      ...execDescriptor,
+      value(this: DatabaseSync, sql: string): void {
+        statements.push(sql);
+        Reflect.apply(originalExec, this, [sql]);
+      }
+    });
+
+    try {
+      for (const read of [() => store.status(), () => store.list(), () => store.resolve("はな")]) {
+        statements.length = 0;
+        read();
+        expect(statements).toEqual(["BEGIN DEFERRED", "COMMIT"]);
+      }
+    } finally {
+      Object.defineProperty(DatabaseSync.prototype, "exec", execDescriptor);
+      store.close();
+    }
+  });
+
   it("rejects operations after close", () => {
     const store = createStore();
     store.close();

@@ -75,6 +75,56 @@ describe("minimal identity registry service", () => {
     service.close();
   });
 
+  it("updates by stable subject reference, clears aliases, and does not implicitly delete", async () => {
+    const service = createService();
+    const input = await createRosterPath(service, [
+      [undefined, undefined, "架空", "花子", "かくう", "はなこ", "はなちゃん", "active"],
+      [undefined, undefined, "架空", "太郎", "かくう", "たろう", undefined, "active"]
+    ]);
+    const created = await service.previewWorkbook(input);
+    if (!created.ok || !created.applicable) throw new Error("expected create preview");
+    service.applyPreview(created.previewId, { ownerApproved: true });
+    const before = service.resolve("架空花子");
+    if (before.kind !== "resolved") throw new Error("expected first identity");
+
+    const workbook = new ExcelJS.Workbook();
+    const exported = await service.createExportWorkbook({ ownerApproved: true });
+    await workbook.xlsx.load(
+      exported as unknown as Parameters<ExcelJS.Workbook["xlsx"]["load"]>[0]
+    );
+    const roster = workbook.getWorksheet("児童名簿");
+    if (roster === undefined) throw new Error("missing roster fixture");
+    roster.getCell("C2").value = "更新後";
+    roster.getCell("G2").value = "[[CLEAR]]";
+    roster.spliceRows(3, 1);
+
+    const updatePath = writeBuffer(Buffer.from(await workbook.xlsx.writeBuffer()));
+    const update = await service.previewWorkbook(updatePath);
+    expect(update).toMatchObject({
+      ok: true,
+      applicable: true,
+      counts: { created: 0, updated: 1, unchanged: 0, errors: 0 },
+      changes: [{ rowNumber: 2, operation: "update", fieldCodes: ["formal_name", "aliases"] }]
+    });
+    if (!update.ok || !update.applicable) throw new Error("expected update preview");
+    service.applyPreview(update.previewId, { ownerApproved: true });
+
+    expect(service.resolve("更新後花子")).toMatchObject({
+      kind: "resolved",
+      identity: {
+        subjectRef: before.identity.subjectRef,
+        revision: before.identity.revision + 1,
+        aliases: []
+      }
+    });
+    expect(service.resolve("はなちゃん")).toEqual({ kind: "not_found" });
+    expect(service.resolve("架空太郎")).toMatchObject({
+      kind: "resolved",
+      identity: { revision: 1 }
+    });
+    service.close();
+  });
+
   it("mutates aliases and status through the service boundary", async () => {
     const service = createService();
     const input = await createRosterPath(service, [

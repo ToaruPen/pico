@@ -114,6 +114,37 @@ describe("minimal identity registry workbook", () => {
     await expect(parseRosterWorkbook(path)).rejects.toThrow("roster_workbook_invalid");
   });
 
+  it.each([
+    "merged cell",
+    "hidden row",
+    "hidden column"
+  ] as const)("rejects a roster %s", async (kind) => {
+    const workbook = await loadWorkbook(await createRosterTemplateWorkbook(now));
+    const roster = workbook.getWorksheet("児童名簿");
+    if (roster === undefined) throw new Error("missing roster fixture");
+    roster.getCell("C2").value = "架空";
+    if (kind === "merged cell") roster.mergeCells("C2:D2");
+    if (kind === "hidden row") roster.getRow(2).hidden = true;
+    if (kind === "hidden column") roster.getColumn(3).hidden = true;
+
+    const path = writeWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()));
+    await expect(parseRosterWorkbook(path)).rejects.toThrow("roster_workbook_invalid");
+  });
+
+  it.each([
+    ["missing", ["pico_id", "revision", "姓", "名", "姓かな", "名かな", "あだ名"]],
+    ["duplicate", ["pico_id", "revision", "姓", "姓", "姓かな", "名かな", "あだ名", "状態"]],
+    ["reordered", ["revision", "pico_id", "姓", "名", "姓かな", "名かな", "あだ名", "状態"]]
+  ] as const)("rejects a %s roster header", async (_kind, headers) => {
+    const workbook = await loadWorkbook(await createRosterTemplateWorkbook(now));
+    const roster = workbook.getWorksheet("児童名簿");
+    if (roster === undefined) throw new Error("missing roster fixture");
+    roster.getRow(1).values = [...headers];
+
+    const path = writeWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()));
+    await expect(parseRosterWorkbook(path)).rejects.toThrow("roster_workbook_invalid");
+  });
+
   it("does not apply editable-sheet restrictions to the guide", async () => {
     const workbook = await loadWorkbook(await createRosterTemplateWorkbook(now));
     const guide = workbook.getWorksheet("入力ガイド");
@@ -159,6 +190,63 @@ describe("minimal identity registry workbook", () => {
     ).rejects.toThrow("roster_workbook_too_large");
   });
 
+  it("counts astral characters as one Unicode code point at the 512 limit", async () => {
+    const workbook = await loadWorkbook(await createRosterTemplateWorkbook(now));
+    const guide = workbook.getWorksheet("入力ガイド");
+    if (guide === undefined) throw new Error("missing guide fixture");
+    guide.getCell("C1").value = "😀".repeat(512);
+
+    await expect(
+      parseRosterWorkbook(writeWorkbook(Buffer.from(await workbook.xlsx.writeBuffer())))
+    ).resolves.toMatchObject({ errors: [] });
+
+    guide.getCell("C1").value = "😀".repeat(513);
+    await expect(
+      parseRosterWorkbook(writeWorkbook(Buffer.from(await workbook.xlsx.writeBuffer())))
+    ).rejects.toThrow("roster_workbook_too_large");
+  });
+
+  it("accepts 2,000 roster rows and rejects row 2,001", async () => {
+    const workbook = await loadWorkbook(await createRosterTemplateWorkbook(now));
+    const roster = workbook.getWorksheet("児童名簿");
+    if (roster === undefined) throw new Error("missing roster fixture");
+    for (let index = 0; index < 2_000; index += 1) {
+      roster.addRow([
+        undefined,
+        undefined,
+        `架空${index}`,
+        "花子",
+        "かくう",
+        "はなこ",
+        undefined,
+        "active"
+      ]);
+    }
+
+    await expect(
+      parseRosterWorkbook(writeWorkbook(Buffer.from(await workbook.xlsx.writeBuffer())))
+    ).resolves.toMatchObject({ rows: { length: 2_000 }, errors: [] });
+
+    roster.addRow([undefined, undefined, "上限超過", "花子", "じょうげん", "はなこ"]);
+    await expect(
+      parseRosterWorkbook(writeWorkbook(Buffer.from(await workbook.xlsx.writeBuffer())))
+    ).rejects.toThrow("roster_workbook_too_large");
+  });
+
+  it("accepts 50,000 workbook cells and rejects cell 50,001", async () => {
+    const workbook = await loadWorkbook(await createRosterTemplateWorkbook(now));
+    fillWorkbookToCellCount(workbook, 50_000);
+
+    await expect(
+      parseRosterWorkbook(writeWorkbook(Buffer.from(await workbook.xlsx.writeBuffer())))
+    ).resolves.toMatchObject({ errors: [] });
+
+    fillWorkbookToCellCount(workbook, 50_001);
+    await expect(
+      parseRosterWorkbook(writeWorkbook(Buffer.from(await workbook.xlsx.writeBuffer())))
+    ).rejects.toThrow("roster_workbook_too_large");
+  });
+
   it("rejects unexpected sheets and non-xlsx paths", async () => {
     const workbook = await loadWorkbook(await createRosterTemplateWorkbook(now));
     workbook.addWorksheet("unexpected");
@@ -188,4 +276,25 @@ function writeWorkbook(buffer: Uint8Array): string {
   const path = join(directory, "roster.xlsx");
   writeFileSync(path, buffer, { mode: 0o600 });
   return path;
+}
+
+function fillWorkbookToCellCount(workbook: ExcelJS.Workbook, target: number): void {
+  const guide = workbook.getWorksheet("入力ガイド");
+  if (guide === undefined) throw new Error("missing guide fixture");
+  let count = 0;
+  for (const worksheet of workbook.worksheets) {
+    worksheet.eachRow({ includeEmpty: false }, (row) => {
+      row.eachCell({ includeEmpty: false }, () => {
+        count += 1;
+      });
+    });
+  }
+  for (let rowNumber = 1; count < target; rowNumber += 1) {
+    for (let columnNumber = 3; columnNumber <= 202 && count < target; columnNumber += 1) {
+      const cell = guide.getCell(rowNumber, columnNumber);
+      if (cell.value !== null) continue;
+      cell.value = "x";
+      count += 1;
+    }
+  }
 }

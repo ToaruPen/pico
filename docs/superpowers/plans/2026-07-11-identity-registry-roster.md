@@ -320,9 +320,16 @@ Run:
 
 ```bash
 just check
-git diff --name-only --diff-filter=ACMR -z origin/main...HEAD | xargs -0 npx --yes --package=secretlint@9.3.2 --package=@secretlint/secretlint-rule-preset-recommend@9.3.2 secretlint --secretlintrc=.secretlintrc.json
-git diff --name-only --diff-filter=ACMR --cached -z | xargs -0 npx --yes --package=secretlint@9.3.2 --package=@secretlint/secretlint-rule-preset-recommend@9.3.2 secretlint --secretlintrc=.secretlintrc.json
-git ls-files -m -o --exclude-standard -z | xargs -0 npx --yes --package=secretlint@9.3.2 --package=@secretlint/secretlint-rule-preset-recommend@9.3.2 secretlint --secretlintrc=.secretlintrc.json
+set -euo pipefail
+secret_files="$(mktemp)"
+trap 'rm -f "$secret_files"' EXIT
+{
+  git diff --name-only --diff-filter=ACMR -z origin/main...HEAD
+  git diff --name-only --diff-filter=ACMR --cached -z
+  git ls-files -m -o --exclude-standard -z
+} >"$secret_files"
+test -s "$secret_files"
+xargs -0 npx --yes --package=secretlint@9.3.2 --package=@secretlint/secretlint-rule-preset-recommend@9.3.2 secretlint --secretlintrc=.secretlintrc.json <"$secret_files"
 npm audit --omit=dev
 git diff --check
 ```

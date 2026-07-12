@@ -189,42 +189,48 @@ function createStore(database: DatabaseSync): IdentityRegistryStore {
 
   function status(): IdentityRegistryStatus {
     requireOpen();
-    const metadata = requireMetadata(database);
-    const count = database.prepare("SELECT COUNT(*) AS count FROM identity_registry_entries").get();
-    return Object.freeze({
-      schemaVersion: metadata.schemaVersion,
-      normalizationVersion: metadata.normalizationVersion,
-      registryEpoch: metadata.registryEpoch,
-      identityCount: requireInteger(rowValue(count, "count"))
+    return readSnapshot(database, () => {
+      const metadata = requireMetadata(database);
+      const count = database
+        .prepare("SELECT COUNT(*) AS count FROM identity_registry_entries")
+        .get();
+      return Object.freeze({
+        schemaVersion: metadata.schemaVersion,
+        normalizationVersion: metadata.normalizationVersion,
+        registryEpoch: metadata.registryEpoch,
+        identityCount: requireInteger(rowValue(count, "count"))
+      });
     });
   }
 
   function list(): readonly ChildIdentity[] {
     requireOpen();
-    return loadIdentities(database);
+    return readSnapshot(database, () => loadIdentities(database));
   }
 
   function resolve(query: string): IdentityResolveResult {
     requireOpen();
-    for (const variant of createIdentityLookupQueryVariants(query)) {
-      const matches = database
-        .prepare(
-          `SELECT DISTINCT subject_ref
-           FROM identity_registry_lookups
-           WHERE normalized_text = ?
-           ORDER BY subject_ref`
-        )
-        .all(variant)
-        .map((row) => requireString(rowValue(row, "subject_ref")));
-      if (matches.length > 1) return Object.freeze({ kind: "ambiguous" });
-      if (matches.length === 1) {
-        return Object.freeze({
-          kind: "resolved",
-          identity: loadIdentity(database, matches[0] as string)
-        });
+    return readSnapshot(database, () => {
+      for (const variant of createIdentityLookupQueryVariants(query)) {
+        const matches = database
+          .prepare(
+            `SELECT DISTINCT subject_ref
+             FROM identity_registry_lookups
+             WHERE normalized_text = ?
+             ORDER BY subject_ref`
+          )
+          .all(variant)
+          .map((row) => requireString(rowValue(row, "subject_ref")));
+        if (matches.length > 1) return Object.freeze({ kind: "ambiguous" });
+        if (matches.length === 1) {
+          return Object.freeze({
+            kind: "resolved",
+            identity: loadIdentity(database, matches[0] as string)
+          });
+        }
       }
-    }
-    return Object.freeze({ kind: "not_found" });
+      return Object.freeze({ kind: "not_found" });
+    });
   }
 
   function stagePreview(input: IdentityPreviewChangeSet): IdentityPreviewSummary {
@@ -386,6 +392,18 @@ function createStore(database: DatabaseSync): IdentityRegistryStore {
       }
     }
   });
+}
+
+function readSnapshot<T>(database: DatabaseSync, read: () => T): T {
+  database.exec("BEGIN DEFERRED");
+  try {
+    const result = read();
+    database.exec("COMMIT");
+    return result;
+  } catch (caught: unknown) {
+    rollback(database);
+    throw caught;
+  }
 }
 
 function configureDatabase(database: DatabaseSync): void {

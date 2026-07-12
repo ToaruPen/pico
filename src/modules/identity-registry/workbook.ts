@@ -188,9 +188,17 @@ function validateWorkbook(workbook: Workbook): void {
 }
 
 function validateCellSize(cell: Cell): void {
-  if (Array.from(cellTextPayload(cell)).length > ROSTER_LIMITS.maximumCellCodePoints) {
+  if (codePointLength(cellTextPayload(cell)) > ROSTER_LIMITS.maximumCellCodePoints) {
     throw new Error("roster_workbook_too_large");
   }
+}
+
+function codePointLength(value: string): number {
+  let length = 0;
+  for (const character of value) {
+    if (character.codePointAt(0) !== undefined) length += 1;
+  }
+  return length;
 }
 
 function cellTextPayload(cell: Cell): string {
