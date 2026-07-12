@@ -4,6 +4,7 @@ export type AuditEventCategory =
   | "tool_call"
   | "external_send"
   | "memory_write"
+  | "identity_registry"
   | "session_lifecycle"
   | "transport_event"
   | "module_error";
@@ -43,6 +44,7 @@ const auditEventCategories = new Set<AuditEventCategory>([
   "tool_call",
   "external_send",
   "memory_write",
+  "identity_registry",
   "session_lifecycle",
   "transport_event",
   "module_error"

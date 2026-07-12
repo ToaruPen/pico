@@ -108,6 +108,7 @@ describe("pico extension", () => {
       "local_models",
       "handoff",
       "audit",
+      "identity_registry",
       "transport"
     ]);
   });
@@ -177,6 +178,9 @@ describe("pico extension", () => {
     );
     expect(handlerResult.systemPrompt).toContain("Available pico modules:");
     expect(handlerResult.systemPrompt).toContain("context: Provides structured facility context");
+    expect(handlerResult.systemPrompt).toContain(
+      "identity_registry: Provides a local child identity registry"
+    );
     expect(handlerResult.systemPrompt).toContain("Planned pico modules:");
     expect(handlerResult.systemPrompt).toContain(
       "vision: Bounded scene understanding through Qwen/Qwen3.5-9B"

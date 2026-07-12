@@ -7,6 +7,7 @@ import { createAuditModule } from "./modules/audit/index.js";
 import { createContextModule } from "./modules/context/index.js";
 import { futurePicoModules } from "./modules/future.js";
 import { createHandoffModule } from "./modules/handoff/index.js";
+import { createIdentityRegistryModule } from "./modules/identity-registry/index.js";
 import { createLocalModelsModule } from "./modules/local-models/index.js";
 import { createMemoryModule } from "./modules/memory/index.js";
 import { createSessionModule, type SessionLifecycle } from "./modules/session/index.js";
@@ -34,6 +35,7 @@ export function createPicoRegistry(): PicoModuleRegistry {
   registry.register(createLocalModelsModule());
   registry.register(createHandoffModule());
   registry.register(createAuditModule());
+  registry.register(createIdentityRegistryModule());
   registry.register(createTransportModule());
 
   return registry;

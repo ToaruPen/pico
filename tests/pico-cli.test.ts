@@ -34,6 +34,14 @@ describe("pico cli", () => {
     });
   });
 
+  it("routes roster management to the local roster script", () => {
+    expect(createPicoCliPlan(["roster", "status", "--database", "/tmp/registry.sqlite"])).toEqual({
+      kind: "script",
+      scriptPath: "scripts/roster.ts",
+      args: ["status", "--database", "/tmp/registry.sqlite"]
+    });
+  });
+
   it("does not expose resident launchd lifecycle as pico commands", () => {
     for (const command of [
       "install",
@@ -66,6 +74,7 @@ describe("pico cli", () => {
     const help = formatPicoCliHelp();
 
     expect(help).toContain("pico dev");
+    expect(help).toContain("pico roster");
     expect(help).toContain("Pi Agent");
 
     for (const command of [
