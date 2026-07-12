@@ -14,6 +14,12 @@ responsible decision makers.
 - Source of truth starts in `docs/superpowers/specs/` and
   `docs/superpowers/research/`.
 - Runtime shape is one Pi package with one TypeScript extension.
+- Pi owns the production process, parent conversation session, model loop,
+  tools, subagents, and normal agent cancellation. Pico owns facility audio,
+  address/attention rules, TTS/echo control, and capability restrictions.
+- `pico-runtime-profile` is startup-only. Its safe default is `worker`;
+  production resident startup must select `resident`, and trusted manual tool
+  sessions must select `interactive` explicitly.
 - Internal modules are TypeScript modules under `src/`.
 - Module code uses one folder per module under `src/modules/<module>/index.ts`.
 - First-slice runtime modules are metadata/contract modules for context, memory,
@@ -48,6 +54,12 @@ responsible decision makers.
 
 - Production architecture has no mock, stub, fake, backward-compatibility, or
   automatic fallback provider paths.
+- `npm run resident:voice` and its launchd wrapper are direct field harnesses,
+  not production ownership paths. They may embed the Pi SDK only inside that
+  bounded harness.
+- Hard-kill residue is reviewed by the scheduled Codex stale-process cleanup.
+  Do not add task auto-resume, a custom worker runner, or a TaskRun store to the
+  Pico runtime for process cleanup.
 - Provider alternatives are explicit future choices, not hidden runtime chains.
 - Do not add a custom policy engine as an early architecture layer.
 - Remote model access uses protected transport boundaries such as Tailscale ACLs

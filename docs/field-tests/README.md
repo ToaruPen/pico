@@ -27,7 +27,7 @@ memory, or OTel validation.
 The next field milestone is Pi Agent runtime interaction through pico tools:
 
 ```bash
-node_modules/.bin/pi --approve --no-session --no-builtin-tools --extension ./src/index.ts -p '<prompt that requires pico_session>'
+node_modules/.bin/pi --pico-runtime-profile=interactive --approve --no-session --no-builtin-tools --extension ./src/index.ts -p '<prompt that requires pico_session>'
 ```
 
 This verifies that the actual Pi Agent process can call pico runtime tools. It

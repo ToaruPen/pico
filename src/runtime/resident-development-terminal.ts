@@ -148,7 +148,7 @@ function buildResidentVoiceRunAndCloseCommand(
   terminal: ResidentDevelopmentTerminal
 ): string {
   const commands = [
-    `npm run resident:voice 2>&1 | tee -a ${quoteShell(logPath)}`,
+    `node_modules/.bin/pi --pico-runtime-profile=resident 2>&1 | tee -a ${quoteShell(logPath)}`,
     "status=$?",
     `printf '\\n[pico] resident voice exited with status %s\\n' "$status" | tee -a ${quoteShell(logPath)}`
   ];

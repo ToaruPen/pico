@@ -61,7 +61,10 @@ describe("resident dev terminal", () => {
     expect(session.shellCommand).not.toContain(": >");
     expect(session.shellCommand).toContain("PICO_DEV_TERMINAL_TTY=$(tty)");
     expect(session.shellCommand).toContain("printf '\\033]0;%s\\007' 'pico resident voice'");
-    expect(session.shellCommand).toContain("npm run resident:voice");
+    expect(session.shellCommand).toContain(
+      "node_modules/.bin/pi --pico-runtime-profile=resident"
+    );
+    expect(session.shellCommand).not.toContain("npm run resident:voice");
     expect(session.shellCommand).toContain(
       "2>&1 | tee -a '/Users/monsoon/.pico/resident-voice/development/processes/2026-06-22/2026-06-22T01-02-03-000Z-1234.log'"
     );
@@ -96,7 +99,10 @@ describe("resident dev terminal", () => {
         "/Users/monsoon/.pico/dev-terminal/resident-voice-launcher.sh"
       ]
     });
-    expect(session.shellCommand).toContain("npm run resident:voice");
+    expect(session.shellCommand).toContain(
+      "node_modules/.bin/pi --pico-runtime-profile=resident"
+    );
+    expect(session.shellCommand).not.toContain("npm run resident:voice");
     expect(session.shellCommand).toContain('exit "$status"');
     expect(session.shellCommand).not.toContain("PICO_DEV_TERMINAL_TTY=$(tty)");
     expect(session.shellCommand).not.toContain("osascript");
