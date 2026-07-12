@@ -173,5 +173,42 @@ describe("minimal identity registry schema", () => {
       fieldCode: "status",
       code: "invalid_value"
     });
+    expect(
+      validateChildIdentity({
+        ...identity,
+        name: { ...identity.name, family: " 架空 " }
+      })
+    ).toContainEqual({ rowNumber: 0, fieldCode: "family", code: "invalid_value" });
+    for (const aliases of [["はな\nちゃん"], [""], [" [[ＣＬＥＡＲ]] "]]) {
+      expect(validateChildIdentity({ ...identity, aliases })).toContainEqual({
+        rowNumber: 0,
+        fieldCode: "aliases",
+        code: "invalid_value"
+      });
+    }
+  });
+
+  it("rejects the reserved alias sentinel in create rows", () => {
+    const result = parseRosterRow(
+      {
+        pico_id: undefined,
+        revision: undefined,
+        姓: "架空",
+        名: "花子",
+        姓かな: "かくう",
+        名かな: "はなこ",
+        あだ名: "通常名\n [[ＣＬＥＡＲ]] ",
+        状態: "active"
+      },
+      2
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected invalid reserved alias");
+    expect(result.errors).toContainEqual({
+      rowNumber: 2,
+      fieldCode: "aliases",
+      code: "invalid_value"
+    });
   });
 });

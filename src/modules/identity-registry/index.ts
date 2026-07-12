@@ -154,23 +154,23 @@ export function createIdentityRegistryService(
     },
     addAlias(subjectReference, alias, approval) {
       requireOwnerApproval(approval);
-      store.addAlias(subjectReference, alias, now());
-      recordAudit(audit, "identity_registry.alias_add", now(), true, 1);
+      const changed = store.addAlias(subjectReference, alias, now());
+      recordAudit(audit, "identity_registry.alias_add", now(), true, changed ? 1 : 0);
     },
     removeAlias(subjectReference, alias, approval) {
       requireOwnerApproval(approval);
-      store.removeAlias(subjectReference, alias, now());
-      recordAudit(audit, "identity_registry.alias_remove", now(), true, 1);
+      const changed = store.removeAlias(subjectReference, alias, now());
+      recordAudit(audit, "identity_registry.alias_remove", now(), true, changed ? 1 : 0);
     },
     activate(subjectReference, approval) {
       requireOwnerApproval(approval);
-      store.setStatus(subjectReference, "active", now());
-      recordAudit(audit, "identity_registry.activate", now(), true, 1);
+      const changed = store.setStatus(subjectReference, "active", now());
+      recordAudit(audit, "identity_registry.activate", now(), true, changed ? 1 : 0);
     },
     deactivate(subjectReference, approval) {
       requireOwnerApproval(approval);
-      store.setStatus(subjectReference, "inactive", now());
-      recordAudit(audit, "identity_registry.deactivate", now(), true, 1);
+      const changed = store.setStatus(subjectReference, "inactive", now());
+      recordAudit(audit, "identity_registry.deactivate", now(), true, changed ? 1 : 0);
     },
     close: () => store.close()
   });

@@ -127,13 +127,26 @@ async function readBoundedWorkbook(path: string): Promise<Buffer> {
     if (statistics.size > ROSTER_LIMITS.maximumFileBytes) {
       throw new Error("roster_workbook_too_large");
     }
-    return await handle.readFile();
+    return await readAtMostMaximumWorkbookBytes(handle);
   } catch (caught: unknown) {
     if (caught instanceof Error && caught.message === "roster_workbook_too_large") throw caught;
     throw invalidWorkbook();
   } finally {
     await handle?.close();
   }
+}
+
+async function readAtMostMaximumWorkbookBytes(handle: FileHandle): Promise<Buffer> {
+  const maximumBytes = ROSTER_LIMITS.maximumFileBytes;
+  const buffer = Buffer.allocUnsafe(maximumBytes + 1);
+  let bytesRead = 0;
+  while (bytesRead < buffer.length) {
+    const result = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+    if (result.bytesRead === 0) break;
+    bytesRead += result.bytesRead;
+  }
+  if (bytesRead > maximumBytes) throw new Error("roster_workbook_too_large");
+  return buffer.subarray(0, bytesRead);
 }
 
 // eslint-disable-next-line complexity -- The fixed workbook contract is a flat set of independent checks.

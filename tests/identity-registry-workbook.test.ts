@@ -13,6 +13,7 @@ import {
 
 const temporaryDirectories: string[] = [];
 const now = "2026-07-12T00:00:00.000Z";
+const xlsxExtensionPattern = /\.xlsx$/u;
 const identity: ChildIdentity = {
   subjectRef: "018f0f4e-0000-7000-8000-000000000001",
   revision: 2,
@@ -164,7 +165,7 @@ describe("minimal identity registry workbook", () => {
     const path = writeWorkbook(Buffer.from(await workbook.xlsx.writeBuffer()));
 
     await expect(parseRosterWorkbook(path)).rejects.toThrow("roster_workbook_invalid");
-    await expect(parseRosterWorkbook(path.replace(/\.xlsx$/u, ".xlsm"))).rejects.toThrow(
+    await expect(parseRosterWorkbook(path.replace(xlsxExtensionPattern, ".xlsm"))).rejects.toThrow(
       "roster_workbook_invalid"
     );
   });

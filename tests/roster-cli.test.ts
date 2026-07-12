@@ -1,11 +1,11 @@
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createStructuredAuditLog } from "../src/modules/audit/index.js";
-import { runRosterCli } from "../src/runtime/roster-cli.js";
+import { formatRosterCliHelp, runRosterCli } from "../src/runtime/roster-cli.js";
 
 const directories: string[] = [];
 
@@ -54,6 +54,47 @@ describe("roster cli", () => {
   it("rejects unknown commands and options", async () => {
     await expect(runRosterCli(["unknown"])).rejects.toThrow("unknown roster command");
     await expect(runRosterCli(["status", "--unknown"])).rejects.toThrow();
+  });
+
+  it("reports roster help for both supported forms", async () => {
+    expect(formatRosterCliHelp()).toContain("pico roster init");
+    await expect(runRosterCli(["help"])).resolves.toEqual({
+      ok: true,
+      command: "help",
+      usage: formatRosterCliHelp()
+    });
+    await expect(runRosterCli(["--help"])).resolves.toEqual({
+      ok: true,
+      command: "help",
+      usage: formatRosterCliHelp()
+    });
+  });
+
+  it("dispatches preview and enforces every mutation approval gate", async () => {
+    const { databasePath, outputPath } = createPaths();
+    await runRosterCli(["init", "--owner-approved", "--database", databasePath]);
+    await runRosterCli(["template", "--output", outputPath]);
+
+    await expect(
+      runRosterCli(["preview", "--input", outputPath, "--database", databasePath])
+    ).resolves.toMatchObject({ ok: true, command: "preview", resultCode: "no_changes" });
+    await expect(runRosterCli(["preview", "--database", databasePath])).rejects.toThrow(
+      "--input is required"
+    );
+
+    const mutationArguments = [
+      ["apply", "--preview", "preview-id"],
+      ["export", "--output", join(dirname(databasePath), "export.xlsx")],
+      ["add-alias", "--subject", "subject", "--alias", "alias"],
+      ["remove-alias", "--subject", "subject", "--alias", "alias"],
+      ["activate", "--subject", "subject"],
+      ["deactivate", "--subject", "subject"]
+    ] as const;
+    for (const arguments_ of mutationArguments) {
+      await expect(runRosterCli([...arguments_, "--database", databasePath])).rejects.toThrow(
+        "owner_approval_required"
+      );
+    }
   });
 
   it("routes value-free events through the structured audit log", async () => {

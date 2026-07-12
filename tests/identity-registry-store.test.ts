@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -171,6 +172,32 @@ describe("plaintext identity registry store", () => {
 
     expect(() => store.applyPreview(stale.previewId, next)).toThrow("preview_stale");
     expect(() => store.applyPreview(stale.previewId, next)).toThrow("preview_not_found");
+    store.close();
+  });
+
+  it("rolls back a stale revision transaction before the next mutation", () => {
+    const { databasePath } = createDatabasePath();
+    const store = initializeIdentityRegistryDatabase({ databasePath, now });
+    const identity = createIdentity("018f0f4e-0000-7000-8000-000000000018", "架空", "花子");
+    applyCreate(store, identity);
+    const preview = store.stagePreview({
+      changes: [
+        {
+          kind: "update",
+          expectedRevision: 1,
+          identity: { ...identity, revision: 2, status: "inactive", updatedAt: next }
+        }
+      ],
+      now
+    });
+    const external = new DatabaseSync(databasePath);
+    external
+      .prepare("UPDATE identity_registry_entries SET revision = 2 WHERE subject_ref = ?")
+      .run(identity.subjectRef);
+    external.close();
+
+    expect(() => store.applyPreview(preview.previewId, next)).toThrow("preview_stale");
+    expect(() => store.addAlias(identity.subjectRef, "はな", next)).not.toThrow();
     store.close();
   });
 

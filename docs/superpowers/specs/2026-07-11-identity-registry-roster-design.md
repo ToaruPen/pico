@@ -189,10 +189,10 @@ pico roster template --output path.xlsx
 pico roster preview --input path.xlsx [--database absolute-path]
 pico roster apply --preview <uuid> --owner-approved [--database absolute-path]
 pico roster export --output path.xlsx --owner-approved [--database absolute-path]
-pico roster add-alias --subject <subjectRef> --alias <value> --owner-approved
-pico roster remove-alias --subject <subjectRef> --alias <value> --owner-approved
-pico roster activate --subject <subjectRef> --owner-approved
-pico roster deactivate --subject <subjectRef> --owner-approved
+pico roster add-alias --subject <subjectRef> --alias <value> --owner-approved [--database absolute-path]
+pico roster remove-alias --subject <subjectRef> --alias <value> --owner-approved [--database absolute-path]
+pico roster activate --subject <subjectRef> --owner-approved [--database absolute-path]
+pico roster deactivate --subject <subjectRef> --owner-approved [--database absolute-path]
 pico roster status [--database absolute-path]
 ```
 

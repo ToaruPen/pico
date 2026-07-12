@@ -21,6 +21,9 @@ export async function runRosterCli(
 ): Promise<RosterCliResult> {
   const [command, ...rest] = arguments_;
   if (command === undefined) throw new Error("roster command is required");
+  if (command === "help" || command === "--help") {
+    return result("help", { usage: formatRosterCliHelp() });
+  }
   if (command === "init") return runInit(rest, options.audit);
   if (command === "template") return runTemplate(rest);
   if (command === "status") {
@@ -104,6 +107,22 @@ export async function runRosterCli(
     );
   }
   throw new Error(`unknown roster command: ${command}`);
+}
+
+export function formatRosterCliHelp(): string {
+  return [
+    "Usage:",
+    "  pico roster init --owner-approved [--database path]",
+    "  pico roster template --output path.xlsx",
+    "  pico roster status [--database path]",
+    "  pico roster preview --input path.xlsx [--database path]",
+    "  pico roster apply --preview id --owner-approved [--database path]",
+    "  pico roster export --output path.xlsx --owner-approved [--database path]",
+    "  pico roster add-alias --subject id --alias value --owner-approved [--database path]",
+    "  pico roster remove-alias --subject id --alias value --owner-approved [--database path]",
+    "  pico roster activate --subject id --owner-approved [--database path]",
+    "  pico roster deactivate --subject id --owner-approved [--database path]"
+  ].join("\n");
 }
 
 function runInit(
@@ -208,5 +227,5 @@ function result(command: string, value: unknown): RosterCliResult {
     typeof value === "object" && value !== null && !Array.isArray(value)
       ? (value as Record<string, unknown>)
       : { value };
-  return Object.freeze({ ok: true, command, ...details });
+  return Object.freeze({ ...details, ok: true, command });
 }

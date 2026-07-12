@@ -119,6 +119,30 @@ describe("minimal identity registry service", () => {
     service.close();
   });
 
+  it("audits idempotent mutations with an accurate change count", async () => {
+    const audit = createStructuredAuditLog();
+    const service = createService(audit);
+    const path = await createRosterPath(service, [
+      [undefined, undefined, "架空", "花子", "かくう", "はなこ", undefined, "active"]
+    ]);
+    const preview = await service.previewWorkbook(path);
+    if (!preview.ok || !preview.applicable) throw new Error("expected preview");
+    service.applyPreview(preview.previewId, { ownerApproved: true });
+    const resolved = service.resolve("架空花子");
+    if (resolved.kind !== "resolved") throw new Error("expected identity");
+
+    service.addAlias(resolved.identity.subjectRef, "はな", { ownerApproved: true });
+    service.addAlias(resolved.identity.subjectRef, "はな", { ownerApproved: true });
+
+    expect(
+      audit
+        .entries()
+        .filter(({ name }) => name === "identity_registry.alias_add")
+        .map(({ attributes }) => attributes.change_count)
+    ).toEqual([1, 0]);
+    service.close();
+  });
+
   it("initializes and reopens the default native store without a keyring", () => {
     const { databasePath } = createDatabasePath();
     expect(() => initializeIdentityRegistry({ databasePath, now: () => now })).toThrow(

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync, type SQLOutputValue } from "node:sqlite";
 
@@ -51,9 +51,9 @@ export type IdentityRegistryStore = Readonly<{
   resolve(query: string): IdentityResolveResult;
   stagePreview(input: IdentityPreviewChangeSet): IdentityPreviewSummary;
   applyPreview(previewId: string, now: string): IdentityApplySummary;
-  addAlias(subjectReference: string, alias: string, now: string): void;
-  removeAlias(subjectReference: string, alias: string, now: string): void;
-  setStatus(subjectReference: string, status: ChildIdentity["status"], now: string): void;
+  addAlias(subjectReference: string, alias: string, now: string): boolean;
+  removeAlias(subjectReference: string, alias: string, now: string): boolean;
+  setStatus(subjectReference: string, status: ChildIdentity["status"], now: string): boolean;
   close(): void;
 }>;
 
@@ -129,9 +129,11 @@ export function initializeIdentityRegistryDatabase(input: {
   const parentAlreadyExists = existsSync(parent);
   mkdirSync(parent, { recursive: true, mode: 0o700 });
   if (!parentAlreadyExists) chmodSync(parent, 0o700);
+  const temporaryPath = `${input.databasePath}.${randomUUID()}.tmp`;
   let database: DatabaseSync | undefined;
+  let published = false;
   try {
-    database = new DatabaseSync(input.databasePath);
+    database = new DatabaseSync(temporaryPath);
     configureDatabase(database);
     database.exec(schemaSql);
     database
@@ -141,11 +143,21 @@ export function initializeIdentityRegistryDatabase(input: {
          VALUES (1, ?, ?, 0)`
       )
       .run(ROSTER_SCHEMA_VERSION, ROSTER_NORMALIZATION_VERSION);
-    chmodSync(input.databasePath, 0o600);
+    chmodSync(temporaryPath, 0o600);
+    database.close();
+    database = undefined;
+    linkSync(temporaryPath, input.databasePath);
+    published = true;
+    rmSync(temporaryPath, { force: true });
+    database = new DatabaseSync(input.databasePath);
+    configureDatabase(database);
+    requireMetadata(database);
     return createStore(database);
   } catch (caught: unknown) {
     database?.close();
+    if (!published) rmSync(temporaryPath, { force: true });
     if (caught instanceof IdentityRegistryError) throw caught;
+    if (isErrorWithCode(caught, "EEXIST")) throw new IdentityRegistryError("registry_exists");
     throw new IdentityRegistryError("registry_unavailable");
   }
 }
@@ -238,6 +250,7 @@ function createStore(database: DatabaseSync): IdentityRegistryStore {
     requireOpen();
     requireTimestamp(now);
     const preview = readPreview(database, previewId);
+    let stalePreviewCommitted = false;
     database.exec("BEGIN IMMEDIATE");
     try {
       const metadata = requireMetadata(database);
@@ -246,6 +259,7 @@ function createStore(database: DatabaseSync): IdentityRegistryStore {
           .prepare("DELETE FROM identity_registry_previews WHERE preview_id = ?")
           .run(previewId);
         database.exec("COMMIT");
+        stalePreviewCommitted = true;
         throw new IdentityRegistryError("preview_stale");
       }
       const current = loadIdentities(database);
@@ -270,9 +284,7 @@ function createStore(database: DatabaseSync): IdentityRegistryStore {
       database.exec("COMMIT");
       return Object.freeze({ applied: preview.changes.length, registryEpoch });
     } catch (caught: unknown) {
-      if (!(caught instanceof IdentityRegistryError && caught.code === "preview_stale")) {
-        rollback(database);
-      }
+      if (!stalePreviewCommitted) rollback(database);
       throw caught;
     }
   }
@@ -281,7 +293,7 @@ function createStore(database: DatabaseSync): IdentityRegistryStore {
     subjectReference: string,
     now: string,
     update: (identity: ChildIdentity) => ChildIdentity | undefined
-  ): void {
+  ): boolean {
     requireOpen();
     requireTimestamp(now);
     database.exec("BEGIN IMMEDIATE");
@@ -293,7 +305,7 @@ function createStore(database: DatabaseSync): IdentityRegistryStore {
       const candidate = update(existing);
       if (candidate === undefined) {
         database.exec("ROLLBACK");
-        return;
+        return false;
       }
       const changed = freezeIdentity(candidate);
       if (validateChildIdentity(changed).length > 0) {
@@ -308,6 +320,7 @@ function createStore(database: DatabaseSync): IdentityRegistryStore {
         "UPDATE identity_registry_metadata SET registry_epoch = registry_epoch + 1 WHERE singleton_id = 1"
       );
       database.exec("COMMIT");
+      return true;
     } catch (caught: unknown) {
       rollback(database);
       throw caught;
@@ -323,7 +336,7 @@ function createStore(database: DatabaseSync): IdentityRegistryStore {
     addAlias(subjectReference, alias, now) {
       const displayAlias = normalizeIdentityDisplayText(alias);
       const normalizedAlias = normalizeIdentityLookupText(displayAlias);
-      updateIdentity(subjectReference, now, (identity) => {
+      return updateIdentity(subjectReference, now, (identity) => {
         if (
           identity.aliases.some(
             (candidate) => normalizeIdentityLookupText(candidate) === normalizedAlias
@@ -341,7 +354,7 @@ function createStore(database: DatabaseSync): IdentityRegistryStore {
     },
     removeAlias(subjectReference, alias, now) {
       const normalizedAlias = normalizeIdentityLookupText(alias);
-      updateIdentity(subjectReference, now, (identity) => {
+      return updateIdentity(subjectReference, now, (identity) => {
         const aliases = identity.aliases.filter(
           (candidate) => normalizeIdentityLookupText(candidate) !== normalizedAlias
         );
@@ -355,7 +368,7 @@ function createStore(database: DatabaseSync): IdentityRegistryStore {
       });
     },
     setStatus(subjectReference, identityStatus, now) {
-      updateIdentity(subjectReference, now, (identity) =>
+      return updateIdentity(subjectReference, now, (identity) =>
         identity.status === identityStatus
           ? undefined
           : {
@@ -630,6 +643,10 @@ function rowValue(row: unknown, key: string): unknown {
     throw new IdentityRegistryError("registry_schema_invalid");
   }
   return (row as Record<string, unknown>)[key];
+}
+
+function isErrorWithCode(value: unknown, code: string): boolean {
+  return value instanceof Error && "code" in value && value.code === code;
 }
 
 function requireString(value: unknown): string {

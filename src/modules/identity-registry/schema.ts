@@ -104,6 +104,7 @@ const identityNameKeys = new Set(["family", "given", "familyKana", "givenKana"])
 const subjectReferencePattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+const aliasLinePattern = /\r?\n/u;
 const keep = Object.freeze({ kind: "keep" } as const);
 const clear = Object.freeze({ kind: "clear" } as const);
 
@@ -319,7 +320,11 @@ function parseAliases(
   update: boolean
 ): readonly string[] | RosterFieldUpdate<readonly string[]> | undefined {
   if (isBlank(value)) return update ? keep : Object.freeze([]);
-  if (value === ROSTER_CLEAR_LITERAL) return update ? clear : Object.freeze([]);
+  if (value === ROSTER_CLEAR_LITERAL) {
+    if (update) return clear;
+    errors.push(error(rowNumber, "aliases", "invalid_value"));
+    return undefined;
+  }
   if (typeof value !== "string") {
     errors.push(error(rowNumber, "aliases", "invalid_value"));
     return undefined;
@@ -327,9 +332,13 @@ function parseAliases(
   const aliases: string[] = [];
   const normalizedSeen = new Set<string>();
   try {
-    for (const line of value.split(/\r?\n/u)) {
+    for (const line of value.split(aliasLinePattern)) {
       if (line.trim() === "") continue;
       const display = normalizeIdentityDisplayText(line);
+      if (display === ROSTER_CLEAR_LITERAL) {
+        errors.push(error(rowNumber, "aliases", "invalid_value"));
+        return undefined;
+      }
       if (codePointLength(display) > ROSTER_LIMITS.maximumAliasCodePoints) {
         errors.push(error(rowNumber, "aliases", "too_long"));
         return undefined;
@@ -404,16 +413,44 @@ function validateIdentityName(
     ["familyKana", "family_kana", true],
     ["givenKana", "given_kana", true]
   ] as const) {
-    parseName(value[key], fieldCode, rowNumber, errors, reading);
+    const parsed = parseName(value[key], fieldCode, rowNumber, errors, reading);
+    if (parsed !== undefined && parsed !== value[key]) {
+      errors.push(error(rowNumber, fieldCode, "invalid_value"));
+    }
   }
 }
 
 function validateAliases(value: unknown, rowNumber: number, errors: RosterValidationError[]): void {
-  if (!Array.isArray(value) || value.some((alias) => typeof alias !== "string")) {
+  if (!isStringArray(value)) {
     errors.push(error(rowNumber, "aliases", "invalid_value"));
     return;
   }
-  parseAliases(value.join("\n"), rowNumber, errors, false);
+  if (value.length > ROSTER_LIMITS.maximumAliases) {
+    errors.push(error(rowNumber, "aliases", "too_long"));
+    return;
+  }
+  for (const alias of value) {
+    validatePersistedAlias(alias, rowNumber, errors);
+  }
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item: unknown) => typeof item === "string");
+}
+
+function validatePersistedAlias(
+  alias: string,
+  rowNumber: number,
+  errors: RosterValidationError[]
+): void {
+  const previousErrorCount = errors.length;
+  const parsed = parseAliases(alias, rowNumber, errors, false);
+  if (
+    errors.length === previousErrorCount &&
+    (parsed === undefined || parsed.length !== 1 || parsed[0] !== alias)
+  ) {
+    errors.push(error(rowNumber, "aliases", "invalid_value"));
+  }
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
