@@ -25,12 +25,17 @@ type PicoBeforeAgentStartHandler = (
 type CapturedExtensionApi = {
   readonly handlers: Map<string, unknown[]>;
   readonly tools: ToolDefinition[];
+  readonly flags: Map<
+    string,
+    { readonly type: "boolean" | "string"; readonly default?: boolean | string }
+  >;
 };
 
 function createCapturedExtensionApi(): CapturedExtensionApi {
   return {
     handlers: new Map(),
-    tools: []
+    tools: [],
+    flags: new Map()
   };
 }
 
@@ -41,6 +46,24 @@ function extensionApiFromCapture(capture: CapturedExtensionApi) {
     },
     registerTool(tool: ToolDefinition) {
       capture.tools.push(tool);
+    },
+    registerFlag(
+      name: string,
+      options: { readonly type: "boolean" | "string"; readonly default?: boolean | string }
+    ) {
+      capture.flags.set(name, options);
+    },
+    getFlag(name: string) {
+      return capture.flags.get(name)?.default;
+    },
+    getActiveTools() {
+      return capture.tools.map((tool) => tool.name);
+    },
+    setActiveTools() {
+      return undefined;
+    },
+    sendUserMessage() {
+      return undefined;
     }
   };
 }
@@ -111,6 +134,26 @@ describe("pico extension", () => {
     expect(result.extensions).toHaveLength(1);
     expect(result.extensions[0]?.path).toBe(
       fileURLToPath(new URL("../src/index.ts", import.meta.url))
+    );
+  });
+
+  it("registers Pi-hosted resident lifecycle on the default extension", () => {
+    const capture = createCapturedExtensionApi();
+
+    picoExtension(extensionApiFromCapture(capture) as never);
+
+    expect(capture.flags.get("pico-runtime-profile")).toEqual({
+      type: "string",
+      default: "worker",
+      description: "Pico runtime profile: worker, interactive, or resident"
+    });
+    expect([...capture.handlers.keys()].sort()).toEqual(
+      expect.arrayContaining([
+        "agent_settled",
+        "message_update",
+        "session_shutdown",
+        "session_start"
+      ])
     );
   });
 
