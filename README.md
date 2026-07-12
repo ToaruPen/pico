@@ -131,9 +131,10 @@ node_modules/.bin/pi --no-tools
 /quit
 ```
 
-For an ad-hoc Pi session, use `--tools` with only the direct tools needed for
-that session. For example, a harmless status check uses
-`--tools stackchan_get_status`. Do not enable the generic `mcp` proxy tool. The
+For a trusted ad-hoc Pi session, select `--pico-runtime-profile=interactive`
+and use `--tools` with only the direct tools needed for that session. For
+example, a harmless status check uses `--tools stackchan_get_status`. Do not
+enable the generic `mcp` proxy tool. The
 resident SDK path enforces its own exact tool allowlist and refuses to send the
 first prompt when the required direct tools are unavailable; built-in file and
 shell tools are not part of that resident allowlist.
@@ -222,6 +223,22 @@ Pi Agent is the runtime owner. Start Pi Agent with this package available so it
 loads the pico extension from `package.json` `pi.extensions`; do not treat
 `pico` as a standalone production process.
 
+Pico runtime capabilities are selected once at Pi startup. The safe default is
+`worker`, which removes Pico, Stack-chan, and recursive subagent tools from the
+active tool set. Start the resident parent explicitly:
+
+```bash
+PICO_CONFIG_PATH=config/pico.local.yaml \
+  node_modules/.bin/pi --extension ./src/index.ts --pico-runtime-profile=resident
+```
+
+Use `--pico-runtime-profile=interactive` only for a trusted manual Pi session
+that needs Pico tools. A Pi child started without a profile remains worker-safe.
+The resident profile uses `pi.sendUserMessage()` and Pi events inside the
+existing parent session; it does not create an integration session in Pico.
+This foundation keeps recursive subagent execution disabled in the resident
+profile until a later production-enablement review.
+
 The direct resident scripts remain low-level field and provider harnesses while
 resident voice integration is validated:
 
@@ -246,13 +263,14 @@ the voice resident process:
 PICO_CONFIG_PATH=config/pico.local.yaml pico dev
 ```
 
-This opens kitty by default, starts the resident voice process, streams stdout
-and stderr in that terminal window, and also appends the same output to
+This opens kitty by default, starts Pi Agent with the resident profile, streams
+stdout and stderr in that terminal window, and also appends the same output to
 `~/.pico/resident-voice/development/processes/YYYY-MM-DD/<run-id>.log`. Use
 `pico dev --terminal=terminal` to open Terminal.app instead. Stop it from the
 opened terminal with `Ctrl-C`; the development terminal closes after the
-resident process exits. This is a development helper around the direct resident
-voice harness, not the Pi Agent production startup path.
+resident process exits. This is a visible development helper around the same
+Pi-hosted ownership path. The direct resident harness remains available
+separately for bounded field validation.
 
 The development terminal uses concise voice probe logs by default and does not
 support verbose mode. It shows utterance windows, STT completion, trigger
@@ -327,6 +345,14 @@ process, event, and session logs under the same normal run mode. `stop` boots
 the KeepAlive service out of the user launchd domain while leaving the plist
 installed; use `install` to bootstrap it again or `uninstall` to remove the
 plist.
+
+Normal abort and graceful shutdown are owned by Pi. If a hard kill or power loss
+leaves an orphaned helper, Pico does not maintain a TaskRun database or attempt
+automatic task resumption. A recurring Codex stale-process cleanup reviews
+command line, parentage, age, CPU, state, and active-workflow evidence before
+sending `TERM` to an identified residue. It does not kill a generic `node` or
+`pi` process by name, and reports `STAT=Z` zombies for parent reaping instead of
+trying to signal them.
 
 For the protected Windows GPU vision host, run Windows native Ollama on
 `127.0.0.1:11434` and reach it only through the pico-host SSH local forward. The

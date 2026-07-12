@@ -19,6 +19,9 @@ import {
   createPicoCameraSnapshotTool,
   createPicoPersonDetectionTool
 } from "./runtime/perception-tool.js";
+import { createPiHostTurnClient } from "./runtime/pi-host-turn.js";
+import { registerPicoRuntimeProfile } from "./runtime/pico-runtime-profile.js";
+import { createResidentVoiceService } from "./runtime/resident-voice-service.js";
 import { createPicoSessionTool } from "./runtime/session-tool.js";
 import type { VoiceStageProbe } from "./runtime/voice-stage-probe.js";
 
@@ -140,4 +143,16 @@ function registerPerceptionRuntimeTools(
 
 export default function registerPicoExtension(pi: ExtensionAPI): void {
   registerPicoExtensionWithRuntime(pi);
+  const piAgent = createPiHostTurnClient(pi);
+
+  registerPicoRuntimeProfile(pi, {
+    createResidentController: (context) =>
+      createResidentVoiceService({
+        piAgent,
+        onError: (error) => {
+          context.ui.notify(error.message, "error");
+          context.shutdown();
+        }
+      })
+  });
 }
