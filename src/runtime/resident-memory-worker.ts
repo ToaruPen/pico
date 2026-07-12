@@ -72,6 +72,7 @@ export function createResidentMemoryDrainWorker(
       );
       let processedCount = 0;
       let recoveredCount = 0;
+      let lastErrorCode: SessionMemoryCandidateJobErrorCode | undefined;
 
       const drainJobs = async (): Promise<ResidentMemoryDrainReport> => {
         while (processedCount < maxDrainJobs) {
@@ -81,13 +82,13 @@ export function createResidentMemoryDrainWorker(
             recoveredCount += result.recoveredCount;
 
             if (result.processedJob === undefined) {
-              return createReport(processedCount, recoveredCount);
+              return createReport(processedCount, recoveredCount, lastErrorCode);
             }
 
             processedCount += 1;
 
             if (store.countJobs(["queued", "processing"]) === 0) {
-              return createReport(processedCount, recoveredCount);
+              return createReport(processedCount, recoveredCount, lastErrorCode);
             }
           } catch (error) {
             const transitionedJob = [...store.listJobs()]
@@ -102,11 +103,11 @@ export function createResidentMemoryDrainWorker(
               throw error;
             }
 
-            return createReport(processedCount, recoveredCount, transitionedJob.lastErrorCode);
+            lastErrorCode = transitionedJob.lastErrorCode;
           }
         }
 
-        return createReport(processedCount, recoveredCount);
+        return createReport(processedCount, recoveredCount, lastErrorCode);
       };
 
       try {

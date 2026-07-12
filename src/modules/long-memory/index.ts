@@ -369,6 +369,7 @@ const longMemoryCategories = new Set<LongMemoryCategory>([
   "operational_note"
 ]);
 const minimumTrigramQueryLength = 3;
+const deadLetterPayloadRetentionMs = 7 * 86_400_000;
 const longMemoryInputKeys = new Set([
   "title",
   "body",
@@ -684,7 +685,7 @@ export function openSessionMemoryCandidateStore(
                     purge_after = ?
                 WHERE id = ? AND status = 'processing'
               `)
-              .run(recoveredAt, addMilliseconds(recoveredAt, 7 * 86_400_000), job.id);
+              .run(recoveredAt, addMilliseconds(recoveredAt, deadLetterPayloadRetentionMs), job.id);
             recordCandidateAudit(audit, "long_memory.candidate_job.dead_lettered", recoveredAt, {
               "pico.memory.session_id": job.sessionId,
               "pico.memory.candidate_job_id": job.id,
@@ -1205,6 +1206,56 @@ function ensureSessionMemoryCandidateJobColumns(database: DatabaseSync): void {
 }
 
 function rebuildSessionMemoryCandidateJobs(database: DatabaseSync): void {
+  const migratedFailedJobs = (
+    database
+      .prepare(`
+        SELECT id, session_id, source_entry_count, queued_at, cutoff_json, processed_at
+        FROM long_memory_candidate_jobs
+        WHERE status = 'failed'
+        ORDER BY id
+      `)
+      .all() as Array<{
+      readonly id: number;
+      readonly session_id: string;
+      readonly source_entry_count: number;
+      readonly queued_at: string;
+      readonly cutoff_json: string;
+      readonly processed_at: string | null;
+    }>
+  ).map((row) => {
+    const deadLetteredAt = requireTimestamp(row.processed_at ?? row.queued_at);
+    let session: SessionMemoryCutoffInput | undefined;
+
+    try {
+      const normalized = normalizeSessionMemoryCutoffInput(JSON.parse(row.cutoff_json) as unknown);
+
+      if (
+        normalized.sessionId === row.session_id &&
+        normalized.sourceEntryIds.length === row.source_entry_count
+      ) {
+        session = normalized;
+      }
+    } catch {
+      session = undefined;
+    }
+
+    const retainedPayload =
+      session === undefined
+        ? compactUnparseableDeadLetterCutoffPayload(
+            row.id,
+            row.session_id,
+            row.source_entry_count,
+            deadLetteredAt
+          )
+        : compactDeadLetterCutoffPayload(session);
+
+    return {
+      id: row.id,
+      cutoffJson: JSON.stringify(retainedPayload),
+      purgeAfter: addMilliseconds(deadLetteredAt, deadLetterPayloadRetentionMs)
+    };
+  });
+
   database.exec(`
     ALTER TABLE long_memory_candidate_jobs RENAME TO long_memory_candidate_jobs_legacy;
 
@@ -1250,11 +1301,21 @@ function rebuildSessionMemoryCandidateJobs(database: DatabaseSync): void {
       CASE status WHEN 'failed' THEN NULL ELSE processed_at END,
       CASE status WHEN 'failed' THEN 3 ELSE 0 END,
       CASE status WHEN 'failed' THEN 'extraction_failed' ELSE NULL END,
-      CASE status WHEN 'failed' THEN processed_at ELSE NULL END
+      CASE status WHEN 'failed' THEN COALESCE(processed_at, queued_at) ELSE NULL END
     FROM long_memory_candidate_jobs_legacy;
 
     DROP TABLE long_memory_candidate_jobs_legacy;
   `);
+
+  const updateMigratedFailedJob = database.prepare(`
+    UPDATE long_memory_candidate_jobs
+    SET cutoff_json = ?, purge_after = ?
+    WHERE id = ? AND status = 'dead_letter'
+  `);
+
+  for (const job of migratedFailedJobs) {
+    updateMigratedFailedJob.run(job.cutoffJson, job.purgeAfter, job.id);
+  }
 }
 
 function ensureLongMemoryLifecycleConstraints(database: DatabaseSync): void {
@@ -2724,7 +2785,7 @@ function transitionFailedCandidateJob(
     .run(
       input.errorCode,
       input.transitionedAt,
-      addMilliseconds(input.transitionedAt, 7 * 86_400_000),
+      addMilliseconds(input.transitionedAt, deadLetterPayloadRetentionMs),
       input.job.id,
       input.processingStartedAt
     );

@@ -168,6 +168,9 @@ Worker retry policy は first slice では固定 contract とする。
 - worker concurrency: 1
 
 値の runtime customization は運用要件が確認されるまで追加しない。
+`drainUntilIdle()` は、job がretry予約またはdead-letterへ正常遷移した場合、そのerror codeを
+bounded reportへ記録して後続の実行可能jobを同じdrainで処理し続ける。repository-owned
+terminal transitionを確認できない例外だけをdrain全体のfailureとして再throwする。
 
 ## Automated Extraction Contract
 

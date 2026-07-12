@@ -285,6 +285,57 @@ function insertLegacyDanglingEvent(path: string): void {
   }
 }
 
+function createLegacyFailedCandidateJobDatabase(path: string): void {
+  const database = new DatabaseSync(path);
+
+  try {
+    database.exec(`
+      CREATE TABLE long_memory_candidate_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'processing', 'processed', 'failed')),
+        source_entry_count INTEGER NOT NULL CHECK (source_entry_count >= 0),
+        queued_at TEXT NOT NULL,
+        processing_started_at TEXT,
+        cutoff_json TEXT NOT NULL,
+        processed_at TEXT
+      );
+    `);
+    database
+      .prepare(`
+        INSERT INTO long_memory_candidate_jobs (
+          session_id,
+          status,
+          source_entry_count,
+          queued_at,
+          cutoff_json,
+          processed_at
+        ) VALUES (?, 'failed', 1, ?, ?, ?)
+      `)
+      .run(
+        "legacy-failed-session",
+        "2026-06-20T09:00:00.000Z",
+        JSON.stringify({
+          sessionId: "legacy-failed-session",
+          cutoffAt: "2026-06-20T09:00:00.000Z",
+          sourceEntryIds: ["legacy-entry-1"],
+          requestedBy: "session_cutoff",
+          entries: [
+            {
+              id: "legacy-entry-1",
+              role: "staff",
+              content: "RAW_LEGACY_CUTOFF_MUST_BE_COMPACTED",
+              createdAt: "2026-06-20T08:59:59.000Z"
+            }
+          ]
+        }),
+        "2026-06-20T09:00:01.000Z"
+      );
+  } finally {
+    database.close();
+  }
+}
+
 describe("SQLite long memory store", () => {
   it("creates the durable memory schema and FTS index in SQLite", async () => {
     await withLongMemoryDatabase((path) => {
@@ -668,6 +719,47 @@ describe("SQLite long memory store", () => {
         expect(candidates.listPending()).toHaveLength(1);
       } finally {
         candidates.close();
+      }
+    });
+  });
+
+  it("compacts failed legacy candidate jobs and assigns their purge deadline", async () => {
+    await withLongMemoryDatabase((path) => {
+      createLegacyFailedCandidateJobDatabase(path);
+      const candidates = openSessionMemoryCandidateStore(path, {
+        processSession: () => Promise.resolve([])
+      });
+
+      try {
+        expect(candidates.listJobs()).toEqual([
+          expect.objectContaining({
+            status: "dead_letter",
+            attemptCount: 3,
+            lastErrorCode: "extraction_failed",
+            deadLetteredAt: "2026-06-20T09:00:01.000Z",
+            purgeAfter: "2026-06-27T09:00:01.000Z"
+          })
+        ]);
+      } finally {
+        candidates.close();
+      }
+
+      const database = new DatabaseSync(path);
+
+      try {
+        const row = database
+          .prepare("SELECT cutoff_json FROM long_memory_candidate_jobs WHERE id = 1")
+          .get() as { readonly cutoff_json: string };
+
+        expect(row.cutoff_json).not.toContain("RAW_LEGACY_CUTOFF_MUST_BE_COMPACTED");
+        expect(JSON.parse(row.cutoff_json)).toMatchObject({
+          sessionId: "legacy-failed-session",
+          sourceEntryIds: ["legacy-entry-1"],
+          sourceEntryCount: 1,
+          retention: "dead_letter_metadata_only"
+        });
+      } finally {
+        database.close();
       }
     });
   });

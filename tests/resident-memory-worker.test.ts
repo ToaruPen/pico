@@ -270,6 +270,63 @@ describe("resident memory drain worker", () => {
     });
   });
 
+  it("continues draining later ready jobs after scheduling a retry", async () => {
+    await withLongMemoryDatabase(async (path) => {
+      const queue = openSessionMemoryCandidateQueue(path, {
+        now: () => "2026-06-20T09:00:00.000Z"
+      });
+
+      try {
+        queue.enqueueSessionCutoff(cutoffInput("session-retry-first"));
+        queue.enqueueSessionCutoff(cutoffInput("session-ready-second"));
+      } finally {
+        queue.close();
+      }
+
+      const extractedSessions: string[] = [];
+      const worker = createResidentMemoryDrainWorker({
+        databasePath: path,
+        extractor: {
+          extract: (cutoff) => {
+            extractedSessions.push(cutoff.sessionId);
+
+            if (cutoff.sessionId === "session-retry-first") {
+              return Promise.reject(new Error("temporary provider failure"));
+            }
+
+            return Promise.resolve([
+              {
+                title: "後続施設メモ",
+                body: "後続の正常なjobを同じdrainで処理する。",
+                category: "operational_note",
+                tags: ["worker"],
+                sourceEntryIds: cutoff.sourceEntryIds,
+                confidence: 0.8
+              }
+            ]);
+          }
+        },
+        now: () => "2026-06-20T09:00:01.000Z"
+      });
+
+      try {
+        await expect(worker.drainUntilIdle()).resolves.toEqual({
+          processedCount: 1,
+          recoveredCount: 0,
+          idle: false,
+          memoryWrittenCount: 1,
+          writtenMemoryIds: [1],
+          retryScheduledCount: 1,
+          deadLetterCount: 0,
+          lastErrorCode: "extraction_failed"
+        });
+        expect(extractedSessions).toEqual(["session-retry-first", "session-ready-second"]);
+      } finally {
+        worker.close();
+      }
+    });
+  });
+
   it("does not report a negative retry count when a scheduled retry succeeds", async () => {
     await withLongMemoryDatabase(async (path) => {
       let currentTime = "2026-06-20T09:00:01.000Z";

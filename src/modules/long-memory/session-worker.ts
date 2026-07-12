@@ -150,14 +150,15 @@ export function createSessionMemoryWorker(
     async drainUntilIdle() {
       let processedCount = 0;
       let recoveredCount = 0;
+      const createDrainReport = (): SessionMemoryDrainReport => ({
+        processedCount,
+        recoveredCount,
+        idle: options.store.countJobs(["queued", "processing"]) === 0
+      });
 
       while (processedCount < maxDrainJobs) {
         if (isAborted()) {
-          return {
-            processedCount,
-            recoveredCount,
-            idle: options.store.countJobs(["queued", "processing"]) === 0
-          };
+          return createDrainReport();
         }
 
         const result = await drainOnce();
@@ -165,37 +166,21 @@ export function createSessionMemoryWorker(
         recoveredCount += result.recoveredCount;
 
         if (result.processedJob === undefined) {
-          return {
-            processedCount,
-            recoveredCount,
-            idle: options.store.countJobs(["queued", "processing"]) === 0
-          };
+          return createDrainReport();
         }
 
         processedCount += 1;
 
         if (isAborted()) {
-          return {
-            processedCount,
-            recoveredCount,
-            idle: options.store.countJobs(["queued", "processing"]) === 0
-          };
+          return createDrainReport();
         }
 
         if (options.store.countJobs(["queued", "processing"]) === 0) {
-          return {
-            processedCount,
-            recoveredCount,
-            idle: true
-          };
+          return createDrainReport();
         }
       }
 
-      return {
-        processedCount,
-        recoveredCount,
-        idle: options.store.countJobs(["queued", "processing"]) === 0
-      };
+      return createDrainReport();
     }
   };
 }

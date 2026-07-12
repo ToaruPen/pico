@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import {
   createAgentSession,
   DefaultResourceLoader,
+  type ExtensionContext,
   getAgentDir,
   SessionManager
 } from "@earendil-works/pi-coding-agent";
@@ -219,7 +220,7 @@ async function executeExtensionMemorySearch(
       { query },
       undefined,
       undefined,
-      {} as never
+      {} as ExtensionContext
     );
     const content = result.content[0];
 

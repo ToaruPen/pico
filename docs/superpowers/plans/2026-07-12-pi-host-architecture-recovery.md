@@ -3,7 +3,7 @@
 > **Superseded scope:** Pi ownership と単一sessionの成果は維持する。runtime profile、
 > Pico内tool filtering、profile用テストは
 > `2026-07-11-autonomous-long-memory-retrieval.md` Task 6Aにより置き換えられた。
-
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Pi が本番 resident process と単一 conversation session を所有し、Pico extension が既存 Pi session へ音声 turn を渡す ownership foundation を構築する。

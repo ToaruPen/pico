@@ -1,29 +1,13 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 
-import { emptyPicoConfig, type PicoConfig } from "../src/config/index.js";
+import { emptyPicoConfig } from "../src/config/index.js";
 import { createStructuredAuditLog } from "../src/modules/audit/index.js";
 import type { LongMemoryRecord } from "../src/modules/long-memory/index.js";
 import { createPicoMemorySearchRuntime } from "../src/runtime/memory-tool.js";
+import { defineEnabledLongMemoryTestConfig } from "./long-memory-config-fixture.js";
 
-const enabledConfig = {
-  ...emptyPicoConfig,
-  memory: {
-    ...emptyPicoConfig.memory,
-    longMemory: {
-      enabled: true,
-      databasePath: "/pico/long-memory.sqlite",
-      extraction: {
-        provider: "pi_model",
-        piProvider: "openai-codex",
-        api: "openai-codex-responses",
-        model: "gpt-5.4",
-        thinkingLevel: "high",
-        timeoutMs: 60_000
-      }
-    }
-  }
-} as const satisfies PicoConfig;
+const enabledConfig = defineEnabledLongMemoryTestConfig("/pico/long-memory.sqlite");
 
 function memory(id: number, body: string): LongMemoryRecord {
   return {

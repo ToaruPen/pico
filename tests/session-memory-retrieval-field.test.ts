@@ -8,8 +8,8 @@ import {
   runSessionMemoryRetrievalField,
   sessionMemoryRetrievalFieldExitCode
 } from "../scripts/field/session-memory-retrieval.js";
-import { definePicoConfig } from "../src/config/index.js";
 import { createStructuredAuditLog } from "../src/modules/audit/index.js";
+import { defineEnabledLongMemoryTestConfig } from "./long-memory-config-fixture.js";
 
 describe("session memory retrieval field harness", () => {
   it("validates cutoff through a separate extension memory search without leaking text", async () => {
@@ -122,29 +122,8 @@ describe("session memory retrieval field harness", () => {
 });
 
 function enabledConfig(directory: string) {
-  return definePicoConfig({
-    session: { ending: { mode: "timed", durationMs: 1 } },
-    memory: {
-      longMemory: {
-        enabled: true,
-        databasePath: join(directory, "long-memory.sqlite"),
-        extraction: {
-          provider: "pi_model",
-          piProvider: "openai-codex",
-          api: "openai-codex-responses",
-          model: "gpt-5.4",
-          thinkingLevel: "high",
-          timeoutMs: 60_000
-        }
-      }
-    },
-    audit: {
-      otel: {
-        enabled: true,
-        endpoint: "http://127.0.0.1:4318/v1/logs",
-        serviceName: "pico-test",
-        timeoutMs: 1_000
-      }
-    }
+  return defineEnabledLongMemoryTestConfig(join(directory, "long-memory.sqlite"), {
+    timedSession: true,
+    otelAudit: true
   });
 }
