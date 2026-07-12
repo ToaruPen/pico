@@ -6,17 +6,30 @@ export type PiHostTurnClient = PiAgentTurnClient & {
   readonly close: () => void;
 };
 
+export type PiHostTurnClientOptions = {
+  readonly preflightTimeoutMs?: number;
+  readonly schedulePreflightTimeout?: (expire: () => void, timeoutMs: number) => () => void;
+};
+
 type ActiveTurn = {
   readonly chunks: string[];
+  readonly expectedPrompt: string;
   readonly resolve: (value: { readonly text: string }) => void;
   readonly reject: (error: Error) => void;
   readonly signal: AbortSignal | undefined;
   abortRequested: boolean;
+  promptCandidate: boolean;
+  started: boolean;
+  cancelPreflight: () => void;
 };
 
 export function createPiHostTurnClient(
-  pi: Pick<ExtensionAPI, "on" | "sendUserMessage">
+  pi: Pick<ExtensionAPI, "on" | "sendUserMessage">,
+  options: PiHostTurnClientOptions = {}
 ): PiHostTurnClient {
+  const schedulePreflightTimeout =
+    options.schedulePreflightTimeout ?? defaultSchedulePreflightTimeout;
+  const preflightTimeoutMs = options.preflightTimeoutMs ?? 30_000;
   let context: ExtensionContext | undefined;
   let activeTurn: ActiveTurn | undefined;
   let closed = false;
@@ -24,9 +37,7 @@ export function createPiHostTurnClient(
   const removeAbortListener = (turn: ActiveTurn): void => {
     turn.signal?.removeEventListener("abort", abortActiveTurn);
   };
-  const finishActiveTurn = (
-    finish: (turn: ActiveTurn) => void
-  ): void => {
+  const finishActiveTurn = (finish: (turn: ActiveTurn) => void): void => {
     const turn = activeTurn;
 
     if (turn === undefined) {
@@ -34,6 +45,7 @@ export function createPiHostTurnClient(
     }
 
     activeTurn = undefined;
+    turn.cancelPreflight();
     removeAbortListener(turn);
     finish(turn);
   };
@@ -63,14 +75,29 @@ export function createPiHostTurnClient(
       context = currentContext;
     }
   });
+  pi.on("before_agent_start", (event) => {
+    if (activeTurn !== undefined && !activeTurn.started) {
+      activeTurn.promptCandidate = event.prompt === activeTurn.expectedPrompt;
+    }
+  });
+  pi.on("agent_start", () => {
+    if (activeTurn?.promptCandidate) {
+      activeTurn.started = true;
+      activeTurn.cancelPreflight();
+    }
+  });
   pi.on("message_update", (event) => {
     const delta = readTextDelta(event);
 
-    if (delta !== undefined) {
-      activeTurn?.chunks.push(delta);
+    if (delta !== undefined && activeTurn?.started) {
+      activeTurn.chunks.push(delta);
     }
   });
   pi.on("agent_settled", () => {
+    if (!activeTurn?.started) {
+      return;
+    }
+
     finishActiveTurn((turn) => {
       if (turn.abortRequested) {
         turn.reject(new Error("Pi host turn was aborted"));
@@ -107,12 +134,29 @@ export function createPiHostTurnClient(
       return new Promise((resolve, reject) => {
         const turn: ActiveTurn = {
           chunks: [],
+          expectedPrompt: input.text,
           resolve,
           reject,
           signal: input.signal,
-          abortRequested: false
+          abortRequested: false,
+          promptCandidate: false,
+          started: false,
+          cancelPreflight: () => undefined
         };
         activeTurn = turn;
+        turn.cancelPreflight = schedulePreflightTimeout(() => {
+          if (activeTurn !== turn || turn.started) {
+            return;
+          }
+
+          const shutdownContext = context;
+          closed = true;
+          finishActiveTurn((currentTurn) => {
+            currentTurn.reject(new Error("Pi host turn preflight failed"));
+          });
+          context = undefined;
+          shutdownContext?.shutdown();
+        }, preflightTimeoutMs);
         input.signal?.addEventListener("abort", abortActiveTurn, { once: true });
 
         try {
@@ -127,6 +171,13 @@ export function createPiHostTurnClient(
     disposeAll: close,
     close
   };
+}
+
+function defaultSchedulePreflightTimeout(expire: () => void, timeoutMs: number): () => void {
+  const timeout = setTimeout(expire, timeoutMs);
+  timeout.unref();
+
+  return () => clearTimeout(timeout);
 }
 
 function readTextDelta(event: {

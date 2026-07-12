@@ -62,7 +62,7 @@ describe("resident dev terminal", () => {
     expect(session.shellCommand).toContain("PICO_DEV_TERMINAL_TTY=$(tty)");
     expect(session.shellCommand).toContain("printf '\\033]0;%s\\007' 'pico resident voice'");
     expect(session.shellCommand).toContain(
-      "node_modules/.bin/pi --pico-runtime-profile=resident"
+      "node_modules/.bin/pi --extension ./src/index.ts --pico-runtime-profile=resident"
     );
     expect(session.shellCommand).not.toContain("npm run resident:voice");
     expect(session.shellCommand).toContain(
@@ -100,7 +100,7 @@ describe("resident dev terminal", () => {
       ]
     });
     expect(session.shellCommand).toContain(
-      "node_modules/.bin/pi --pico-runtime-profile=resident"
+      "node_modules/.bin/pi --extension ./src/index.ts --pico-runtime-profile=resident"
     );
     expect(session.shellCommand).not.toContain("npm run resident:voice");
     expect(session.shellCommand).toContain('exit "$status"');

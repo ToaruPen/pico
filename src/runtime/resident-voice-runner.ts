@@ -24,10 +24,7 @@ import {
   createLoopbackHttpResidentActivationServer,
   createResidentActivationQueue
 } from "./resident-activation.js";
-import {
-  createResidentPcmFrameSource,
-  createResidentPlaybackSink
-} from "./resident-audio-io.js";
+import { createResidentPcmFrameSource, createResidentPlaybackSink } from "./resident-audio-io.js";
 import {
   acquireResidentSingleInstanceLock,
   registerResidentSingleInstanceLockShutdownCleanup
@@ -49,8 +46,8 @@ import {
   createTenWasmSpeechActivityGate
 } from "./speech-activity-gate.js";
 import {
-  runVoiceResidentRuntime,
   type PiAgentTurnClient,
+  runVoiceResidentRuntime,
   type VoiceResidentActivation
 } from "./voice-resident.js";
 
@@ -157,20 +154,14 @@ export async function runResidentVoiceWithProviders(input: {
     const frames = createResidentPcmFrameSource(config, signal);
     const echoControl = createConfiguredEchoControl(config);
     const playback = createResidentPlaybackSink(config);
-    const piAgent =
-      input.piAgent ??
-      input.createPiAgent?.({
-        cwd: process.cwd(),
-        sessionLifecycle,
-        deferredTools: {
-          coordinator: deferredTools
-        },
-        ...(audit === undefined ? {} : { voiceProbe: { audit } })
-      });
-
-    if (piAgent === undefined) {
-      throw new Error("pico resident voice requires a Pi Agent turn client");
-    }
+    const piAgent = resolveResidentPiAgent(input.piAgent, input.createPiAgent, {
+      cwd: process.cwd(),
+      sessionLifecycle,
+      deferredTools: {
+        coordinator: deferredTools
+      },
+      ...(audit === undefined ? {} : { voiceProbe: { audit } })
+    });
     const speechActivity = await createConfiguredSpeechActivityGate(config);
 
     await runVoiceResidentRuntime({
@@ -204,6 +195,20 @@ export async function runResidentVoiceWithProviders(input: {
   } finally {
     await activation.close();
   }
+}
+
+function resolveResidentPiAgent(
+  piAgent: PiAgentTurnClient | undefined,
+  createPiAgent: ((options: PiAgentTurnClientOptions) => PiAgentTurnClient) | undefined,
+  options: PiAgentTurnClientOptions
+): PiAgentTurnClient {
+  const resolvedPiAgent = piAgent ?? createPiAgent?.(options);
+
+  if (resolvedPiAgent === undefined) {
+    throw new Error("pico resident voice requires a Pi Agent turn client");
+  }
+
+  return resolvedPiAgent;
 }
 
 export function requireResidentVoiceEnabled(config: PicoConfig): void {

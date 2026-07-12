@@ -13,16 +13,16 @@ import { createSessionModule, type SessionLifecycle } from "./modules/session/in
 import { createTransportModule } from "./modules/transport/index.js";
 import { PicoModuleRegistry } from "./orchestrator/registry.js";
 import type { DeferredToolCoordinator } from "./runtime/deferred-tool-coordinator.js";
-import { createPiHostTurnClient } from "./runtime/pi-host-turn.js";
-import { registerPicoRuntimeProfile } from "./runtime/pico-runtime-profile.js";
 import {
   createPicoCameraSceneDescriptionDeferredTool,
   createPicoCameraSceneDescriptionTool,
   createPicoCameraSnapshotTool,
   createPicoPersonDetectionTool
 } from "./runtime/perception-tool.js";
-import { createPicoSessionTool } from "./runtime/session-tool.js";
+import { createPiHostTurnClient } from "./runtime/pi-host-turn.js";
+import { registerPicoRuntimeProfile } from "./runtime/pico-runtime-profile.js";
 import { createResidentVoiceService } from "./runtime/resident-voice-service.js";
+import { createPicoSessionTool } from "./runtime/session-tool.js";
 import type { VoiceStageProbe } from "./runtime/voice-stage-probe.js";
 
 export function createPicoRegistry(): PicoModuleRegistry {

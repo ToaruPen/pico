@@ -29,12 +29,12 @@
 
 1. **State being changed:** startup-only runtime profile、extension-scoped resident controller、current Pi context、active voice turn、音声serviceのcapture/timer/playback資源。
 2. **Lifecycle boundary:** `startup-only-immutable`。profile変更にはPi再起動が必要で、session reloadやconfig watcherでは変更しない。
-3. **Mutation path inventory:** Pi CLI flag、`session_start`、Pi message events、`agent_settled`、AbortSignal、`session_shutdown`、focused tests。env、config watcher、API、migration、admin job、background mutationは非対象。Codex scheduleはruntime stateを変更せずOS processだけを別運用で回収する。
+3. **Mutation path inventory:** Pi CLI flag、`session_start`、`before_agent_start`、`agent_start`、Pi message events、`agent_settled`、preflight timeout、AbortSignal、`session_shutdown`、focused tests。env、config watcher、API、migration、admin job、background mutationは非対象。Codex scheduleはruntime stateを変更せずOS processだけを別運用で回収する。
 4. **Consumer/invariant inventory:** Pico tool registry、Pi active tools、resident voice service、`runVoiceResidentRuntime`、development terminal、system prompt、extension loader、SDK capability test、health/preflight、shutdown cleanup。
 5. **Central enforcement point:** `registerPicoRuntimeProfile()` がprofile解釈、active tool filtering、controller生成・破棄の唯一の境界。`createPiHostTurnClient()` がactive Pi turnの唯一の境界。
 6. **Forbidden paths:** production residentから `createAgentSession()`、scriptから第二Pi session、profileのhot reload、workerの`pico_*`／`stackchan_*`／`subagent`利用、複数controller生成、古いcontext保持、Pico独自worker runner、TaskRun store、自動再開。
-7. **Required tests:** worker default、interactive/resident明示、unknown profile拒否、tool bypass除去、start冪等性、shutdown待機、literal slash input、同時turn拒否、abort一回、settled後state解放、session shutdown中のactive turn終了、実SDKでのPico+subagent共存。
-8. **Async ownership and terminal states:** Piがagent/subagent/agent abort/settledを所有する。Pi host turn boundaryはpending voice turnを`agent_settled`またはshutdown rejectionで除去する。resident controllerはcapture/timer/playbackを所有し、`session_shutdown`はcontrollerの`stop()`完了を待つ。Codex scheduleは残留processを別運用で回収し、runtime内にterminal task stateを保持しない。
+7. **Required tests:** worker default、interactive/resident明示、unknown profile拒否、tool bypass除去、resident subagent拒否、start冪等性、startup failure時shutdown、shutdown待機、literal slash input、同時turn拒否、unrelated Pi event分離、preflight timeout、abort一回、settled後state解放、session shutdown中のactive turn終了、実SDKでのPico+subagent共存。
+8. **Async ownership and terminal states:** Piがagent/subagent/agent abort/settledを所有する。Pi host turn boundaryは相関した`agent_start`後の`agent_settled`、preflight timeout、またはshutdown rejectionでpending voice turnを除去する。resident controllerはcapture/timer/playbackを所有し、`session_shutdown`はcontrollerの`stop()`完了を待つ。shutdown timeout後もruntime終了までsingle-instance lockを保持する。Codex scheduleは残留processを別運用で回収し、runtime内にterminal task stateを保持しない。
 
 ### Task 1: Pi-hosted turn boundary
 
@@ -49,6 +49,8 @@
 ```ts
 const response = client.prompt({ sessionId: "facility-1", text: "/status" });
 expect(sentMessages).toEqual(["/status"]);
+emit("before_agent_start", matchingPrompt("/status"), context);
+emit("agent_start", { type: "agent_start" }, context);
 emit("message_update", textDelta("応答です"), context);
 emit("agent_settled", { type: "agent_settled" }, context);
 await expect(response).resolves.toEqual({ text: "応答です" });
@@ -74,7 +76,7 @@ export function createPiHostTurnClient(
 ): PiHostTurnClient;
 ```
 
-`session_start`でcurrent contextを束縛し、`message_update`の`text_delta`だけをactive turnへ追加し、`agent_settled`でresolveする。`prompt()`はcontext未束縛、非idle、active turn重複、close後を拒否し、入力を加工せず`pi.sendUserMessage(input.text)`へ渡す。
+`session_start`でcurrent contextを束縛し、入力を加工せず`pi.sendUserMessage(input.text)`へ渡す。対応する`before_agent_start.prompt`と直後の`agent_start`を確認してから、そのturnの`message_update`と`agent_settled`だけを受け入れる。相関したagent startが30秒以内に来ない場合だけpreflightを失敗させ、clientを閉じてPi shutdownを要求する。このtimeoutは開始済みturnの実行期限には使わない。`prompt()`はcontext未束縛、非idle、active turn重複、close後を拒否する。
 
 - [ ] **Step 4: Add failing cancellation and shutdown tests**
 
@@ -136,7 +138,7 @@ export function registerPicoRuntimeProfile(
 ): void;
 ```
 
-`pico-runtime-profile` string flagのdefaultを`worker`にする。workerではactive toolsから`pico_*`、`stackchan_*`、`subagent`を除く。residentではfacility sessionの重複ownerになる`pico_session`を除く。interactiveは既存active toolsを維持する。
+`pico-runtime-profile` string flagのdefaultを`worker`にする。workerではactive toolsから`pico_*`、`stackchan_*`、`subagent`を除く。residentではfacility sessionの重複ownerになる`pico_session`と、初回PRで本番有効化しない`subagent`を除く。interactiveは既存active toolsを維持する。同じ判定を`tool_call`時にも適用し、別extensionによる再有効化をfail closedで拒否する。
 
 - [ ] **Step 4: Add failing lifecycle tests**
 
@@ -184,7 +186,7 @@ export function createResidentVoiceService(options: {
 export async function runDirectResidentVoiceHarness(): Promise<void>;
 ```
 
-service controllerはstartを一回だけ許可し、専用AbortControllerとsingle-instance lockを所有する。stopはabort後、既存`shutdownGraceMs`内でruntime cleanupを待ち、最後にlockをreleaseする。direct harnessだけが`createPiAgentTurnClient()`を生成する。
+service controllerはstartを一回だけ許可し、専用AbortControllerとsingle-instance lockを所有する。通常stopはabort後、既存`shutdownGraceMs`内でruntime cleanupを待ち、runtime終了時にlockをreleaseする。shutdown timeoutでもruntimeが残る間はlockを保持する。stop前の予期しないruntime終了はerror通知とshutdownへ収束させる。direct harnessだけが`createPiAgentTurnClient()`を生成する。
 
 - [ ] **Step 4: Replace the script with the field-harness wrapper**
 
@@ -212,7 +214,7 @@ Commit: `refactor: expose resident voice as extension service`
 
 - [ ] **Step 1: Write failing default-extension registration tests**
 
-default extensionが`pico-runtime-profile` flag、`session_start`、`message_update`、`agent_settled`、`session_shutdown`を登録し、resident profileでPi host clientをresident service factoryへ渡すことを検証する。
+default extensionが`pico-runtime-profile` flag、`session_start`、`before_agent_start`、`agent_start`、`message_update`、`agent_settled`、`tool_call`、`session_shutdown`を登録し、resident profileでPi host clientをresident service factoryへ渡すことを検証する。
 
 - [ ] **Step 2: Run focused test and verify RED**
 
@@ -295,7 +297,7 @@ Expected: FAIL with the old direct-harness command.
 shell commandを次へ変更し、既存logging/terminal close contractを保つ。
 
 ```text
-node_modules/.bin/pi --pico-runtime-profile=resident
+node_modules/.bin/pi --extension ./src/index.ts --pico-runtime-profile=resident
 ```
 
 `npm run resident:voice`とlaunchd scriptはdirect field harnessとして残す。

@@ -58,6 +58,20 @@ export function createResidentVoiceServiceController(
     lock = undefined;
     currentLock.release();
   };
+  const finishRuntime = (errorIfUnexpected: unknown): void => {
+    const exitedUnexpectedly = state === "running";
+    state = "stopped";
+
+    if (exitedUnexpectedly) {
+      options.onError(
+        errorIfUnexpected instanceof Error
+          ? errorIfUnexpected
+          : new Error(String(errorIfUnexpected))
+      );
+    }
+
+    releaseLock();
+  };
 
   return {
     start() {
@@ -74,15 +88,9 @@ export function createResidentVoiceServiceController(
       lock = options.acquireLock();
 
       try {
-        runtimeCompletion = options.startRuntime(abortController.signal).then(
-          () => {
-            releaseLock();
-          },
-          (error: unknown) => {
-            options.onError(error instanceof Error ? error : new Error(String(error)));
-            releaseLock();
-          }
-        );
+        runtimeCompletion = options.startRuntime(abortController.signal).then(() => {
+          finishRuntime(new Error("resident voice runtime exited unexpectedly"));
+        }, finishRuntime);
       } catch (error) {
         state = "stopped";
         releaseLock();
@@ -104,8 +112,7 @@ export function createResidentVoiceServiceController(
       stopOperation = waitForRuntimeShutdown(
         runtimeCompletion ?? Promise.resolve(),
         options.shutdownGraceMs
-      ).finally(() => {
-        releaseLock();
+      ).then(() => {
         state = "stopped";
       });
 

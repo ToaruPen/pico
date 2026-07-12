@@ -42,29 +42,47 @@ export function registerPicoRuntimeProfile(
   });
 
   pi.on("session_start", async (_event, context) => {
-    if (closed) {
-      throw new Error("pico runtime profile is shutting down");
+    try {
+      if (closed) {
+        throw new Error("pico runtime profile is shutting down");
+      }
+
+      const profile = resolvePicoRuntimeProfile(pi.getFlag(runtimeProfileFlag));
+
+      if (selectedProfile !== undefined && selectedProfile !== profile) {
+        throw new Error("pico-runtime-profile is startup-only and cannot change");
+      }
+
+      selectedProfile = profile;
+      enforceActiveTools(pi, profile);
+
+      if (profile !== "resident") {
+        return;
+      }
+
+      if (controller === undefined) {
+        controller = options.createResidentController(context);
+        startOperation = Promise.resolve(controller.start());
+      }
+
+      await startOperation;
+    } catch (error) {
+      closed = true;
+      failClosed(context, error);
     }
+  });
 
-    const profile = resolvePicoRuntimeProfile(pi.getFlag(runtimeProfileFlag));
+  pi.on("tool_call", (event) => {
+    const profile = selectedProfile;
 
-    if (selectedProfile !== undefined && selectedProfile !== profile) {
-      throw new Error("pico-runtime-profile is startup-only and cannot change");
-    }
-
-    selectedProfile = profile;
-    enforceActiveTools(pi, profile);
-
-    if (profile !== "resident") {
+    if (profile === undefined || isToolAllowed(profile, event.toolName)) {
       return;
     }
 
-    if (controller === undefined) {
-      controller = options.createResidentController(context);
-      startOperation = Promise.resolve(controller.start());
-    }
-
-    await startOperation;
+    return {
+      block: true,
+      reason: `pico ${profile} profile denies ${event.toolName}`
+    };
   });
 
   pi.on("session_shutdown", () => {
@@ -104,17 +122,25 @@ function enforceActiveTools(pi: ExtensionAPI, profile: PicoRuntimeProfile): void
     return;
   }
 
-  pi.setActiveTools(
-    activeTools.filter((toolName) =>
-      profile === "worker" ? isWorkerToolAllowed(toolName) : toolName !== "pico_session"
-    )
+  pi.setActiveTools(activeTools.filter((toolName) => isToolAllowed(profile, toolName)));
+}
+
+function isToolAllowed(profile: PicoRuntimeProfile, toolName: string): boolean {
+  if (profile === "interactive") {
+    return true;
+  }
+
+  if (profile === "resident") {
+    return toolName !== "pico_session" && toolName !== "subagent";
+  }
+
+  return (
+    !toolName.startsWith("pico_") && !toolName.startsWith("stackchan_") && toolName !== "subagent"
   );
 }
 
-function isWorkerToolAllowed(toolName: string): boolean {
-  return (
-    !toolName.startsWith("pico_") &&
-    !toolName.startsWith("stackchan_") &&
-    toolName !== "subagent"
-  );
+function failClosed(context: ExtensionContext, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  context.ui.notify(message, "error");
+  context.shutdown();
 }

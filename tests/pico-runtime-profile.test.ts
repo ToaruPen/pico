@@ -2,9 +2,9 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
 import {
+  type ResidentVoiceController,
   registerPicoRuntimeProfile,
-  resolvePicoRuntimeProfile,
-  type ResidentVoiceController
+  resolvePicoRuntimeProfile
 } from "../src/runtime/pico-runtime-profile.js";
 
 type ProfileHandler = (event: unknown, context: ExtensionContext) => unknown;
@@ -19,10 +19,7 @@ function createProfileHarness(options: {
 
   return {
     api: {
-      registerFlag(
-        name: string,
-        input: { readonly default?: boolean | string }
-      ): void {
+      registerFlag(name: string, input: { readonly default?: boolean | string }): void {
         if (input.default !== undefined) {
           flagDefaults.set(name, input.default);
         }
@@ -41,16 +38,29 @@ function createProfileHarness(options: {
       }
     },
     getActiveTools: () => [...activeTools],
-    async emit(event: string, value: unknown, context: ExtensionContext): Promise<void> {
+    async emit(event: string, value: unknown, context: ExtensionContext): Promise<unknown[]> {
+      const results: unknown[] = [];
+
       for (const handler of handlers.get(event) ?? []) {
-        await handler(value, context);
+        results.push(await handler(value, context));
       }
+
+      return results;
     }
   };
 }
 
-function createContext(): ExtensionContext {
-  return {} as ExtensionContext;
+function createContext(events: string[] = []): ExtensionContext {
+  return {
+    ui: {
+      notify: (message: string, level: string) => {
+        events.push(`notify:${level}:${message}`);
+      }
+    },
+    shutdown: () => {
+      events.push("shutdown");
+    }
+  } as ExtensionContext;
 }
 
 describe("Pico runtime profile", () => {
@@ -124,12 +134,7 @@ describe("Pico runtime profile", () => {
     await harness.emit("session_start", { type: "session_start" }, context);
     await harness.emit("session_start", { type: "session_start" }, context);
 
-    expect(harness.getActiveTools()).toEqual([
-      "read",
-      "pico_camera_snapshot",
-      "stackchan_say",
-      "subagent"
-    ]);
+    expect(harness.getActiveTools()).toEqual(["read", "pico_camera_snapshot", "stackchan_say"]);
     expect(lifecycle).toEqual(["start"]);
 
     await harness.emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, context);
@@ -177,8 +182,9 @@ describe("Pico runtime profile", () => {
     expect(lifecycle).toEqual(["start", "stop:start", "stop:end"]);
   });
 
-  it("rejects an unknown startup profile before creating resident state", async () => {
+  it("fails closed for an unknown startup profile before creating resident state", async () => {
     const harness = createProfileHarness({ profile: "unknown" });
+    const events: string[] = [];
     let controllerCreations = 0;
 
     registerPicoRuntimeProfile(harness.api as never, {
@@ -188,10 +194,75 @@ describe("Pico runtime profile", () => {
       }
     });
 
-    await expect(
-      harness.emit("session_start", { type: "session_start" }, createContext())
-    ).rejects.toThrow("pico-runtime-profile");
+    await harness.emit("session_start", { type: "session_start" }, createContext(events));
+
     expect(controllerCreations).toBe(0);
+    expect(events).toEqual([
+      "notify:error:pico-runtime-profile must be worker, interactive, or resident",
+      "shutdown"
+    ]);
+  });
+
+  it("fails closed when resident controller startup fails", async () => {
+    const harness = createProfileHarness({ profile: "resident" });
+    const events: string[] = [];
+
+    registerPicoRuntimeProfile(harness.api as never, {
+      createResidentController: () => ({
+        start: () => {
+          throw new Error("resident start failed");
+        },
+        stop: () => undefined
+      })
+    });
+
+    await harness.emit("session_start", { type: "session_start" }, createContext(events));
+
+    expect(events).toEqual(["notify:error:resident start failed", "shutdown"]);
+  });
+
+  it("blocks worker and resident capabilities even if another extension reactivates them", async () => {
+    const workerHarness = createProfileHarness({ profile: "worker", activeTools: ["read"] });
+    registerPicoRuntimeProfile(workerHarness.api as never, {
+      createResidentController: createCompletedController
+    });
+    const workerContext = createContext();
+    await workerHarness.emit("session_start", { type: "session_start" }, workerContext);
+    workerHarness.api.setActiveTools(["read", "pico_session", "stackchan_say", "subagent"]);
+
+    for (const toolName of ["pico_session", "stackchan_say", "subagent"]) {
+      await expect(
+        workerHarness.emit(
+          "tool_call",
+          { type: "tool_call", toolCallId: `call-${toolName}`, toolName, input: {} },
+          workerContext
+        )
+      ).resolves.toContainEqual({
+        block: true,
+        reason: `pico worker profile denies ${toolName}`
+      });
+    }
+
+    const residentHarness = createProfileHarness({ profile: "resident", activeTools: ["read"] });
+    registerPicoRuntimeProfile(residentHarness.api as never, {
+      createResidentController: createCompletedController
+    });
+    const residentContext = createContext();
+    await residentHarness.emit("session_start", { type: "session_start" }, residentContext);
+    residentHarness.api.setActiveTools(["read", "pico_session", "subagent"]);
+
+    for (const toolName of ["pico_session", "subagent"]) {
+      await expect(
+        residentHarness.emit(
+          "tool_call",
+          { type: "tool_call", toolCallId: `call-${toolName}`, toolName, input: {} },
+          residentContext
+        )
+      ).resolves.toContainEqual({
+        block: true,
+        reason: `pico resident profile denies ${toolName}`
+      });
+    }
   });
 });
 

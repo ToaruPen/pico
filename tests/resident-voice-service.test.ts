@@ -81,4 +81,89 @@ describe("resident voice service controller", () => {
     await controller.stop();
     expect(events).toEqual(["error:runtime failed", "release"]);
   });
+
+  it("does not report a runtime rejection caused by intentional shutdown", async () => {
+    const events: string[] = [];
+    let failRuntime: ((error: Error) => void) | undefined;
+    const runtimeResult = new Promise<void>((_resolve, reject) => {
+      failRuntime = reject;
+    });
+    const controller = createResidentVoiceServiceController({
+      shutdownGraceMs: 1_000,
+      acquireLock: () => ({
+        release: () => {
+          events.push("release");
+        }
+      }),
+      startRuntime: () => runtimeResult,
+      onError: (error) => {
+        events.push(`error:${error.message}`);
+      }
+    });
+
+    await controller.start();
+    const stop = controller.stop();
+    failRuntime?.(new Error("shutdown interrupted runtime"));
+    await stop;
+
+    expect(events).toEqual(["release"]);
+  });
+
+  it("reports an unexpected successful runtime exit before releasing the lock", async () => {
+    const events: string[] = [];
+    let finishRuntime: (() => void) | undefined;
+    const runtimeResult = new Promise<void>((resolve) => {
+      finishRuntime = resolve;
+    });
+    const controller = createResidentVoiceServiceController({
+      shutdownGraceMs: 1_000,
+      acquireLock: () => ({
+        release: () => {
+          events.push("release");
+        }
+      }),
+      startRuntime: () => runtimeResult,
+      onError: (error) => {
+        events.push(`error:${error.message}`);
+      }
+    });
+
+    await controller.start();
+    finishRuntime?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(events).toEqual(["error:resident voice runtime exited unexpectedly", "release"]);
+  });
+
+  it("keeps the lock after shutdown timeout until the runtime actually exits", async () => {
+    const events: string[] = [];
+    let finishRuntime: (() => void) | undefined;
+    const runtimeResult = new Promise<void>((resolve) => {
+      finishRuntime = resolve;
+    });
+    const controller = createResidentVoiceServiceController({
+      shutdownGraceMs: 1,
+      acquireLock: () => ({
+        release: () => {
+          events.push("release");
+        }
+      }),
+      startRuntime: () => runtimeResult,
+      onError: (error) => {
+        events.push(`error:${error.message}`);
+      }
+    });
+
+    await controller.start();
+
+    await expect(controller.stop()).rejects.toThrow("shutdown exceeded 1 ms");
+    expect(events).toEqual([]);
+
+    finishRuntime?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(events).toEqual(["release"]);
+  });
 });

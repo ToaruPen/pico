@@ -229,13 +229,15 @@ active tool set. Start the resident parent explicitly:
 
 ```bash
 PICO_CONFIG_PATH=config/pico.local.yaml \
-  node_modules/.bin/pi --pico-runtime-profile=resident
+  node_modules/.bin/pi --extension ./src/index.ts --pico-runtime-profile=resident
 ```
 
 Use `--pico-runtime-profile=interactive` only for a trusted manual Pi session
 that needs Pico tools. A Pi child started without a profile remains worker-safe.
 The resident profile uses `pi.sendUserMessage()` and Pi events inside the
 existing parent session; it does not create an integration session in Pico.
+This foundation keeps recursive subagent execution disabled in the resident
+profile until a later production-enablement review.
 
 The direct resident scripts remain low-level field and provider harnesses while
 resident voice integration is validated:
