@@ -33,6 +33,14 @@ export function createPicoCliPlan(arguments_: readonly string[]): PicoCliPlan {
     return createDevelopmentTerminalPlan(rest);
   }
 
+  if (command === "roster") {
+    return {
+      kind: "script",
+      scriptPath: "scripts/roster.ts",
+      args: rest
+    };
+  }
+
   throw new Error(`unknown pico command: ${command}\n\n${formatPicoCliHelp()}`);
 }
 
@@ -41,14 +49,16 @@ export function formatPicoCliHelp(): string {
     "Usage:",
     "  pico help",
     "  pico dev [--terminal=kitty|terminal]",
+    "  pico roster <command> [options]",
     "",
     "Commands:",
     "  help        Show this help.",
     "  dev         Open a visible resident voice development terminal with live logs.",
+    "  roster      Manage the local child identity roster.",
     "",
     "Notes:",
     "  Pi Agent owns production startup and loads pico as an extension.",
-    "  The pico CLI is only a development helper."
+    "  The pico CLI otherwise remains a development helper."
   ].join("\n");
 }
 

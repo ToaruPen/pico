@@ -5,6 +5,7 @@ export type PicoModuleKind =
   | "local_models"
   | "handoff"
   | "audit"
+  | "identity_registry"
   | "transport";
 
 export type FuturePicoModuleKind = "long_memory" | "voice" | "vision" | "camera" | "channels";

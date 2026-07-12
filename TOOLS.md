@@ -64,6 +64,8 @@ ast-grep rule and test instead of relying on AGENTS.md prose.
   for a lighter Jina runtime, `bge-m3` for Ollama-native operation,
   `Qwen3-Embedding-0.6B` for Ollama A/B testing, and `ruri-v3-310m` as the
   Japanese-specialized control model.
+- Identity Registry XLSX processing: use ExcelJS with the fixed local roster
+  schema and ordinary file/row/cell bounds. Do not add a custom ZIP parser.
 
 ## Reference Documents
 
