@@ -327,6 +327,63 @@ describe("resident memory drain worker", () => {
     });
   });
 
+  it("counts handled failures against the drain job limit", async () => {
+    await withLongMemoryDatabase(async (path) => {
+      const queue = openSessionMemoryCandidateQueue(path, {
+        now: () => "2026-06-20T09:00:00.000Z"
+      });
+
+      try {
+        queue.enqueueSessionCutoff(cutoffInput("session-retry-limited"));
+        queue.enqueueSessionCutoff(cutoffInput("session-ready-after-limit"));
+      } finally {
+        queue.close();
+      }
+
+      const extractedSessions: string[] = [];
+      const worker = createResidentMemoryDrainWorker({
+        databasePath: path,
+        maxDrainJobs: 1,
+        extractor: {
+          extract: (cutoff) => {
+            extractedSessions.push(cutoff.sessionId);
+
+            if (cutoff.sessionId === "session-retry-limited") {
+              return Promise.reject(new Error("temporary provider failure"));
+            }
+
+            return Promise.resolve([
+              {
+                title: "Deferred facility note",
+                body: "This job must remain queued until the next drain.",
+                category: "operational_note",
+                tags: ["worker"],
+                sourceEntryIds: cutoff.sourceEntryIds,
+                confidence: 0.8
+              }
+            ]);
+          }
+        },
+        now: () => "2026-06-20T09:00:01.000Z"
+      });
+
+      try {
+        await expect(worker.drainUntilIdle()).resolves.toEqual({
+          processedCount: 0,
+          recoveredCount: 0,
+          idle: false,
+          memoryWrittenCount: 0,
+          retryScheduledCount: 1,
+          deadLetterCount: 0,
+          lastErrorCode: "extraction_failed"
+        });
+        expect(extractedSessions).toEqual(["session-retry-limited"]);
+      } finally {
+        worker.close();
+      }
+    });
+  });
+
   it("does not report a negative retry count when a scheduled retry succeeds", async () => {
     await withLongMemoryDatabase(async (path) => {
       let currentTime = "2026-06-20T09:00:01.000Z";

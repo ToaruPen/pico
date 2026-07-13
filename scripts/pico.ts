@@ -22,11 +22,20 @@ try {
 
 function runScript(scriptPath: string, arguments_: readonly string[]): Promise<void> {
   const jitiCliPath = join(repoRoot, "node_modules", "jiti", "lib", "jiti-cli.mjs");
+  const resolvedScriptPath = join(repoRoot, scriptPath);
 
-  return runProcess(process.execPath, [jitiCliPath, join(repoRoot, scriptPath), ...arguments_]);
+  return runProcess(
+    process.execPath,
+    [jitiCliPath, resolvedScriptPath, ...arguments_],
+    resolvedScriptPath
+  );
 }
 
-function runProcess(command: string, arguments_: readonly string[]): Promise<void> {
+function runProcess(
+  command: string,
+  arguments_: readonly string[],
+  failureLabel: string = command
+): Promise<void> {
   const child = spawn(command, [...arguments_], {
     cwd: repoRoot,
     env: {
@@ -49,7 +58,7 @@ function runProcess(command: string, arguments_: readonly string[]): Promise<voi
         return;
       }
 
-      rejectRun(new Error(`${command} exited with code ${String(code ?? -1)}`));
+      rejectRun(new Error(`${failureLabel} exited with code ${String(code ?? -1)}`));
     });
   });
 }

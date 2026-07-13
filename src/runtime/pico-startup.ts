@@ -18,6 +18,8 @@ export type PicoStartupOptions = {
 
 const picoFlag = "pico";
 
+class PicoStartupUserError extends Error {}
+
 export function registerPicoStartup(pi: ExtensionAPI, options: PicoStartupOptions): void {
   let controller: PicoController | undefined;
   let startOperation: Promise<void> | undefined;
@@ -37,7 +39,7 @@ export function registerPicoStartup(pi: ExtensionAPI, options: PicoStartupOption
 
     try {
       if (closed) {
-        throw new Error("Pico is shutting down");
+        throw new PicoStartupUserError("Pico is shutting down");
       }
 
       if (startOperation === undefined) {
@@ -47,9 +49,9 @@ export function registerPicoStartup(pi: ExtensionAPI, options: PicoStartupOption
       }
 
       await startOperation;
-    } catch {
+    } catch (error) {
       closed = true;
-      failClosed(context);
+      failClosed(context, error);
     }
   });
 
@@ -87,22 +89,26 @@ async function startPico(
   const model = context.modelRegistry.find(modelConfig.provider, modelConfig.id);
 
   if (model === undefined) {
-    throw new Error("configured Pico model is unavailable");
+    throw new PicoStartupUserError("configured Pico model is unavailable");
   }
 
   if (!(await pi.setModel(model))) {
-    throw new Error("configured Pico model authentication is unavailable");
+    throw new PicoStartupUserError("configured Pico model authentication is unavailable");
   }
 
   pi.setThinkingLevel(modelConfig.thinkingLevel);
   const controller = options.createController(context);
   setController(controller);
-  await controller.start();
+  try {
+    await controller.start();
+  } catch {
+    throw new PicoStartupUserError("Pico controller failed to start");
+  }
 }
 
 function requirePicoModel(config: PicoConfig): PicoAgentModelConfig {
   if (config.pico.model === undefined) {
-    throw new Error("Pico startup requires pico.model config");
+    throw new PicoStartupUserError("Pico startup requires pico.model config");
   }
 
   return config.pico.model;
@@ -132,7 +138,12 @@ async function stopPico(
   }
 }
 
-function failClosed(context: ExtensionContext): void {
-  context.ui.notify("Pico startup failed (startup_failed)", "error");
+function failClosed(context: ExtensionContext, error: unknown): void {
+  const message =
+    error instanceof PicoStartupUserError
+      ? `Pico startup failed: ${error.message}`
+      : "Pico startup failed (startup_failed)";
+
+  context.ui.notify(message, "error");
   context.shutdown();
 }

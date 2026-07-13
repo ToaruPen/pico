@@ -95,6 +95,7 @@ const serviceDefaults = {
   }
 } as const satisfies Record<ResidentLaunchdServiceKind, unknown>;
 const residentLaunchdStates = new Set(["exited", "running", "waiting"]);
+const launchdIntegerPattern = /^-?\d+$/u;
 const deferredMemoryActivationOperations = new Set<ResidentLaunchdOperation>([
   "install",
   "restart",
@@ -257,7 +258,7 @@ export function createResidentLaunchdOperationPlan(
         kind: "status",
         command: plan.command,
         args: plan.args,
-        allowedExitCodes: [0],
+        allowedExitCodes: service.serviceKind === "memory" ? [0, 3, 113] : [0],
         serviceKind: service.serviceKind,
         configPath: service.configPath
       }
@@ -389,7 +390,7 @@ function readStatusInteger(
 ): number | undefined {
   const value = readStatusValue(rawStatus, label);
 
-  if (value === undefined || !/^-?\d+$/u.test(value)) {
+  if (value === undefined || !launchdIntegerPattern.test(value)) {
     return undefined;
   }
 

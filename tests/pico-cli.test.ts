@@ -1,8 +1,25 @@
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { createPicoCliPlan, formatPicoCliHelp } from "../src/runtime/pico-cli.js";
 
 describe("pico cli", () => {
+  it("identifies the failing target script in delegated command errors", () => {
+    const repoRoot = process.cwd();
+    const result = spawnSync(
+      process.execPath,
+      [join(repoRoot, "node_modules/jiti/lib/jiti-cli.mjs"), "scripts/pico.ts", "roster"],
+      {
+        cwd: repoRoot,
+        encoding: "utf8"
+      }
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(join(repoRoot, "scripts/roster.ts"));
+  });
+
   it("starts Pi with --pico for an empty invocation without model arguments", () => {
     expect(createPicoCliPlan([])).toEqual({
       kind: "pi",

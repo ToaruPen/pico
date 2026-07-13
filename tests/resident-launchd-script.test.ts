@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -5,7 +7,16 @@ import {
   readResidentLaunchdArguments
 } from "../scripts/resident/launchd.js";
 
+const capturedCommandClosePattern =
+  /function runCapturedCommand[\s\S]*?child\.once\("close", \(code\) =>/u;
+
 describe("resident launchd script", () => {
+  it("waits for captured stdout to close before resolving status output", async () => {
+    const source = await readFile(join(process.cwd(), "scripts/resident/launchd.ts"), "utf8");
+
+    expect(source).toMatch(capturedCommandClosePattern);
+  });
+
   it("reads the selected service independently of argument order", () => {
     expect(readResidentLaunchdArguments(["status", "--service=memory"])).toEqual({
       operation: "status",

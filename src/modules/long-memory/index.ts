@@ -6,6 +6,8 @@ import type { StructuredAuditLog } from "../audit/index.js";
 
 export type LongMemoryCategory = "care_continuity" | "facility_knowledge" | "operational_note";
 
+export const maximumAutomatedLongMemoryDraftCount = 5;
+
 export type LongMemoryStatus = "active";
 export type LongMemoryLifecycleStatus = "active" | "archived" | "deleted";
 
@@ -238,6 +240,10 @@ export type SessionMemoryCandidateQueue = {
 export type SessionMemoryCandidateStore = {
   readonly enqueueSessionCutoff: (input: SessionMemoryCutoffInput) => SessionMemoryCandidateJob;
   readonly processNextJob: () => Promise<SessionMemoryCandidateJob | undefined>;
+  readonly invalidateProcessingOwnership: (input: {
+    readonly jobId: number;
+    readonly processingStartedAt: string;
+  }) => void;
   readonly recoverStaleProcessingJobs: (input: {
     readonly staleBefore: string;
     readonly recoveredAt: string;
@@ -370,6 +376,7 @@ const longMemoryCategories = new Set<LongMemoryCategory>([
 ]);
 const minimumTrigramQueryLength = 3;
 const deadLetterPayloadRetentionMs = 7 * 86_400_000;
+const invalidatedProcessingOwnershipTimestamp = "1970-01-01T00:00:00.000Z";
 const longMemoryInputKeys = new Set([
   "title",
   "body",
@@ -640,6 +647,18 @@ export function openSessionMemoryCandidateStore(
         throw error;
       }
     },
+    invalidateProcessingOwnership(input) {
+      const processingStartedAt = requireTimestamp(input.processingStartedAt);
+      database
+        .prepare(`
+          UPDATE long_memory_candidate_jobs
+          SET processing_started_at = ?
+          WHERE id = ?
+            AND status = 'processing'
+            AND processing_started_at = ?
+        `)
+        .run(invalidatedProcessingOwnershipTimestamp, input.jobId, processingStartedAt);
+    },
     recoverStaleProcessingJobs(input) {
       const staleBefore = requireTimestamp(input.staleBefore);
       const recoveredAt = requireTimestamp(input.recoveredAt);
@@ -840,16 +859,31 @@ async function processSessionMemoryDrafts(
   }
 
   const automatedDrafts = await processAutomatedSession(clonedSession);
+  const allowedSourceEntryIds = new Set(session.sourceEntryIds);
+
+  if (automatedDrafts.length > maximumAutomatedLongMemoryDraftCount) {
+    throw new Error("pico automated long memory input is malformed");
+  }
+
+  const normalizedAutomatedDrafts = automatedDrafts.map((draft) =>
+    normalizeAutomatedLongMemoryInput({
+      ...draft,
+      sourceSessionId: session.sessionId,
+      policyVersion: "session-cutoff-v1"
+    })
+  );
+
+  if (
+    normalizedAutomatedDrafts.some((draft) =>
+      draft.sourceEntryIds.some((entryId) => !allowedSourceEntryIds.has(entryId))
+    )
+  ) {
+    throw new Error("pico automated long memory source entries are invalid");
+  }
 
   return {
     normalizedDrafts: [],
-    normalizedAutomatedDrafts: automatedDrafts.map((draft) =>
-      normalizeAutomatedLongMemoryInput({
-        ...draft,
-        sourceSessionId: session.sessionId,
-        policyVersion: "session-cutoff-v1"
-      })
-    )
+    normalizedAutomatedDrafts
   };
 }
 

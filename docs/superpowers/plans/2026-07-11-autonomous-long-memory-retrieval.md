@@ -56,6 +56,7 @@ it("defines explicit long-memory SQLite and Pi extraction config", () => {
           piProvider: "openai-codex",
           api: "openai-codex-responses",
           model: "gpt-5.4",
+          thinkingLevel: "high",
           timeoutMs: 60_000
         }
       }
@@ -70,6 +71,7 @@ it("defines explicit long-memory SQLite and Pi extraction config", () => {
       piProvider: "openai-codex",
       api: "openai-codex-responses",
       model: "gpt-5.4",
+      thinkingLevel: "high",
       timeoutMs: 60_000
     }
   });
@@ -111,6 +113,7 @@ export type PicoLongMemoryExtractionConfig = {
   readonly piProvider: "openai-codex";
   readonly api: "openai-codex-responses";
   readonly model: string;
+  readonly thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   readonly timeoutMs: number;
 };
 ```
@@ -739,8 +742,8 @@ Expected: multi-service planning and secret-safe status tests PASS.
 
 ## Task 8: Document and field-validate the completed path
 
-Task 6 completion is the only implementation prerequisite. Privacy Filter is explicitly outside this
-slice.
+Tasks 1 through 6 must be complete before this field-validation task. Privacy Filter is explicitly
+outside this slice.
 
 **Files:**
 

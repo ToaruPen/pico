@@ -8,6 +8,9 @@ import {
   requireResidentLaunchdPlatform
 } from "../src/runtime/resident-launchd.js";
 
+const residentMemoryStdoutPattern = /resident-memory\.out\.log$/;
+const residentMemoryStderrPattern = /resident-memory\.err\.log$/;
+
 describe("resident launchd service", () => {
   it("formats only allowlisted status fields from launchctl output", () => {
     const rawStatus = `gui/501/dev.toarupen.pico.resident-memory = {
@@ -133,8 +136,8 @@ describe("resident launchd service", () => {
 
     expect(service.label).toBe("dev.toarupen.pico.resident-memory");
     expect(service.logDirectory).toBe("/Users/monsoon/.pico/resident-memory/processes");
-    expect(service.standardOutputPath).toMatch(/resident-memory\.out\.log$/);
-    expect(service.standardErrorPath).toMatch(/resident-memory\.err\.log$/);
+    expect(service.standardOutputPath).toMatch(residentMemoryStdoutPattern);
+    expect(service.standardErrorPath).toMatch(residentMemoryStderrPattern);
     expect(service.plist).toContain(
       "<string>/Users/monsoon/Dev/pico project/scripts/resident/memory.ts</string>"
     );
@@ -300,7 +303,7 @@ describe("resident launchd service", () => {
         kind: "status",
         command: "launchctl",
         args: ["print", "gui/501/dev.toarupen.pico.resident-memory"],
-        allowedExitCodes: [0],
+        allowedExitCodes: [0, 3, 113],
         serviceKind: "memory",
         configPath: "/repo/pico/config/pico.local.yaml"
       }

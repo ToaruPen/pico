@@ -78,7 +78,7 @@ describe("automated facility-memory parser", () => {
     ["a non-object root", "[]"],
     ["an unknown root key", JSON.stringify({ memories: [], extra: true })],
     ["a missing root key", "{}"],
-    ["six drafts", JSON.stringify({ memories: Array.from({ length: 6 }, () => validDraft) })],
+    ["six drafts", JSON.stringify({ memories: Array.from({ length: 6 }).fill(validDraft) })],
     ["a sparse-array representation", '{"memories":[null]}'],
     ["an unknown draft key", JSON.stringify({ memories: [{ ...validDraft, extra: true }] })],
     [

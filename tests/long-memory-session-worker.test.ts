@@ -1,7 +1,9 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
 import { createStructuredAuditLog } from "../src/modules/audit/index.js";
@@ -52,7 +54,63 @@ function draftFor(session: SessionMemoryCutoffInput): LongMemoryCandidateDraft {
   };
 }
 
+function automatedDraftFor(
+  session: SessionMemoryCutoffInput,
+  sourceEntryIds: readonly string[] = session.sourceEntryIds
+) {
+  return {
+    title: `${session.sessionId} facility knowledge`,
+    body: `${session.sessionId} reusable facility memory`,
+    category: "facility_knowledge" as const,
+    tags: ["facility"],
+    sourceEntryIds,
+    confidence: 0.8
+  };
+}
+
 describe("session memory worker", () => {
+  it.each([
+    {
+      label: "more than five drafts",
+      expectedError: "pico automated long memory input is malformed",
+      process: (session: SessionMemoryCutoffInput) =>
+        Promise.resolve(Array.from({ length: 6 }, () => automatedDraftFor(session)))
+    },
+    {
+      label: "source entries outside the cutoff",
+      expectedError: "pico automated long memory source entries are invalid",
+      process: (session: SessionMemoryCutoffInput) =>
+        Promise.resolve([automatedDraftFor(session, ["unrelated-entry"])])
+    }
+  ])("rejects $label at the durable processing boundary", async ({ expectedError, process }) => {
+    await withLongMemoryDatabase(async (path) => {
+      const candidates = openSessionMemoryCandidateStore(path, {
+        now: () => "2026-06-17T10:00:00.000Z",
+        processAutomatedSession: process
+      });
+
+      try {
+        candidates.enqueueSessionCutoff(cutoffInput("session-provenance"));
+
+        await expect(candidates.processNextJob()).rejects.toThrow(expectedError);
+
+        const database = new DatabaseSync(path);
+
+        try {
+          const row = database
+            .prepare("SELECT COUNT(*) AS count FROM long_memory_entries")
+            .get() as { readonly count: number };
+
+          expect(row.count).toBe(0);
+        } finally {
+          database.close();
+        }
+      } finally {
+        candidates.close();
+      }
+    });
+  });
+
   it("supports enqueue-only resident processes without a drain processor", async () => {
     await withLongMemoryDatabase((path) => {
       const audit = createStructuredAuditLog();
@@ -547,6 +605,151 @@ describe("session memory worker", () => {
         candidates.close();
       }
     });
+  });
+
+  it("invalidates in-flight ownership after the bounded shutdown grace", async () => {
+    vi.useFakeTimers();
+
+    try {
+      await withLongMemoryDatabase(async (path) => {
+        let releaseProcessing: (() => void) | undefined;
+        const processingGate = new Promise<void>((resolve) => {
+          releaseProcessing = resolve;
+        });
+        const controller = new AbortController();
+        const candidates = openSessionMemoryCandidateStore(path, {
+          now: () => "2026-06-17T10:00:00.000Z",
+          processSession: async (session) => {
+            await processingGate;
+            return [draftFor(session)];
+          }
+        });
+        const worker = createSessionMemoryWorker({
+          store: candidates,
+          signal: controller.signal,
+          shutdownGraceMs: 25,
+          now: () => "2026-06-17T10:00:00.000Z"
+        });
+
+        try {
+          const existingOwner = worker.enqueueCutoff(cutoffInput("session-existing-owner"));
+          worker.enqueueCutoff(cutoffInput("session-grace-timeout"));
+          const database = new DatabaseSync(path);
+
+          try {
+            database
+              .prepare(`
+                UPDATE long_memory_candidate_jobs
+                SET status = 'processing',
+                    processing_started_at = '2026-06-17T09:59:59.000Z',
+                    attempt_count = 1
+                WHERE id = ?
+              `)
+              .run(existingOwner.id);
+          } finally {
+            database.close();
+          }
+
+          const drain = worker.drainUntilIdle();
+          await Promise.resolve();
+
+          controller.abort();
+          await vi.advanceTimersByTimeAsync(25);
+
+          await expect(drain).resolves.toEqual({
+            processedCount: 0,
+            recoveredCount: 0,
+            idle: false
+          });
+          expect(candidates.listJobs()).toEqual([
+            expect.objectContaining({
+              sessionId: "session-existing-owner",
+              status: "processing",
+              processingStartedAt: "2026-06-17T09:59:59.000Z"
+            }),
+            expect.objectContaining({
+              sessionId: "session-grace-timeout",
+              status: "processing",
+              processingStartedAt: "1970-01-01T00:00:00.000Z"
+            })
+          ]);
+
+          releaseProcessing?.();
+          await vi.runAllTimersAsync();
+          await Promise.resolve();
+          expect(candidates.listPending()).toEqual([]);
+        } finally {
+          releaseProcessing?.();
+          candidates.close();
+        }
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the worker process alive until shutdown grace invalidates ownership", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pico-session-memory-shutdown-process-"));
+    const databasePath = join(directory, "long-memory.sqlite");
+    const scriptPath = join(directory, "shutdown-grace.ts");
+    const longMemoryModule = pathToFileURL(
+      join(process.cwd(), "src/modules/long-memory/index.ts")
+    ).href;
+    const workerModule = pathToFileURL(
+      join(process.cwd(), "src/modules/long-memory/session-worker.ts")
+    ).href;
+
+    try {
+      await writeFile(
+        scriptPath,
+        `
+          import { openSessionMemoryCandidateStore } from ${JSON.stringify(longMemoryModule)};
+          import { createSessionMemoryWorker } from ${JSON.stringify(workerModule)};
+
+          const controller = new AbortController();
+          const store = openSessionMemoryCandidateStore(${JSON.stringify(databasePath)}, {
+            now: () => "2026-06-17T10:00:00.000Z",
+            processSession: () => new Promise(() => undefined)
+          });
+          const worker = createSessionMemoryWorker({
+            store,
+            signal: controller.signal,
+            shutdownGraceMs: 25,
+            now: () => "2026-06-17T10:00:00.000Z"
+          });
+
+          worker.enqueueCutoff({
+            sessionId: "session-process-grace",
+            cutoffAt: "2026-06-17T10:00:00.000Z",
+            sourceEntryIds: ["entry-1"],
+            entries: [{ id: "entry-1", role: "staff", content: "施設運用メモ。" }],
+            requestedBy: "session_lifecycle"
+          });
+          const drain = worker.drainUntilIdle();
+          await Promise.resolve();
+          controller.abort();
+          await drain;
+          process.stdout.write(JSON.stringify(store.listJobs()));
+          store.close();
+        `,
+        "utf8"
+      );
+
+      const result = spawnSync(
+        process.execPath,
+        [join(process.cwd(), "node_modules/jiti/lib/jiti-cli.mjs"), scriptPath],
+        {
+          cwd: process.cwd(),
+          encoding: "utf8",
+          timeout: 2_000
+        }
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('"processingStartedAt":"1970-01-01T00:00:00.000Z"');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("purges expired dead-letter payloads through the worker timestamp boundary", async () => {

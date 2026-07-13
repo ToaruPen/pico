@@ -177,7 +177,7 @@ function runCapturedCommand(
       chunks.push(chunk);
     });
     child.once("error", rejectCommand);
-    child.once("exit", (code) => {
+    child.once("close", (code) => {
       const exitCode = code ?? -1;
 
       if (byteCount > maximumStatusBytes) {

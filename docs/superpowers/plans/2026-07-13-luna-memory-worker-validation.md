@@ -22,7 +22,7 @@
 - `tests/long-memory-extractor.test.ts`: use a non-production model sentinel to prove arbitrary configured model IDs and the configured thinking level reach the Pi session unchanged.
 - Other long-memory test fixtures: add the newly required extraction field without changing behavior.
 - `config/pico.example.yaml`: document Luna/high as the extraction worker configuration.
-- `/Users/monsoon/Dev/pico/config/pico.local.yaml`: select Luna/high for the real local worker without changing the Pico conversation model.
+- `$PICO_REPO_ROOT/config/pico.local.yaml`: select Luna/high for the real local worker without changing the Pico conversation model.
 - `docs/field-tests/2026-07-11-autonomous-long-memory-retrieval.md`: record the bounded one-shot validation result without raw conversation or memory content.
 
 ## State Boundary
@@ -159,7 +159,7 @@ Expected: all focused tests and the complete repository gate PASS.
 
 **Files:**
 
-- Modify: `/Users/monsoon/Dev/pico/config/pico.local.yaml`
+- Modify: `$PICO_REPO_ROOT/config/pico.local.yaml`
 - Modify: `docs/field-tests/2026-07-11-autonomous-long-memory-retrieval.md`
 
 - [x] **Step 1: Preflight the model and queue without exposing content**
@@ -167,8 +167,9 @@ Expected: all focused tests and the complete repository gate PASS.
 Run:
 
 ```bash
+export PICO_REPO_ROOT="${PICO_REPO_ROOT:-$(pwd)}"
 ./node_modules/.bin/pi --list-models gpt-5.6-luna
-sqlite3 -header -column /Users/monsoon/Dev/pico/.pico-local/mem0-history.sqlite \
+sqlite3 -header -column "$PICO_REPO_ROOT/.pico-local/mem0-history.sqlite" \
   "SELECT status, count(*) AS count FROM long_memory_candidate_jobs GROUP BY status ORDER BY status;"
 ```
 
@@ -179,12 +180,12 @@ Expected: `openai-codex/gpt-5.6-luna` is available with thinking support; two qu
 Change only the extraction model/thinking level in the untracked local YAML. Copy the SQLite database plus existing WAL/SHM companions, if present, to a timestamped backup directory:
 
 ```bash
-backup_dir="/Users/monsoon/Dev/pico/.pico-local/backups/$(date +%Y%m%d-%H%M%S)-luna-worker"
+backup_dir="$PICO_REPO_ROOT/.pico-local/backups/$(date +%Y%m%d-%H%M%S)-luna-worker"
 mkdir -p "$backup_dir"
 for source in \
-  /Users/monsoon/Dev/pico/.pico-local/mem0-history.sqlite \
-  /Users/monsoon/Dev/pico/.pico-local/mem0-history.sqlite-wal \
-  /Users/monsoon/Dev/pico/.pico-local/mem0-history.sqlite-shm; do
+  "$PICO_REPO_ROOT/.pico-local/mem0-history.sqlite" \
+  "$PICO_REPO_ROOT/.pico-local/mem0-history.sqlite-wal" \
+  "$PICO_REPO_ROOT/.pico-local/mem0-history.sqlite-shm"; do
   if test -f "$source"; then cp -p "$source" "$backup_dir/"; fi
 done
 ```
@@ -198,7 +199,7 @@ Run the already-available official `otel/opentelemetry-collector:0.154.0` image 
 Run:
 
 ```bash
-PICO_CONFIG_PATH=/Users/monsoon/Dev/pico/config/pico.local.yaml \
+PICO_CONFIG_PATH="$PICO_REPO_ROOT/config/pico.local.yaml" \
 npm run resident:memory -- --once
 ```
 

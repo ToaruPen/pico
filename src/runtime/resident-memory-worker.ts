@@ -2,6 +2,7 @@ import type { StructuredAuditLog } from "../modules/audit/index.js";
 import type { FacilityMemoryExtractor } from "../modules/long-memory/extractor.js";
 import {
   openSessionMemoryCandidateStore,
+  type SessionMemoryCandidateJob,
   type SessionMemoryCandidateJobErrorCode
 } from "../modules/long-memory/index.js";
 import {
@@ -16,6 +17,7 @@ export type ResidentMemoryDrainWorkerOptions = {
   readonly audit?: StructuredAuditLog;
   readonly maxQueueDepth?: number;
   readonly recoverProcessingOlderThanMs?: number;
+  readonly shutdownGraceMs?: number;
   readonly maxDrainJobs?: number;
   readonly now?: () => string;
   readonly signal?: AbortSignal;
@@ -67,15 +69,17 @@ export function createResidentMemoryDrainWorker(
       activeWrittenMemoryIds = writtenMemoryIds;
       const beforeDeadLetters = store.countJobs(["dead_letter"]);
       const beforeRetryJobs = countRetryScheduledJobs();
-      const attemptsBefore = new Map(
-        store.listJobs().map((job) => [job.id, job.attemptCount] as const)
-      );
       let processedCount = 0;
+      let attemptedCount = 0;
       let recoveredCount = 0;
       let lastErrorCode: SessionMemoryCandidateJobErrorCode | undefined;
 
       const drainJobs = async (): Promise<ResidentMemoryDrainReport> => {
-        while (processedCount < maxDrainJobs) {
+        while (attemptedCount < maxDrainJobs) {
+          const attemptsBefore = new Map(
+            store.listJobs().map((job) => [job.id, job.attemptCount] as const)
+          );
+
           try {
             const result = await worker.drainOnce();
 
@@ -86,24 +90,20 @@ export function createResidentMemoryDrainWorker(
             }
 
             processedCount += 1;
+            attemptedCount += 1;
 
             if (store.countJobs(["queued", "processing"]) === 0) {
               return createReport(processedCount, recoveredCount, lastErrorCode);
             }
           } catch (error) {
-            const transitionedJob = [...store.listJobs()]
-              .reverse()
-              .find(
-                (job) =>
-                  job.lastErrorCode !== undefined &&
-                  job.attemptCount !== (attemptsBefore.get(job.id) ?? 0)
-              );
+            const transitionedJob = findLastTransitionedJob(store.listJobs(), attemptsBefore);
 
             if (transitionedJob?.lastErrorCode === undefined) {
               throw error;
             }
 
             lastErrorCode = transitionedJob.lastErrorCode;
+            attemptedCount += 1;
           }
         }
 
@@ -158,6 +158,25 @@ export function createResidentMemoryDrainWorker(
   };
 }
 
+function findLastTransitionedJob(
+  jobs: readonly SessionMemoryCandidateJob[],
+  attemptsBefore: ReadonlyMap<number, number>
+): SessionMemoryCandidateJob | undefined {
+  for (let index = jobs.length - 1; index >= 0; index -= 1) {
+    const job = jobs[index];
+
+    if (
+      job !== undefined &&
+      job.lastErrorCode !== undefined &&
+      job.attemptCount !== (attemptsBefore.get(job.id) ?? 0)
+    ) {
+      return job;
+    }
+  }
+
+  return undefined;
+}
+
 function defineCandidateStoreOptions(
   options: ResidentMemoryDrainWorkerOptions,
   processAutomatedSession: NonNullable<
@@ -186,6 +205,7 @@ function createConfiguredSessionMemoryWorker(
     ...(options.recoverProcessingOlderThanMs === undefined
       ? {}
       : { recoverProcessingOlderThanMs: options.recoverProcessingOlderThanMs }),
+    ...(options.shutdownGraceMs === undefined ? {} : { shutdownGraceMs: options.shutdownGraceMs }),
     ...(options.maxDrainJobs === undefined ? {} : { maxDrainJobs: options.maxDrainJobs }),
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.signal === undefined ? {} : { signal: options.signal })

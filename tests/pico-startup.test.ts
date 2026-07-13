@@ -147,7 +147,13 @@ describe("Pico startup", () => {
   });
 
   it("fails closed without a configured model, a registry match, or authentication", async () => {
-    for (const scenario of ["missing-config", "missing-model", "missing-auth"] as const) {
+    const scenarios = [
+      ["missing-config", "Pico startup requires pico.model config"],
+      ["missing-model", "configured Pico model is unavailable"],
+      ["missing-auth", "configured Pico model authentication is unavailable"]
+    ] as const;
+
+    for (const [scenario, reason] of scenarios) {
       const events: string[] = [];
       const harness = createStartupHarness({
         pico: true,
@@ -173,7 +179,7 @@ describe("Pico startup", () => {
 
       expect(controllerCreations).toBe(0);
       expect(events.at(-1)).toBe("shutdown");
-      expect(events.some((event) => event.startsWith("notify:error:"))).toBe(true);
+      expect(events).toContain(`notify:error:Pico startup failed: ${reason}`);
     }
   });
 

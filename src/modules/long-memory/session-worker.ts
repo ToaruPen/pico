@@ -11,6 +11,7 @@ export type SessionMemoryWorkerOptions = {
   readonly audit?: StructuredAuditLog;
   readonly maxQueueDepth?: number;
   readonly recoverProcessingOlderThanMs?: number;
+  readonly shutdownGraceMs?: number;
   readonly maxDrainJobs?: number;
   readonly now?: () => string;
   readonly signal?: AbortSignal;
@@ -51,7 +52,9 @@ type SessionMemoryEnqueueTarget = {
 
 const defaultMaxQueueDepth = 100;
 const defaultMaxDrainJobs = 100;
+const defaultShutdownGraceMs = 5_000;
 const maxNodeTimeoutMs = 2_147_483_647;
+const shutdownGraceExpired = Symbol("shutdownGraceExpired");
 
 export function createSessionMemoryWorker(
   options: SessionMemoryWorkerOptions
@@ -70,6 +73,10 @@ export function createSessionMemoryWorker(
   const maxDrainJobs = requirePositiveInteger(
     options.maxDrainJobs ?? defaultMaxDrainJobs,
     "pico session memory worker maxDrainJobs"
+  );
+  const shutdownGraceMs = requirePositiveInteger(
+    options.shutdownGraceMs ?? defaultShutdownGraceMs,
+    "pico session memory worker shutdownGraceMs"
   );
   const now = options.now ?? (() => new Date().toISOString());
   const isAborted = (): boolean => options.signal?.aborted === true;
@@ -116,7 +123,28 @@ export function createSessionMemoryWorker(
       };
     }
 
-    const processedJob = await options.store.processNextJob();
+    const processingOwnersBefore = new Map(
+      options.store
+        .listJobs()
+        .filter((job) => job.status === "processing")
+        .map((job) => [job.id, job.processingStartedAt] as const)
+    );
+    const processingOperation = options.store.processNextJob();
+    const processingJob = options.store
+      .listJobs()
+      .find(
+        (job) =>
+          job.status === "processing" &&
+          job.processingStartedAt !== processingOwnersBefore.get(job.id)
+      );
+    const processingResult = await waitForInFlightTransition({
+      operation: processingOperation,
+      processingJob,
+      signal: options.signal,
+      shutdownGraceMs,
+      invalidateOwnership: options.store.invalidateProcessingOwnership
+    });
+    const processedJob = processingResult === shutdownGraceExpired ? undefined : processingResult;
     const occurredAt = requireIsoTimestamp(now(), "pico session memory worker timestamp");
 
     recordWorkerAudit(options.audit, "long_memory.worker.drain_once", occurredAt, {
@@ -183,6 +211,81 @@ export function createSessionMemoryWorker(
       return createDrainReport();
     }
   };
+}
+
+function waitForInFlightTransition<T>(input: {
+  readonly operation: Promise<T>;
+  readonly processingJob: SessionMemoryCandidateJob | undefined;
+  readonly signal: AbortSignal | undefined;
+  readonly shutdownGraceMs: number;
+  readonly invalidateOwnership: SessionMemoryCandidateStore["invalidateProcessingOwnership"];
+}): Promise<T | typeof shutdownGraceExpired> {
+  const signal = input.signal;
+  const processingJob = input.processingJob;
+
+  if (
+    signal === undefined ||
+    processingJob === undefined ||
+    processingJob.processingStartedAt === undefined
+  ) {
+    return input.operation;
+  }
+
+  const jobId = processingJob.id;
+  const processingStartedAt = processingJob.processingStartedAt;
+
+  return new Promise((resolve, reject) => {
+    let timeout: NodeJS.Timeout | undefined;
+    let graceStarted = false;
+    let settled = false;
+
+    const cleanup = (): void => {
+      if (timeout !== undefined) {
+        clearTimeout(timeout);
+      }
+      signal.removeEventListener("abort", startGrace);
+    };
+    const finish = (result: T | typeof shutdownGraceExpired): void => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+    const fail = (error: unknown): void => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanup();
+      reject(error instanceof Error ? error : new Error(String(error)));
+    };
+    function startGrace(): void {
+      if (graceStarted || settled) {
+        return;
+      }
+
+      graceStarted = true;
+      timeout = setTimeout(() => {
+        try {
+          input.invalidateOwnership({ jobId, processingStartedAt });
+          finish(shutdownGraceExpired);
+        } catch (error) {
+          fail(error);
+        }
+      }, input.shutdownGraceMs);
+    }
+
+    input.operation.then(finish, fail);
+    signal.addEventListener("abort", startGrace, { once: true });
+
+    if (signal.aborted) {
+      startGrace();
+    }
+  });
 }
 
 export function createSessionMemoryEnqueueWorker(

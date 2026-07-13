@@ -1,6 +1,7 @@
 import {
   assertNoIndividualChildLongMemoryFields,
   type LongMemoryCategory,
+  maximumAutomatedLongMemoryDraftCount,
   type SessionMemoryCutoffInput
 } from "./index.js";
 
@@ -38,7 +39,7 @@ export function parseAutomatedFacilityMemoryDrafts(
   const response = requireExactRecord(parsed, responseKeys);
   const memories = response.memories;
 
-  if (!Array.isArray(memories) || memories.length > 5) {
+  if (!Array.isArray(memories) || memories.length > maximumAutomatedLongMemoryDraftCount) {
     throwMalformedResponse();
   }
 
