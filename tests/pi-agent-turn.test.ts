@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import { createSessionLifecycle } from "../src/modules/session/index.js";
 import { createPiAgentTurnClient } from "../src/runtime/pi-agent-turn.js";
 
 const inactiveExtensionRunner = {
@@ -57,12 +56,6 @@ describe("Pi Agent turn adapter", () => {
       | undefined;
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -109,12 +102,6 @@ describe("Pi Agent turn adapter", () => {
     const prompts: string[] = [];
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -161,12 +148,6 @@ describe("Pi Agent turn adapter", () => {
     const registeredTools: string[] = [];
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: (input) => {
         for (const factory of input.extensionFactories) {
           factory({
@@ -207,12 +188,6 @@ describe("Pi Agent turn adapter", () => {
     const registeredTools: string[] = [];
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       deferredTools: {
         coordinator: {
           enqueue: () => ({
@@ -259,12 +234,6 @@ describe("Pi Agent turn adapter", () => {
     let thinkingLevel: unknown;
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -293,12 +262,6 @@ describe("Pi Agent turn adapter", () => {
     let tools: readonly string[] | undefined;
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       deferredTools: {
         coordinator: {
           enqueue: () => {
@@ -334,12 +297,6 @@ describe("Pi Agent turn adapter", () => {
     let tools: readonly string[] | undefined;
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -376,12 +333,6 @@ describe("Pi Agent turn adapter", () => {
     let toolsAtPrompt: readonly string[] = [];
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -411,12 +362,6 @@ describe("Pi Agent turn adapter", () => {
     let disposedSessions = 0;
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -449,12 +394,6 @@ describe("Pi Agent turn adapter", () => {
     const events: string[] = [];
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -486,12 +425,6 @@ describe("Pi Agent turn adapter", () => {
     let disposed = false;
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -530,12 +463,6 @@ describe("Pi Agent turn adapter", () => {
     });
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -586,12 +513,6 @@ describe("Pi Agent turn adapter", () => {
     const events: string[] = [];
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -627,12 +548,6 @@ describe("Pi Agent turn adapter", () => {
     let disposedSessions = 0;
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -670,12 +585,6 @@ describe("Pi Agent turn adapter", () => {
     let createdSessions = 0;
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -715,12 +624,6 @@ describe("Pi Agent turn adapter", () => {
     let disposedSessions = 0;
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -750,12 +653,6 @@ describe("Pi Agent turn adapter", () => {
     const prompts: string[] = [];
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -790,12 +687,6 @@ describe("Pi Agent turn adapter", () => {
     let disposed = 0;
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -834,12 +725,6 @@ describe("Pi Agent turn adapter", () => {
     });
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -885,12 +770,6 @@ describe("Pi Agent turn adapter", () => {
     });
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -941,12 +820,6 @@ describe("Pi Agent turn adapter", () => {
     });
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -1018,12 +891,6 @@ describe("Pi Agent turn adapter", () => {
     });
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -1070,12 +937,6 @@ describe("Pi Agent turn adapter", () => {
     });
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -1112,12 +973,6 @@ describe("Pi Agent turn adapter", () => {
     let attempts = 0;
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -1164,12 +1019,6 @@ describe("Pi Agent turn adapter", () => {
     const abortController = new AbortController();
     const client = createPiAgentTurnClient({
       cwd: testCwd,
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),

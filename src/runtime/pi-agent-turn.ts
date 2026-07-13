@@ -7,7 +7,6 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { registerPicoExtensionWithRuntime } from "../index.js";
-import type { SessionLifecycle } from "../modules/session/index.js";
 import type {
   DeferredToolCoordinator,
   DeferredToolDeliverableResult
@@ -72,7 +71,6 @@ export type PiAgentResourceLoader = {
 
 export type PiAgentTurnClientOptions = {
   readonly cwd: string;
-  readonly sessionLifecycle: SessionLifecycle;
   readonly voiceProbe?: VoiceStageProbe;
   readonly deferredTools?: {
     readonly coordinator: Pick<DeferredToolCoordinator, "enqueue">;

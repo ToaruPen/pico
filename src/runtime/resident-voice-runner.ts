@@ -2,10 +2,6 @@ import { homedir } from "node:os";
 
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../config/index.js";
 import type { AuditEvent } from "../modules/audit/index.js";
-import { createMem0MemoryProvider, facilityMemoryScopeId } from "../modules/long-memory/mem0.js";
-import { createMem0OssClient } from "../modules/long-memory/mem0-runtime.js";
-import { createPiModelFacilityMemoryExtractor } from "../modules/long-memory/pi-extractor.js";
-import { createFacilityMemoryWorker } from "../modules/long-memory/worker.js";
 import { createSessionLifecycle } from "../modules/session/index.js";
 import {
   createHalfDuplexEchoControl,
@@ -66,8 +62,7 @@ const residentVoiceMetricStages = new Set([
   "tts_synthesize",
   "tts_playback",
   "camera_capture",
-  "vlm_scene_description",
-  "session_cutoff_memory"
+  "vlm_scene_description"
 ]);
 
 export async function runDirectResidentVoiceHarness(
@@ -173,13 +168,11 @@ export async function runResidentVoiceWithProviders(input: {
     const playback = createResidentPlaybackSink(config);
     const piAgent = resolveResidentPiAgent(input.piAgent, input.createPiAgent, {
       cwd: process.cwd(),
-      sessionLifecycle,
       deferredTools: {
         coordinator: deferredTools
       },
       ...(audit === undefined ? {} : { voiceProbe: { audit } })
     });
-    const memoryWorker = await createResidentMemoryWorker(config, audit);
     const speechActivity = await createConfiguredSpeechActivityGate(config);
 
     await runVoiceResidentRuntime({
@@ -195,7 +188,6 @@ export async function runResidentVoiceWithProviders(input: {
       tts,
       playback,
       piAgent,
-      memoryWorker,
       deferredTools,
       wakeAcknowledgement: {
         enabled: config.voice.resident.activation.mode === "wake_word"
@@ -459,29 +451,6 @@ function createConfiguredStt(config: PicoConfig) {
 
 function createConfiguredTts(config: PicoConfig) {
   return createAivisSpeechTtsClient(buildAivisSpeechService(config));
-}
-
-async function createResidentMemoryWorker(
-  config: PicoConfig,
-  audit: ReturnType<typeof createResidentVoiceAuditLog> | undefined
-) {
-  const mem0 = config.memory.mem0;
-
-  if (!mem0.enabled) {
-    throw new Error("pico resident voice requires memory.mem0.enabled=true");
-  }
-
-  const client = await createMem0OssClient(mem0);
-  const provider = createMem0MemoryProvider({
-    client,
-    scopeId: facilityMemoryScopeId,
-    ...(audit === undefined ? {} : { audit })
-  });
-
-  return createFacilityMemoryWorker({
-    extractor: createPiModelFacilityMemoryExtractor(mem0.worker),
-    provider
-  });
 }
 
 async function assertResidentVoiceStartupReadiness(config: PicoConfig): Promise<void> {

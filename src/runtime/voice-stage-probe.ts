@@ -19,8 +19,7 @@ export type VoiceRuntimeStage =
   | "tts_synthesize"
   | "tts_playback"
   | "camera_capture"
-  | "vlm_scene_description"
-  | "session_cutoff_memory";
+  | "vlm_scene_description";
 
 export type VoiceStageStatus = "ok" | "error" | "skipped" | "suppressed";
 
@@ -51,8 +50,7 @@ const voiceRuntimeStages = new Set<VoiceRuntimeStage>([
   "tts_synthesize",
   "tts_playback",
   "camera_capture",
-  "vlm_scene_description",
-  "session_cutoff_memory"
+  "vlm_scene_description"
 ]);
 const voiceStageStatuses = new Set<VoiceStageStatus>(["ok", "error", "skipped", "suppressed"]);
 const voiceStageAttributeKeys = new Set([
@@ -65,7 +63,6 @@ const voiceStageAttributeKeys = new Set([
   "pico.voice.speech_probability",
   "pico.voice.rms_db",
   "pico.voice.triggered",
-  "pico.voice.entry_count",
   "pico.voice.chunk_count",
   "pico.voice.frame_bytes",
   "pico.voice.vlm_frame_bytes",
