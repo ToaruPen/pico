@@ -9,9 +9,6 @@ export type PicoConfig = DeepReadonly<{
     model?: PicoAgentModelConfig;
   };
   session: PicoSessionConfig;
-  memory: {
-    mem0: PicoMem0Config;
-  };
   audit: {
     otel: PicoAuditOtelConfig;
   };
@@ -53,39 +50,6 @@ export type PicoSessionConfig = {
     readonly mode: "timed";
     readonly durationMs: number;
   };
-};
-
-export type PicoMem0Config =
-  | { readonly enabled: false }
-  | {
-      readonly enabled: true;
-      readonly historyDbPath: string;
-      readonly vectorStore: PicoMem0VectorStoreConfig;
-      readonly worker: PicoMem0WorkerConfig;
-      readonly embedder: PicoMem0EmbedderConfig;
-    };
-
-export type PicoMem0WorkerConfig = {
-  readonly provider: "pi_model";
-  readonly piProvider: "openai-codex";
-  readonly api: "openai-codex-responses";
-  readonly model: string;
-  readonly thinkingLevel: PicoAgentModelConfig["thinkingLevel"];
-  readonly timeoutMs: number;
-};
-
-export type PicoMem0VectorStoreConfig = {
-  readonly provider: "qdrant";
-  readonly localBaseUrl: string;
-  readonly collectionName: string;
-};
-
-export type PicoMem0EmbedderConfig = {
-  readonly provider: "ollama" | "sidecar";
-  readonly localBaseUrl: string;
-  readonly model: string;
-  readonly embeddingDims?: number;
-  readonly timeoutMs?: number;
 };
 
 export type PicoAuditOtelConfig = {
@@ -320,11 +284,6 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
       durationMs: 60_000
     }
   },
-  memory: {
-    mem0: {
-      enabled: false
-    }
-  },
   audit: {
     otel: {
       enabled: false
@@ -412,11 +371,18 @@ export function loadPicoConfig(options: LoadPicoConfigOptions = {}): PicoConfig 
 
 export function definePicoConfig(input: unknown): PicoConfig {
   const root = input === null || input === undefined ? {} : requireRecord(input, "pico config");
+  requireKnownConfigFields(root, "pico config", [
+    "pico",
+    "session",
+    "audit",
+    "camera",
+    "vision",
+    "voice"
+  ]);
 
   return deepFreeze({
     pico: definePicoSection(root),
     session: defineSessionSection(root),
-    memory: defineMemorySection(root),
     audit: defineAuditSection(root),
     camera: defineCameraSection(root),
     vision: defineVisionSection(root),
@@ -511,19 +477,6 @@ function defineSessionEnding(
   };
 }
 
-function defineMemorySection(root: Record<string, unknown>): PicoConfig["memory"] {
-  const memory = readOptionalRecord(root.memory, "pico config memory");
-  const mem0 = readOptionalRecord(memory?.mem0, "pico config memory.mem0");
-
-  if (memory !== undefined) {
-    requireKnownConfigFields(memory, "pico config memory", ["mem0"]);
-  }
-
-  return {
-    mem0: defineMem0Config(mem0)
-  };
-}
-
 function requireThinkingLevel(
   value: unknown,
   label: string
@@ -535,121 +488,6 @@ function requireThinkingLevel(
   }
 
   return thinkingLevel as PicoAgentModelConfig["thinkingLevel"];
-}
-
-function defineMem0Config(input: Record<string, unknown> | undefined): PicoMem0Config {
-  if (input === undefined) {
-    return {
-      enabled: false
-    };
-  }
-
-  const enabled = readOptionalBoolean(input.enabled, "pico config memory.mem0.enabled") ?? false;
-  requireKnownConfigFields(
-    input,
-    "pico config memory.mem0",
-    enabled ? ["enabled", "historyDbPath", "vectorStore", "worker", "embedder"] : ["enabled"]
-  );
-
-  if (!enabled) {
-    return { enabled };
-  }
-
-  return {
-    enabled,
-    historyDbPath: requireString(input.historyDbPath, "pico config memory.mem0.historyDbPath"),
-    vectorStore: defineMem0VectorStore(
-      requireRecord(input.vectorStore, "pico config memory.mem0.vectorStore")
-    ),
-    worker: defineMem0Worker(requireRecord(input.worker, "pico config memory.mem0.worker")),
-    embedder: defineMem0Embedder(
-      requireRecord(input.embedder, "pico config memory.mem0.embedder"),
-      "pico config memory.mem0.embedder"
-    )
-  };
-}
-
-function defineMem0VectorStore(input: Record<string, unknown>): PicoMem0VectorStoreConfig {
-  const provider = requireString(input.provider, "pico config memory.mem0.vectorStore.provider");
-
-  if (provider !== "qdrant") {
-    throw new Error("pico config memory.mem0.vectorStore.provider must be qdrant");
-  }
-
-  return {
-    provider,
-    localBaseUrl: requireLocalBaseUrl(
-      input.localBaseUrl,
-      "pico config memory.mem0.vectorStore.localBaseUrl"
-    ),
-    collectionName: requireString(
-      input.collectionName,
-      "pico config memory.mem0.vectorStore.collectionName"
-    )
-  };
-}
-
-function defineMem0Worker(input: Record<string, unknown>): PicoMem0WorkerConfig {
-  const label = "pico config memory.mem0.worker";
-  requireKnownConfigFields(input, label, [
-    "provider",
-    "piProvider",
-    "api",
-    "model",
-    "thinkingLevel",
-    "timeoutMs"
-  ]);
-  const provider = requireString(input.provider, `${label}.provider`);
-  const piProvider = requireString(input.piProvider, `${label}.piProvider`);
-  const api = requireString(input.api, `${label}.api`);
-
-  if (provider !== "pi_model") {
-    throw new Error(`${label}.provider must be pi_model`);
-  }
-
-  if (piProvider !== "openai-codex") {
-    throw new Error(`${label}.piProvider must be openai-codex`);
-  }
-
-  if (api !== "openai-codex-responses") {
-    throw new Error(`${label}.api must be openai-codex-responses`);
-  }
-
-  return {
-    provider,
-    piProvider,
-    api,
-    model: requireString(input.model, `${label}.model`),
-    thinkingLevel: requireThinkingLevel(input.thinkingLevel, `${label}.thinkingLevel`),
-    timeoutMs: requireNumber(
-      readOptionalBoundedPositiveInteger(input.timeoutMs, `${label}.timeoutMs`, maxNodeTimeoutMs),
-      `${label}.timeoutMs`
-    )
-  };
-}
-
-function defineMem0Embedder(
-  input: Record<string, unknown>,
-  label: "pico config memory.mem0.embedder"
-): PicoMem0EmbedderConfig {
-  const provider = requireString(input.provider, `${label}.provider`);
-
-  if (provider !== "ollama" && provider !== "sidecar") {
-    throw new Error(`${label}.provider must be ollama or sidecar`);
-  }
-
-  return {
-    provider,
-    localBaseUrl: requireLocalBaseUrl(input.localBaseUrl, `${label}.localBaseUrl`),
-    model: requireString(input.model, `${label}.model`),
-    ...optionalPositiveIntegerProperty(input, "embeddingDims", `${label}.embeddingDims`),
-    ...optionalBoundedPositiveIntegerProperty(
-      input,
-      "timeoutMs",
-      `${label}.timeoutMs`,
-      maxNodeTimeoutMs
-    )
-  };
 }
 
 function defineAuditSection(root: Record<string, unknown>): PicoConfig["audit"] {
@@ -1556,19 +1394,6 @@ function resolveConfigRelativeBaseDirectory(configPath: string): string {
 function resolveConfigRelativePaths(config: PicoConfig, baseDirectory: string): PicoConfig {
   return deepFreeze({
     ...config,
-    memory: {
-      mem0: {
-        ...config.memory.mem0,
-        ...(config.memory.mem0.enabled
-          ? {
-              historyDbPath: resolveConfigRelativePath(
-                baseDirectory,
-                config.memory.mem0.historyDbPath
-              )
-            }
-          : {})
-      }
-    },
     vision: {
       ...config.vision,
       personDetection: {

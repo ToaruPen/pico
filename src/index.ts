@@ -9,15 +9,10 @@ import { futurePicoModules } from "./modules/future.js";
 import { createHandoffModule } from "./modules/handoff/index.js";
 import { createIdentityRegistryModule } from "./modules/identity-registry/index.js";
 import { createLocalModelsModule } from "./modules/local-models/index.js";
-import { createMemoryModule } from "./modules/memory/index.js";
-import { createSessionModule, type SessionLifecycle } from "./modules/session/index.js";
+import { createSessionModule } from "./modules/session/index.js";
 import { createTransportModule } from "./modules/transport/index.js";
 import { PicoModuleRegistry } from "./orchestrator/registry.js";
 import type { DeferredToolCoordinator } from "./runtime/deferred-tool-coordinator.js";
-import {
-  createPicoMemorySearchRuntime,
-  type PicoMemorySearchRuntimeOptions
-} from "./runtime/memory-tool.js";
 import {
   createPicoCameraSceneDescriptionDeferredTool,
   createPicoCameraSceneDescriptionTool,
@@ -27,14 +22,12 @@ import {
 import { createPiHostTurnClient } from "./runtime/pi-host-turn.js";
 import { registerPicoStartup } from "./runtime/pico-startup.js";
 import { createResidentVoiceService } from "./runtime/resident-voice-service.js";
-import { createPicoSessionTool } from "./runtime/session-tool.js";
 import type { VoiceStageProbe } from "./runtime/voice-stage-probe.js";
 
 export function createPicoRegistry(): PicoModuleRegistry {
   const registry = new PicoModuleRegistry();
 
   registry.register(createContextModule());
-  registry.register(createMemoryModule());
   registry.register(createSessionModule());
   registry.register(createLocalModelsModule());
   registry.register(createHandoffModule());
@@ -86,7 +79,6 @@ export function buildPicoExtensionSystemPrompt(baseSystemPrompt: string): string
 }
 
 export type PicoExtensionRuntimeOptions = {
-  readonly sessionLifecycle?: SessionLifecycle;
   readonly loadConfig?: () => PicoConfig;
   readonly voiceProbe?: VoiceStageProbe;
   readonly perceptionMode?: "standard" | "resident_deferred";
@@ -94,43 +86,16 @@ export type PicoExtensionRuntimeOptions = {
     readonly sessionId: string;
     readonly coordinator: Pick<DeferredToolCoordinator, "enqueue">;
   };
-  readonly memorySearch?: Omit<PicoMemorySearchRuntimeOptions, "loadConfig">;
-  readonly sessionTool?: {
-    readonly allowCutoff?: boolean;
-  };
 };
 
 export function registerPicoExtensionWithRuntime(
   pi: ExtensionAPI,
   options: PicoExtensionRuntimeOptions = {}
 ): void {
-  registerSessionRuntimeTool(pi, options);
-  registerMemoryRuntimeTool(pi, options);
   registerPerceptionRuntimeTools(pi, options);
   pi.on("before_agent_start", (event: BeforeAgentStartEvent) => ({
     systemPrompt: buildPicoExtensionSystemPrompt(event.systemPrompt)
   }));
-}
-
-function registerMemoryRuntimeTool(pi: ExtensionAPI, options: PicoExtensionRuntimeOptions): void {
-  const runtime = createPicoMemorySearchRuntime({
-    ...options.memorySearch,
-    ...(options.loadConfig === undefined ? {} : { loadConfig: options.loadConfig })
-  });
-  pi.registerTool(runtime.tool);
-  pi.on("session_shutdown", () => runtime.close());
-}
-
-function registerSessionRuntimeTool(pi: ExtensionAPI, options: PicoExtensionRuntimeOptions): void {
-  pi.registerTool(
-    createPicoSessionTool({
-      ...(options.sessionLifecycle === undefined ? {} : { lifecycle: options.sessionLifecycle }),
-      ...(options.loadConfig === undefined ? {} : { loadConfig: options.loadConfig }),
-      ...(options.sessionTool?.allowCutoff === undefined
-        ? {}
-        : { allowCutoff: options.sessionTool.allowCutoff })
-    })
-  );
 }
 
 function registerPerceptionRuntimeTools(

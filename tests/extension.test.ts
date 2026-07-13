@@ -14,9 +14,6 @@ import picoExtension, {
   picoExtensionMetadata,
   registerPicoExtensionWithRuntime
 } from "../src/index.js";
-import type { Mem0Client } from "../src/modules/long-memory/mem0.js";
-import { createSessionLifecycle } from "../src/modules/session/index.js";
-import { defineEnabledLongMemoryTestConfig } from "./long-memory-config-fixture.js";
 
 type PicoBeforeAgentStartHandler = (
   event: BeforeAgentStartEvent,
@@ -104,13 +101,18 @@ describe("pico extension", () => {
     expect(picoExtensionMetadata.systemPrompt).toContain("one AI support staff member");
     expect(picoExtensionMetadata.modules.map((module) => module.kind)).toEqual([
       "context",
-      "memory",
       "session",
       "local_models",
       "handoff",
       "audit",
       "identity_registry",
       "transport"
+    ]);
+    expect(picoExtensionMetadata.futureModules.map((module) => module.kind)).toEqual([
+      "voice",
+      "vision",
+      "camera",
+      "channels"
     ]);
   });
 
@@ -187,7 +189,7 @@ describe("pico extension", () => {
     );
   });
 
-  it("registers a runtime session tool for field interaction tests", async () => {
+  it("registers exactly the standard perception tools", () => {
     const capture = createCapturedExtensionApi();
 
     picoExtension(extensionApiFromCapture(capture) as never);
@@ -195,134 +197,8 @@ describe("pico extension", () => {
     expect(capture.tools.map((tool) => tool.name).sort()).toEqual([
       "pico_camera_scene_description",
       "pico_camera_snapshot",
-      "pico_memory_search",
-      "pico_person_detection",
-      "pico_session"
+      "pico_person_detection"
     ]);
-
-    const sessionTool = capture.tools.find((tool) => tool.name === "pico_session");
-    if (sessionTool === undefined) {
-      throw new Error("pico_session tool was not registered");
-    }
-
-    const started = await sessionTool.execute(
-      "tool-call-1",
-      {
-        action: "start",
-        triggerKind: "greeting",
-        label: "おはよう",
-        source: "field-test"
-      },
-      undefined,
-      undefined,
-      {} as ExtensionContext
-    );
-    expect(extractToolJson(started)).toMatchObject({
-      action: "start",
-      session: {
-        id: "session-1",
-        state: "active",
-        trigger: {
-          kind: "greeting",
-          label: "おはよう",
-          source: "field-test"
-        }
-      }
-    });
-
-    const appended = await sessionTool.execute(
-      "tool-call-2",
-      {
-        action: "append",
-        sessionId: "session-1",
-        role: "staff",
-        content: "今日は折り紙をします。"
-      },
-      undefined,
-      undefined,
-      {} as ExtensionContext
-    );
-    expect(extractToolJson(appended)).toEqual({
-      action: "append",
-      entry: {
-        id: "session-1-entry-1",
-        role: "staff",
-        content: "今日は折り紙をします。"
-      }
-    });
-
-    const read = await sessionTool.execute(
-      "tool-call-3",
-      {
-        action: "read",
-        sessionId: "session-1"
-      },
-      undefined,
-      undefined,
-      {} as ExtensionContext
-    );
-    expect(extractToolJson(read)).toMatchObject({
-      action: "read",
-      session: {
-        id: "session-1",
-        state: "active",
-        entries: [
-          {
-            id: "session-1-entry-1",
-            role: "staff",
-            content: "今日は折り紙をします。"
-          }
-        ]
-      }
-    });
-  });
-
-  it("registers session tools against an injected shared lifecycle", async () => {
-    const capture = createCapturedExtensionApi();
-    const lifecycle = createSessionLifecycle({
-      ending: {
-        mode: "timed",
-        durationMs: 60_000
-      }
-    });
-
-    registerPicoExtensionWithRuntime(extensionApiFromCapture(capture) as never, {
-      sessionLifecycle: lifecycle
-    });
-
-    const sessionTool = capture.tools.find((tool) => tool.name === "pico_session");
-    if (sessionTool === undefined) {
-      throw new Error("pico_session tool was not registered");
-    }
-
-    const started = await sessionTool.execute(
-      "tool-call-shared",
-      {
-        action: "start",
-        triggerKind: "wake_name",
-        label: "ピコ",
-        source: "resident-runtime"
-      },
-      undefined,
-      undefined,
-      {} as ExtensionContext
-    );
-
-    expect(extractToolJson(started)).toMatchObject({
-      action: "start",
-      session: {
-        id: "session-1",
-        state: "active"
-      }
-    });
-    expect(lifecycle.read("session-1")).toMatchObject({
-      id: "session-1",
-      trigger: {
-        kind: "wake_name",
-        label: "ピコ",
-        source: "resident-runtime"
-      }
-    });
   });
 
   it("uses deferred perception tools for resident voice sessions", () => {
@@ -344,9 +220,7 @@ describe("pico extension", () => {
     });
 
     expect(capture.tools.map((tool) => tool.name).sort()).toEqual([
-      "pico_camera_scene_description_deferred",
-      "pico_memory_search",
-      "pico_session"
+      "pico_camera_scene_description_deferred"
     ]);
   });
 
@@ -355,12 +229,6 @@ describe("pico extension", () => {
     let loadConfigCalls = 0;
 
     registerPicoExtensionWithRuntime(extensionApiFromCapture(capture) as never, {
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
       loadConfig: () => {
         loadConfigCalls += 1;
         throw new Error("test config loader reached");
@@ -395,58 +263,7 @@ describe("pico extension", () => {
     expect(capture.tools.map((tool) => tool.name).sort()).toEqual([
       "pico_camera_scene_description",
       "pico_camera_snapshot",
-      "pico_memory_search",
-      "pico_person_detection",
-      "pico_session"
+      "pico_person_detection"
     ]);
   });
-
-  it("closes the shared memory search runtime at session shutdown", async () => {
-    const capture = createCapturedExtensionApi();
-
-    registerPicoExtensionWithRuntime(extensionApiFromCapture(capture) as never, {
-      loadConfig: () => defineEnabledLongMemoryTestConfig("/pico/mem0-history.sqlite"),
-      memorySearch: {
-        createClient: () =>
-          Promise.resolve({
-            add: () => Promise.resolve({ memories: [] }),
-            search: () => Promise.resolve({ memories: [] }),
-            delete: () => Promise.resolve()
-          } satisfies Mem0Client)
-      }
-    });
-
-    const tool = capture.tools.find((candidate) => candidate.name === "pico_memory_search");
-    const shutdown = capture.handlers.get("session_shutdown")?.[0] as (() => void) | undefined;
-
-    if (tool === undefined || shutdown === undefined) {
-      throw new Error("memory search runtime lifecycle was not registered");
-    }
-
-    await tool.execute("call-1", { query: "雨" }, undefined, undefined, {} as ExtensionContext);
-    shutdown();
-    shutdown();
-
-    const closedResult = await tool.execute(
-      "call-2",
-      { query: "雨" },
-      undefined,
-      undefined,
-      {} as ExtensionContext
-    );
-    expect(extractToolJson(closedResult)).toMatchObject({
-      result: { status: "unavailable", code: "closed" }
-    });
-  });
 });
-
-function extractToolJson(result: unknown): unknown {
-  const content = (result as { content?: readonly { type: string; text?: string }[] }).content;
-  const text = content?.find((item) => item.type === "text")?.text;
-
-  if (text === undefined) {
-    throw new Error("pico_session tool did not return text content");
-  }
-
-  return JSON.parse(text) as unknown;
-}

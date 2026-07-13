@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
@@ -42,6 +43,14 @@ describe("justfile", () => {
     expect(packageJson.scripts?.["field:session-memory-retrieval"]).toBeUndefined();
     expect(justfile).not.toContain("memory-status:");
     expect(justfile).not.toContain("field-session-memory-retrieval:");
+    expect(
+      [
+        "src/modules/memory",
+        "src/runtime/memory-tool.ts",
+        "src/runtime/session-tool.ts",
+        "scripts/resident/memory.ts"
+      ].filter((path) => existsSync(resolve(path)))
+    ).toEqual([]);
   });
 
   it("exposes the Apple Speech sidecar gate", () => {

@@ -1,5 +1,3 @@
-import type { FuturePicoModuleMetadata } from "../../orchestrator/contracts.js";
-
 export type LongMemoryCategory = "care_continuity" | "facility_knowledge" | "operational_note";
 
 export const maximumAutomatedLongMemoryDraftCount = 5;
@@ -21,13 +19,6 @@ export type SessionMemoryCutoffInput = {
 export class PermanentMemoryPolicyError extends Error {
   readonly code = "policy_violation";
 }
-
-export const longMemoryModuleMetadata = {
-  kind: "long_memory",
-  status: "planned",
-  summary: "Durable facility knowledge extracted into Mem0 OSS.",
-  capabilities: []
-} as const satisfies FuturePicoModuleMetadata;
 
 const individualChildFieldPrefixes = ["child", "individualchild", "こども", "児童", "子ども"];
 const individualChildExactPurposes = new Set(["id"]);

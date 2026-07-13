@@ -34,19 +34,10 @@ function temporaryRepoConfigFile(content: string): {
 }
 
 describe("pico YAML config", () => {
-  it("loads the Mem0-only example without locking the worker model", () => {
-    const config = loadPicoConfig({
-      path: join(process.cwd(), "config/pico.example.yaml")
-    });
-
-    expect(config.memory.mem0).toMatchObject({
-      enabled: true,
-      historyDbPath: "/var/lib/pico/mem0-history.sqlite",
-      worker: {
-        model: "configured-worker-model",
-        thinkingLevel: "high"
-      }
-    });
+  it("rejects the removed memory config section", () => {
+    expect(() => definePicoConfig({ memory: { mem0: { enabled: false } } })).toThrow(
+      "pico config has unknown field memory"
+    );
   });
 
   it("parses the startup-only Pico model selection", () => {
@@ -141,7 +132,7 @@ describe("pico YAML config", () => {
     ).toThrow("pico config voice.resident.audioOutput is required when resident is enabled");
   });
 
-  it("loads configured camera, vision, voice, memory, and person detection providers from YAML", () => {
+  it("loads configured camera, vision, voice, audit, and person detection providers from YAML", () => {
     const path = temporaryConfigFile(`
 session:
   enabled: true
@@ -262,27 +253,6 @@ voice:
       speakerId: 888753760
       timeoutMs: 30000
       text: こんにちは。
-memory:
-  mem0:
-    enabled: true
-    historyDbPath: /var/lib/pico/mem0-history.sqlite
-    vectorStore:
-      provider: qdrant
-      localBaseUrl: http://127.0.0.1:6333
-      collectionName: pico_long_memory
-    worker:
-      provider: pi_model
-      piProvider: openai-codex
-      api: openai-codex-responses
-      model: vendor/arbitrary-worker
-      thinkingLevel: high
-      timeoutMs: 30000
-    embedder:
-      provider: sidecar
-      localBaseUrl: http://127.0.0.1:18081
-      model: jinaai/jina-embeddings-v5-text-small
-      embeddingDims: 1024
-      timeoutMs: 30000
 audit:
   otel:
     enabled: true
@@ -425,32 +395,6 @@ audit:
           }
         }
       },
-      memory: {
-        mem0: {
-          enabled: true,
-          historyDbPath: "/var/lib/pico/mem0-history.sqlite",
-          vectorStore: {
-            provider: "qdrant",
-            localBaseUrl: "http://127.0.0.1:6333",
-            collectionName: "pico_long_memory"
-          },
-          worker: {
-            provider: "pi_model",
-            piProvider: "openai-codex",
-            api: "openai-codex-responses",
-            model: "vendor/arbitrary-worker",
-            thinkingLevel: "high",
-            timeoutMs: 30_000
-          },
-          embedder: {
-            provider: "sidecar",
-            localBaseUrl: "http://127.0.0.1:18081",
-            model: "jinaai/jina-embeddings-v5-text-small",
-            embeddingDims: 1024,
-            timeoutMs: 30_000
-          }
-        }
-      },
       audit: {
         otel: {
           enabled: true,
@@ -474,11 +418,6 @@ audit:
         ending: {
           mode: "timed",
           durationMs: 60_000
-        }
-      },
-      memory: {
-        mem0: {
-          enabled: false
         }
       },
       audit: {
@@ -516,48 +455,6 @@ audit:
         }
       }
     });
-  });
-
-  it("defines one Mem0 owner and rejects the removed longMemory field", () => {
-    const model = "vendor/model-selected-in-yaml";
-    const config = definePicoConfig({
-      memory: {
-        mem0: {
-          enabled: true,
-          historyDbPath: "/var/lib/pico/mem0-history.sqlite",
-          vectorStore: {
-            provider: "qdrant",
-            localBaseUrl: "http://127.0.0.1:6333",
-            collectionName: "pico_facility_memory"
-          },
-          worker: {
-            provider: "pi_model",
-            piProvider: "openai-codex",
-            api: "openai-codex-responses",
-            model,
-            thinkingLevel: "high",
-            timeoutMs: 60_000
-          },
-          embedder: {
-            provider: "sidecar",
-            localBaseUrl: "http://127.0.0.1:18081",
-            model: "test-embedder",
-            embeddingDims: 3
-          }
-        }
-      }
-    });
-
-    expect(config.memory.mem0).toMatchObject({
-      enabled: true,
-      worker: { model, thinkingLevel: "high" }
-    });
-    expect(() => definePicoConfig({ memory: { longMemory: { enabled: false } } })).toThrow(
-      "pico config memory has unknown field longMemory"
-    );
-    expect(() => definePicoConfig({ memory: { mem0: { enabled: false, infer: false } } })).toThrow(
-      "pico config memory.mem0 has unknown field infer"
-    );
   });
 
   it("requires local voice echo control provider endpoints when AEC is enabled", () => {
@@ -858,25 +755,6 @@ camera:
 
   it("resolves local file paths relative to the repo root for config directory files", () => {
     const { root, path } = temporaryRepoConfigFile(`
-memory:
-  mem0:
-    enabled: true
-    historyDbPath: .pico-local/mem0-history.sqlite
-    vectorStore:
-      provider: qdrant
-      localBaseUrl: http://127.0.0.1:6333
-      collectionName: pico_facility_memory
-    worker:
-      provider: pi_model
-      piProvider: openai-codex
-      api: openai-codex-responses
-      model: arbitrary-worker
-      thinkingLevel: high
-      timeoutMs: 60000
-    embedder:
-      provider: sidecar
-      localBaseUrl: http://127.0.0.1:18081
-      model: test-embedder
 vision:
   personDetection:
     enabled: false
@@ -898,10 +776,6 @@ voice:
 
     const config = loadPicoConfig({ path });
 
-    expect(config.memory.mem0).toMatchObject({
-      enabled: true,
-      historyDbPath: join(root, ".pico-local/mem0-history.sqlite")
-    });
     expect(config.vision.personDetection.modelPath).toBe(
       join(root, "models/person-detector.mlmodel")
     );
@@ -1081,73 +955,6 @@ voice:
         }
       })
     ).toThrow("pico config session.ending.durationMs must be a positive integer <= 2147483647");
-  });
-
-  it("validates the Mem0 worker boundary without model-name allowlisting", () => {
-    const base = {
-      enabled: true,
-      historyDbPath: "/var/lib/pico/mem0-history.sqlite",
-      vectorStore: {
-        provider: "qdrant",
-        localBaseUrl: "http://127.0.0.1:6333",
-        collectionName: "pico_facility_memory"
-      },
-      worker: {
-        provider: "pi_model",
-        piProvider: "openai-codex",
-        api: "openai-codex-responses",
-        model: "vendor/arbitrary-model-id",
-        thinkingLevel: "high",
-        timeoutMs: 60_000
-      },
-      embedder: {
-        provider: "sidecar",
-        localBaseUrl: "http://127.0.0.1:18081",
-        model: "test-embedder"
-      }
-    };
-
-    expect(definePicoConfig({ memory: { mem0: base } }).memory.mem0).toMatchObject({
-      worker: { model: "vendor/arbitrary-model-id" }
-    });
-    expect(() =>
-      definePicoConfig({
-        memory: { mem0: { ...base, worker: { ...base.worker, thinkingLevel: "automatic" } } }
-      })
-    ).toThrow(
-      "pico config memory.mem0.worker.thinkingLevel must be off, minimal, low, medium, high, xhigh, or max"
-    );
-    expect(() =>
-      definePicoConfig({
-        memory: { mem0: { ...base, worker: { ...base.worker, timeoutMs: 2_147_483_648 } } }
-      })
-    ).toThrow("pico config memory.mem0.worker.timeoutMs must be a positive integer <= 2147483647");
-    expect(() =>
-      definePicoConfig({
-        memory: {
-          mem0: {
-            ...base,
-            vectorStore: { ...base.vectorStore, localBaseUrl: "https://qdrant.example.com" }
-          }
-        }
-      })
-    ).toThrow("pico config memory.mem0.vectorStore.localBaseUrl must use a local SSH tunnel URL");
-    expect(() =>
-      definePicoConfig({
-        memory: {
-          mem0: { ...base, embedder: { ...base.embedder, provider: "unsupported" } }
-        }
-      })
-    ).toThrow("pico config memory.mem0.embedder.provider must be ollama or sidecar");
-    expect(() =>
-      definePicoConfig({
-        memory: {
-          mem0: { ...base, embedder: { ...base.embedder, timeoutMs: 2_147_483_648 } }
-        }
-      })
-    ).toThrow(
-      "pico config memory.mem0.embedder.timeoutMs must be a positive integer <= 2147483647"
-    );
   });
 
   it("rejects Tapo timeout values beyond Node timer bounds", () => {
