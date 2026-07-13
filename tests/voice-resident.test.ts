@@ -509,7 +509,7 @@ describe("voice resident runtime", () => {
     expect(farEndFrames.map((frame) => frame.capturedAt)).toEqual(["2026-06-18T00:00:00.000Z"]);
   });
 
-  it("records active user input and Pi Agent response text only to the resident console sink", async () => {
+  it("records active input and Pi Agent response metadata without duplicating text", async () => {
     const consoleEvents: unknown[] = [];
 
     await runVoiceResidentRuntime({
@@ -562,19 +562,20 @@ describe("voice resident runtime", () => {
 
     expect(consoleEvents).toEqual([
       {
-        kind: "staff_transcript",
+        kind: "staff_input",
         occurredAt: "2026-06-18T00:00:00.000Z",
-        sessionId: "session-1",
-        text: "今日はテストです"
+        sessionId: "session-1"
       },
       {
         kind: "pi_agent_response",
         occurredAt: "2026-06-18T00:00:00.250Z",
         sessionId: "session-1",
-        durationMs: 250,
-        text: "了解です。"
+        durationMs: 250
       }
     ]);
+    expect(JSON.stringify(consoleEvents)).not.toContain("今日はテストです");
+    expect(JSON.stringify(consoleEvents)).not.toContain("了解です。");
+    expect(JSON.stringify(consoleEvents)).not.toContain('"text"');
   });
 
   it("passes deliverable deferred tool results separately from the active turn transcript", async () => {
@@ -1085,8 +1086,7 @@ describe("voice resident runtime", () => {
       kind: "pi_agent_response",
       occurredAt: "2026-06-18T00:00:08.000Z",
       sessionId: "session-1",
-      durationMs: 123,
-      text: "了解です。"
+      durationMs: 123
     });
   });
 
@@ -1215,18 +1215,18 @@ describe("voice resident runtime", () => {
       {
         kind: "wake_ack_input",
         occurredAt: "2026-06-18T00:00:00.000Z",
-        sessionId: "session-1",
-        trigger: "ピコ",
-        text: 'The user just woke you up by saying: "ピコ". Respond briefly in spoken Japanese to show you are listening. Do not answer a separate task yet.'
+        sessionId: "session-1"
       },
       {
         kind: "wake_ack_response",
         occurredAt: "2026-06-18T00:00:00.180Z",
         sessionId: "session-1",
-        durationMs: 180,
-        text: "はい、聞いています。"
+        durationMs: 180
       }
     ]);
+    expect(JSON.stringify(consoleEvents)).not.toContain("The user just woke you up by saying");
+    expect(JSON.stringify(consoleEvents)).not.toContain("はい、聞いています。");
+    expect(JSON.stringify(consoleEvents)).not.toContain('"text"');
   });
 
   it("keeps wake acknowledgement running when resident console logging fails", async () => {

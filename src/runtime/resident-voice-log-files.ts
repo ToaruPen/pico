@@ -2,8 +2,7 @@ import { appendFileSync, chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import type { AuditAttributeValue, AuditEvent } from "../modules/audit/index.js";
-import { formatResidentVoiceConsoleEvent } from "./resident-voice-console-log.js";
-import type { VoiceResidentConsoleSink } from "./voice-resident.js";
+import type { VoiceResidentConsoleEvent, VoiceResidentConsoleSink } from "./voice-resident.js";
 
 export type ResidentVoiceLogRunMode = "development" | "normal";
 
@@ -22,7 +21,6 @@ export type ResidentVoiceLogPaths = {
   readonly processLogPath: string;
   readonly dailyEventsJsonlPath: string;
   readonly metricsJsonlPath: string;
-  readonly sessionTextLogPath?: string;
   readonly sessionJsonlPath?: string;
 };
 
@@ -31,10 +29,8 @@ export type ResidentVoiceFileLogSinkOptions = {
   readonly runMode: ResidentVoiceLogRunMode;
   readonly runId?: string;
   readonly now?: () => string;
-  readonly maxTextLength?: number;
 };
 
-const defaultMaxTextLength = 240;
 const voiceMetricAttributeKeys = new Set([
   "pico.voice.stage",
   "pico.voice.stage_status",
@@ -63,7 +59,6 @@ export function createResidentVoiceFileLogSink(
 } {
   const runStartedAt = options.now?.() ?? new Date().toISOString();
   const runId = options.runId ?? defineResidentVoiceRunId(runStartedAt, process.pid);
-  const maxTextLength = options.maxTextLength ?? defaultMaxTextLength;
 
   return {
     record(event) {
@@ -74,20 +69,16 @@ export function createResidentVoiceFileLogSink(
         occurredAt: event.occurredAt,
         sessionId: event.sessionId
       });
-      const payload = {
+      const payload = normalizeResidentVoiceEvent({
         schemaVersion: 1,
         runMode: options.runMode,
         runId,
         ...event
-      };
+      });
 
       appendPrivateFile(paths.dailyEventsJsonlPath, `${JSON.stringify(payload)}\n`);
 
-      if (paths.sessionTextLogPath !== undefined && paths.sessionJsonlPath !== undefined) {
-        appendPrivateFile(
-          paths.sessionTextLogPath,
-          formatResidentVoiceConsoleEvent(event, maxTextLength)
-        );
+      if (paths.sessionJsonlPath !== undefined) {
         appendPrivateFile(paths.sessionJsonlPath, `${JSON.stringify(payload)}\n`);
       }
     },
@@ -162,10 +153,29 @@ export function resolveResidentVoiceLogPaths(
     ...(input.sessionId === undefined
       ? {}
       : {
-          sessionTextLogPath: join(sessionsDirectory, `${input.sessionId}.log`),
           sessionJsonlPath: join(sessionsDirectory, `${input.sessionId}.jsonl`)
         })
   };
+}
+
+function normalizeResidentVoiceEvent(
+  event: VoiceResidentConsoleEvent & {
+    readonly schemaVersion: number;
+    readonly runMode: ResidentVoiceLogRunMode;
+    readonly runId: string;
+  }
+): Readonly<Record<string, number | string>> {
+  return Object.freeze({
+    schemaVersion: event.schemaVersion,
+    runMode: event.runMode,
+    runId: event.runId,
+    kind: event.kind,
+    occurredAt: event.occurredAt,
+    sessionId: event.sessionId,
+    ...(event.kind === "pi_agent_response" || event.kind === "wake_ack_response"
+      ? { durationMs: event.durationMs }
+      : {})
+  });
 }
 
 export function defineResidentVoiceRunId(timestamp: string, processId: number): string {

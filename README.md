@@ -269,7 +269,7 @@ or natural-language classifier.
 Rotate any provider, OTel, or Stack-chan token before production use if it has
 appeared in a terminal transcript, field artifact, or shared log. The remaining
 product risks are speaker authority, emergency/handoff behavior, and retention
-of operator and session logs; this slice does not claim to solve them.
+of operational log metadata; this slice does not claim to solve them.
 
 For local development on macOS, open a Minecraft-server-style log terminal for
 the voice resident process:
@@ -289,15 +289,13 @@ separately for bounded field validation.
 
 The development terminal uses concise voice probe logs by default and does not
 support verbose mode. It shows utterance windows, STT completion, trigger
-decisions, session start, Pi Agent turns, Pi Agent response duration, wake
-acknowledgement prompts/responses, active user input text, active Pi Agent
-response text, TTS synthesis/playback, interaction ending, and errors. Text
-payloads are displayed as indented multiline blocks so operator logs show the
-actual response shape without hiding line breaks. Per-frame successful
-capture/echo-control events are suppressed because they are too high-volume for
-operator-facing logs. Use `PICO_VOICE_PROBE_STDOUT=verbose npm run resident:voice` only
-when debugging the frame pipeline directly from a plain terminal, not from
-`pico dev`.
+decisions, session start, Pi Agent turn and response-duration metadata, wake
+acknowledgement input/response events, TTS synthesis/playback, interaction
+ending, and errors. It does not log the wake prompt, staff input, or Pi Agent
+response text. Per-frame successful capture/echo-control events are suppressed
+because they are too high-volume for operator-facing logs. Use
+`PICO_VOICE_PROBE_STDOUT=verbose npm run resident:voice` only when debugging the
+frame pipeline directly from a plain terminal, not from `pico dev`.
 
 Resident voice logs are stored under `~/.pico` with local-user-only
 permissions. Development and normal resident runs are separated:
@@ -309,22 +307,21 @@ permissions. Development and normal resident runs are separated:
       processes/YYYY-MM-DD/<run-id>.log
       metrics/YYYY-MM-DD/<run-id>.jsonl
       events/YYYY-MM-DD.jsonl
-      sessions/YYYY-MM-DD/<run-id>/<session-id>.log
       sessions/YYYY-MM-DD/<run-id>/<session-id>.jsonl
     normal/
       processes/resident-voice.out.log
       processes/resident-voice.err.log
       processes/YYYY-MM-DD/<run-id>.log
       events/YYYY-MM-DD.jsonl
-      sessions/YYYY-MM-DD/<run-id>/<session-id>.log
       sessions/YYYY-MM-DD/<run-id>/<session-id>.jsonl
 ```
 
-Process logs contain stage summaries, durations, and errors. Session logs keep
-the spoken input and Pi Agent response text for review, while JSONL files carry
-the same session events in a script-friendly shape with `schemaVersion`,
-`runMode`, and `runId`. Raw audio is not stored continuously; use targeted field
-harnesses for short diagnostic audio artifacts.
+Process logs contain stage summaries, durations, and errors. Daily and session
+JSONL files contain metadata-only interaction events with `schemaVersion`,
+`runMode`, `runId`, event kind, timestamp, session ID, and duration where
+relevant. They contain no text field and do not store the wake prompt, staff
+input, or Pi Agent response. Raw audio is not stored continuously; use targeted
+field harnesses for short diagnostic audio artifacts.
 
 The resident voice process generates a short Pi Agent wake acknowledgement after
 trusted wake-name or greeting triggers. This confirms that pico is listening

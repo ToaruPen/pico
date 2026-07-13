@@ -59,31 +59,26 @@ export type PiAgentTurnClient = {
 
 export type VoiceResidentConsoleEvent =
   | {
-      readonly kind: "staff_transcript";
+      readonly kind: "staff_input";
       readonly occurredAt: string;
       readonly sessionId: string;
-      readonly text: string;
     }
   | {
       readonly kind: "pi_agent_response";
       readonly occurredAt: string;
       readonly sessionId: string;
       readonly durationMs: number;
-      readonly text: string;
     }
   | {
       readonly kind: "wake_ack_input";
       readonly occurredAt: string;
       readonly sessionId: string;
-      readonly trigger: string;
-      readonly text: string;
     }
   | {
       readonly kind: "wake_ack_response";
       readonly occurredAt: string;
       readonly sessionId: string;
       readonly durationMs: number;
-      readonly text: string;
     };
 
 export type VoiceResidentConsoleSink = {
@@ -812,9 +807,7 @@ async function runWakeAcknowledgement(
   recordResidentConsoleEvent(options.console, {
     kind: "wake_ack_input",
     occurredAt: piStageStartedAt,
-    sessionId,
-    trigger,
-    text: prompt
+    sessionId
   });
   const response = await requestPiAgentResponse(
     sessionId,
@@ -834,8 +827,7 @@ async function runWakeAcknowledgement(
     kind: "wake_ack_response",
     occurredAt: response.completedAt,
     sessionId,
-    durationMs: response.durationMs,
-    text: response.text
+    durationMs: response.durationMs
   });
   recordVoiceStageProbe(options.probe ?? {}, {
     stage: "pi_turn",
@@ -892,10 +884,9 @@ async function runActiveVoiceTurn(
   const piStageStartedMs = (options.monotonicNow ?? defaultMonotonicNow)();
   const turnRequest = createActiveVoiceTurnRequest(transcript, options, activeSessionId, now);
   recordResidentConsoleEvent(options.console, {
-    kind: "staff_transcript",
+    kind: "staff_input",
     occurredAt: piStageStartedAt,
-    sessionId: activeSessionId,
-    text: transcript
+    sessionId: activeSessionId
   });
   const response = await requestPiAgentResponse(
     activeSessionId,
@@ -915,8 +906,7 @@ async function runActiveVoiceTurn(
     kind: "pi_agent_response",
     occurredAt: response.completedAt,
     sessionId: activeSessionId,
-    durationMs: response.durationMs,
-    text: response.text
+    durationMs: response.durationMs
   });
   recordVoiceStageProbe(options.probe ?? {}, {
     stage: "pi_turn",

@@ -9,9 +9,10 @@ import {
   createResidentVoiceFileLogSink,
   resolveResidentVoiceLogPaths
 } from "../src/runtime/resident-voice-log-files.js";
+import type { VoiceResidentConsoleEvent } from "../src/runtime/voice-resident.js";
 
 describe("resident voice file logs", () => {
-  it("writes process and session logs under the user pico directory by mode, date, and session id", async () => {
+  it("writes metadata-only daily and session events under the user pico directory", async () => {
     const homeDirectory = await mkdtemp(join(tmpdir(), "pico-home-"));
     const log = createResidentVoiceFileLogSink({
       homeDirectory,
@@ -27,7 +28,7 @@ describe("resident voice file logs", () => {
       sessionId: "session-1",
       durationMs: 1234,
       text: "はい。\n聞いています。"
-    });
+    } as VoiceResidentConsoleEvent);
 
     const paths = resolveResidentVoiceLogPaths({
       homeDirectory,
@@ -40,9 +41,7 @@ describe("resident voice file logs", () => {
     await expect(readFile(paths.processLogPath, "utf8")).resolves.toBe(
       "[pico voice] process event\n"
     );
-    await expect(readFile(paths.sessionTextLogPath ?? "", "utf8")).resolves.toBe(
-      "[pico voice] 2026-06-22T01:02:04.000Z pi_agent session=session-1 duration_ms=1234\n  text:\n    はい。\n    聞いています。\n"
-    );
+    expect(paths).not.toHaveProperty("sessionTextLogPath");
     await expect(readFile(paths.sessionJsonlPath ?? "", "utf8")).resolves.toBe(
       `${JSON.stringify({
         schemaVersion: 1,
@@ -51,8 +50,7 @@ describe("resident voice file logs", () => {
         kind: "pi_agent_response",
         occurredAt: "2026-06-22T01:02:04.000Z",
         sessionId: "session-1",
-        durationMs: 1234,
-        text: "はい。\n聞いています。"
+        durationMs: 1234
       })}\n`
     );
     await expect(readFile(paths.dailyEventsJsonlPath, "utf8")).resolves.toBe(
@@ -63,15 +61,17 @@ describe("resident voice file logs", () => {
         kind: "pi_agent_response",
         occurredAt: "2026-06-22T01:02:04.000Z",
         sessionId: "session-1",
-        durationMs: 1234,
-        text: "はい。\n聞いています。"
+        durationMs: 1234
       })}\n`
     );
+    expect(await readFile(paths.sessionJsonlPath ?? "", "utf8")).not.toContain("はい。");
+    expect(await readFile(paths.dailyEventsJsonlPath, "utf8")).not.toContain("はい。");
+    expect(await readFile(paths.dailyEventsJsonlPath, "utf8")).not.toContain('"text"');
     expect((await stat(join(homeDirectory, ".pico"))).mode & 0o777).toBe(0o700);
     expect((await stat(paths.sessionJsonlPath ?? "")).mode & 0o777).toBe(0o600);
   });
 
-  it("writes audit-safe voice metrics separately from contentful session logs", async () => {
+  it("writes audit-safe voice metrics separately from metadata-only interaction logs", async () => {
     const homeDirectory = await mkdtemp(join(tmpdir(), "pico-home-"));
     const log = createResidentVoiceFileLogSink({
       homeDirectory,
@@ -161,10 +161,9 @@ describe("resident voice file logs", () => {
       }
     ]);
     const event = {
-      kind: "staff_transcript" as const,
+      kind: "staff_input" as const,
       occurredAt: "2026-06-22T01:02:04.000Z",
-      sessionId: "session-1",
-      text: "こんにちは"
+      sessionId: "session-1"
     };
 
     sink.record(event);
@@ -190,10 +189,9 @@ describe("resident voice file logs", () => {
       }
     ]);
     const event = {
-      kind: "staff_transcript" as const,
+      kind: "staff_input" as const,
       occurredAt: "2026-06-22T01:02:04.000Z",
-      sessionId: "session-1",
-      text: "こんにちは"
+      sessionId: "session-1"
     };
 
     expect(() => {

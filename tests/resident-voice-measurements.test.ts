@@ -17,7 +17,7 @@ describe("resident voice measurements", () => {
         JSON.stringify({
           schemaVersion: 1,
           runId: "run-a",
-          kind: "staff_transcript",
+          kind: "staff_input",
           text: "この本文は計測結果に出してはいけない"
         })
       ].join("\n")
