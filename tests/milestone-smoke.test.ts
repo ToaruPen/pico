@@ -108,17 +108,17 @@ function expectMilestoneSectionNames(report: PicoMilestoneSmokeReport): void {
     "camera_vlm_scene",
     "embedding_sidecar",
     "mem0_runtime",
-    "memory_candidate",
+    "memory_mem0",
     "audit_otel"
   ]);
 }
 
 function expectMemoryAndAuditEvidence(report: PicoMilestoneSmokeReport): void {
-  const memorySection = requireSection(report, "memory_candidate");
+  const memorySection = requireSection(report, "memory_mem0");
   const auditSection = requireSection(report, "audit_otel");
 
   expect(memorySection.status).toBe("passed");
-  expect(memorySection.details?.promotedMemoryId).toBe(1);
+  expect(memorySection.details?.memoryId).toBe("milestone-mem0-1");
   expect(auditSection.status).toBe("passed");
   expect(auditSection.details?.category).toBe("memory_write");
   expect(typeof auditSection.details?.otelRecordCount).toBe("number");
@@ -404,7 +404,7 @@ audit:
     const reason =
       "pico config load failed: pico config audit.otel.endpoint must use a local Collector URL";
     expect(report.status).toBe("failed");
-    expect(requireSection(report, "memory_candidate").status).toBe("passed");
+    expect(requireSection(report, "memory_mem0").status).toBe("passed");
     expect(requireSection(report, "audit_otel")).toEqual({
       name: "audit_otel",
       status: "failed",
@@ -500,9 +500,9 @@ audit:
 
     expect(auditSection.details).toMatchObject({
       category: "memory_write",
-      eventName: "long_memory.candidate_job.enqueued",
-      eventCount: 4,
-      otelRecordCount: 4
+      eventName: "long_memory.mem0.added",
+      eventCount: 2,
+      otelRecordCount: 2
     });
   });
 
@@ -554,15 +554,10 @@ audit:
     expect(auditSection.status).toBe("passed");
     expect(auditSection.provider).toBe("structured-audit+otel");
     expect(auditSection.details).toMatchObject({
-      eventCount: 4,
-      exportedOtelRecordCount: 4
+      eventCount: 2,
+      exportedOtelRecordCount: 2
     });
-    expect(exportedEvents).toEqual([
-      "long_memory.candidate_job.enqueued",
-      "long_memory.candidate.created",
-      "long_memory.candidate_job.processed",
-      "long_memory.candidate.promoted"
-    ]);
+    expect(exportedEvents).toEqual(["long_memory.mem0.added", "long_memory.mem0.searched"]);
     expect(shutdownCalled).toBe(true);
   });
 
@@ -591,12 +586,12 @@ audit:
     );
 
     expect(report.status).toBe("failed");
-    expect(requireSection(report, "memory_candidate")).toMatchObject({
+    expect(requireSection(report, "memory_mem0")).toMatchObject({
       status: "passed",
-      provider: "sqlite",
+      provider: "mem0-oss",
       details: {
-        promotedMemoryId: 1,
-        category: "care_continuity"
+        memoryId: "milestone-mem0-1",
+        category: "facility_knowledge"
       }
     });
     expect(requireSection(report, "audit_otel")).toEqual({
@@ -632,7 +627,7 @@ audit:
     );
 
     expect(report.status).toBe("failed");
-    expect(requireSection(report, "memory_candidate").status).toBe("passed");
+    expect(requireSection(report, "memory_mem0").status).toBe("passed");
     expect(requireSection(report, "audit_otel")).toEqual({
       name: "audit_otel",
       status: "failed",

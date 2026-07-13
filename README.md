@@ -241,63 +241,42 @@ resident voice integration is validated:
 
 ```bash
 PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice
-PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:memory
 ```
 
-`resident:voice` owns live microphone, speaker, session cutoff, and enqueueing in
-the current terminal for direct field validation. It is not the public pico
-startup contract.
-`resident:memory` is the companion drain worker that writes queued session
-cutoffs to the SQLite long-memory source of truth through the configured Pi
-extractor and exports bounded OTel/audit events without adding a default job
-timeout. It recovers stale `processing` jobs after
-`PICO_RESIDENT_MEMORY_RECOVER_PROCESSING_OLDER_THAN_MS` or 10 minutes by
-default; this is crash recovery, not a per-job execution deadline. Mem0 remains
-an optional secondary integration and is not part of this first-slice drain
-path.
-
-The memory LaunchAgent definition is retained only as a field harness. The
-current rollout must not install, start, or restart it; those operations fail
-closed until Pico startup owns the memory-worker lifecycle. The remaining
-commands inspect or clean up a previously installed service. Status output is
-reduced to state, PID, last exit code, queue depth, oldest queued-job age, and
-dead-letter count; raw `launchctl` environment, arguments, and job payloads are
-not printed.
-
-```bash
-just memory-status
-just memory-stop
-PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:memory:launchd -- uninstall
-```
+`resident:voice` owns live microphone, speaker, session cutoff, facility-memory
+extraction, and the awaited Mem0 write in the current terminal for direct field
+validation. It is not the public pico startup contract. There is no separate
+memory process or memory LaunchAgent.
 
 ### Long-memory operations
 
-`memory.longMemory.databasePath` is the SQLite source of truth used by both the
-memory worker and `pico_memory_search`. During migration, stop the voice process
-and any direct memory-worker harness, point this field at the existing SQLite
-file previously used by `memory.mem0.historyDbPath`, and run the deterministic
-gates. Use `resident:memory -- --once` only for the bounded field drain in this
-rollout. Do not copy or merge databases while either process is running.
+`memory.mem0` is the only durable-memory configuration. Mem0 OSS owns memory
+storage, history, and Qdrant retrieval. When a session ends, the configured Pi
+worker extracts zero to five reusable facility-memory drafts. Pico validates
+the structured response and stores each accepted draft with `infer:false`.
+The worker model id and thinking level come from YAML; runtime code does not
+select or allowlist a model name.
 
-The worker retries transient extraction failures after 30 seconds and 2
-minutes. A third failed attempt moves the job to `dead_letter`; its payload is
-retained for seven days and then scrubbed. Policy violations go directly to a
-metadata-only dead letter. `just memory-status` is intentionally sanitized and
-shows no job payload, query, memory body, provider credential, or launchd
-environment.
+The write is awaited before Pico acknowledges the session cutoff. Extraction,
+Mem0, Qdrant, or embedding failures are surfaced without a persisted queue,
+automatic retry, fallback database, or auto-resume path.
 
 Every agent that loads the Pico extension receives the same
 `pico_memory_search` implementation. Pi settings decide whether the tool is
-visible to that agent. Search reads only active SQLite entries, returns bounded
-untrusted data, and does not require Mem0, Qdrant, or an embedding sidecar.
+visible to that agent. Search uses the same scoped Mem0/Qdrant provider and
+returns bounded untrusted data. It has no SQLite fallback.
 
-Run the live end-to-end gate after provider authentication and OTel readiness:
+Run the bounded configured-worker → Mem0 add/search/delete gate and the
+embedding provider gate after local services are ready:
 
 ```bash
-PICO_CONFIG_PATH=config/pico.local.yaml \
-PICO_ENABLE_LIVE_SESSION_MEMORY_RETRIEVAL=1 \
-npm run field:session-memory-retrieval
+PICO_CONFIG_PATH=config/pico.local.yaml npm run smoke:embedding-sidecar
+PICO_CONFIG_PATH=config/pico.local.yaml npm run smoke:mem0-runtime
 ```
+
+Durable memory is limited to facility knowledge. Do not store child tracking,
+evaluation, scoring, profiling, child-linked individual records, or health,
+disability, abuse, and family-circumstance information.
 
 Rotate any provider, OTel, or Stack-chan token before production use if it has
 appeared in a terminal transcript, field artifact, or shared log. The remaining
@@ -324,7 +303,7 @@ The development terminal uses concise voice probe logs by default and does not
 support verbose mode. It shows utterance windows, STT completion, trigger
 decisions, session start, Pi Agent turns, Pi Agent response duration, wake
 acknowledgement prompts/responses, active user input text, active Pi Agent
-response text, TTS synthesis/playback, cutoff enqueue, and errors. Text payloads
+response text, TTS synthesis/playback, cutoff memory processing, and errors. Text payloads
 are displayed as indented multiline blocks so operator logs show the actual
 response shape without hiding line breaks. Per-frame successful
 capture/echo-control events are suppressed because they are too high-volume for

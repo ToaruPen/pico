@@ -7,6 +7,7 @@ import {
   createStructuredAuditLog,
   toOpenTelemetryLogRecord
 } from "../../src/modules/audit/index.js";
+import type { FacilityMemoryExtractor } from "../../src/modules/long-memory/extractor.js";
 import type { SessionMemoryCutoffInput } from "../../src/modules/long-memory/index.js";
 import {
   createMem0MemoryProvider,
@@ -14,6 +15,8 @@ import {
   type Mem0SessionAddResult
 } from "../../src/modules/long-memory/mem0.js";
 import { createMem0OssClient } from "../../src/modules/long-memory/mem0-runtime.js";
+import { createPiModelFacilityMemoryExtractor } from "../../src/modules/long-memory/pi-extractor.js";
+import { createFacilityMemoryWorker } from "../../src/modules/long-memory/worker.js";
 
 export type Mem0RuntimeSmokeReport =
   | {
@@ -35,10 +38,13 @@ export type Mem0RuntimeSmokeReport =
 
 export type Mem0RuntimeSmokeDependencies = {
   readonly createClient?: (
-    config: PicoConfig["memory"]["mem0"]
+    config: Extract<PicoConfig["memory"]["mem0"], { readonly enabled: true }>
   ) => Mem0Client | Promise<Mem0Client>;
   readonly loadConfig?: () => PicoConfig;
   readonly createRunId?: () => string;
+  readonly createExtractor?: (
+    config: Extract<PicoConfig["memory"]["mem0"], { readonly enabled: true }>["worker"]
+  ) => FacilityMemoryExtractor;
   readonly timeoutMs?: number;
 };
 
@@ -70,7 +76,7 @@ export async function runMem0RuntimeSmoke(
   }
 
   async function executeMem0RuntimeSmoke(
-    mem0: PicoConfig["memory"]["mem0"],
+    mem0: Extract<PicoConfig["memory"]["mem0"], { readonly enabled: true }>,
     dependencies: Mem0RuntimeSmokeDependencies
   ): Promise<Mem0RuntimeSmokeReport> {
     const audit = createStructuredAuditLog();
@@ -91,8 +97,12 @@ export async function runMem0RuntimeSmoke(
       scopeId,
       audit
     });
-    const addOperation = provider.addSessionCutoff(smokeSession);
-    const added = await addSessionCutoffWithLateCleanup(addOperation, provider, timeoutMs);
+    const extractor =
+      dependencies.createExtractor?.(mem0.worker) ??
+      createPiModelFacilityMemoryExtractor(mem0.worker);
+    const worker = createFacilityMemoryWorker({ extractor, provider });
+    const processingOperation = worker.processCutoff(smokeSession);
+    const added = await processCutoffWithLateCleanup(processingOperation, provider, timeoutMs);
     const searchResultCount = await searchCreatedMemories(
       provider,
       runId,
@@ -139,7 +149,7 @@ async function searchCreatedMemories(
   let primaryError: Error | undefined;
 
   try {
-    const searchResults = await withTimeout(provider.search(runId), "Mem0 search", timeoutMs);
+    const searchResults = await withTimeout(provider.search(runId, 5), "Mem0 search", timeoutMs);
     searchResultCount = searchResults.length;
     requireMem0SmokeResults(
       addedMemoryIds,
@@ -164,27 +174,27 @@ async function searchCreatedMemories(
   return searchResultCount;
 }
 
-async function addSessionCutoffWithLateCleanup(
-  addOperation: Promise<Mem0SessionAddResult>,
+async function processCutoffWithLateCleanup(
+  processingOperation: Promise<Mem0SessionAddResult>,
   provider: ReturnType<typeof createMem0MemoryProvider>,
   timeoutMs: number
 ): Promise<Mem0SessionAddResult> {
   try {
-    return await withTimeout(addOperation, "Mem0 add", timeoutMs);
+    return await withTimeout(processingOperation, "Mem0 add", timeoutMs);
   } catch (error) {
-    cleanupLateAddedMemories(addOperation, provider, timeoutMs).catch(() => undefined);
+    cleanupLateProcessedMemories(processingOperation, provider, timeoutMs).catch(() => undefined);
 
     throw error;
   }
 }
 
-async function cleanupLateAddedMemories(
-  addOperation: Promise<Mem0SessionAddResult>,
+async function cleanupLateProcessedMemories(
+  processingOperation: Promise<Mem0SessionAddResult>,
   provider: ReturnType<typeof createMem0MemoryProvider>,
   timeoutMs: number
 ): Promise<void> {
   try {
-    const added = await addOperation;
+    const added = await processingOperation;
 
     await cleanupAddedMemories(provider, added.memoryIds, timeoutMs);
   } catch {

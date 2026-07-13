@@ -18,7 +18,7 @@ only active decisions and relevant source references.
 | orchestrator | Thin TypeScript registry | Route modules without a broad control plane. |
 | context | Structured local files first | Add storage only when real context data exists. |
 | memory | In-process short-term memory first | Active interaction continuity only. |
-| long_memory | SQLite + FTS5 + explicit Mem0/Qdrant secondary index | SQLite is the durable source of truth; vector retrieval is replaceable. |
+| long_memory | Mem0 OSS + Qdrant + configured Pi extraction worker | Mem0 is the durable source of truth and retrieval owner. |
 | local_models | Selected provider boundary | Model access is explicit, not automatically switched. |
 | STT | Apple Speech | Current Japanese STT through a loopback Swift sidecar on macOS 26. |
 | TTS | Aivis Speech | Current local Japanese TTS baseline. |
@@ -117,12 +117,12 @@ Sources:
 Selected direction:
 
 - Use in-process memory for active interaction continuity.
-- Use SQLite + FTS5 for the durable facility-memory slice.
-- Treat vector search as a secondary index, not the source of truth.
-- Use asynchronous session-cutoff processing for long-memory updates so live
-  response latency is not tied to memory extraction or embedding.
-- Use Pi Agent `openai-codex` / `openai-codex-responses` access for the main
-  long-memory LLM path when that provider is configured.
+- Use Mem0 OSS as the sole durable facility-memory, history, and retrieval owner.
+- Keep Qdrant behind the Mem0 adapter rather than treating it as a second Pico-owned store.
+- Process session cutoffs in-process after the conversation session ends. Await extraction and
+  Mem0 write before acknowledging the cutoff; do not add a persisted queue or drain process.
+- Use the startup YAML-selected Pi model for facility-memory extraction. Pass arbitrary model ids
+  through the Pi model registry without a model-specific branch or default.
 - Keep embedding independent from the LLM provider. Prefer a local multilingual
   embedder if it can approach Japanese-specialized retrieval quality.
 - Current embedding shortlist:
@@ -139,17 +139,16 @@ Selected direction:
   resource test justifies the heavier footprint.
 - Require explicit vector-index migration when the embedding provider, model, or
   dimension changes.
-- Keep correction and deletion boundaries available in durable storage.
+- Use Mem0 operations as the only correction, history, and deletion boundary.
 
 Sources:
 
-- SQLite JSON: https://www.sqlite.org/json1.html
-- SQLite FTS5: https://www.sqlite.org/fts5.html
-- SQLite WAL: https://www.sqlite.org/wal.html
 - Pi provider auth: `node_modules/@earendil-works/pi-coding-agent/docs/providers.md`
 - Pi extension model registry: `node_modules/@earendil-works/pi-coding-agent/docs/extensions.md`
-- Long-memory model provider design:
-  `docs/superpowers/specs/2026-06-17-long-memory-model-provider-design.md`
+- Mem0-only architecture research:
+  `docs/superpowers/research/2026-07-13-mem0-only-memory-architecture.md`
+- Mem0-only long-memory design:
+  `docs/superpowers/specs/2026-07-13-mem0-only-long-memory-design.md`
 - BGE-M3: https://huggingface.co/BAAI/bge-m3
 - Qwen3 embedding: https://huggingface.co/Qwen/Qwen3-Embedding-0.6B
 - Ollama Qwen3 embedding: https://ollama.com/library/qwen3-embedding

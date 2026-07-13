@@ -112,7 +112,7 @@ the resident tool boundary:
 
 - Pi Agent: `0.80.6`
 - Pi MCP adapter: `2.11.0`
-- available current OpenAI Codex models: `gpt-5.6-luna`, `gpt-5.6-terra`, and
+- available current OpenAI Codex models included multiple model ids, and
   `gpt-5.6-sol`
 - StackChan MCP gateway: `0.15.0`
 

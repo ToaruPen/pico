@@ -9,7 +9,7 @@ import {
   SettingsManager
 } from "@earendil-works/pi-coding-agent";
 
-import type { PicoLongMemoryExtractionConfig } from "../../config/index.js";
+import type { PicoMem0WorkerConfig } from "../../config/index.js";
 import {
   buildFacilityMemoryExtractionPrompt,
   type FacilityMemoryExtractor,
@@ -21,7 +21,7 @@ export type PiFacilityMemorySessionConfiguration = {
   readonly api: "openai-codex-responses";
   readonly model: string;
   readonly timeoutMs: number;
-  readonly thinkingLevel: PicoLongMemoryExtractionConfig["thinkingLevel"];
+  readonly thinkingLevel: PicoMem0WorkerConfig["thinkingLevel"];
   readonly noTools: "all";
   readonly sessionStorage: "memory";
   readonly compaction: { readonly enabled: false };
@@ -54,7 +54,7 @@ const maximumFacilityMemoryResponseCharacters = 32_768;
 const facilityMemoryAbortGraceMs = 5_000;
 
 export function createPiModelFacilityMemoryExtractor(
-  config: PicoLongMemoryExtractionConfig,
+  config: PicoMem0WorkerConfig,
   options: PiModelFacilityMemoryExtractorOptions = {}
 ): FacilityMemoryExtractor {
   const sessionConfiguration = defineSessionConfiguration(config);
@@ -75,7 +75,7 @@ export function createPiModelFacilityMemoryExtractor(
 }
 
 function defineSessionConfiguration(
-  config: PicoLongMemoryExtractionConfig
+  config: PicoMem0WorkerConfig
 ): PiFacilityMemorySessionConfiguration {
   return Object.freeze({
     provider: config.piProvider,

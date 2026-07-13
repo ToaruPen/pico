@@ -4,22 +4,25 @@ import { Type } from "typebox";
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../config/index.js";
 import type { StructuredAuditLog } from "../modules/audit/index.js";
 import {
-  type LongMemoryProvenance,
-  type LongMemoryRecord,
-  type LongMemoryStore,
-  openLongMemoryStore
-} from "../modules/long-memory/index.js";
+  createMem0MemoryProvider,
+  facilityMemoryScopeId,
+  type Mem0Client,
+  type Mem0MemoryProvider,
+  type Mem0SearchMemory
+} from "../modules/long-memory/mem0.js";
+import { createMem0OssClient } from "../modules/long-memory/mem0-runtime.js";
 
 const picoMemorySearchParameters = Type.Object({
   query: Type.String({ minLength: 1, maxLength: 256 }),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 }))
 });
 
-type MemorySearchStore = Pick<LongMemoryStore, "searchActive" | "close">;
-
 export type PicoMemorySearchRuntimeOptions = {
   readonly loadConfig?: () => PicoConfig;
-  readonly openStore?: (path: string) => MemorySearchStore;
+  readonly createClient?: (
+    config: Extract<PicoConfig["memory"]["mem0"], { enabled: true }>
+  ) => Promise<Mem0Client>;
+  readonly createProvider?: (client: Mem0Client) => Mem0MemoryProvider;
   readonly audit?: StructuredAuditLog;
   readonly now?: () => string;
 };
@@ -32,37 +35,21 @@ export type PicoMemorySearchRuntime = {
 const defaultLimit = 3;
 const maximumBodyCharacters = 2_000;
 const maximumTotalBodyCharacters = 6_000;
-const maximumTitleCharacters = 120;
-const maximumReviewerCharacters = 80;
-const maximumReviewNoteCharacters = 200;
-const maximumSourceSessionCharacters = 128;
-const maximumSourceEntryCharacters = 96;
-const maximumSourceEntryCount = 3;
 const maximumSerializedResultCharacters = 12_000;
 
 export function createPicoMemorySearchRuntime(
   options: PicoMemorySearchRuntimeOptions = {}
 ): PicoMemorySearchRuntime {
-  let store: MemorySearchStore | undefined;
+  let provider: Promise<Mem0MemoryProvider | "disabled"> | undefined;
   let closed = false;
 
-  const resolveStore = (): MemorySearchStore | "disabled" => {
+  const resolveProvider = (): Promise<Mem0MemoryProvider | "disabled"> => {
     if (closed) {
       throw new Error("closed");
     }
 
-    if (store !== undefined) {
-      return store;
-    }
-
-    const config = (options.loadConfig ?? loadPicoConfigFromEnvironment)();
-
-    if (!config.memory.longMemory.enabled) {
-      return "disabled";
-    }
-
-    store = (options.openStore ?? openLongMemoryStore)(config.memory.longMemory.databasePath);
-    return store;
+    provider ??= createConfiguredProvider(options);
+    return provider;
   };
 
   const tool: ToolDefinition<typeof picoMemorySearchParameters> = {
@@ -82,31 +69,27 @@ export function createPicoMemorySearchRuntime(
     parameters: picoMemorySearchParameters,
     executionMode: "sequential",
     async execute(_toolCallId, parameters) {
-      await Promise.resolve();
       const query = requireQuery(parameters.query);
       const limit = requireLimit(parameters.limit);
 
       try {
-        const resolvedStore = resolveStore();
+        const resolvedProvider = await resolveProvider();
 
-        if (resolvedStore === "disabled") {
-          recordSearchAudit(options, "long_memory.search.unavailable", {
-            errorCode: "disabled"
-          });
+        if (resolvedProvider === "disabled") {
+          recordSearchAudit(options, "long_memory.search.unavailable", { errorCode: "disabled" });
           return unavailableResult("disabled");
         }
 
-        const records = resolvedStore.searchActive({ query, limit });
+        const memories = await resolvedProvider.search(query, limit);
         recordSearchAudit(options, "long_memory.search.completed", {
-          resultCount: records.length
+          resultCount: memories.length
         });
 
-        return completedResult(records);
+        return completedResult(memories);
       } catch {
-        recordSearchAudit(options, "long_memory.search.unavailable", {
-          errorCode: closed ? "closed" : "store_unavailable"
-        });
-        return unavailableResult(closed ? "closed" : "store_unavailable");
+        const code = closed ? "closed" : "provider_unavailable";
+        recordSearchAudit(options, "long_memory.search.unavailable", { errorCode: code });
+        return unavailableResult(code);
       }
     }
   };
@@ -114,15 +97,31 @@ export function createPicoMemorySearchRuntime(
   return {
     tool,
     close() {
-      if (closed) {
-        return;
-      }
-
       closed = true;
-      store?.close();
-      store = undefined;
+      provider = undefined;
     }
   };
+}
+
+async function createConfiguredProvider(
+  options: PicoMemorySearchRuntimeOptions
+): Promise<Mem0MemoryProvider | "disabled"> {
+  const mem0 = (options.loadConfig ?? loadPicoConfigFromEnvironment)().memory.mem0;
+
+  if (!mem0.enabled) {
+    return "disabled";
+  }
+
+  const client = await (options.createClient ?? createMem0OssClient)(mem0);
+
+  return (
+    options.createProvider?.(client) ??
+    createMem0MemoryProvider({
+      client,
+      scopeId: facilityMemoryScopeId,
+      ...(options.audit === undefined ? {} : { audit: options.audit })
+    })
+  );
 }
 
 function requireQuery(value: unknown): string {
@@ -152,12 +151,11 @@ function requireLimit(value: unknown): number {
 }
 
 function completedResult(
-  records: readonly LongMemoryRecord[]
+  records: readonly Mem0SearchMemory[]
 ): AgentToolResult<Record<string, never>> {
   let remainingBodyCharacters = maximumTotalBodyCharacters;
   const memories = records.map((record) => {
-    const title = boundText(record.title, maximumTitleCharacters);
-    const bodyCharacters = Array.from(record.body);
+    const bodyCharacters = Array.from(record.content);
     const bodyLength = Math.min(
       bodyCharacters.length,
       maximumBodyCharacters,
@@ -165,16 +163,16 @@ function completedResult(
     );
     const body = bodyCharacters.slice(0, bodyLength).join("");
     remainingBodyCharacters -= bodyLength;
-    const provenance = boundProvenance(record.provenance);
+    const category = record.metadata?.category;
+    const confidence = record.metadata?.confidence;
 
     return {
       id: record.id,
-      title: title.value,
       body,
-      category: record.category,
-      provenance: provenance.value,
-      confidence: record.lifecycle.confidence,
-      truncated: bodyLength < bodyCharacters.length || title.truncated || provenance.truncated
+      ...(typeof category === "string" ? { category } : {}),
+      ...(typeof confidence === "number" && Number.isFinite(confidence) ? { confidence } : {}),
+      ...(record.score === undefined ? {} : { score: record.score }),
+      truncated: bodyLength < bodyCharacters.length
     };
   });
 
@@ -188,7 +186,7 @@ function completedResult(
   });
 }
 
-function unavailableResult(code: "closed" | "disabled" | "output_limit" | "store_unavailable") {
+function unavailableResult(code: "closed" | "disabled" | "output_limit" | "provider_unavailable") {
   return textResult({
     tool: "pico_memory_search",
     result: {
@@ -222,63 +220,6 @@ function textResult(value: unknown): AgentToolResult<Record<string, never>> {
   };
 }
 
-function boundProvenance(provenance: LongMemoryProvenance): {
-  readonly value: Record<string, unknown>;
-  readonly truncated: boolean;
-} {
-  if (provenance.kind === "staff_review") {
-    const reviewedBy = boundText(provenance.reviewedBy, maximumReviewerCharacters);
-    const note =
-      provenance.note === undefined
-        ? undefined
-        : boundText(provenance.note, maximumReviewNoteCharacters);
-
-    return {
-      value: {
-        kind: provenance.kind,
-        reviewedBy: reviewedBy.value,
-        reviewedAt: provenance.reviewedAt,
-        ...(note === undefined ? {} : { note: note.value })
-      },
-      truncated: reviewedBy.truncated || note?.truncated === true
-    };
-  }
-
-  const sourceSessionId = boundText(provenance.sourceSessionId, maximumSourceSessionCharacters);
-  const sourceEntryIds = provenance.sourceEntryIds
-    .slice(0, maximumSourceEntryCount)
-    .map((entryId) => boundText(entryId, maximumSourceEntryCharacters));
-
-  return {
-    value: {
-      kind: provenance.kind,
-      policyVersion: provenance.policyVersion,
-      sourceSessionId: sourceSessionId.value,
-      sourceEntryIds: sourceEntryIds.map((entry) => entry.value),
-      createdAt: provenance.createdAt
-    },
-    truncated:
-      sourceSessionId.truncated ||
-      sourceEntryIds.some((entry) => entry.truncated) ||
-      provenance.sourceEntryIds.length > maximumSourceEntryCount
-  };
-}
-
-function boundText(
-  value: string,
-  maximumCharacters: number
-): {
-  readonly value: string;
-  readonly truncated: boolean;
-} {
-  const characters = Array.from(value);
-
-  return {
-    value: characters.slice(0, maximumCharacters).join(""),
-    truncated: characters.length > maximumCharacters
-  };
-}
-
 function recordSearchAudit(
   options: PicoMemorySearchRuntimeOptions,
   name: "long_memory.search.completed" | "long_memory.search.unavailable",
@@ -291,7 +232,7 @@ function recordSearchAudit(
     occurredAt: (options.now ?? (() => new Date().toISOString()))(),
     summary:
       name === "long_memory.search.completed"
-        ? "Searched active facility memory."
+        ? "Searched Mem0 facility memory."
         : "Facility memory search was unavailable.",
     attributes
   });

@@ -11,7 +11,8 @@ import type { SttClient, TtsAudioChunk, TtsClient } from "../src/modules/voice/i
 import {
   runVoiceResidentRuntime,
   type VoicePlaybackSink,
-  type VoiceResidentActivationSource
+  type VoiceResidentActivationSource,
+  type VoiceResidentMemoryWorker
 } from "../src/runtime/voice-resident.js";
 
 describe("voice resident runtime", () => {
@@ -248,6 +249,108 @@ describe("voice resident runtime", () => {
     expect(transcribedDurations).toEqual([20]);
   });
 
+  it("uses shutdown grace rather than the conversation abort signal for the final cutoff", async () => {
+    const abortController = new AbortController();
+    const cutoffSignalStates: boolean[] = [];
+
+    await expect(
+      runVoiceResidentRuntime({
+        now: fixedNow(),
+        frames: abortingFrames(abortController),
+        utteranceWindow: {
+          minSpeechMs: 20,
+          silenceMs: 700,
+          maxUtteranceMs: 1_000,
+          minRmsDb: -50
+        },
+        triggerPhrases: ["ピコ"],
+        sessionLifecycle: createSessionLifecycle({
+          ending: {
+            mode: "timed",
+            durationMs: 60_000
+          }
+        }),
+        echoControl: createIdleEchoControl(),
+        stt: successfulStt("ピコ"),
+        tts: createSuccessfulTts("unused"),
+        playback: {
+          play: () => Promise.resolve()
+        },
+        piAgent: {
+          prompt: () => {
+            throw new Error("wake acknowledgement is disabled");
+          }
+        },
+        memoryWorker: {
+          processCutoff: (cutoff, signal) => {
+            cutoffSignalStates.push(signal?.aborted === true);
+
+            if (signal?.aborted === true) {
+              return Promise.reject(new Error("final cutoff received the conversation abort"));
+            }
+
+            return Promise.resolve({ memoryIds: [], sourceSessionId: cutoff.sessionId });
+          }
+        },
+        wakeAcknowledgement: {
+          enabled: false
+        },
+        signal: abortController.signal
+      })
+    ).rejects.toThrow("pico resident voice runtime aborted");
+
+    expect(cutoffSignalStates).toEqual([false]);
+  });
+
+  it("does not cancel an already-ended session cutoff with the conversation signal", async () => {
+    const abortController = new AbortController();
+    const calls: string[] = [];
+    const lifecycle = createOrderingLifecycle(calls);
+
+    abortController.abort();
+
+    await expect(
+      runVoiceResidentRuntime({
+        now: fixedNow(),
+        frames: [sampleNearEndFrame("frame-after-abort")],
+        utteranceWindow: perFrameCompatibleUtteranceWindow(),
+        triggerPhrases: ["ピコ"],
+        sessionLifecycle: lifecycle,
+        endedSessionIds: ["session-ended"],
+        echoControl: createIdleEchoControl(),
+        stt: successfulStt(""),
+        tts: createSuccessfulTts("unused"),
+        playback: {
+          play: () => Promise.resolve()
+        },
+        piAgent: {
+          prompt: () => {
+            throw new Error("no turn is expected");
+          }
+        },
+        memoryWorker: {
+          processCutoff: (cutoff, signal) => {
+            calls.push(`process:${cutoff.sessionId}`);
+
+            if (signal?.aborted === true) {
+              return Promise.reject(new Error("ended cutoff received the conversation abort"));
+            }
+
+            return Promise.resolve({ memoryIds: [], sourceSessionId: cutoff.sessionId });
+          }
+        },
+        signal: abortController.signal
+      })
+    ).rejects.toThrow("pico resident voice runtime aborted");
+
+    expect(calls).toEqual([
+      "read:session-ended",
+      "cutoff:session-ended",
+      "process:session-ended",
+      "ack:session-ended"
+    ]);
+  });
+
   it("runs shutdown cleanup even when pending utterance flush fails", async () => {
     const events: string[] = [];
     const abortController = new AbortController();
@@ -292,7 +395,7 @@ describe("voice resident runtime", () => {
           }
         },
         memoryWorker: {
-          enqueueCutoff: () => {
+          processCutoff: () => {
             throw new Error("no cutoff is expected");
           },
           close: () => {
@@ -337,7 +440,7 @@ describe("voice resident runtime", () => {
           }
         },
         memoryWorker: {
-          enqueueCutoff: () => {
+          processCutoff: () => {
             throw new Error("no cutoff is expected");
           },
           close: () => {
@@ -411,7 +514,7 @@ describe("voice resident runtime", () => {
       processedFrames: 3,
       startedSessions: 1,
       completedTurns: 1,
-      enqueuedCutoffs: 0,
+      processedCutoffs: 0,
       failedCutoffs: 0,
       failedFrames: 0,
       failedTurns: 0,
@@ -846,6 +949,7 @@ describe("voice resident runtime", () => {
           return Promise.resolve({ text: "はい。" });
         }
       },
+      memoryWorker: successfulMemoryWorker(),
       deferredTools: {
         collectDeliverableResults: () => [],
         cancelSession: (sessionId, reason) => {
@@ -894,6 +998,7 @@ describe("voice resident runtime", () => {
             return Promise.resolve({ text: "はい。" });
           }
         },
+        memoryWorker: successfulMemoryWorker(),
         deferredTools: {
           collectDeliverableResults: () => [],
           cancelSession: () => {
@@ -1215,14 +1320,14 @@ describe("voice resident runtime", () => {
     expect(playbackCalls).toBe(1);
   });
 
-  it("cuts off and enqueues an active session during shutdown cleanup", async () => {
+  it("cuts off and processes an active session during shutdown cleanup", async () => {
     const lifecycle = createSessionLifecycle({
       ending: {
         mode: "timed",
         durationMs: 60_000
       }
     });
-    const enqueuedSessions: string[] = [];
+    const processedSessions: string[] = [];
     const cancelled: string[] = [];
     let disposedAll = 0;
 
@@ -1266,34 +1371,87 @@ describe("voice resident runtime", () => {
           }
         },
         memoryWorker: {
-          enqueueCutoff: (cutoff) => {
-            enqueuedSessions.push(cutoff.sessionId);
+          processCutoff: (cutoff) => {
+            processedSessions.push(cutoff.sessionId);
 
-            return {
-              id: 99,
-              sessionId: cutoff.sessionId,
-              status: "queued",
-              sourceEntryCount: cutoff.entries.length,
-              queuedAt: "2026-06-18T00:00:00.000Z",
-              processingStartedAt: undefined,
-              processedAt: undefined,
-              attemptCount: 0,
-              nextAttemptAt: undefined,
-              lastErrorCode: undefined,
-              deadLetteredAt: undefined,
-              purgeAfter: undefined
-            };
+            return Promise.resolve({
+              memoryIds: ["mem0-1"],
+              sourceSessionId: cutoff.sessionId
+            });
           }
         }
       })
     ).resolves.toMatchObject({
-      enqueuedCutoffs: 1
+      processedCutoffs: 1
     });
 
-    expect(enqueuedSessions).toEqual(["session-1"]);
+    expect(processedSessions).toEqual(["session-1"]);
     expect(cancelled).toEqual(["session-1:shutdown", "waitForIdle"]);
     expect(lifecycle.read("session-1")).toBeUndefined();
     expect(disposedAll).toBe(1);
+  });
+
+  it("continues resource cleanup when shutdown memory processing fails", async () => {
+    const events: string[] = [];
+
+    await expect(
+      runVoiceResidentRuntime({
+        now: fixedNow(),
+        frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
+        utteranceWindow: perFrameCompatibleUtteranceWindow(),
+        triggerPhrases: ["ピコ"],
+        sessionLifecycle: createSessionLifecycle({
+          ending: {
+            mode: "timed",
+            durationMs: 60_000
+          }
+        }),
+        echoControl: createCleanupTrackingEchoControl(events),
+        speechActivity: {
+          process: () => Promise.resolve({ speech: true, provider: "energy", rmsDb: -20 }),
+          close: () => {
+            events.push("speech:close");
+          }
+        },
+        stt: (() => {
+          const texts = ["ピコ", "終了前の会話です。"];
+
+          return {
+            warmup: () => {
+              throw new Error("warmup is not part of resident runtime");
+            },
+            transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
+          };
+        })(),
+        tts: createSuccessfulTts("はい。"),
+        playback: {
+          play: () => Promise.resolve()
+        },
+        piAgent: {
+          prompt: () => Promise.resolve({ text: "はい。" }),
+          disposeAll: () => {
+            events.push("pi:disposeAll");
+          }
+        },
+        memoryWorker: {
+          processCutoff: () => {
+            events.push("memory:process");
+            return Promise.reject(new Error("Mem0 unavailable during shutdown"));
+          },
+          close: () => {
+            events.push("memory:close");
+          }
+        }
+      })
+    ).rejects.toThrow("Mem0 unavailable during shutdown");
+
+    expect(events).toEqual([
+      "memory:process",
+      "pi:disposeAll",
+      "memory:close",
+      "echo:flush",
+      "speech:close"
+    ]);
   });
 
   it("cancels deferred jobs during shutdown even without a memory worker", async () => {
@@ -1425,7 +1583,7 @@ describe("voice resident runtime", () => {
     expect(transcribedFrameLengths).toHaveLength(2);
   });
 
-  it("enqueues ended sessions before acknowledging cutoff cleanup", async () => {
+  it("processes ended sessions before acknowledging cutoff cleanup", async () => {
     const calls: string[] = [];
     const lifecycle = createOrderingLifecycle(calls);
 
@@ -1448,22 +1606,12 @@ describe("voice resident runtime", () => {
         }
       },
       memoryWorker: {
-        enqueueCutoff: (cutoff) => {
-          calls.push(`enqueue:${cutoff.sessionId}`);
-          return {
-            id: 42,
-            sessionId: cutoff.sessionId,
-            status: "queued",
-            sourceEntryCount: cutoff.entries.length,
-            queuedAt: "2026-06-18T00:00:00.000Z",
-            processingStartedAt: undefined,
-            processedAt: undefined,
-            attemptCount: 0,
-            nextAttemptAt: undefined,
-            lastErrorCode: undefined,
-            deadLetteredAt: undefined,
-            purgeAfter: undefined
-          };
+        processCutoff: (cutoff) => {
+          calls.push(`process:${cutoff.sessionId}`);
+          return Promise.resolve({
+            memoryIds: ["mem0-1"],
+            sourceSessionId: cutoff.sessionId
+          });
         }
       }
     });
@@ -1471,13 +1619,13 @@ describe("voice resident runtime", () => {
     expect(calls).toEqual([
       "read:session-ended",
       "cutoff:session-ended",
-      "enqueue:session-ended",
+      "process:session-ended",
       "ack:session-ended"
     ]);
-    expect(result.enqueuedCutoffs).toBe(1);
+    expect(result.processedCutoffs).toBe(1);
   });
 
-  it("generates and speaks a farewell before enqueueing a timed-ended active session", async () => {
+  it("generates and speaks a farewell before processing a timed-ended active session", async () => {
     const calls: string[] = [];
     const lifecycle = createOrderingLifecycle(calls);
     const prompts: string[] = [];
@@ -1513,22 +1661,12 @@ describe("voice resident runtime", () => {
         }
       },
       memoryWorker: {
-        enqueueCutoff: (cutoff) => {
-          calls.push(`enqueue:${cutoff.sessionId}`);
-          return {
-            id: 42,
-            sessionId: cutoff.sessionId,
-            status: "queued",
-            sourceEntryCount: cutoff.entries.length,
-            queuedAt: "2026-06-18T00:00:00.000Z",
-            processingStartedAt: undefined,
-            processedAt: undefined,
-            attemptCount: 0,
-            nextAttemptAt: undefined,
-            lastErrorCode: undefined,
-            deadLetteredAt: undefined,
-            purgeAfter: undefined
-          };
+        processCutoff: (cutoff) => {
+          calls.push(`process:${cutoff.sessionId}`);
+          return Promise.resolve({
+            memoryIds: ["mem0-1"],
+            sourceSessionId: cutoff.sessionId
+          });
         }
       },
       farewell: {
@@ -1536,7 +1674,7 @@ describe("voice resident runtime", () => {
       }
     });
 
-    expect(result.enqueuedCutoffs).toBe(1);
+    expect(result.processedCutoffs).toBe(1);
     expect(prompts).toEqual([
       "The voice session is ending now. Respond with one brief spoken Japanese farewell for the staff. Do not introduce a new topic."
     ]);
@@ -1547,12 +1685,12 @@ describe("voice resident runtime", () => {
       "tts:また呼んでね。",
       "play",
       "cutoff:session-ended",
-      "enqueue:session-ended",
+      "process:session-ended",
       "ack:session-ended"
     ]);
   });
 
-  it("still enqueues a timed-ended session when farewell generation fails", async () => {
+  it("still processes a timed-ended session when farewell generation fails", async () => {
     const calls: string[] = [];
     const lifecycle = createOrderingLifecycle(calls);
 
@@ -1582,22 +1720,12 @@ describe("voice resident runtime", () => {
         }
       },
       memoryWorker: {
-        enqueueCutoff: (cutoff) => {
-          calls.push(`enqueue:${cutoff.sessionId}`);
-          return {
-            id: 42,
-            sessionId: cutoff.sessionId,
-            status: "queued",
-            sourceEntryCount: cutoff.entries.length,
-            queuedAt: "2026-06-18T00:00:00.000Z",
-            processingStartedAt: undefined,
-            processedAt: undefined,
-            attemptCount: 0,
-            nextAttemptAt: undefined,
-            lastErrorCode: undefined,
-            deadLetteredAt: undefined,
-            purgeAfter: undefined
-          };
+        processCutoff: (cutoff) => {
+          calls.push(`process:${cutoff.sessionId}`);
+          return Promise.resolve({
+            memoryIds: ["mem0-1"],
+            sourceSessionId: cutoff.sessionId
+          });
         }
       },
       farewell: {
@@ -1605,18 +1733,18 @@ describe("voice resident runtime", () => {
       }
     });
 
-    expect(result.enqueuedCutoffs).toBe(1);
+    expect(result.processedCutoffs).toBe(1);
     expect(result.failedTurns).toBe(1);
     expect(calls).toEqual([
       "read:session-ended",
       "prompt:failed",
       "cutoff:session-ended",
-      "enqueue:session-ended",
+      "process:session-ended",
       "ack:session-ended"
     ]);
   });
 
-  it("keeps ended sessions unacknowledged and keeps running when memory enqueue fails", async () => {
+  it("surfaces memory processing failure and leaves the cutoff unacknowledged", async () => {
     const calls: string[] = [];
     const lifecycle = createOrderingLifecycle(calls);
 
@@ -1640,31 +1768,12 @@ describe("voice resident runtime", () => {
           }
         },
         memoryWorker: {
-          enqueueCutoff: () => {
-            calls.push("enqueue:failed");
-            throw new Error("queue full");
-          }
+          processCutoff: () => Promise.reject(new Error("Mem0 unavailable"))
         }
       })
-    ).resolves.toMatchObject({
-      processedFrames: 1,
-      failedCutoffs: 4
-    });
+    ).rejects.toThrow("Mem0 unavailable");
 
-    expect(calls).toEqual([
-      "read:session-ended",
-      "cutoff:session-ended",
-      "enqueue:failed",
-      "read:session-ended",
-      "cutoff:session-ended",
-      "enqueue:failed",
-      "read:session-ended",
-      "cutoff:session-ended",
-      "enqueue:failed",
-      "read:session-ended",
-      "cutoff:session-ended",
-      "enqueue:failed"
-    ]);
+    expect(calls).toEqual(["read:session-ended", "cutoff:session-ended"]);
   });
 
   it("records probe events without transcript payloads", async () => {
@@ -2411,6 +2520,16 @@ function createSequenceActivationSource(
 
 function fixedNow(): () => string {
   return () => "2026-06-18T00:00:00.000Z";
+}
+
+function successfulMemoryWorker(): VoiceResidentMemoryWorker {
+  return {
+    processCutoff: (cutoff) =>
+      Promise.resolve({
+        memoryIds: [],
+        sourceSessionId: cutoff.sessionId
+      })
+  };
 }
 
 function sequenceNow(timestamps: readonly string[]): () => string {

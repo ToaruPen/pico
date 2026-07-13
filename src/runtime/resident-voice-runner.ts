@@ -2,8 +2,10 @@ import { homedir } from "node:os";
 
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../config/index.js";
 import type { AuditEvent } from "../modules/audit/index.js";
-import { openSessionMemoryCandidateQueue } from "../modules/long-memory/index.js";
-import { createSessionMemoryEnqueueWorker } from "../modules/long-memory/session-worker.js";
+import { createMem0MemoryProvider, facilityMemoryScopeId } from "../modules/long-memory/mem0.js";
+import { createMem0OssClient } from "../modules/long-memory/mem0-runtime.js";
+import { createPiModelFacilityMemoryExtractor } from "../modules/long-memory/pi-extractor.js";
+import { createFacilityMemoryWorker } from "../modules/long-memory/worker.js";
 import { createSessionLifecycle } from "../modules/session/index.js";
 import {
   createHalfDuplexEchoControl,
@@ -65,7 +67,7 @@ const residentVoiceMetricStages = new Set([
   "tts_playback",
   "camera_capture",
   "vlm_scene_description",
-  "session_cutoff_enqueue"
+  "session_cutoff_memory"
 ]);
 
 export async function runDirectResidentVoiceHarness(
@@ -178,7 +180,7 @@ export async function runResidentVoiceWithProviders(input: {
       ...(audit === undefined ? {} : { voiceProbe: { audit } })
     });
     const speechActivity = await createConfiguredSpeechActivityGate(config);
-    const memoryWorker = createResidentMemoryWorker(config);
+    const memoryWorker = await createResidentMemoryWorker(config, audit);
 
     await runVoiceResidentRuntime({
       frames,
@@ -459,22 +461,27 @@ function createConfiguredTts(config: PicoConfig) {
   return createAivisSpeechTtsClient(buildAivisSpeechService(config));
 }
 
-function createResidentMemoryWorker(config: PicoConfig) {
+async function createResidentMemoryWorker(
+  config: PicoConfig,
+  audit: ReturnType<typeof createResidentVoiceAuditLog> | undefined
+) {
   const mem0 = config.memory.mem0;
 
-  if (!mem0.enabled || mem0.historyDbPath === undefined) {
-    throw new Error("pico resident voice requires memory.mem0.enabled=true and historyDbPath");
+  if (!mem0.enabled) {
+    throw new Error("pico resident voice requires memory.mem0.enabled=true");
   }
 
-  const queue = openSessionMemoryCandidateQueue(mem0.historyDbPath);
-  const worker = createSessionMemoryEnqueueWorker({
-    queue
+  const client = await createMem0OssClient(mem0);
+  const provider = createMem0MemoryProvider({
+    client,
+    scopeId: facilityMemoryScopeId,
+    ...(audit === undefined ? {} : { audit })
   });
 
-  return {
-    ...worker,
-    close: () => queue.close()
-  };
+  return createFacilityMemoryWorker({
+    extractor: createPiModelFacilityMemoryExtractor(mem0.worker),
+    provider
+  });
 }
 
 async function assertResidentVoiceStartupReadiness(config: PicoConfig): Promise<void> {

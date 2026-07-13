@@ -104,17 +104,15 @@ The default framing is place memory and support knowledge, not child profiles.
 Long-term memory should be designed around what helps the facility provide
 consistent care.
 
-The initial durable slice is a SQLite store for facility knowledge,
-care-continuity notes, and operational notes. It is not a child dossier store
-or a vector-primary memory system. Session-cutoff automation may write facility
-memories without a human review gate, but SQLite remains the durable source of
-truth and vector storage remains a replaceable retrieval index.
+The durable slice uses Mem0 OSS for facility knowledge, care-continuity notes,
+and operational notes. It is not a child dossier store. Session-cutoff automation
+may write validated facility memories without a human review gate; Mem0 owns the
+durable records, history, and retrieval, with Qdrant behind its adapter.
 
-Session-cutoff processing should run outside the live response path. It may use
-an explicit cloud LLM provider through Pi Agent authentication when that is the
-selected operational provider. The worker must be bounded, observable, and
-replaceable; it must not become a hidden provider chain or block live
-conversation turns.
+Session-cutoff processing runs in-process after the conversation session ends. It
+uses the explicitly configured Pi worker model, awaits Mem0 write before cutoff
+acknowledgement, and has no persisted queue, fallback provider chain, or separate
+Pico-owned memory database.
 
 ### local_models
 
@@ -244,9 +242,8 @@ Suggested first slice:
 5. Keep `voice`, `vision`, `camera`, and `channels` as explicit future modules
    with contracts but no runtime implementation until their real dependencies
    are selected and reachable.
-6. Keep the first `long_memory` runtime surface limited to SQLite facility
-   memory. Broader extraction, compaction, and integration behavior is future
-   work.
+6. Keep the first `long_memory` runtime surface limited to Mem0-backed facility
+   memory. Broader integrations remain future work.
 
 ## Open Decisions
 

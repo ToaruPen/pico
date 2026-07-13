@@ -147,29 +147,20 @@ voice:
       # Optional default text: こんにちは。picoの音声スモークです。
 
 memory:
-  longMemory:
-    enabled: true
-    databasePath: /var/lib/pico/long-memory.sqlite
-    extraction:
-      provider: pi_model
-      piProvider: openai-codex
-      api: openai-codex-responses
-      model: gpt-5.6-luna
-      thinkingLevel: high
-      timeoutMs: 60000
-  # Optional secondary indexing. Disabled for the first retrieval slice.
   mem0:
-    enabled: false
+    enabled: true
     historyDbPath: /var/lib/pico/mem0-history.sqlite
     vectorStore:
       provider: qdrant
       localBaseUrl: http://127.0.0.1:6333
       collectionName: pico_long_memory_jina_v5_small_1024_v1
-    llm:
+    worker:
       provider: pi_model
       piProvider: openai-codex
       api: openai-codex-responses
-      model: gpt-5.4
+      # Select any Pi model available in the local model registry.
+      model: configured-worker-model
+      thinkingLevel: high
       timeoutMs: 60000
     embedder:
       provider: sidecar

@@ -9,13 +9,14 @@ import {
   type ToolDefinition
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { emptyPicoConfig } from "../src/config/index.js";
 import picoExtension, {
   createPicoRegistry,
   picoExtensionMetadata,
   registerPicoExtensionWithRuntime
 } from "../src/index.js";
+import type { Mem0Client } from "../src/modules/long-memory/mem0.js";
 import { createSessionLifecycle } from "../src/modules/session/index.js";
+import { defineEnabledLongMemoryTestConfig } from "./long-memory-config-fixture.js";
 
 type PicoBeforeAgentStartHandler = (
   event: BeforeAgentStartEvent,
@@ -400,36 +401,18 @@ describe("pico extension", () => {
     ]);
   });
 
-  it("closes the shared memory search store at runtime shutdown", async () => {
+  it("closes the shared memory search runtime at session shutdown", async () => {
     const capture = createCapturedExtensionApi();
-    let closeCalls = 0;
 
     registerPicoExtensionWithRuntime(extensionApiFromCapture(capture) as never, {
-      loadConfig: () => ({
-        ...emptyPicoConfig,
-        memory: {
-          ...emptyPicoConfig.memory,
-          longMemory: {
-            enabled: true,
-            databasePath: "/pico/long-memory.sqlite",
-            extraction: {
-              provider: "pi_model",
-              piProvider: "openai-codex",
-              api: "openai-codex-responses",
-              model: "gpt-5.4",
-              thinkingLevel: "high",
-              timeoutMs: 60_000
-            }
-          }
-        }
-      }),
+      loadConfig: () => defineEnabledLongMemoryTestConfig("/pico/mem0-history.sqlite"),
       memorySearch: {
-        openStore: () => ({
-          searchActive: () => [],
-          close: () => {
-            closeCalls += 1;
-          }
-        })
+        createClient: () =>
+          Promise.resolve({
+            add: () => Promise.resolve({ memories: [] }),
+            search: () => Promise.resolve({ memories: [] }),
+            delete: () => Promise.resolve()
+          } satisfies Mem0Client)
       }
     });
 
@@ -444,7 +427,16 @@ describe("pico extension", () => {
     shutdown();
     shutdown();
 
-    expect(closeCalls).toBe(1);
+    const closedResult = await tool.execute(
+      "call-2",
+      { query: "雨" },
+      undefined,
+      undefined,
+      {} as ExtensionContext
+    );
+    expect(extractToolJson(closedResult)).toMatchObject({
+      result: { status: "unavailable", code: "closed" }
+    });
   });
 });
 

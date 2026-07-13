@@ -34,29 +34,22 @@ This verifies that the actual Pi Agent process can call pico runtime tools. It
 is still not a substitute for microphone, speaker, camera, VLM, memory, or OTel
 validation.
 
-Entry-bearing session cutoff through memory and OTel is validated with:
+Configured Pi worker extraction followed by Mem0 storage, search, delete, and
+redacted audit evidence is validated with:
 
 ```bash
-PICO_CONFIG_PATH=config/pico.local.yaml npm run field:session-memory-lifecycle
+PICO_CONFIG_PATH=config/pico.local.yaml npm run smoke:mem0-runtime
 ```
 
-The complete automated-memory retrieval path is validated separately. This
-gate calls the configured real extraction model, writes active SQLite memory,
-then invokes `pico_memory_search` from a separate extension runtime:
+Embedding-sidecar readiness is validated separately:
 
 ```bash
-PICO_CONFIG_PATH=config/pico.local.yaml \
-PICO_ENABLE_LIVE_SESSION_MEMORY_RETRIEVAL=1 \
-npm run field:session-memory-retrieval
+PICO_CONFIG_PATH=config/pico.local.yaml npm run smoke:embedding-sidecar
 ```
 
-Its JSON report may contain IDs, counts, durations, status, and a redacted
-database path only. Do not add the cutoff text, search query, memory title/body,
-device identifiers, credentials, or raw provider output to the report.
-
-Use a documented local field config if the production session duration is too
-long for a repeatable field run. The command fails unless the cutoff contains at
-least one source entry and the same cutoff produces memory and OTel evidence.
+Reports may contain IDs, counts, dimensions, durations, and status only. Do not
+add cutoff text, search query, memory title/body, device identifiers,
+credentials, or raw provider output.
 
 Visible-person PTZ follow behavior is validated separately from the smoke gate:
 

@@ -15,9 +15,7 @@ import type { MemoryConfig, Message, SearchResult } from "mem0ai/oss";
 import type {
   PicoMem0Config,
   PicoMem0EmbedderConfig,
-  PicoMem0LlmConfig,
-  PicoMem0OllamaLlmConfig,
-  PicoMem0PiModelLlmConfig
+  PicoMem0WorkerConfig
 } from "../../config/index.js";
 import type { Mem0AddRequest, Mem0AddResponse, Mem0Client, Mem0SearchResponse } from "./mem0.js";
 
@@ -44,7 +42,7 @@ export type Mem0OssClientFactoryOptions = {
   readonly createMemory?: (config: MemoryConfig) => Mem0OssRuntime;
   readonly fetchEmbeddingSidecar?: typeof fetch;
   readonly fetchOllamaTags?: (localBaseUrl: string, signal: AbortSignal) => Promise<unknown>;
-  readonly createPiAgentSession?: (config: PicoMem0PiModelLlmConfig) => Promise<PiAgentLlmSession>;
+  readonly createPiAgentSession?: (config: PicoMem0WorkerConfig) => Promise<PiAgentLlmSession>;
   readonly modelPreflightTimeoutMs?: number;
 };
 
@@ -64,7 +62,6 @@ type Mem0OssModule = {
 const require = createRequire(import.meta.url);
 const defaultModelPreflightTimeoutMs = 10_000;
 const defaultEmbeddingSidecarTimeoutMs = 30_000;
-const defaultPiModelLlmTimeoutMs = 60_000;
 
 export async function createMem0OssClient(
   config: PicoMem0Config,
@@ -91,7 +88,7 @@ export async function createMem0OssClient(
           ...request.metadata,
           pico_scope_id: request.scopeId
         },
-        infer: config.infer ?? false
+        infer: false
       });
 
       return normalizeMem0AddResponse(response);
@@ -100,7 +97,8 @@ export async function createMem0OssClient(
       const response = await memory.search(request.query, {
         filters: {
           user_id: request.scopeId
-        }
+        },
+        topK: request.limit
       });
 
       return normalizeMem0SearchResponse(response);
@@ -135,10 +133,12 @@ async function assertLocalOllamaModelsAvailable(
   fetchTags: (localBaseUrl: string, signal: AbortSignal) => Promise<unknown>,
   timeoutMs: number
 ): Promise<void> {
-  const llm = requireMem0Llm(config.llm);
-  const modelChecks: Promise<void>[] =
-    llm.provider === "ollama" ? [assertLocalOllamaModelAvailable(llm, fetchTags, timeoutMs)] : [];
-  const embedder = requireMem0Embedder(config.embedder);
+  const modelChecks: Promise<void>[] = [];
+  const embedder = config.enabled ? config.embedder : undefined;
+
+  if (embedder === undefined) {
+    throw new Error("pico Mem0 runtime requires memory.mem0.embedder");
+  }
 
   if (embedder.provider === "ollama") {
     modelChecks.push(assertLocalOllamaModelAvailable(embedder, fetchTags, timeoutMs));
@@ -148,7 +148,7 @@ async function assertLocalOllamaModelsAvailable(
 }
 
 async function assertLocalOllamaModelAvailable(
-  config: PicoMem0OllamaLlmConfig | PicoMem0EmbedderConfig,
+  config: PicoMem0EmbedderConfig,
   fetchTags: (localBaseUrl: string, signal: AbortSignal) => Promise<unknown>,
   timeoutMs: number
 ): Promise<void> {
@@ -277,9 +277,9 @@ export function buildMem0OssConfig(
     throw new Error("pico Mem0 runtime requires memory.mem0.enabled=true");
   }
 
-  const vectorStore = requireMem0VectorStore(config);
-  const llm = requireMem0Llm(config.llm);
-  const embedder = requireMem0Embedder(config.embedder);
+  const vectorStore = config.vectorStore;
+  const worker = config.worker;
+  const embedder = config.embedder;
   const embeddingDims = embedder.embeddingDims;
 
   return {
@@ -292,29 +292,19 @@ export function buildMem0OssConfig(
         ...(embeddingDims === undefined ? {} : { dimension: embeddingDims })
       }
     },
-    llm: toMem0LlmConfig(llm, options.createPiAgentSession),
+    llm: toMem0LlmConfig(worker, options.createPiAgentSession),
     embedder: toMem0EmbedderConfig(embedder, options.fetchEmbeddingSidecar)
   };
 }
 
 function toMem0LlmConfig(
-  llm: PicoMem0LlmConfig,
+  worker: PicoMem0WorkerConfig,
   createPiAgentSession: Mem0OssClientFactoryOptions["createPiAgentSession"]
 ): MemoryConfig["llm"] {
-  if (llm.provider === "ollama") {
-    return {
-      provider: "ollama",
-      config: {
-        url: llm.localBaseUrl,
-        model: llm.model
-      }
-    };
-  }
-
   return {
     provider: "langchain",
     config: {
-      model: createPiAgentLlm(llm, createPiAgentSession ?? createDefaultPiAgentSession)
+      model: createPiAgentLlm(worker, createPiAgentSession ?? createDefaultPiAgentSession)
     }
   };
 }
@@ -329,10 +319,10 @@ type LangchainCompatibleLlm = {
 };
 
 function createPiAgentLlm(
-  config: PicoMem0PiModelLlmConfig,
-  createSession: (config: PicoMem0PiModelLlmConfig) => Promise<PiAgentLlmSession>
+  config: PicoMem0WorkerConfig,
+  createSession: (config: PicoMem0WorkerConfig) => Promise<PiAgentLlmSession>
 ): LangchainCompatibleLlm {
-  const timeoutMs = config.timeoutMs ?? defaultPiModelLlmTimeoutMs;
+  const timeoutMs = config.timeoutMs;
 
   return Object.freeze({
     model: config.model,
@@ -385,7 +375,7 @@ function createPiAgentLlm(
 }
 
 async function createDefaultPiAgentSession(
-  config: PicoMem0PiModelLlmConfig
+  config: PicoMem0WorkerConfig
 ): Promise<PiAgentLlmSession> {
   const authStorage = AuthStorage.create();
   const modelRegistry = ModelRegistry.create(authStorage);
@@ -405,7 +395,7 @@ async function createDefaultPiAgentSession(
 
   const { session } = await createAgentSession({
     model,
-    thinkingLevel: "off",
+    thinkingLevel: config.thinkingLevel,
     authStorage,
     modelRegistry,
     noTools: "all",
@@ -417,11 +407,11 @@ async function createDefaultPiAgentSession(
       },
       retry: {
         provider: {
-          timeoutMs: config.timeoutMs ?? defaultPiModelLlmTimeoutMs,
+          timeoutMs: config.timeoutMs,
           maxRetries: 0
         }
       },
-      httpIdleTimeoutMs: config.timeoutMs ?? defaultPiModelLlmTimeoutMs
+      httpIdleTimeoutMs: config.timeoutMs
     })
   });
 
@@ -644,35 +634,10 @@ function normalizeMem0SearchResponse(response: SearchResult): Mem0SearchResponse
     memories: response.results.map((memory) => ({
       id: requireMem0Text(memory.id, "Mem0 memory id"),
       content: requireMem0Text(memory.memory, "Mem0 memory content"),
-      ...(memory.score === undefined ? {} : { score: memory.score })
+      ...(memory.score === undefined ? {} : { score: memory.score }),
+      ...(memory.metadata === undefined ? {} : { metadata: Object.freeze({ ...memory.metadata }) })
     }))
   };
-}
-
-function requireMem0VectorStore(
-  config: PicoMem0Config
-): NonNullable<PicoMem0Config["vectorStore"]> {
-  if (config.vectorStore === undefined) {
-    throw new Error("pico Mem0 runtime requires memory.mem0.vectorStore");
-  }
-
-  return config.vectorStore;
-}
-
-function requireMem0Llm(config: PicoMem0Config["llm"]): PicoMem0LlmConfig {
-  if (config === undefined) {
-    throw new Error("pico Mem0 runtime requires memory.mem0.llm");
-  }
-
-  return config;
-}
-
-function requireMem0Embedder(config: PicoMem0Config["embedder"]): PicoMem0EmbedderConfig {
-  if (config === undefined) {
-    throw new Error("pico Mem0 runtime requires memory.mem0.embedder");
-  }
-
-  return config;
 }
 
 function requireMem0Text(value: unknown, label: string): string {

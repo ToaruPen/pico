@@ -24,7 +24,10 @@ export type EmbeddingSidecarSmokeDependencies = {
   readonly loadConfig?: () => PicoConfig;
 };
 
-type Mem0EmbedderConfig = NonNullable<PicoConfig["memory"]["mem0"]["embedder"]>;
+type Mem0EmbedderConfig = Extract<
+  PicoConfig["memory"]["mem0"],
+  { readonly enabled: true }
+>["embedder"];
 type SidecarEmbedderConfig = Mem0EmbedderConfig & { readonly provider: "sidecar" };
 
 const provider = "embedding-sidecar" as const;
@@ -77,14 +80,14 @@ async function runEmbeddingSidecarSmokeUnchecked(
 }
 
 function sidecarEmbedderConfig(config: PicoConfig): SidecarEmbedderConfig | undefined {
-  const embedder = config.memory.mem0.embedder;
+  const mem0 = config.memory.mem0;
 
-  if (!config.memory.mem0.enabled || embedder?.provider !== "sidecar") {
+  if (!mem0.enabled || mem0.embedder.provider !== "sidecar") {
     return undefined;
   }
 
   return {
-    ...embedder,
+    ...mem0.embedder,
     provider: "sidecar"
   };
 }

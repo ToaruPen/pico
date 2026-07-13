@@ -1,7 +1,7 @@
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 
-import type { PicoLongMemoryExtractionConfig } from "../src/config/index.js";
+import type { PicoMem0WorkerConfig } from "../src/config/index.js";
 import {
   buildFacilityMemoryExtractionPrompt,
   parseAutomatedFacilityMemoryDrafts
@@ -40,7 +40,7 @@ const extractionConfig = {
   model: "test-extraction-model",
   thinkingLevel: "high",
   timeoutMs: 25
-} as const satisfies PicoLongMemoryExtractionConfig;
+} as const satisfies PicoMem0WorkerConfig;
 
 describe("automated facility-memory parser", () => {
   it("accepts bounded drafts with trimmed text and source provenance", () => {

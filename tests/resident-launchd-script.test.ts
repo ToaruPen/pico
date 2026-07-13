@@ -71,11 +71,7 @@ setInterval(() => undefined, 1_000);
     }
   });
 
-  it("reads the selected service independently of argument order", () => {
-    expect(readResidentLaunchdArguments(["status", "--service=memory"])).toEqual({
-      operation: "status",
-      serviceKind: "memory"
-    });
+  it("accepts only the resident voice service selector", () => {
     expect(readResidentLaunchdArguments(["--service=voice", "restart"])).toEqual({
       operation: "restart",
       serviceKind: "voice"
@@ -84,11 +80,8 @@ setInterval(() => undefined, 1_000);
       operation: "status",
       serviceKind: "voice"
     });
-  });
-
-  it("rejects unknown service selectors", () => {
-    expect(() => readResidentLaunchdArguments(["status", "--service=other"])).toThrow(
-      "resident launchd service"
+    expect(() => readResidentLaunchdArguments(["status", "--service=memory"])).toThrow(
+      "resident launchd service must be voice"
     );
   });
 
@@ -100,10 +93,9 @@ setInterval(() => undefined, 1_000);
         {
           kind: "status",
           command: "launchctl",
-          args: ["print", "gui/501/dev.toarupen.pico.resident-memory"],
+          args: ["print", "gui/501/dev.toarupen.pico.resident-voice"],
           allowedExitCodes: [0],
-          serviceKind: "memory",
-          configPath: "/repo/pico/config/pico.local.yaml"
+          serviceKind: "voice"
         }
       ],
       {
@@ -111,11 +103,6 @@ setInterval(() => undefined, 1_000);
           Promise.resolve(
             "state = running\npid = 31880\nenvironment = { STACKCHAN_TOKEN => exposed-secret }"
           ),
-        readMemoryQueueStatus: () => ({
-          queueDepth: 3,
-          oldestQueuedAgeMs: 60_000,
-          deadLetterCount: 2
-        }),
         writeOutput: (content) => output.push(content)
       }
     );
@@ -123,10 +110,7 @@ setInterval(() => undefined, 1_000);
     expect(output).toEqual([
       `${JSON.stringify({
         state: "running",
-        pid: 31880,
-        queueDepth: 3,
-        oldestQueuedAgeMs: 60_000,
-        deadLetterCount: 2
+        pid: 31880
       })}\n`
     ]);
     expect(output.join("\n")).not.toContain("STACKCHAN_TOKEN");

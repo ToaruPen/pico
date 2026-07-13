@@ -10,7 +10,6 @@ export type PicoConfig = DeepReadonly<{
   };
   session: PicoSessionConfig;
   memory: {
-    longMemory: PicoLongMemoryConfig;
     mem0: PicoMem0Config;
   };
   audit: {
@@ -56,24 +55,17 @@ export type PicoSessionConfig = {
   };
 };
 
-export type PicoMem0Config = {
-  readonly enabled: boolean;
-  readonly infer?: boolean;
-  readonly historyDbPath?: string;
-  readonly vectorStore?: PicoMem0VectorStoreConfig;
-  readonly llm?: PicoMem0LlmConfig;
-  readonly embedder?: PicoMem0EmbedderConfig;
-};
-
-export type PicoLongMemoryConfig =
+export type PicoMem0Config =
   | { readonly enabled: false }
   | {
       readonly enabled: true;
-      readonly databasePath: string;
-      readonly extraction: PicoLongMemoryExtractionConfig;
+      readonly historyDbPath: string;
+      readonly vectorStore: PicoMem0VectorStoreConfig;
+      readonly worker: PicoMem0WorkerConfig;
+      readonly embedder: PicoMem0EmbedderConfig;
     };
 
-export type PicoLongMemoryExtractionConfig = {
+export type PicoMem0WorkerConfig = {
   readonly provider: "pi_model";
   readonly piProvider: "openai-codex";
   readonly api: "openai-codex-responses";
@@ -86,22 +78,6 @@ export type PicoMem0VectorStoreConfig = {
   readonly provider: "qdrant";
   readonly localBaseUrl: string;
   readonly collectionName: string;
-};
-
-export type PicoMem0LlmConfig = PicoMem0OllamaLlmConfig | PicoMem0PiModelLlmConfig;
-
-export type PicoMem0OllamaLlmConfig = {
-  readonly provider: "ollama";
-  readonly localBaseUrl: string;
-  readonly model: string;
-};
-
-export type PicoMem0PiModelLlmConfig = {
-  readonly provider: "pi_model";
-  readonly piProvider: "openai-codex";
-  readonly api: "openai-codex-responses";
-  readonly model: string;
-  readonly timeoutMs?: number;
 };
 
 export type PicoMem0EmbedderConfig = {
@@ -345,9 +321,6 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
     }
   },
   memory: {
-    longMemory: {
-      enabled: false
-    },
     mem0: {
       enabled: false
     }
@@ -540,57 +513,84 @@ function defineSessionEnding(
 
 function defineMemorySection(root: Record<string, unknown>): PicoConfig["memory"] {
   const memory = readOptionalRecord(root.memory, "pico config memory");
-  const longMemory = readOptionalRecord(memory?.longMemory, "pico config memory.longMemory");
   const mem0 = readOptionalRecord(memory?.mem0, "pico config memory.mem0");
 
+  if (memory !== undefined) {
+    requireKnownConfigFields(memory, "pico config memory", ["mem0"]);
+  }
+
   return {
-    longMemory: defineLongMemoryConfig(longMemory),
     mem0: defineMem0Config(mem0)
   };
 }
 
-function defineLongMemoryConfig(input: Record<string, unknown> | undefined): PicoLongMemoryConfig {
+function requireThinkingLevel(
+  value: unknown,
+  label: string
+): PicoAgentModelConfig["thinkingLevel"] {
+  const thinkingLevel = requireString(value, label);
+
+  if (!picoThinkingLevels.has(thinkingLevel)) {
+    throw new Error(`${label} must be off, minimal, low, medium, high, xhigh, or max`);
+  }
+
+  return thinkingLevel as PicoAgentModelConfig["thinkingLevel"];
+}
+
+function defineMem0Config(input: Record<string, unknown> | undefined): PicoMem0Config {
   if (input === undefined) {
     return {
       enabled: false
     };
   }
 
-  const enabled =
-    readOptionalBoolean(input.enabled, "pico config memory.longMemory.enabled") ?? false;
-
+  const enabled = readOptionalBoolean(input.enabled, "pico config memory.mem0.enabled") ?? false;
   requireKnownConfigFields(
     input,
-    "pico config memory.longMemory",
-    enabled ? ["enabled", "databasePath", "extraction"] : ["enabled"]
+    "pico config memory.mem0",
+    enabled ? ["enabled", "historyDbPath", "vectorStore", "worker", "embedder"] : ["enabled"]
   );
 
   if (!enabled) {
     return { enabled };
   }
 
-  const extraction = readOptionalRecord(
-    input.extraction,
-    "pico config memory.longMemory.extraction"
-  );
-
-  if (extraction === undefined) {
-    throw new Error(
-      "pico config memory.longMemory.extraction is required when memory.longMemory is enabled"
-    );
-  }
-
   return {
     enabled,
-    databasePath: requireString(input.databasePath, "pico config memory.longMemory.databasePath"),
-    extraction: defineLongMemoryExtractionConfig(extraction)
+    historyDbPath: requireString(input.historyDbPath, "pico config memory.mem0.historyDbPath"),
+    vectorStore: defineMem0VectorStore(
+      requireRecord(input.vectorStore, "pico config memory.mem0.vectorStore")
+    ),
+    worker: defineMem0Worker(requireRecord(input.worker, "pico config memory.mem0.worker")),
+    embedder: defineMem0Embedder(
+      requireRecord(input.embedder, "pico config memory.mem0.embedder"),
+      "pico config memory.mem0.embedder"
+    )
   };
 }
 
-function defineLongMemoryExtractionConfig(
-  input: Record<string, unknown>
-): PicoLongMemoryExtractionConfig {
-  const label = "pico config memory.longMemory.extraction";
+function defineMem0VectorStore(input: Record<string, unknown>): PicoMem0VectorStoreConfig {
+  const provider = requireString(input.provider, "pico config memory.mem0.vectorStore.provider");
+
+  if (provider !== "qdrant") {
+    throw new Error("pico config memory.mem0.vectorStore.provider must be qdrant");
+  }
+
+  return {
+    provider,
+    localBaseUrl: requireLocalBaseUrl(
+      input.localBaseUrl,
+      "pico config memory.mem0.vectorStore.localBaseUrl"
+    ),
+    collectionName: requireString(
+      input.collectionName,
+      "pico config memory.mem0.vectorStore.collectionName"
+    )
+  };
+}
+
+function defineMem0Worker(input: Record<string, unknown>): PicoMem0WorkerConfig {
+  const label = "pico config memory.mem0.worker";
   requireKnownConfigFields(input, label, [
     "provider",
     "piProvider",
@@ -599,7 +599,6 @@ function defineLongMemoryExtractionConfig(
     "thinkingLevel",
     "timeoutMs"
   ]);
-
   const provider = requireString(input.provider, `${label}.provider`);
   const piProvider = requireString(input.piProvider, `${label}.piProvider`);
   const api = requireString(input.api, `${label}.api`);
@@ -625,130 +624,6 @@ function defineLongMemoryExtractionConfig(
     timeoutMs: requireNumber(
       readOptionalBoundedPositiveInteger(input.timeoutMs, `${label}.timeoutMs`, maxNodeTimeoutMs),
       `${label}.timeoutMs`
-    )
-  };
-}
-
-function requireThinkingLevel(
-  value: unknown,
-  label: string
-): PicoAgentModelConfig["thinkingLevel"] {
-  const thinkingLevel = requireString(value, label);
-
-  if (!picoThinkingLevels.has(thinkingLevel)) {
-    throw new Error(`${label} must be off, minimal, low, medium, high, xhigh, or max`);
-  }
-
-  return thinkingLevel as PicoAgentModelConfig["thinkingLevel"];
-}
-
-function defineMem0Config(input: Record<string, unknown> | undefined): PicoMem0Config {
-  if (input === undefined) {
-    return {
-      enabled: false
-    };
-  }
-
-  const enabled = readOptionalBoolean(input.enabled, "pico config memory.mem0.enabled") ?? false;
-  const historyDatabasePath = readOptionalString(
-    input.historyDbPath,
-    "pico config memory.mem0.historyDbPath"
-  );
-  const vectorStore = readOptionalRecord(input.vectorStore, "pico config memory.mem0.vectorStore");
-  const llm = readOptionalRecord(input.llm, "pico config memory.mem0.llm");
-  const embedder = readOptionalRecord(input.embedder, "pico config memory.mem0.embedder");
-
-  if (enabled) {
-    return {
-      enabled,
-      ...optionalBooleanProperty(input, "infer", "pico config memory.mem0.infer"),
-      historyDbPath: requireString(historyDatabasePath, "pico config memory.mem0.historyDbPath"),
-      vectorStore: defineMem0VectorStore(
-        requireRecord(vectorStore, "pico config memory.mem0.vectorStore")
-      ),
-      llm: defineMem0Llm(requireRecord(llm, "pico config memory.mem0.llm")),
-      embedder: defineMem0Embedder(
-        requireRecord(embedder, "pico config memory.mem0.embedder"),
-        "pico config memory.mem0.embedder"
-      )
-    };
-  }
-
-  return {
-    enabled,
-    ...optionalBooleanProperty(input, "infer", "pico config memory.mem0.infer"),
-    ...(historyDatabasePath === undefined ? {} : { historyDbPath: historyDatabasePath }),
-    ...(vectorStore === undefined ? {} : { vectorStore: defineMem0VectorStore(vectorStore) }),
-    ...(llm === undefined ? {} : { llm: defineMem0Llm(llm) }),
-    ...(embedder === undefined
-      ? {}
-      : { embedder: defineMem0Embedder(embedder, "pico config memory.mem0.embedder") })
-  };
-}
-
-function defineMem0VectorStore(input: Record<string, unknown>): PicoMem0VectorStoreConfig {
-  const provider = requireString(input.provider, "pico config memory.mem0.vectorStore.provider");
-
-  if (provider !== "qdrant") {
-    throw new Error("pico config memory.mem0.vectorStore.provider must be qdrant");
-  }
-
-  return {
-    provider,
-    localBaseUrl: requireLocalBaseUrl(
-      input.localBaseUrl,
-      "pico config memory.mem0.vectorStore.localBaseUrl"
-    ),
-    collectionName: requireString(
-      input.collectionName,
-      "pico config memory.mem0.vectorStore.collectionName"
-    )
-  };
-}
-
-function defineMem0Llm(input: Record<string, unknown>): PicoMem0LlmConfig {
-  const provider = requireString(input.provider, "pico config memory.mem0.llm.provider");
-
-  if (provider === "ollama") {
-    return {
-      provider,
-      localBaseUrl: requireLocalBaseUrl(
-        input.localBaseUrl,
-        "pico config memory.mem0.llm.localBaseUrl"
-      ),
-      model: requireString(input.model, "pico config memory.mem0.llm.model")
-    };
-  }
-
-  if (provider === "pi_model") {
-    return defineMem0PiModelLlm(input);
-  }
-
-  throw new Error("pico config memory.mem0.llm.provider must be ollama or pi_model");
-}
-
-function defineMem0PiModelLlm(input: Record<string, unknown>): PicoMem0PiModelLlmConfig {
-  const piProvider = requireString(input.piProvider, "pico config memory.mem0.llm.piProvider");
-  const api = requireString(input.api, "pico config memory.mem0.llm.api");
-
-  if (piProvider !== "openai-codex") {
-    throw new Error("pico config memory.mem0.llm.piProvider must be openai-codex");
-  }
-
-  if (api !== "openai-codex-responses") {
-    throw new Error("pico config memory.mem0.llm.api must be openai-codex-responses");
-  }
-
-  return {
-    provider: "pi_model",
-    piProvider,
-    api,
-    model: requireString(input.model, "pico config memory.mem0.llm.model"),
-    ...optionalBoundedPositiveIntegerProperty(
-      input,
-      "timeoutMs",
-      "pico config memory.mem0.llm.timeoutMs",
-      maxNodeTimeoutMs
     )
   };
 }
@@ -1682,25 +1557,16 @@ function resolveConfigRelativePaths(config: PicoConfig, baseDirectory: string): 
   return deepFreeze({
     ...config,
     memory: {
-      longMemory: config.memory.longMemory.enabled
-        ? {
-            ...config.memory.longMemory,
-            databasePath: resolveConfigRelativePath(
-              baseDirectory,
-              config.memory.longMemory.databasePath
-            )
-          }
-        : config.memory.longMemory,
       mem0: {
         ...config.memory.mem0,
-        ...(config.memory.mem0.historyDbPath === undefined
-          ? {}
-          : {
+        ...(config.memory.mem0.enabled
+          ? {
               historyDbPath: resolveConfigRelativePath(
                 baseDirectory,
                 config.memory.mem0.historyDbPath
               )
-            })
+            }
+          : {})
       }
     },
     vision: {
@@ -1791,16 +1657,6 @@ function optionalStringProperty(
   label: string
 ): Record<string, string> {
   const value = readOptionalString(input[key], label);
-
-  return value === undefined ? {} : { [key]: value };
-}
-
-function optionalBooleanProperty(
-  input: Record<string, unknown>,
-  key: string,
-  label: string
-): Record<string, boolean> {
-  const value = readOptionalBoolean(input[key], label);
 
   return value === undefined ? {} : { [key]: value };
 }

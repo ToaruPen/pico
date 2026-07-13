@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { mem0RuntimeSmokeExitCode, runMem0RuntimeSmoke } from "../scripts/smoke/mem0-runtime.js";
+import {
+  type Mem0RuntimeSmokeDependencies,
+  mem0RuntimeSmokeExitCode,
+  runMem0RuntimeSmoke
+} from "../scripts/smoke/mem0-runtime.js";
 import { definePicoConfig } from "../src/config/index.js";
+import type { FacilityMemoryExtractor } from "../src/modules/long-memory/extractor.js";
 import type {
   Mem0AddRequest,
   Mem0AddResponse,
@@ -21,10 +26,13 @@ function enabledConfig() {
           localBaseUrl: "http://127.0.0.1:6333",
           collectionName: "pico_long_memory"
         },
-        llm: {
-          provider: "ollama",
-          localBaseUrl: "http://127.0.0.1:11434",
-          model: "qwen3.5:9b"
+        worker: {
+          provider: "pi_model",
+          piProvider: "openai-codex",
+          api: "openai-codex-responses",
+          model: "arbitrary-smoke-worker",
+          thinkingLevel: "high",
+          timeoutMs: 60_000
         },
         embedder: {
           provider: "ollama",
@@ -35,6 +43,22 @@ function enabledConfig() {
       }
     }
   });
+}
+
+function createSmokeExtractor(): FacilityMemoryExtractor {
+  return {
+    extract: (cutoff) =>
+      Promise.resolve([
+        {
+          title: "雨の日の工作準備",
+          body: cutoff.entries[0]?.content ?? "missing smoke entry",
+          category: "facility_knowledge",
+          tags: ["smoke"],
+          sourceEntryIds: [cutoff.sourceEntryIds[0] ?? "missing"],
+          confidence: 1
+        }
+      ])
+  };
 }
 
 describe("Mem0 runtime smoke", () => {
@@ -81,6 +105,7 @@ describe("Mem0 runtime smoke", () => {
     };
 
     const report = await runMem0RuntimeSmoke(enabledConfig(), {
+      createExtractor: createSmokeExtractor,
       createClient: () => client,
       createRunId: () => "test-run"
     });
@@ -97,7 +122,7 @@ describe("Mem0 runtime smoke", () => {
       }
     });
     expect(calls).toEqual([
-      "add:pico-smoke-test-run:2",
+      "add:pico-smoke-test-run:1",
       "search:pico-smoke-test-run:test-run",
       "delete:mem0-smoke-1"
     ]);
@@ -105,8 +130,50 @@ describe("Mem0 runtime smoke", () => {
     expect(mem0RuntimeSmokeExitCode(report)).toBe(0);
   });
 
+  it("runs the configured extraction worker before writing the smoke memory", async () => {
+    let observedModel: string | undefined;
+    const dependencies: Mem0RuntimeSmokeDependencies = {
+      createRunId: () => "worker-run",
+      createExtractor: (worker): FacilityMemoryExtractor => {
+        observedModel = worker.model;
+
+        return {
+          extract: (cutoff) =>
+            Promise.resolve([
+              {
+                title: "抽出された施設知識",
+                body: `抽出workerを通った。 run:worker-run`,
+                category: "facility_knowledge",
+                tags: ["smoke"],
+                sourceEntryIds: [cutoff.sourceEntryIds[0] ?? "missing"],
+                confidence: 0.9
+              }
+            ])
+        };
+      },
+      createClient: (): Mem0Client => ({
+        add: (request) => {
+          expect(request.messages[0]?.content).toContain("抽出workerを通った");
+
+          return Promise.resolve({ memories: [{ id: "worker-memory" }] });
+        },
+        search: () =>
+          Promise.resolve({
+            memories: [{ id: "worker-memory", content: "抽出workerを通った。" }]
+          }),
+        delete: () => Promise.resolve()
+      })
+    };
+
+    await expect(runMem0RuntimeSmoke(enabledConfig(), dependencies)).resolves.toMatchObject({
+      status: "passed"
+    });
+    expect(observedModel).toBe("arbitrary-smoke-worker");
+  });
+
   it("fails when the runtime add/search/delete path fails", async () => {
     const report = await runMem0RuntimeSmoke(enabledConfig(), {
+      createExtractor: createSmokeExtractor,
       createClient: () => ({
         add: () => Promise.reject(new Error("qdrant unavailable")),
         search: () => Promise.resolve({ memories: [] }),
@@ -126,6 +193,7 @@ describe("Mem0 runtime smoke", () => {
   it("fails when search does not return a memory created by this run", async () => {
     const calls: string[] = [];
     const report = await runMem0RuntimeSmoke(enabledConfig(), {
+      createExtractor: createSmokeExtractor,
       createClient: () => ({
         add: () =>
           Promise.resolve({
@@ -162,6 +230,7 @@ describe("Mem0 runtime smoke", () => {
   it("preserves the primary search failure when cleanup also fails", async () => {
     const calls: string[] = [];
     const report = await runMem0RuntimeSmoke(enabledConfig(), {
+      createExtractor: createSmokeExtractor,
       createClient: () => ({
         add: () =>
           Promise.resolve({
@@ -198,6 +267,7 @@ describe("Mem0 runtime smoke", () => {
   it("attempts to delete every memory created by a failed smoke run", async () => {
     const calls: string[] = [];
     const report = await runMem0RuntimeSmoke(enabledConfig(), {
+      createExtractor: createSmokeExtractor,
       createClient: () => ({
         add: () =>
           Promise.resolve({
@@ -238,6 +308,7 @@ describe("Mem0 runtime smoke", () => {
 
     try {
       const report = runMem0RuntimeSmoke(enabledConfig(), {
+        createExtractor: createSmokeExtractor,
         createClient: () => ({
           add: () => new Promise<Mem0AddResponse>(() => undefined),
           search: () => Promise.resolve({ memories: [] }),
@@ -247,6 +318,7 @@ describe("Mem0 runtime smoke", () => {
         timeoutMs: 25
       });
 
+      await vi.advanceTimersByTimeAsync(0);
       await vi.advanceTimersByTimeAsync(25);
 
       await expect(report).resolves.toEqual({
@@ -264,6 +336,7 @@ describe("Mem0 runtime smoke", () => {
 
     try {
       const report = runMem0RuntimeSmoke(enabledConfig(), {
+        createExtractor: createSmokeExtractor,
         createClient: () => new Promise<Mem0Client>(() => undefined),
         createRunId: () => "test-run",
         timeoutMs: 25
@@ -288,6 +361,7 @@ describe("Mem0 runtime smoke", () => {
 
     try {
       const report = runMem0RuntimeSmoke(enabledConfig(), {
+        createExtractor: createSmokeExtractor,
         createClient: () => ({
           add: () =>
             new Promise<Mem0AddResponse>((resolve) => {
@@ -304,6 +378,8 @@ describe("Mem0 runtime smoke", () => {
         timeoutMs: 25
       });
 
+      await vi.advanceTimersByTimeAsync(0);
+      expect(resolveAdd).toBeTypeOf("function");
       await vi.advanceTimersByTimeAsync(25);
 
       await expect(report).resolves.toEqual({
@@ -315,8 +391,7 @@ describe("Mem0 runtime smoke", () => {
       resolveAdd?.({
         memories: [{ id: "mem0-late-1" }, { id: "mem0-late-2" }]
       });
-      await Promise.resolve();
-      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(0);
 
       expect(calls).toEqual(["delete:mem0-late-1", "delete:mem0-late-2"]);
     } finally {

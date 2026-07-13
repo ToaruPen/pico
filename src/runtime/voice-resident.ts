@@ -1,4 +1,4 @@
-import type { SessionMemoryWorker } from "../modules/long-memory/session-worker.js";
+import type { FacilityMemoryWorker } from "../modules/long-memory/worker.js";
 import type {
   SessionLifecycle,
   SessionRecord,
@@ -58,8 +58,8 @@ export type PiAgentTurnClient = {
   readonly disposeAll?: () => void | Promise<void>;
 };
 
-export type VoiceResidentMemoryWorker = Pick<SessionMemoryWorker, "enqueueCutoff"> & {
-  readonly close?: () => void;
+export type VoiceResidentMemoryWorker = FacilityMemoryWorker & {
+  readonly close?: () => void | Promise<void>;
 };
 
 export type VoiceResidentConsoleEvent =
@@ -137,7 +137,7 @@ export type VoiceResidentRuntimeResult = {
   readonly processedFrames: number;
   readonly startedSessions: number;
   readonly completedTurns: number;
-  readonly enqueuedCutoffs: number;
+  readonly processedCutoffs: number;
   readonly failedCutoffs: number;
   readonly failedFrames: number;
   readonly failedTurns: number;
@@ -148,7 +148,7 @@ type VoiceResidentCounters = {
   processedFrames: number;
   startedSessions: number;
   completedTurns: number;
-  enqueuedCutoffs: number;
+  processedCutoffs: number;
   failedCutoffs: number;
   failedFrames: number;
   failedTurns: number;
@@ -195,7 +195,7 @@ export async function runVoiceResidentRuntime(
     processedFrames: 0,
     startedSessions: 0,
     completedTurns: 0,
-    enqueuedCutoffs: 0,
+    processedCutoffs: 0,
     failedCutoffs: 0,
     failedFrames: 0,
     failedTurns: 0,
@@ -222,7 +222,7 @@ export async function runVoiceResidentRuntime(
       throw new Error(`pico resident voice echo-control provider is unhealthy: ${health.message}`);
     }
 
-    await enqueueEndedSessions(
+    await processEndedSessions(
       options,
       pendingCutoffSessionIds,
       counters,
@@ -255,7 +255,7 @@ export async function runVoiceResidentRuntime(
       piAgent: options.piAgent,
       deferredTools: options.deferredTools
     });
-    await enqueueEndedSessions(
+    await processEndedSessions(
       options,
       pendingCutoffSessionIds,
       counters,
@@ -293,37 +293,38 @@ async function runShutdownCleanup(
   counters: VoiceResidentCounters,
   now: () => string
 ): Promise<string | undefined> {
-  const nextActiveSessionId = await cleanupActiveSessionForShutdown(
-    options,
-    activeSessionId,
-    pendingCutoffSessionIds,
-    farewelledSessionIds,
-    counters,
-    now
-  );
-  const firstError = await collectFirstShutdownCleanupError(options);
+  const errors: Error[] = [];
+  let nextActiveSessionId = activeSessionId;
 
-  if (firstError !== undefined) {
-    throw firstError;
+  await recordCleanupError(errors, async () => {
+    nextActiveSessionId = await cleanupActiveSessionForShutdown(
+      options,
+      activeSessionId,
+      pendingCutoffSessionIds,
+      farewelledSessionIds,
+      counters,
+      now
+    );
+  });
+
+  await collectShutdownCleanupErrors(options, errors);
+
+  if (errors[0] !== undefined) {
+    throw errors[0];
   }
 
   return nextActiveSessionId;
 }
 
-async function collectFirstShutdownCleanupError(
-  options: VoiceResidentRuntimeOptions
-): Promise<Error | undefined> {
-  const errors: Error[] = [];
-
+async function collectShutdownCleanupErrors(
+  options: VoiceResidentRuntimeOptions,
+  errors: Error[]
+): Promise<void> {
   await recordCleanupError(errors, () => options.piAgent.disposeAll?.());
   await recordCleanupError(errors, () => options.deferredTools?.waitForIdle?.());
-  await recordCleanupError(errors, () => {
-    options.memoryWorker?.close?.();
-  });
+  await recordCleanupError(errors, () => options.memoryWorker?.close?.());
   await recordCleanupError(errors, () => options.echoControl.flush());
   await recordCleanupError(errors, () => options.speechActivity?.close?.());
-
-  return errors[0];
 }
 
 async function recordCleanupError(
@@ -357,7 +358,7 @@ async function processResidentFrameIteration(
     }
   );
   state.activeSession.setActiveSessionId(activeSessionId);
-  await enqueueEndedSessions(
+  await processEndedSessions(
     options,
     state.pendingCutoffSessionIds,
     counters,
@@ -404,7 +405,7 @@ async function cleanupActiveSessionForShutdown(
       deferredTools: options.deferredTools
     }
   );
-  await enqueueEndedSessions(options, pendingCutoffSessionIds, counters, now, farewelledSessionIds);
+  await processEndedSessions(options, pendingCutoffSessionIds, counters, now, farewelledSessionIds);
 
   return nextActiveSessionId;
 }
@@ -525,7 +526,7 @@ async function processTranscribedUtterance(
       deferredTools: options.deferredTools
     })
   );
-  await enqueueEndedSessions(
+  await processEndedSessions(
     options,
     state.pendingCutoffSessionIds,
     counters,
@@ -1259,7 +1260,7 @@ function cancelDeferredToolSession(
   }
 }
 
-async function enqueueEndedSessions(
+async function processEndedSessions(
   options: VoiceResidentRuntimeOptions,
   pendingCutoffSessionIds: Set<string>,
   counters: VoiceResidentCounters,
@@ -1278,26 +1279,28 @@ async function enqueueEndedSessions(
 
     if (options.memoryWorker === undefined) {
       counters.failedCutoffs += 1;
-      recordCutoffEnqueueError(options, now(), "missing_memory_worker");
-      continue;
+      recordCutoffProcessingError(options, now(), "missing_memory_worker");
+      pendingCutoffSessionIds.delete(sessionId);
+      throw new Error("pico resident voice requires a facility memory worker");
     }
 
     const startedAt = now();
     const cutoff = options.sessionLifecycle.cutoff(sessionId);
 
     try {
-      options.memoryWorker.enqueueCutoff(cutoff);
-    } catch {
+      await options.memoryWorker.processCutoff(cutoff);
+    } catch (error) {
       counters.failedCutoffs += 1;
-      recordCutoffEnqueueError(options, startedAt, "enqueue_failed");
-      continue;
+      recordCutoffProcessingError(options, startedAt, "processing_failed");
+      pendingCutoffSessionIds.delete(sessionId);
+      throw error;
     }
 
     options.sessionLifecycle.acknowledgeCutoff(sessionId);
     pendingCutoffSessionIds.delete(sessionId);
-    counters.enqueuedCutoffs += 1;
+    counters.processedCutoffs += 1;
     recordVoiceStageProbe(options.probe ?? {}, {
-      stage: "session_cutoff_enqueue",
+      stage: "session_cutoff_memory",
       status: "ok",
       startedAt,
       durationMs: 0,
@@ -1411,13 +1414,13 @@ function disposeSessionQuietly(piAgent: PiAgentTurnClient, sessionId: string): v
   void Promise.resolve(piAgent.disposeSession?.(sessionId)).catch(() => undefined);
 }
 
-function recordCutoffEnqueueError(
+function recordCutoffProcessingError(
   options: VoiceResidentRuntimeOptions,
   startedAt: string,
   errorCode: string
 ): void {
   recordVoiceStageProbe(options.probe ?? {}, {
-    stage: "session_cutoff_enqueue",
+    stage: "session_cutoff_memory",
     status: "error",
     startedAt,
     durationMs: 0,

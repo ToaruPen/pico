@@ -4,8 +4,6 @@ import { homedir, userInfo } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { loadPicoConfig } from "../../src/config/index.js";
-import { openSessionMemoryCandidateQueue } from "../../src/modules/long-memory/index.js";
 import {
   createResidentLaunchdOperationPlan,
   defineResidentLaunchdService,
@@ -13,7 +11,6 @@ import {
   type ResidentLaunchdOperation,
   type ResidentLaunchdOperationStep,
   type ResidentLaunchdServiceKind,
-  type ResidentMemoryQueueStatus,
   requireResidentLaunchdPlatform
 } from "../../src/runtime/resident-launchd.js";
 
@@ -29,7 +26,6 @@ export type ResidentLaunchdExecutionDependencies = {
     allowedExitCodes: readonly number[]
   ) => Promise<string>;
   readonly writeOutput?: (content: string) => void;
-  readonly readMemoryQueueStatus?: (configPath: string) => ResidentMemoryQueueStatus;
 };
 
 export function readResidentLaunchdArguments(
@@ -113,44 +109,7 @@ async function executeStatusStep(
 ): Promise<void> {
   const execute = dependencies.runStatusCommand ?? runCapturedCommand;
   const rawStatus = await execute(step.command, step.args, step.allowedExitCodes ?? [0]);
-  const memoryQueueStatus =
-    step.serviceKind === "memory" && step.configPath !== undefined
-      ? (dependencies.readMemoryQueueStatus ?? readMemoryQueueStatus)(step.configPath)
-      : undefined;
-
-  writeOutput(
-    `${JSON.stringify(formatResidentLaunchdStatus(rawStatus, memoryQueueStatus))}\n`,
-    dependencies
-  );
-}
-
-function readMemoryQueueStatus(configPath: string): ResidentMemoryQueueStatus {
-  const config = loadPicoConfig({ path: configPath });
-
-  if (!config.memory.longMemory.enabled) {
-    throw new Error("resident memory status requires memory.longMemory.enabled=true");
-  }
-
-  const queue = openSessionMemoryCandidateQueue(config.memory.longMemory.databasePath);
-
-  try {
-    const jobs = queue.listJobs();
-    const oldestQueuedAt = jobs
-      .filter((job) => job.status === "queued")
-      .map((job) => Date.parse(job.queuedAt))
-      .filter(Number.isFinite)
-      .sort((left, right) => left - right)[0];
-
-    return {
-      queueDepth: jobs.filter((job) => job.status === "queued" || job.status === "processing")
-        .length,
-      oldestQueuedAgeMs:
-        oldestQueuedAt === undefined ? 0 : Math.max(0, Date.now() - oldestQueuedAt),
-      deadLetterCount: jobs.filter((job) => job.status === "dead_letter").length
-    };
-  } finally {
-    queue.close();
-  }
+  writeOutput(`${JSON.stringify(formatResidentLaunchdStatus(rawStatus))}\n`, dependencies);
 }
 
 function runCapturedCommand(
@@ -280,11 +239,7 @@ function readServiceKind(value: string | undefined): ResidentLaunchdServiceKind 
     return "voice";
   }
 
-  if (value === "--service=memory") {
-    return "memory";
-  }
-
-  throw new Error("resident launchd service must be voice or memory");
+  throw new Error("resident launchd service must be voice");
 }
 
 function readLaunchdPathEnvironment(environment: NodeJS.ProcessEnv, homeDirectory: string): string {

@@ -131,7 +131,7 @@ Other observed passed sections:
 - `voice_stt`.
 - `voice_tts`.
 - `mem0_runtime`.
-- `memory_candidate`.
+- `memory_mem0`.
 - `audit_otel`.
 
 ## Follow-Up

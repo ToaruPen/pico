@@ -1,8 +1,6 @@
 #!/usr/bin/env jiti
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
@@ -16,11 +14,8 @@ import {
   createOpenTelemetryAuditExporter,
   type OpenTelemetryAuditExporter
 } from "../../src/modules/audit/otel.js";
-import {
-  openLongMemoryStore,
-  openSessionMemoryCandidateStore,
-  type SessionMemoryCutoffInput
-} from "../../src/modules/long-memory/index.js";
+import type { SessionMemoryCutoffInput } from "../../src/modules/long-memory/index.js";
+import { createMem0MemoryProvider, type Mem0Client } from "../../src/modules/long-memory/mem0.js";
 import { type CameraVlmSceneSmokeReport, runCameraVlmSceneSmoke } from "./camera-vlm-scene.js";
 import { type EmbeddingSidecarSmokeReport, runEmbeddingSidecarSmoke } from "./embedding-sidecar.js";
 import { type Mem0RuntimeSmokeReport, runMem0RuntimeSmoke } from "./mem0-runtime.js";
@@ -54,7 +49,7 @@ export type PicoMilestoneSmokeSectionName =
   | "camera_vlm_scene"
   | "embedding_sidecar"
   | "mem0_runtime"
-  | "memory_candidate"
+  | "memory_mem0"
   | "audit_otel";
 
 export type PicoMilestoneSmokeSectionReport = {
@@ -349,71 +344,75 @@ async function runMemoryAndAuditSections(
   config?: PicoConfig,
   dependencies: Pick<PicoMilestoneSmokeDependencies, "createAuditOtelExporter"> = {}
 ): Promise<readonly PicoMilestoneSmokeSectionReport[]> {
-  const directory = await mkdtemp(join(tmpdir(), "pico-milestone-smoke-"));
-  const path = join(directory, "long-memory.sqlite");
-
   try {
     const audit = createStructuredAuditLog();
-    const candidates = openSessionMemoryCandidateStore(path, {
-      audit,
-      now: () => "2026-06-10T18:31:00.000Z",
-      processSession: () =>
-        Promise.resolve([
-          {
-            title: "雨の日の工作準備",
-            body: "雨の日は工作セットを早めに準備すると活動へ入りやすい。",
-            category: "care_continuity"
-          }
-        ])
+    const client: Mem0Client = {
+      add: () => Promise.resolve({ memories: [{ id: "milestone-mem0-1" }] }),
+      search: () =>
+        Promise.resolve({
+          memories: [
+            {
+              id: "milestone-mem0-1",
+              content: "雨の日は工作セットを早めに準備すると活動へ入りやすい。"
+            }
+          ]
+        }),
+      delete: () => Promise.resolve()
+    };
+    const provider = createMem0MemoryProvider({
+      client,
+      scopeId: "facility:pico:milestone-smoke",
+      audit
     });
+    const added = await provider.addFacilityMemories(completedSession, [
+      {
+        title: "雨の日の工作準備",
+        body: "雨の日は工作セットを早めに準備すると活動へ入りやすい。",
+        category: "facility_knowledge",
+        tags: ["smoke"],
+        sourceEntryIds: ["milestone-memory-1"],
+        confidence: 1
+      }
+    ]);
+    const searchResults = await provider.search("工作準備", 3);
 
-    try {
-      candidates.enqueueSessionCutoff(completedSession);
-      await candidates.processNextJob();
-      const promoted = candidates.promoteReviewed(1, {
-        reviewedBy: "milestone-smoke",
-        reviewedAt: "2026-06-10T18:35:00.000Z",
-        note: "Milestone smoke reviewed memory candidate."
-      });
-      assertPromotedMemorySearch(path);
-      const memoryCandidateSection: PicoMilestoneSmokeSectionReport = {
-        name: "memory_candidate",
-        status: "passed",
-        provider: "sqlite",
-        details: {
-          promotedMemoryId: promoted.id,
-          category: promoted.category
-        }
-      };
-      const auditEntries = audit.entries();
-      const auditOtelSection = await captureSection(
-        "audit_otel",
-        auditOtelProviderName(config),
-        async () => {
-          const otelRecords = auditEntries.map(toOpenTelemetryLogRecord);
-          const firstOtelRecord = validateAuditOtelRecords(auditEntries.length, otelRecords);
-
-          return buildAuditOtelSection(
-            config,
-            dependencies,
-            auditEntries,
-            otelRecords,
-            firstOtelRecord
-          );
-        }
-      );
-
-      return [memoryCandidateSection, auditOtelSection];
-    } finally {
-      candidates.close();
+    if (added.memoryIds.length !== 1 || searchResults[0]?.id !== added.memoryIds[0]) {
+      throw new Error("pico milestone smoke could not search the Mem0 facility memory");
     }
+
+    const memorySection: PicoMilestoneSmokeSectionReport = {
+      name: "memory_mem0",
+      status: "passed",
+      provider: "mem0-oss",
+      details: {
+        memoryId: added.memoryIds[0],
+        category: "facility_knowledge"
+      }
+    };
+    const auditEntries = audit.entries();
+    const auditOtelSection = await captureSection(
+      "audit_otel",
+      auditOtelProviderName(config),
+      async () => {
+        const otelRecords = auditEntries.map(toOpenTelemetryLogRecord);
+        const firstOtelRecord = validateAuditOtelRecords(auditEntries.length, otelRecords);
+
+        return buildAuditOtelSection(
+          config,
+          dependencies,
+          auditEntries,
+          otelRecords,
+          firstOtelRecord
+        );
+      }
+    );
+
+    return [memorySection, auditOtelSection];
   } catch (error) {
     return [
-      failedSection("memory_candidate", "sqlite", errorMessage(error)),
+      failedSection("memory_mem0", "mem0-oss", errorMessage(error)),
       failedSection("audit_otel", "structured-audit", errorMessage(error))
     ];
-  } finally {
-    await rm(directory, { recursive: true, force: true });
   }
 }
 
@@ -563,18 +562,6 @@ function assertMemoryWriteOtelRecord(record: OpenTelemetryAuditLogRecord): void 
 
   if (typeof record.attributes["event.name"] !== "string") {
     throw new Error("pico milestone smoke did not emit an audit event.name attribute");
-  }
-}
-
-function assertPromotedMemorySearch(path: string): void {
-  const memory = openLongMemoryStore(path);
-
-  try {
-    if (memory.search("工作準備").length === 0) {
-      throw new Error("pico milestone smoke could not find promoted long memory");
-    }
-  } finally {
-    memory.close();
   }
 }
 

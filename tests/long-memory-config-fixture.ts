@@ -3,10 +3,11 @@ import { definePicoConfig, type PicoConfig } from "../src/config/index.js";
 type EnabledLongMemoryTestConfigOptions = {
   readonly timedSession?: boolean;
   readonly otelAudit?: boolean;
+  readonly model?: string;
 };
 
 export function defineEnabledLongMemoryTestConfig(
-  databasePath: string,
+  historyDatabasePath: string,
   options: EnabledLongMemoryTestConfigOptions = {}
 ): PicoConfig {
   return definePicoConfig({
@@ -14,16 +15,28 @@ export function defineEnabledLongMemoryTestConfig(
       ? { session: { ending: { mode: "timed" as const, durationMs: 1 } } }
       : {}),
     memory: {
-      longMemory: {
+      mem0: {
         enabled: true,
-        databasePath,
-        extraction: {
+        historyDbPath: historyDatabasePath,
+        vectorStore: {
+          provider: "qdrant",
+          localBaseUrl: "http://127.0.0.1:6333",
+          collectionName: "pico_test_facility_memory"
+        },
+        worker: {
           provider: "pi_model",
           piProvider: "openai-codex",
           api: "openai-codex-responses",
-          model: "gpt-5.4",
+          model: options.model ?? "arbitrary-worker-model",
           thinkingLevel: "high",
           timeoutMs: 60_000
+        },
+        embedder: {
+          provider: "sidecar",
+          localBaseUrl: "http://127.0.0.1:18081",
+          model: "test-embedder",
+          embeddingDims: 3,
+          timeoutMs: 30_000
         }
       }
     },

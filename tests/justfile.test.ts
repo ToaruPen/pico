@@ -31,34 +31,17 @@ describe("justfile", () => {
     expect(justfile).toContain("npm run field:resident-voice-deferred-rallies");
   });
 
-  it("exposes resident memory inspection and cleanup recipes without activation", () => {
+  it("does not expose the removed SQLite memory worker or field harnesses", () => {
     const justfile = readFileSync("Justfile", "utf8");
     const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
       readonly scripts?: Readonly<Record<string, string>>;
     };
 
-    expect(packageJson.scripts?.["resident:memory:launchd"]).toBe(
-      "jiti scripts/resident/launchd.ts --service=memory"
-    );
-    expect(justfile).toContain("memory-status:");
-    expect(justfile).toContain("resident:memory:launchd -- status");
-    expect(justfile).not.toContain("memory-normal:");
-    expect(justfile).not.toContain("resident:memory:launchd -- install");
-    expect(justfile).toContain("memory-stop:");
-    expect(justfile).toContain("resident:memory:launchd -- stop");
-  });
-
-  it("exposes the session memory retrieval field gate", () => {
-    const justfile = readFileSync("Justfile", "utf8");
-    const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
-      readonly scripts?: Readonly<Record<string, string>>;
-    };
-
-    expect(packageJson.scripts?.["field:session-memory-retrieval"]).toBe(
-      "jiti scripts/field/session-memory-retrieval.ts"
-    );
-    expect(justfile).toContain("field-session-memory-retrieval:");
-    expect(justfile).toContain("npm run field:session-memory-retrieval");
+    expect(packageJson.scripts?.["resident:memory"]).toBeUndefined();
+    expect(packageJson.scripts?.["resident:memory:launchd"]).toBeUndefined();
+    expect(packageJson.scripts?.["field:session-memory-retrieval"]).toBeUndefined();
+    expect(justfile).not.toContain("memory-status:");
+    expect(justfile).not.toContain("field-session-memory-retrieval:");
   });
 
   it("exposes the Apple Speech sidecar gate", () => {

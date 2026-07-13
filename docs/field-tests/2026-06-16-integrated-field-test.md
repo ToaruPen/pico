@@ -1,5 +1,8 @@
 # 2026-06-16 Integrated Field Test
 
+> Historical report. References to the former SQLite candidate path describe
+> the system tested on this date; current durable memory is Mem0-only.
+
 ## Scope
 
 Verify the current live pico path across Pi Agent loading, voice providers, Tapo
@@ -44,7 +47,7 @@ PICO_CONFIG_PATH=.pico-local/field-session-cutoff.yaml node_modules/.bin/pi --ap
   `PICO_ENABLE_LIVE_PTZ_NUDGE=1`.
 - Passed sections: `pi_runtime`, `voice_stt`, `voice_tts`, `tapo_snapshot`,
   `person_detection`, `ollama_vlm`, `camera_vlm_scene`, `mem0_runtime`,
-  `memory_candidate`, and `audit_otel`.
+  `memory_mem0`, and `audit_otel`.
 
 Selected details:
 

@@ -20,7 +20,7 @@ export type VoiceRuntimeStage =
   | "tts_playback"
   | "camera_capture"
   | "vlm_scene_description"
-  | "session_cutoff_enqueue";
+  | "session_cutoff_memory";
 
 export type VoiceStageStatus = "ok" | "error" | "skipped" | "suppressed";
 
@@ -52,7 +52,7 @@ const voiceRuntimeStages = new Set<VoiceRuntimeStage>([
   "tts_playback",
   "camera_capture",
   "vlm_scene_description",
-  "session_cutoff_enqueue"
+  "session_cutoff_memory"
 ]);
 const voiceStageStatuses = new Set<VoiceStageStatus>(["ok", "error", "skipped", "suppressed"]);
 const voiceStageAttributeKeys = new Set([

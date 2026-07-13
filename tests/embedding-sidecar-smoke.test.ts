@@ -17,10 +17,13 @@ function configWithSidecarEmbedder(embeddingDims = 3) {
           localBaseUrl: "http://127.0.0.1:6333",
           collectionName: "pico_long_memory"
         },
-        llm: {
-          provider: "ollama",
-          localBaseUrl: "http://127.0.0.1:11434",
-          model: "qwen3.5:9b"
+        worker: {
+          provider: "pi_model",
+          piProvider: "openai-codex",
+          api: "openai-codex-responses",
+          model: "arbitrary-smoke-worker",
+          thinkingLevel: "high",
+          timeoutMs: 60_000
         },
         embedder: {
           provider: "sidecar",
@@ -67,10 +70,13 @@ describe("embedding sidecar smoke", () => {
             localBaseUrl: "http://127.0.0.1:6333",
             collectionName: "pico_long_memory"
           },
-          llm: {
-            provider: "ollama",
-            localBaseUrl: "http://127.0.0.1:11434",
-            model: "qwen3.5:9b"
+          worker: {
+            provider: "pi_model",
+            piProvider: "openai-codex",
+            api: "openai-codex-responses",
+            model: "arbitrary-smoke-worker",
+            thinkingLevel: "high",
+            timeoutMs: 60_000
           },
           embedder: {
             provider: "ollama",
