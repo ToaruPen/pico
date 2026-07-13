@@ -8,7 +8,7 @@
 
 ---
 
-### Task 1: Collapse the configuration contract
+## Task 1: Collapse the configuration contract
 
 **Files:** `src/config/index.ts`, `config/pico.example.yaml`, `tests/config.test.ts`, test fixtures.
 
@@ -17,7 +17,7 @@
 - Replace Mem0 `llm` alternatives with a required Pi worker model configuration.
 - Update the example without a Luna-specific contract.
 
-### Task 2: Make Mem0 accept validated facility drafts
+## Task 2: Make Mem0 accept validated facility drafts
 
 **Files:** `src/modules/long-memory/index.ts`, `extractor.ts`, `pi-extractor.ts`, `mem0.ts`, `mem0-runtime.ts`, new `worker.ts`, focused tests.
 
@@ -27,7 +27,7 @@
 - Force `infer:false` in the OSS client.
 - Implement a one-shot worker that composes extractor and provider.
 
-### Task 3: Replace SQLite search with Mem0 search
+## Task 3: Replace SQLite search with Mem0 search
 
 **Files:** `src/runtime/memory-tool.ts`, `tests/memory-tool.test.ts`, extension wiring tests.
 
@@ -35,7 +35,7 @@
 - Replace SQLite store ownership with the Mem0 provider.
 - Preserve untrusted-memory guidance, input bounds, output bounds, and redacted audit.
 
-### Task 4: Connect the resident lifecycle
+## Task 4: Connect the resident lifecycle
 
 **Files:** `src/runtime/resident-voice-runner.ts`, `src/runtime/voice-resident.ts`, related tests.
 
@@ -44,7 +44,7 @@
 - Surface failure and keep the cutoff unacknowledged.
 - Build the extractor/provider once from `memory.mem0` during resident startup.
 
-### Task 5: Delete the duplicate implementation
+## Task 5: Delete the duplicate implementation
 
 **Files:** old worker/store/scripts/tests, launchd, npm/Just targets, smoke/field harnesses, README/spec references.
 
@@ -53,7 +53,7 @@
 - Update milestone/smoke coverage to use Mem0-only operations.
 - Run similarity/identifier searches to confirm no old owner remains.
 
-### Task 6: Verify and publish
+## Task 6: Verify and publish
 
 - Run focused tests after each Red/Green slice.
 - Run `just format`, `just check`, and the repository-standard secretlint command against changed files.

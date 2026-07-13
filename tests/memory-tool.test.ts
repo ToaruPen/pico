@@ -117,27 +117,20 @@ describe("pico memory search tool", () => {
     });
   });
 
-  it("retries lazy provider initialization on a later tool call", async () => {
-    const provider = {
-      search: vi.fn().mockResolvedValue([{ id: "mem0-1", content: "施設の手順" }])
-    } as unknown as Mem0MemoryProvider;
-    const createClient = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("qdrant starting"))
-      .mockResolvedValueOnce({});
+  it("keeps failed lazy provider initialization unavailable until restart", async () => {
+    const createClient = vi.fn().mockRejectedValue(new Error("qdrant starting"));
     const runtime = createPicoMemorySearchRuntime({
       loadConfig: () => enabledConfig,
-      createClient,
-      createProvider: () => provider
+      createClient
     });
 
     expect(await execute(runtime, { query: "施設" })).toMatchObject({
       result: { status: "unavailable", code: "provider_unavailable" }
     });
     expect(await execute(runtime, { query: "施設" })).toMatchObject({
-      result: { status: "completed" }
+      result: { status: "unavailable", code: "provider_unavailable" }
     });
-    expect(createClient).toHaveBeenCalledTimes(2);
+    expect(createClient).toHaveBeenCalledOnce();
   });
 
   it("audits counts and fixed codes without raw query or memory content", async () => {

@@ -193,7 +193,18 @@ describe("Mem0 runtime smoke", () => {
   it("cleans up memories committed before a later smoke add fails", async () => {
     const deletedMemoryIds: string[] = [];
     let addCalls = 0;
-    const report = await runMem0RuntimeSmoke(enabledConfig(), {
+    let markDeleteStarted: (() => void) | undefined;
+    let reportSettled = false;
+    const deleteStarted = new Promise<void>((resolveDeleteStarted) => {
+      markDeleteStarted = () => {
+        resolveDeleteStarted();
+      };
+    });
+    let releaseDelete: (() => void) | undefined;
+    const pendingDelete = new Promise<void>((resolveDelete) => {
+      releaseDelete = resolveDelete;
+    });
+    const reportOperation = runMem0RuntimeSmoke(enabledConfig(), {
       createRunId: () => "partial-run",
       createExtractor: (): FacilityMemoryExtractor => ({
         extract: (cutoff) =>
@@ -227,15 +238,23 @@ describe("Mem0 runtime smoke", () => {
         search: () => Promise.resolve({ memories: [] }),
         delete: (memoryId) => {
           deletedMemoryIds.push(memoryId);
+          markDeleteStarted?.();
 
-          return Promise.resolve();
+          return pendingDelete;
         }
       })
+    }).then((report) => {
+      reportSettled = true;
+
+      return report;
     });
 
+    await deleteStarted;
     await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reportSettled).toBe(false);
+    releaseDelete?.();
 
-    expect(report).toEqual({
+    await expect(reportOperation).resolves.toEqual({
       status: "failed",
       provider: "mem0-oss",
       reason: "pico Mem0 runtime smoke failed: second add failed"

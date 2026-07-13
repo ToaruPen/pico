@@ -48,19 +48,7 @@ export function createPicoMemorySearchRuntime(
       throw new Error("closed");
     }
 
-    if (provider === undefined) {
-      const initialization = createConfiguredProvider(options);
-      const retryableInitialization = initialization.catch((error: unknown) => {
-        if (provider === retryableInitialization) {
-          provider = undefined;
-        }
-
-        throw error;
-      });
-
-      provider = retryableInitialization;
-    }
-
+    provider ??= createConfiguredProvider(options);
     return provider;
   };
 

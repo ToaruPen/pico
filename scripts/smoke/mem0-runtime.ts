@@ -180,13 +180,26 @@ async function processCutoffWithLateCleanup(
   provider: ReturnType<typeof createMem0MemoryProvider>,
   timeoutMs: number
 ): Promise<Mem0SessionAddResult> {
+  const settledOperation = processingOperation.then(
+    (value) => ({ status: "fulfilled", value }) as const,
+    (reason: unknown) => ({ status: "rejected", reason }) as const
+  );
+  let outcome: Awaited<typeof settledOperation>;
+
   try {
-    return await withTimeout(processingOperation, "Mem0 add", timeoutMs);
+    outcome = await withTimeout(settledOperation, "Mem0 add", timeoutMs);
   } catch (error) {
     cleanupLateProcessedMemories(processingOperation, provider, timeoutMs).catch(() => undefined);
 
     throw error;
   }
+
+  if (outcome.status === "fulfilled") {
+    return outcome.value;
+  }
+
+  await cleanupLateProcessedMemories(processingOperation, provider, timeoutMs);
+  throw outcome.reason;
 }
 
 async function cleanupLateProcessedMemories(
