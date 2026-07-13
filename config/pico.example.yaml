@@ -1,5 +1,11 @@
 # Copy this file to config/pico.local.yaml and fill in local-only values.
 # Do not commit config/pico.local.yaml.
+pico:
+  model:
+    provider: openai-codex
+    id: gpt-5.6-sol
+    thinkingLevel: medium
+
 session:
   enabled: true
   startTriggers:
@@ -141,6 +147,17 @@ voice:
       # Optional default text: こんにちは。picoの音声スモークです。
 
 memory:
+  longMemory:
+    enabled: true
+    databasePath: /var/lib/pico/long-memory.sqlite
+    extraction:
+      provider: pi_model
+      piProvider: openai-codex
+      api: openai-codex-responses
+      model: gpt-5.6-luna
+      thinkingLevel: high
+      timeoutMs: 60000
+  # Optional secondary indexing. Disabled for the first retrieval slice.
   mem0:
     enabled: false
     historyDbPath: /var/lib/pico/mem0-history.sqlite

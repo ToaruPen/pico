@@ -1,5 +1,5 @@
 import { loadPicoConfigFromEnvironment } from "../config/index.js";
-import type { ResidentVoiceController } from "./pico-runtime-profile.js";
+import type { PicoController as ResidentVoiceController } from "./pico-startup.js";
 import { acquireResidentSingleInstanceLock } from "./resident-single-instance-lock.js";
 import {
   requireResidentVoiceEnabled,

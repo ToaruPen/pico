@@ -9,6 +9,7 @@ import {
   type LongMemoryCandidateDraft,
   openLongMemoryStore,
   openSessionMemoryCandidateStore,
+  PermanentMemoryPolicyError,
   type SessionMemoryCutoffInput
 } from "../src/modules/long-memory/index.js";
 
@@ -39,6 +40,21 @@ async function withLongMemoryDatabase(run: (path: string) => Promise<void> | voi
     await run(path);
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+}
+
+function readCandidateJobRow(
+  path: string,
+  id = 1
+): { readonly status: string; readonly cutoff_json: string } {
+  const database = new DatabaseSync(path);
+
+  try {
+    return database
+      .prepare("SELECT status, cutoff_json FROM long_memory_candidate_jobs WHERE id = ?")
+      .get(id) as { readonly status: string; readonly cutoff_json: string };
+  } finally {
+    database.close();
   }
 }
 
@@ -131,25 +147,18 @@ describe("session long-memory candidate pipeline", () => {
 
         expect(JSON.stringify(candidates.listJobs())).not.toContain("工作セットを早めに出す");
         expect(JSON.stringify(candidates.listJobs())).not.toContain("工作セットを先に準備する候補");
-        const database = new DatabaseSync(path);
-        try {
-          const row = database
-            .prepare("SELECT cutoff_json FROM long_memory_candidate_jobs WHERE id = 1")
-            .get() as { readonly cutoff_json: string };
+        const row = readCandidateJobRow(path);
 
-          expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
-          expect(row.cutoff_json).not.toContain("工作セットを先に準備する候補");
-          expect(JSON.parse(row.cutoff_json)).toEqual({
-            sessionId: "session-2026-06-10-evening",
-            cutoffAt: "2026-06-10T18:30:00.000Z",
-            sourceEntryIds: ["memory-1", "memory-2"],
-            sourceEntryCount: 2,
-            requestedBy: "pico",
-            retention: "processed_metadata_only"
-          });
-        } finally {
-          database.close();
-        }
+        expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
+        expect(row.cutoff_json).not.toContain("工作セットを先に準備する候補");
+        expect(JSON.parse(row.cutoff_json)).toEqual({
+          sessionId: "session-2026-06-10-evening",
+          cutoffAt: "2026-06-10T18:30:00.000Z",
+          sourceEntryIds: ["memory-1", "memory-2"],
+          sourceEntryCount: 2,
+          requestedBy: "pico",
+          retention: "processed_metadata_only"
+        });
         expect(audit.entries().map((event) => event.name)).toEqual([
           "long_memory.candidate_job.enqueued",
           "long_memory.candidate.created",
@@ -162,12 +171,14 @@ describe("session long-memory candidate pipeline", () => {
     });
   });
 
-  it("compacts failed job cutoff payloads to metadata after processor failure", async () => {
+  it("schedules retryable failures after 30 seconds without scrubbing the cutoff payload", async () => {
     await withLongMemoryDatabase(async (path) => {
+      const audit = createStructuredAuditLog();
       const candidates = openSessionMemoryCandidateStore(path, {
-        now: () => "2026-06-10T18:31:00.000Z",
+        audit,
+        now: () => "2026-07-11T00:00:00.000Z",
         processSession: () => {
-          throw new Error("processor unavailable");
+          throw new Error("processor unavailable with raw provider output");
         }
       });
 
@@ -176,73 +187,196 @@ describe("session long-memory candidate pipeline", () => {
 
         await expect(candidates.processNextJob()).rejects.toThrow("processor unavailable");
 
-        const database = new DatabaseSync(path);
+        expect(candidates.listJobs()).toEqual([
+          expect.objectContaining({
+            status: "queued",
+            attemptCount: 1,
+            nextAttemptAt: "2026-07-11T00:00:30.000Z",
+            lastErrorCode: "extraction_failed",
+            deadLetteredAt: undefined,
+            purgeAfter: undefined
+          })
+        ]);
 
-        try {
-          const row = database
-            .prepare("SELECT status, cutoff_json FROM long_memory_candidate_jobs WHERE id = 1")
-            .get() as { readonly status: string; readonly cutoff_json: string };
+        const row = readCandidateJobRow(path);
 
-          expect(row.status).toBe("failed");
-          expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
-          expect(row.cutoff_json).not.toContain("工作セットを先に準備する候補");
-          expect(JSON.parse(row.cutoff_json)).toEqual({
-            sessionId: "session-2026-06-10-evening",
-            cutoffAt: "2026-06-10T18:30:00.000Z",
-            sourceEntryIds: ["memory-1", "memory-2"],
-            sourceEntryCount: 2,
-            requestedBy: "pico",
-            retention: "failed_metadata_only"
-          });
-        } finally {
-          database.close();
-        }
+        expect(row.status).toBe("queued");
+        expect(JSON.parse(row.cutoff_json)).toEqual(completedSession);
+        expect(JSON.stringify(audit.entries())).not.toContain(
+          "processor unavailable with raw provider output"
+        );
       } finally {
         candidates.close();
       }
     });
   });
 
-  it("compacts unparseable failed cutoff payloads without retaining raw JSON", async () => {
+  it("uses a two-minute second retry delay and dead-letters the third failed attempt", async () => {
     await withLongMemoryDatabase(async (path) => {
+      let currentTime = "2026-07-11T00:00:00.000Z";
       const candidates = openSessionMemoryCandidateStore(path, {
-        now: () => "2026-06-10T18:31:00.000Z",
-        processSession: () => Promise.resolve([])
+        now: () => currentTime,
+        processSession: () => {
+          throw new Error("retryable extraction failure");
+        }
       });
 
       try {
         candidates.enqueueSessionCutoff(completedSession);
-        const mutationDatabase = new DatabaseSync(path);
+        await expect(candidates.processNextJob()).rejects.toThrow("retryable extraction failure");
 
-        try {
-          mutationDatabase
-            .prepare("UPDATE long_memory_candidate_jobs SET cutoff_json = ? WHERE id = 1")
-            .run('{"raw":"工作セットを早めに出す malformed"}');
-        } finally {
-          mutationDatabase.close();
+        currentTime = "2026-07-11T00:00:29.999Z";
+        await expect(candidates.processNextJob()).resolves.toBeUndefined();
+
+        currentTime = "2026-07-11T00:00:30.000Z";
+        await expect(candidates.processNextJob()).rejects.toThrow("retryable extraction failure");
+        expect(candidates.listJobs()).toEqual([
+          expect.objectContaining({
+            status: "queued",
+            attemptCount: 2,
+            nextAttemptAt: "2026-07-11T00:02:30.000Z",
+            lastErrorCode: "extraction_failed"
+          })
+        ]);
+
+        currentTime = "2026-07-11T00:02:30.000Z";
+        await expect(candidates.processNextJob()).rejects.toThrow("retryable extraction failure");
+        expect(candidates.listJobs()).toEqual([
+          expect.objectContaining({
+            status: "dead_letter",
+            attemptCount: 3,
+            nextAttemptAt: undefined,
+            lastErrorCode: "extraction_failed",
+            deadLetteredAt: "2026-07-11T00:02:30.000Z",
+            purgeAfter: "2026-07-18T00:02:30.000Z"
+          })
+        ]);
+
+        const row = readCandidateJobRow(path);
+
+        expect(row.status).toBe("dead_letter");
+        expect(JSON.parse(row.cutoff_json)).toEqual(completedSession);
+      } finally {
+        candidates.close();
+      }
+    });
+  });
+
+  it("dead-letters permanent policy failures immediately and scrubs raw cutoff content", async () => {
+    await withLongMemoryDatabase(async (path) => {
+      const audit = createStructuredAuditLog();
+      const candidates = openSessionMemoryCandidateStore(path, {
+        audit,
+        now: () => "2026-07-11T00:00:00.000Z",
+        processSession: () => {
+          throw new PermanentMemoryPolicyError("raw policy-sensitive model output");
         }
+      });
 
+      try {
+        candidates.enqueueSessionCutoff(completedSession);
+        await expect(candidates.processNextJob()).rejects.toThrow(PermanentMemoryPolicyError);
+
+        expect(candidates.listJobs()).toEqual([
+          expect.objectContaining({
+            status: "dead_letter",
+            attemptCount: 1,
+            nextAttemptAt: undefined,
+            lastErrorCode: "policy_violation",
+            deadLetteredAt: "2026-07-11T00:00:00.000Z",
+            purgeAfter: undefined
+          })
+        ]);
+
+        const row = readCandidateJobRow(path);
+
+        expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
+        expect(JSON.parse(row.cutoff_json)).toMatchObject({
+          sessionId: completedSession.sessionId,
+          retention: "dead_letter_metadata_only"
+        });
+        expect(JSON.stringify(audit.entries())).not.toContain("raw policy-sensitive model output");
+      } finally {
+        candidates.close();
+      }
+    });
+  });
+
+  it("purges expired retry-exhausted dead-letter payloads to metadata only", async () => {
+    await withLongMemoryDatabase(async (path) => {
+      let currentTime = "2026-07-11T00:00:00.000Z";
+      const candidates = openSessionMemoryCandidateStore(path, {
+        now: () => currentTime,
+        processSession: () => {
+          throw new Error("retryable extraction failure");
+        }
+      });
+
+      try {
+        candidates.enqueueSessionCutoff(completedSession);
+        await expect(candidates.processNextJob()).rejects.toThrow();
+        currentTime = "2026-07-11T00:00:30.000Z";
+        await expect(candidates.processNextJob()).rejects.toThrow();
+        currentTime = "2026-07-11T00:02:30.000Z";
         await expect(candidates.processNextJob()).rejects.toThrow();
 
-        const database = new DatabaseSync(path);
+        expect(candidates.purgeExpiredDeadLetterPayloads({ now: "2026-07-18T00:02:29.999Z" })).toBe(
+          0
+        );
+        expect(candidates.purgeExpiredDeadLetterPayloads({ now: "2026-07-18T00:02:30.000Z" })).toBe(
+          1
+        );
 
-        try {
-          const row = database
-            .prepare("SELECT status, cutoff_json FROM long_memory_candidate_jobs WHERE id = 1")
-            .get() as { readonly status: string; readonly cutoff_json: string };
+        const row = readCandidateJobRow(path);
 
-          expect(row.status).toBe("failed");
-          expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
-          expect(JSON.parse(row.cutoff_json)).toEqual({
-            jobId: 1,
-            processedAt: "2026-06-10T18:31:00.000Z",
-            sourceEntryIds: [],
-            sourceEntryCount: 0,
-            retention: "failed_unparseable_metadata_only"
-          });
-        } finally {
-          database.close();
+        expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
+        expect(JSON.parse(row.cutoff_json)).toMatchObject({
+          sessionId: completedSession.sessionId,
+          retention: "dead_letter_metadata_only"
+        });
+      } finally {
+        candidates.close();
+      }
+    });
+  });
+
+  it("canonicalizes offset timestamps for retry eligibility and dead-letter purge", async () => {
+    await withLongMemoryDatabase(async (path) => {
+      let currentTime = "2026-07-11T09:00:00.000+09:00";
+      const candidates = openSessionMemoryCandidateStore(path, {
+        now: () => currentTime,
+        processSession: () => {
+          throw new Error("retryable extraction failure");
         }
+      });
+
+      try {
+        candidates.enqueueSessionCutoff(completedSession);
+        await expect(candidates.processNextJob()).rejects.toThrow();
+        expect(candidates.listJobs()).toEqual([
+          expect.objectContaining({
+            queuedAt: "2026-07-11T00:00:00.000Z",
+            nextAttemptAt: "2026-07-11T00:00:30.000Z"
+          })
+        ]);
+
+        currentTime = "2026-07-11T09:00:29.999+09:00";
+        await expect(candidates.processNextJob()).resolves.toBeUndefined();
+        currentTime = "2026-07-11T09:00:30.000+09:00";
+        await expect(candidates.processNextJob()).rejects.toThrow();
+        currentTime = "2026-07-11T09:02:30.000+09:00";
+        await expect(candidates.processNextJob()).rejects.toThrow();
+
+        expect(
+          candidates.purgeExpiredDeadLetterPayloads({
+            now: "2026-07-18T09:02:29.999+09:00"
+          })
+        ).toBe(0);
+        expect(
+          candidates.purgeExpiredDeadLetterPayloads({
+            now: "2026-07-18T09:02:30.000+09:00"
+          })
+        ).toBe(1);
       } finally {
         candidates.close();
       }
@@ -287,9 +421,64 @@ describe("session long-memory candidate pipeline", () => {
     });
   });
 
-  it("rejects child profile content before persisting a session cutoff job", async () => {
+  it("does not classify ordinary session-cutoff prose", async () => {
     await withLongMemoryDatabase((path) => {
       const candidates = openSessionMemoryCandidateStore(path, {
+        processSession: () => Promise.resolve([])
+      });
+
+      try {
+        expect(
+          candidates.enqueueSessionCutoff({
+            ...completedSession,
+            entries: [
+              {
+                id: "memory-1",
+                role: "staff",
+                content: "施設の健康管理手順を年度末に見直す。"
+              }
+            ]
+          }).status
+        ).toBe("queued");
+      } finally {
+        candidates.close();
+      }
+
+      expect(countCandidateJobs(path)).toBe(1);
+    });
+  });
+
+  it("does not classify medical vocabulary in session-cutoff prose", async () => {
+    await withLongMemoryDatabase((path) => {
+      const candidates = openSessionMemoryCandidateStore(path, {
+        processSession: () => Promise.resolve([])
+      });
+
+      try {
+        expect(
+          candidates.enqueueSessionCutoff({
+            ...completedSession,
+            entries: [
+              {
+                id: "memory-1",
+                role: "staff",
+                content: "喘息対応を含む施設の緊急手順を見直す。"
+              }
+            ]
+          }).status
+        ).toBe("queued");
+      } finally {
+        candidates.close();
+      }
+
+      expect(countCandidateJobs(path)).toBe(1);
+    });
+  });
+
+  it("rolls back enqueue when audit validation rejects the event", async () => {
+    await withLongMemoryDatabase((path) => {
+      const candidates = openSessionMemoryCandidateStore(path, {
+        audit: createStructuredAuditLog(),
         processSession: () => Promise.resolve([])
       });
 
@@ -297,15 +486,9 @@ describe("session long-memory candidate pipeline", () => {
         expect(() =>
           candidates.enqueueSessionCutoff({
             ...completedSession,
-            entries: [
-              {
-                id: "memory-1",
-                role: "staff",
-                content: "child profile content must not become durable cutoff payload."
-              }
-            ]
+            sessionId: "s".repeat(257)
           })
-        ).toThrow("pico long memory must not contain individual child profile data");
+        ).toThrow();
       } finally {
         candidates.close();
       }
@@ -462,16 +645,104 @@ describe("session long-memory candidate pipeline", () => {
     });
   });
 
-  it("rejects candidate drafts that contain child profiling or scoring content", async () => {
+  it("dead-letters structurally explicit child-profile fields immediately", async () => {
     await withLongMemoryDatabase(async (path) => {
       const candidates = openSessionMemoryCandidateStore(path, {
         processSession: () =>
           Promise.resolve([
             {
-              title: "child score",
-              body: "child profile content must not become a candidate.",
-              category: "care_continuity"
-            }
+              title: "施設メモ",
+              body: "施設全体の候補。",
+              category: "care_continuity",
+              childId: "child-1"
+            } as unknown as LongMemoryCandidateDraft
+          ])
+      });
+
+      try {
+        candidates.enqueueSessionCutoff(completedSession);
+
+        await expect(candidates.processNextJob()).rejects.toThrow(PermanentMemoryPolicyError);
+        expect(candidates.listPending()).toEqual([]);
+        expect(candidates.listJobs()).toEqual([
+          expect.objectContaining({
+            status: "dead_letter",
+            attemptCount: 1,
+            lastErrorCode: "policy_violation",
+            purgeAfter: undefined
+          })
+        ]);
+
+        const row = readCandidateJobRow(path);
+
+        expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
+        expect(JSON.parse(row.cutoff_json)).toMatchObject({
+          sessionId: completedSession.sessionId,
+          retention: "dead_letter_metadata_only"
+        });
+      } finally {
+        candidates.close();
+      }
+    });
+  });
+
+  it("dead-letters and scrubs structurally explicit child scoring immediately", async () => {
+    await withLongMemoryDatabase(async (path) => {
+      const candidates = openSessionMemoryCandidateStore(path, {
+        processSession: () =>
+          Promise.resolve([
+            {
+              title: "施設メモ",
+              body: "施設全体の候補。",
+              category: "care_continuity",
+              childScore: 1
+            } as unknown as LongMemoryCandidateDraft
+          ])
+      });
+
+      try {
+        candidates.enqueueSessionCutoff(completedSession);
+
+        await expect(candidates.processNextJob()).rejects.toThrow(PermanentMemoryPolicyError);
+        expect(candidates.listJobs()).toEqual([
+          expect.objectContaining({
+            status: "dead_letter",
+            attemptCount: 1,
+            lastErrorCode: "policy_violation",
+            purgeAfter: undefined
+          })
+        ]);
+
+        const row = readCandidateJobRow(path);
+
+        expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
+        expect(JSON.parse(row.cutoff_json)).toMatchObject({
+          sessionId: completedSession.sessionId,
+          retention: "dead_letter_metadata_only"
+        });
+      } finally {
+        candidates.close();
+      }
+    });
+  });
+
+  it.each([
+    "profile",
+    "childGuidance",
+    "childVideo",
+    "childIdea"
+  ])("retries generic unknown field %s instead of treating it as a child-policy violation", async (field) => {
+    await withLongMemoryDatabase(async (path) => {
+      const candidates = openSessionMemoryCandidateStore(path, {
+        now: () => "2026-07-11T00:00:00.000Z",
+        processSession: () =>
+          Promise.resolve([
+            {
+              title: "施設メモ",
+              body: "施設全体の候補。",
+              category: "care_continuity",
+              [field]: "facility"
+            } as unknown as LongMemoryCandidateDraft
           ])
       });
 
@@ -479,9 +750,18 @@ describe("session long-memory candidate pipeline", () => {
         candidates.enqueueSessionCutoff(completedSession);
 
         await expect(candidates.processNextJob()).rejects.toThrow(
-          "pico long memory must not contain individual child profile data"
+          "pico long memory candidate input is malformed"
         );
-        expect(candidates.listPending()).toEqual([]);
+        expect(candidates.listJobs()).toEqual([
+          expect.objectContaining({
+            status: "queued",
+            attemptCount: 1,
+            lastErrorCode: "extraction_failed",
+            nextAttemptAt: "2026-07-11T00:00:30.000Z"
+          })
+        ]);
+
+        expect(JSON.parse(readCandidateJobRow(path).cutoff_json)).toEqual(completedSession);
       } finally {
         candidates.close();
       }
@@ -501,10 +781,11 @@ describe("session long-memory candidate pipeline", () => {
               category: "operational_note"
             },
             {
-              title: "child score",
-              body: "child profile content must not become a candidate.",
-              category: "care_continuity"
-            }
+              title: "施設メモ",
+              body: "施設全体の候補。",
+              category: "care_continuity",
+              childProfile: { score: 1 }
+            } as unknown as LongMemoryCandidateDraft
           ])
       });
 
@@ -512,7 +793,7 @@ describe("session long-memory candidate pipeline", () => {
         candidates.enqueueSessionCutoff(completedSession);
 
         await expect(candidates.processNextJob()).rejects.toThrow(
-          "pico long memory must not contain individual child profile data"
+          "pico long memory must not contain structured individual child profile fields"
         );
         expect(candidates.listPending()).toEqual([]);
         expect(audit.entries().map((event) => event.name)).not.toContain(
@@ -542,7 +823,7 @@ describe("session long-memory candidate pipeline", () => {
         candidates.enqueueSessionCutoff(completedSession);
 
         await expect(candidates.processNextJob()).rejects.toThrow(
-          "pico long memory must not contain individual child profile data"
+          "pico long memory must not contain structured individual child profile fields"
         );
         expect(candidates.listPending()).toEqual([]);
       } finally {

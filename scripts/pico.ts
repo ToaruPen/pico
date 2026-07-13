@@ -10,6 +10,8 @@ try {
 
   if (plan.kind === "help") {
     process.stdout.write(`${plan.text}\n`);
+  } else if (plan.kind === "pi") {
+    await runProcess(join(repoRoot, "node_modules", ".bin", "pi"), plan.args);
   } else {
     await runScript(plan.scriptPath, plan.args);
   }
@@ -20,7 +22,21 @@ try {
 
 function runScript(scriptPath: string, arguments_: readonly string[]): Promise<void> {
   const jitiCliPath = join(repoRoot, "node_modules", "jiti", "lib", "jiti-cli.mjs");
-  const child = spawn(process.execPath, [jitiCliPath, join(repoRoot, scriptPath), ...arguments_], {
+  const resolvedScriptPath = join(repoRoot, scriptPath);
+
+  return runProcess(
+    process.execPath,
+    [jitiCliPath, resolvedScriptPath, ...arguments_],
+    resolvedScriptPath
+  );
+}
+
+function runProcess(
+  command: string,
+  arguments_: readonly string[],
+  failureLabel: string = command
+): Promise<void> {
+  const child = spawn(command, [...arguments_], {
     cwd: repoRoot,
     env: {
       ...process.env,
@@ -42,7 +58,7 @@ function runScript(scriptPath: string, arguments_: readonly string[]): Promise<v
         return;
       }
 
-      rejectRun(new Error(`${scriptPath} exited with code ${String(code ?? -1)}`));
+      rejectRun(new Error(`${failureLabel} exited with code ${String(code ?? -1)}`));
     });
   });
 }

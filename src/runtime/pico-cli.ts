@@ -9,6 +9,10 @@ export type PicoCliPlan =
       readonly kind: "script";
       readonly scriptPath: string;
       readonly args: readonly string[];
+    }
+  | {
+      readonly kind: "pi";
+      readonly args: readonly string[];
     };
 
 type DevelopmentTerminal = "kitty" | "terminal";
@@ -18,7 +22,14 @@ const helpCommands = new Set(["help", "--help", "-h"]);
 export function createPicoCliPlan(arguments_: readonly string[]): PicoCliPlan {
   const [command, ...rest] = arguments_;
 
-  if (command === undefined || helpCommands.has(command)) {
+  if (command === undefined) {
+    return {
+      kind: "pi",
+      args: ["--pico"]
+    };
+  }
+
+  if (helpCommands.has(command)) {
     return {
       kind: "help",
       text: formatPicoCliHelp()
@@ -47,18 +58,20 @@ export function createPicoCliPlan(arguments_: readonly string[]): PicoCliPlan {
 export function formatPicoCliHelp(): string {
   return [
     "Usage:",
+    "  pico",
     "  pico help",
     "  pico dev [--terminal=kitty|terminal]",
     "  pico roster <command> [options]",
     "",
     "Commands:",
+    "  (none)      Start Pi Agent as Pico.",
     "  help        Show this help.",
     "  dev         Open a visible resident voice development terminal with live logs.",
     "  roster      Manage the local child identity roster.",
     "",
     "Notes:",
-    "  Pi Agent owns production startup and loads pico as an extension.",
-    "  The pico CLI otherwise remains a development helper."
+    "  pico delegates production startup to Pi Agent with --pico.",
+    "  Pico model selection is loaded from YAML, not CLI model arguments."
   ].join("\n");
 }
 

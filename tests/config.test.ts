@@ -34,6 +34,64 @@ function temporaryRepoConfigFile(content: string): {
 }
 
 describe("pico YAML config", () => {
+  it("keeps the example long-memory database separate from Mem0 history", () => {
+    const config = loadPicoConfig({
+      path: join(process.cwd(), "config/pico.example.yaml")
+    });
+
+    expect(config.memory.longMemory).toMatchObject({
+      enabled: true,
+      databasePath: "/var/lib/pico/long-memory.sqlite"
+    });
+    expect(config.memory.mem0.historyDbPath).toBe("/var/lib/pico/mem0-history.sqlite");
+  });
+
+  it("parses the startup-only Pico model selection", () => {
+    expect(
+      definePicoConfig({
+        pico: {
+          model: {
+            provider: "openai-codex",
+            id: "gpt-5.6-sol",
+            thinkingLevel: "medium"
+          }
+        }
+      }).pico
+    ).toEqual({
+      model: {
+        provider: "openai-codex",
+        id: "gpt-5.6-sol",
+        thinkingLevel: "medium"
+      }
+    });
+  });
+
+  it("allows normal Pi config without a Pico model and rejects malformed selections", () => {
+    expect(definePicoConfig({}).pico).toEqual({});
+    expect(() =>
+      definePicoConfig({
+        pico: {
+          model: {
+            provider: "openai-codex",
+            id: "gpt-5.6-sol",
+            thinkingLevel: "automatic"
+          }
+        }
+      })
+    ).toThrow("pico config pico.model.thinkingLevel");
+    expect(() =>
+      definePicoConfig({
+        pico: {
+          model: {
+            provider: "openai-codex",
+            id: " ",
+            thinkingLevel: "medium"
+          }
+        }
+      })
+    ).toThrow("pico config pico.model.id");
+  });
+
   it("returns empty config when the local config file is absent", () => {
     const directory = mkdtempSync(join(tmpdir(), "pico-config-missing-"));
 
@@ -457,6 +515,306 @@ audit:
     });
   });
 
+  it("defines explicit long-memory SQLite and Pi extraction config", () => {
+    const config = definePicoConfig({
+      memory: {
+        longMemory: {
+          enabled: true,
+          databasePath: "/var/lib/pico/long-memory.sqlite",
+          extraction: {
+            provider: "pi_model",
+            piProvider: "openai-codex",
+            api: "openai-codex-responses",
+            model: "gpt-5.4",
+            thinkingLevel: "high",
+            timeoutMs: 60_000
+          }
+        }
+      }
+    });
+
+    expect(config.memory.longMemory).toEqual({
+      enabled: true,
+      databasePath: "/var/lib/pico/long-memory.sqlite",
+      extraction: {
+        provider: "pi_model",
+        piProvider: "openai-codex",
+        api: "openai-codex-responses",
+        model: "gpt-5.4",
+        thinkingLevel: "high",
+        timeoutMs: 60_000
+      }
+    });
+    expect(Object.isFrozen(config.memory.longMemory)).toBe(true);
+    expect(config.memory.longMemory.enabled).toBe(true);
+    if (config.memory.longMemory.enabled) {
+      expect(Object.isFrozen(config.memory.longMemory.extraction)).toBe(true);
+    }
+  });
+
+  it("defaults long memory to disabled independently of Mem0", () => {
+    expect(
+      definePicoConfig({
+        memory: {
+          mem0: {
+            enabled: false,
+            historyDbPath: "/var/lib/pico/mem0-history.sqlite"
+          }
+        }
+      }).memory.longMemory
+    ).toEqual({ enabled: false });
+  });
+
+  it.each([
+    ["databasePath", "/var/lib/pico/long-memory.sqlite"],
+    [
+      "extraction",
+      {
+        provider: "pi_model",
+        piProvider: "openai-codex",
+        api: "openai-codex-responses",
+        model: "gpt-5.4",
+        thinkingLevel: "high",
+        timeoutMs: 60_000
+      }
+    ]
+  ])("rejects long-memory %s when long memory is disabled", (field, value) => {
+    expect(() =>
+      definePicoConfig({
+        memory: {
+          longMemory: {
+            enabled: false,
+            [field]: value
+          }
+        }
+      })
+    ).toThrow(`pico config memory.longMemory has unknown field ${field}`);
+  });
+
+  it.each([
+    [
+      "database path",
+      {
+        enabled: true,
+        extraction: {
+          provider: "pi_model",
+          piProvider: "openai-codex",
+          api: "openai-codex-responses",
+          model: "gpt-5.4",
+          thinkingLevel: "high",
+          timeoutMs: 60_000
+        }
+      },
+      "pico config memory.longMemory.databasePath is required"
+    ],
+    [
+      "extraction config",
+      {
+        enabled: true,
+        databasePath: "/var/lib/pico/long-memory.sqlite"
+      },
+      "pico config memory.longMemory.extraction is required"
+    ],
+    [
+      "extraction provider",
+      {
+        enabled: true,
+        databasePath: "/var/lib/pico/long-memory.sqlite",
+        extraction: {
+          provider: "openai",
+          piProvider: "openai-codex",
+          api: "openai-codex-responses",
+          model: "gpt-5.4",
+          thinkingLevel: "high",
+          timeoutMs: 60_000
+        }
+      },
+      "pico config memory.longMemory.extraction.provider must be pi_model"
+    ],
+    [
+      "Pi provider",
+      {
+        enabled: true,
+        databasePath: "/var/lib/pico/long-memory.sqlite",
+        extraction: {
+          provider: "pi_model",
+          piProvider: "openai",
+          api: "openai-codex-responses",
+          model: "gpt-5.4",
+          thinkingLevel: "high",
+          timeoutMs: 60_000
+        }
+      },
+      "pico config memory.longMemory.extraction.piProvider must be openai-codex"
+    ],
+    [
+      "Pi API",
+      {
+        enabled: true,
+        databasePath: "/var/lib/pico/long-memory.sqlite",
+        extraction: {
+          provider: "pi_model",
+          piProvider: "openai-codex",
+          api: "openai-responses",
+          model: "gpt-5.4",
+          thinkingLevel: "high",
+          timeoutMs: 60_000
+        }
+      },
+      "pico config memory.longMemory.extraction.api must be openai-codex-responses"
+    ],
+    [
+      "model",
+      {
+        enabled: true,
+        databasePath: "/var/lib/pico/long-memory.sqlite",
+        extraction: {
+          provider: "pi_model",
+          piProvider: "openai-codex",
+          api: "openai-codex-responses",
+          model: " ",
+          thinkingLevel: "high",
+          timeoutMs: 60_000
+        }
+      },
+      "pico config memory.longMemory.extraction.model is required"
+    ],
+    [
+      "thinking level",
+      {
+        enabled: true,
+        databasePath: "/var/lib/pico/long-memory.sqlite",
+        extraction: {
+          provider: "pi_model",
+          piProvider: "openai-codex",
+          api: "openai-codex-responses",
+          model: "gpt-5.4",
+          timeoutMs: 60_000
+        }
+      },
+      "pico config memory.longMemory.extraction.thinkingLevel is required"
+    ],
+    [
+      "unsupported thinking level",
+      {
+        enabled: true,
+        databasePath: "/var/lib/pico/long-memory.sqlite",
+        extraction: {
+          provider: "pi_model",
+          piProvider: "openai-codex",
+          api: "openai-codex-responses",
+          model: "gpt-5.4",
+          thinkingLevel: "automatic",
+          timeoutMs: 60_000
+        }
+      },
+      "pico config memory.longMemory.extraction.thinkingLevel must be off, minimal, low, medium, high, xhigh, or max"
+    ],
+    [
+      "timeout",
+      {
+        enabled: true,
+        databasePath: "/var/lib/pico/long-memory.sqlite",
+        extraction: {
+          provider: "pi_model",
+          piProvider: "openai-codex",
+          api: "openai-codex-responses",
+          model: "gpt-5.4",
+          thinkingLevel: "high",
+          timeoutMs: 0
+        }
+      },
+      "pico config memory.longMemory.extraction.timeoutMs must be a positive integer"
+    ]
+  ])("rejects incomplete or unsupported long-memory %s", (_name, longMemory, message) => {
+    expect(() =>
+      definePicoConfig({
+        memory: {
+          longMemory
+        }
+      })
+    ).toThrow(message);
+  });
+
+  it("enforces Node timer bounds for long-memory extraction", () => {
+    const longMemory = {
+      enabled: true,
+      databasePath: "/var/lib/pico/long-memory.sqlite",
+      extraction: {
+        provider: "pi_model",
+        piProvider: "openai-codex",
+        api: "openai-codex-responses",
+        model: "gpt-5.4",
+        thinkingLevel: "high",
+        timeoutMs: 2_147_483_647
+      }
+    };
+
+    expect(definePicoConfig({ memory: { longMemory } }).memory.longMemory).toMatchObject({
+      extraction: {
+        timeoutMs: 2_147_483_647
+      }
+    });
+    expect(() =>
+      definePicoConfig({
+        memory: {
+          longMemory: {
+            ...longMemory,
+            extraction: {
+              ...longMemory.extraction,
+              timeoutMs: 2_147_483_648
+            }
+          }
+        }
+      })
+    ).toThrow(
+      "pico config memory.longMemory.extraction.timeoutMs must be a positive integer <= 2147483647"
+    );
+  });
+
+  it.each([
+    [
+      {
+        enabled: true,
+        databasePath: "/var/lib/pico/long-memory.sqlite",
+        extraction: {
+          provider: "pi_model",
+          piProvider: "openai-codex",
+          api: "openai-codex-responses",
+          model: "gpt-5.4",
+          thinkingLevel: "high",
+          timeoutMs: 60_000
+        },
+        fallbackDatabasePath: "/tmp/long-memory.sqlite"
+      },
+      "pico config memory.longMemory has unknown field fallbackDatabasePath"
+    ],
+    [
+      {
+        enabled: true,
+        databasePath: "/var/lib/pico/long-memory.sqlite",
+        extraction: {
+          provider: "pi_model",
+          piProvider: "openai-codex",
+          api: "openai-codex-responses",
+          model: "gpt-5.4",
+          thinkingLevel: "high",
+          timeoutMs: 60_000,
+          fallbackProvider: "ollama"
+        }
+      },
+      "pico config memory.longMemory.extraction has unknown field fallbackProvider"
+    ]
+  ])("rejects unknown long-memory config fields", (longMemory, message) => {
+    expect(() =>
+      definePicoConfig({
+        memory: {
+          longMemory
+        }
+      })
+    ).toThrow(message);
+  });
+
   it("requires local voice echo control provider endpoints when AEC is enabled", () => {
     expect(() =>
       definePicoConfig({
@@ -793,6 +1151,16 @@ camera:
   it("resolves local file paths relative to the repo root for config directory files", () => {
     const { root, path } = temporaryRepoConfigFile(`
 memory:
+  longMemory:
+    enabled: true
+    databasePath: .pico-local/mem0-history.sqlite
+    extraction:
+      provider: pi_model
+      piProvider: openai-codex
+      api: openai-codex-responses
+      model: gpt-5.4
+      thinkingLevel: high
+      timeoutMs: 60000
   mem0:
     enabled: false
     historyDbPath: .pico-local/mem0-history.sqlite
@@ -817,6 +1185,10 @@ voice:
 
     const config = loadPicoConfig({ path });
 
+    expect(config.memory.longMemory).toMatchObject({
+      enabled: true,
+      databasePath: join(root, ".pico-local/mem0-history.sqlite")
+    });
     expect(config.memory.mem0.historyDbPath).toBe(join(root, ".pico-local/mem0-history.sqlite"));
     expect(config.vision.personDetection.modelPath).toBe(
       join(root, "models/person-detector.mlmodel")

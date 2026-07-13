@@ -30,7 +30,6 @@ describe("Pi-owned subagent capability", () => {
       noContextFiles: true
     });
     await loader.reload();
-    loader.getExtensions().runtime.flagValues.set("pico-runtime-profile", "interactive");
     const { session } = await createAgentSession({
       cwd: process.cwd(),
       resourceLoader: loader,

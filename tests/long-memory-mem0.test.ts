@@ -73,7 +73,7 @@ describe("Mem0 long-memory provider", () => {
     expect(JSON.stringify(audit.entries())).not.toContain("工作セットを早めに出す");
   });
 
-  it("rejects child profiling content before calling Mem0", async () => {
+  it("rejects structurally explicit child-profile fields before calling Mem0", async () => {
     const client = {
       add: vi.fn<Mem0Client["add"]>(),
       search: vi.fn<Mem0Client["search"]>(),
@@ -84,18 +84,14 @@ describe("Mem0 long-memory provider", () => {
       scopeId: "facility:pico"
     });
 
-    await expect(
-      provider.addSessionCutoff({
-        ...completedSession,
-        entries: [
-          {
-            id: "session-1-entry-1",
-            role: "staff",
-            content: "child profile content must not become Mem0 memory."
-          }
-        ]
-      })
-    ).rejects.toThrow("pico long memory must not contain individual child profile data");
+    const structurallyInvalid = {
+      ...completedSession,
+      childId: "child-1"
+    } as unknown as SessionMemoryCutoffInput;
+
+    await expect(provider.addSessionCutoff(structurallyInvalid)).rejects.toThrow(
+      "pico long memory must not contain structured individual child profile fields"
+    );
     expect(client.add).not.toHaveBeenCalled();
   });
 

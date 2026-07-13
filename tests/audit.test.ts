@@ -38,6 +38,24 @@ describe("operational audit events", () => {
     expect(log.entries()).toEqual([event]);
   });
 
+  it("drains recorded events without retaining exported history", () => {
+    const log = createStructuredAuditLog();
+    const event = log.record({
+      category: "memory_write",
+      name: "long_memory.worker.drain_once",
+      severity: "info",
+      occurredAt: "2026-06-10T09:00:00.000Z",
+      summary: "Session memory worker lifecycle event.",
+      attributes: {
+        "pico.memory.processed_count": 0
+      }
+    });
+
+    expect(log.drain()).toEqual([event]);
+    expect(log.entries()).toEqual([]);
+    expect(log.drain()).toEqual([]);
+  });
+
   it("rejects raw payload, transcript, and conversation fields", () => {
     const log = createStructuredAuditLog();
 

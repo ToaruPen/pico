@@ -8,35 +8,14 @@ import {
   runSessionMemoryLifecycleField,
   sessionMemoryLifecycleFieldExitCode
 } from "../scripts/field/session-memory-lifecycle.js";
-import { definePicoConfig } from "../src/config/index.js";
-import type { Mem0Client } from "../src/modules/long-memory/mem0.js";
+import { defineEnabledLongMemoryTestConfig } from "./long-memory-config-fixture.js";
 
 describe("session memory lifecycle field harness", () => {
-  it("creates an entry-bearing cutoff, memory candidates, Mem0 memories, and OTel audit exports", async () => {
+  it("creates an entry-bearing cutoff, automated SQLite memory, and OTel audit exports", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pico-session-memory-field-"));
     const databasePath = join(directory, "long-memory.sqlite");
     const exportedEvents: string[] = [];
-    const addedRequests: unknown[] = [];
-    const client = {
-      add(request) {
-        addedRequests.push(request);
-
-        return Promise.resolve({
-          memories: [
-            {
-              id: "mem0-field-1",
-              content: "雨の日の工作準備"
-            }
-          ]
-        });
-      },
-      search() {
-        return Promise.resolve({ memories: [] });
-      },
-      delete() {
-        return Promise.resolve();
-      }
-    } satisfies Mem0Client;
+    let extractedCutoffText = "";
 
     try {
       const report = await runSessionMemoryLifecycleField(
@@ -45,7 +24,22 @@ describe("session memory lifecycle field harness", () => {
         {
           createRunId: () => "field-run-1",
           databasePath,
-          createClient: () => Promise.resolve(client),
+          createExtractor: () => ({
+            extract: (cutoff) => {
+              extractedCutoffText = cutoff.entries.map((entry) => entry.content).join("\n");
+
+              return Promise.resolve([
+                {
+                  title: "Rainy day supplies",
+                  body: "Prepare the reusable activity kit before arrival.",
+                  category: "facility_knowledge",
+                  tags: ["雨", "工作"],
+                  sourceEntryIds: cutoff.sourceEntryIds,
+                  confidence: 0.9
+                }
+              ]);
+            }
+          }),
           createAuditExporter: () => ({
             export(event) {
               exportedEvents.push(event.name);
@@ -61,40 +55,40 @@ describe("session memory lifecycle field harness", () => {
 
       expect(report).toEqual({
         status: "passed",
-        provider: "session+sqlite+mem0+otel",
+        provider: "session+sqlite+otel",
         details: {
           runId: "field-run-1",
           sessionId: "session-1",
           sourceEntryCount: 2,
           candidateJobId: 1,
-          candidateCount: 1,
           workerProcessedCount: 1,
           workerRecoveredCount: 0,
           workerIdle: true,
-          mem0MemoryCount: 1,
-          auditEventCount: 8,
-          exportedOtelRecordCount: 8,
+          memoryWrittenCount: 1,
+          activeMemoryCount: 1,
+          provenanceKind: "session_cutoff_automation",
+          auditEventCount: 6,
+          exportedOtelRecordCount: 6,
           databasePath: "<injected-database-path>"
         }
       });
-      expect(addedRequests).toHaveLength(1);
       expect(exportedEvents).toEqual([
         "session.started",
         "session.ended",
         "long_memory.candidate_job.enqueued",
         "long_memory.worker.cutoff_enqueued",
-        "long_memory.candidate.created",
         "long_memory.candidate_job.processed",
-        "long_memory.worker.drain_once",
-        "long_memory.mem0.added"
+        "long_memory.worker.drain_once"
       ]);
+      expect(extractedCutoffText).toContain("施設共通");
+      expect(extractedCutoffText).toContain("継続手順");
       expect(sessionMemoryLifecycleFieldExitCode(report)).toBe(0);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
   });
 
-  it("fails when Mem0 creates no memories from the cutoff payload", async () => {
+  it("fails when extraction creates no active SQLite memory", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pico-session-memory-field-"));
 
     try {
@@ -102,20 +96,9 @@ describe("session memory lifecycle field harness", () => {
         enabledSessionMemoryConfig(directory),
         {},
         {
-          createRunId: () => "field-run-empty-mem0",
+          createRunId: () => "field-run-empty-memory",
           databasePath: join(directory, "long-memory.sqlite"),
-          createClient: () =>
-            Promise.resolve({
-              add() {
-                return Promise.resolve({ memories: [] });
-              },
-              search() {
-                return Promise.resolve({ memories: [] });
-              },
-              delete() {
-                return Promise.resolve();
-              }
-            }),
+          createExtractor: () => ({ extract: () => Promise.resolve([]) }),
           createAuditExporter: () => ({
             export() {
               return Promise.resolve();
@@ -129,8 +112,8 @@ describe("session memory lifecycle field harness", () => {
 
       expect(report).toEqual({
         status: "failed",
-        provider: "session+sqlite+mem0+otel",
-        reason: "pico session memory lifecycle field requires at least one Mem0 memory"
+        provider: "session+sqlite+otel",
+        reason: "pico session memory lifecycle field requires at least one active SQLite memory"
       });
       expect(sessionMemoryLifecycleFieldExitCode(report)).toBe(1);
     } finally {
@@ -148,25 +131,19 @@ describe("session memory lifecycle field harness", () => {
         {
           createRunId: () => "field-run-otel-fail",
           databasePath: join(directory, "long-memory.sqlite"),
-          createClient: () =>
-            Promise.resolve({
-              add() {
-                return Promise.resolve({
-                  memories: [
-                    {
-                      id: "mem0-field-1",
-                      content: "rainy day preparation"
-                    }
-                  ]
-                });
-              },
-              search() {
-                return Promise.resolve({ memories: [] });
-              },
-              delete() {
-                return Promise.resolve();
-              }
-            }),
+          createExtractor: () => ({
+            extract: (cutoff) =>
+              Promise.resolve([
+                {
+                  title: "Rainy day preparation",
+                  body: "Prepare craft supplies before the activity.",
+                  category: "facility_knowledge",
+                  tags: ["rain"],
+                  sourceEntryIds: cutoff.sourceEntryIds,
+                  confidence: 0.9
+                }
+              ])
+          }),
           createAuditExporter: () => ({
             export() {
               return Promise.reject(new Error("collector unavailable"));
@@ -180,9 +157,10 @@ describe("session memory lifecycle field harness", () => {
 
       expect(report).toEqual({
         status: "failed",
-        provider: "session+sqlite+mem0+otel",
-        reason: "pico session memory lifecycle field failed: collector unavailable"
+        provider: "session+sqlite+otel",
+        reason: "pico session memory lifecycle field failed"
       });
+      expect(JSON.stringify(report)).not.toContain("collector unavailable");
       expect(sessionMemoryLifecycleFieldExitCode(report)).toBe(1);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -199,7 +177,7 @@ describe("session memory lifecycle field harness", () => {
 
     expect(report).toEqual({
       status: "failed",
-      provider: "session+sqlite+mem0+otel",
+      provider: "session+sqlite+otel",
       reason:
         "PICO_FIELD_SESSION_MEMORY_DB_PATH is not supported; field memory evidence stays under the repo-local .pico-local directory."
     });
@@ -212,18 +190,7 @@ describe("session memory lifecycle field harness", () => {
       {},
       {
         appendEntries: false,
-        createClient: () =>
-          Promise.resolve({
-            add() {
-              return Promise.resolve({ memories: [] });
-            },
-            search() {
-              return Promise.resolve({ memories: [] });
-            },
-            delete() {
-              return Promise.resolve();
-            }
-          }),
+        createExtractor: () => ({ extract: () => Promise.resolve([]) }),
         createAuditExporter: () => ({
           export() {
             return Promise.resolve();
@@ -237,7 +204,7 @@ describe("session memory lifecycle field harness", () => {
 
     expect(report).toEqual({
       status: "failed",
-      provider: "session+sqlite+mem0+otel",
+      provider: "session+sqlite+otel",
       reason: "pico session memory lifecycle field requires an entry-bearing cutoff"
     });
     expect(sessionMemoryLifecycleFieldExitCode(report)).toBe(1);
@@ -245,42 +212,8 @@ describe("session memory lifecycle field harness", () => {
 });
 
 function enabledSessionMemoryConfig(directory: string) {
-  return definePicoConfig({
-    session: {
-      ending: {
-        mode: "timed",
-        durationMs: 1
-      }
-    },
-    memory: {
-      mem0: {
-        enabled: true,
-        historyDbPath: join(directory, "mem0-history.sqlite"),
-        vectorStore: {
-          provider: "qdrant",
-          localBaseUrl: "http://127.0.0.1:6333",
-          collectionName: "pico-field-test"
-        },
-        llm: {
-          provider: "ollama",
-          localBaseUrl: "http://127.0.0.1:11434",
-          model: "qwen3.5:9b"
-        },
-        embedder: {
-          provider: "ollama",
-          localBaseUrl: "http://127.0.0.1:11434",
-          model: "nomic-embed-text",
-          embeddingDims: 768
-        }
-      }
-    },
-    audit: {
-      otel: {
-        enabled: true,
-        endpoint: "http://127.0.0.1:4318/v1/logs",
-        serviceName: "pico-test",
-        timeoutMs: 1_000
-      }
-    }
+  return defineEnabledLongMemoryTestConfig(join(directory, "long-memory.sqlite"), {
+    timedSession: true,
+    otelAudit: true
   });
 }

@@ -27,7 +27,7 @@ memory, or OTel validation.
 The next field milestone is Pi Agent runtime interaction through pico tools:
 
 ```bash
-node_modules/.bin/pi --pico-runtime-profile=interactive --approve --no-session --no-builtin-tools --extension ./src/index.ts -p '<prompt that requires pico_session>'
+node_modules/.bin/pi --approve --no-session --no-builtin-tools --extension ./src/index.ts -p '<prompt that requires pico_session>'
 ```
 
 This verifies that the actual Pi Agent process can call pico runtime tools. It
@@ -39,6 +39,20 @@ Entry-bearing session cutoff through memory and OTel is validated with:
 ```bash
 PICO_CONFIG_PATH=config/pico.local.yaml npm run field:session-memory-lifecycle
 ```
+
+The complete automated-memory retrieval path is validated separately. This
+gate calls the configured real extraction model, writes active SQLite memory,
+then invokes `pico_memory_search` from a separate extension runtime:
+
+```bash
+PICO_CONFIG_PATH=config/pico.local.yaml \
+PICO_ENABLE_LIVE_SESSION_MEMORY_RETRIEVAL=1 \
+npm run field:session-memory-retrieval
+```
+
+Its JSON report may contain IDs, counts, durations, status, and a redacted
+database path only. Do not add the cutoff text, search query, memory title/body,
+device identifiers, credentials, or raw provider output to the report.
 
 Use a documented local field config if the production session duration is too
 long for a repeatable field run. The command fails unless the cutoff contains at
