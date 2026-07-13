@@ -245,9 +245,7 @@ describe("resident launchd service", () => {
         kind: "status",
         command: "launchctl",
         args: ["print", "gui/501/dev.toarupen.pico.resident-voice"],
-        allowedExitCodes: [0],
-        serviceKind: "voice",
-        configPath: "/repo/pico/config/pico.local.yaml"
+        allowedExitCodes: [0]
       }
     ]);
   });

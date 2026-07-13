@@ -30,8 +30,7 @@ process.stdout.write("state = running\\n");
               kind: "status",
               command: "launchctl",
               args: ["print", "gui/501/dev.toarupen.pico.resident-voice"],
-              allowedExitCodes: [0],
-              serviceKind: "voice"
+              allowedExitCodes: [0]
             }
           ],
           { writeOutput: (content) => output.push(content) }
@@ -56,8 +55,7 @@ setInterval(() => undefined, 1_000);
               kind: "status",
               command: "launchctl",
               args: ["print", "gui/501/dev.toarupen.pico.resident-voice"],
-              allowedExitCodes: [0],
-              serviceKind: "voice"
+              allowedExitCodes: [0]
             }
           ]);
           const rejection = expect(operation).rejects.toThrow("launchctl status command timed out");
@@ -94,8 +92,7 @@ setInterval(() => undefined, 1_000);
           kind: "status",
           command: "launchctl",
           args: ["print", "gui/501/dev.toarupen.pico.resident-voice"],
-          allowedExitCodes: [0],
-          serviceKind: "voice"
+          allowedExitCodes: [0]
         }
       ],
       {

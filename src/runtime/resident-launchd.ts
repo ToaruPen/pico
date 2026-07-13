@@ -58,8 +58,6 @@ export type ResidentLaunchdOperationStep =
       readonly command: "launchctl";
       readonly args: readonly string[];
       readonly allowedExitCodes?: readonly number[];
-      readonly serviceKind?: ResidentLaunchdServiceKind;
-      readonly configPath?: string;
     }
   | {
       readonly kind: "mkdir";
@@ -228,9 +226,7 @@ export function createResidentLaunchdOperationPlan(
         kind: "status",
         command: plan.command,
         args: plan.args,
-        allowedExitCodes: [0],
-        serviceKind: service.serviceKind,
-        configPath: service.configPath
+        allowedExitCodes: [0]
       }
     ];
   }

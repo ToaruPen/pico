@@ -99,7 +99,7 @@ export async function runPicoMilestoneSmokeSuite(
     config = loadPicoConfigFromEnvironment(env);
   } catch (error) {
     sections.push(...failedConfigProviderSections(error));
-    sections.push(...auditConfigAwareSections(await runAuditSections(), error));
+    sections.push(auditConfigAwareSection(await runAuditSection(), error));
 
     return {
       status: summarizeStatus(sections),
@@ -158,7 +158,7 @@ export async function runPicoMilestoneSmokeSuite(
       )
     )
   );
-  sections.push(...(await runAuditSections(config, dependencies)));
+  sections.push(await runAuditSection(config, dependencies));
 
   return {
     status: summarizeStatus(sections),
@@ -255,21 +255,17 @@ function failedConfigProviderSections(error: unknown): readonly PicoMilestoneSmo
   ];
 }
 
-function auditConfigAwareSections(
-  sections: readonly PicoMilestoneSmokeSectionReport[],
+function auditConfigAwareSection(
+  section: PicoMilestoneSmokeSectionReport,
   error: unknown
-): readonly PicoMilestoneSmokeSectionReport[] {
+): PicoMilestoneSmokeSectionReport {
   if (!isAuditOtelConfigError(error)) {
-    return sections;
+    return section;
   }
 
   const reason = `pico config load failed: ${errorMessage(error)}`;
 
-  return sections.map((section) =>
-    section.name === "audit_otel"
-      ? failedSection("audit_otel", "structured-audit+otel", reason)
-      : section
-  );
+  return failedSection("audit_otel", "structured-audit+otel", reason);
 }
 
 function isAuditOtelConfigError(error: unknown): boolean {
@@ -292,10 +288,10 @@ async function runVoiceSections(
   }
 }
 
-async function runAuditSections(
+async function runAuditSection(
   config?: PicoConfig,
   dependencies: Pick<PicoMilestoneSmokeDependencies, "createAuditOtelExporter"> = {}
-): Promise<readonly PicoMilestoneSmokeSectionReport[]> {
+): Promise<PicoMilestoneSmokeSectionReport> {
   try {
     const audit = createStructuredAuditLog();
     audit.record({
@@ -307,26 +303,20 @@ async function runAuditSections(
       attributes: { source: "milestone_smoke" }
     });
     const auditEntries = audit.entries();
-    const auditOtelSection = await captureSection(
-      "audit_otel",
-      auditOtelProviderName(config),
-      async () => {
-        const otelRecords = auditEntries.map(toOpenTelemetryLogRecord);
-        const firstOtelRecord = validateAuditOtelRecords(auditEntries.length, otelRecords);
+    return await captureSection("audit_otel", auditOtelProviderName(config), async () => {
+      const otelRecords = auditEntries.map(toOpenTelemetryLogRecord);
+      const firstOtelRecord = validateAuditOtelRecords(auditEntries.length, otelRecords);
 
-        return buildAuditOtelSection(
-          config,
-          dependencies,
-          auditEntries,
-          otelRecords,
-          firstOtelRecord
-        );
-      }
-    );
-
-    return [auditOtelSection];
+      return buildAuditOtelSection(
+        config,
+        dependencies,
+        auditEntries,
+        otelRecords,
+        firstOtelRecord
+      );
+    });
   } catch (error) {
-    return [failedSection("audit_otel", "structured-audit", errorMessage(error))];
+    return failedSection("audit_otel", "structured-audit", errorMessage(error));
   }
 }
 
