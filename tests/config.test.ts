@@ -34,6 +34,18 @@ function temporaryRepoConfigFile(content: string): {
 }
 
 describe("pico YAML config", () => {
+  it("keeps the example long-memory database separate from Mem0 history", () => {
+    const config = loadPicoConfig({
+      path: join(process.cwd(), "config/pico.example.yaml")
+    });
+
+    expect(config.memory.longMemory).toMatchObject({
+      enabled: true,
+      databasePath: "/var/lib/pico/long-memory.sqlite"
+    });
+    expect(config.memory.mem0.historyDbPath).toBe("/var/lib/pico/mem0-history.sqlite");
+  });
+
   it("parses the startup-only Pico model selection", () => {
     expect(
       definePicoConfig({

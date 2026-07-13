@@ -149,7 +149,7 @@ voice:
 memory:
   longMemory:
     enabled: true
-    databasePath: /var/lib/pico/mem0-history.sqlite
+    databasePath: /var/lib/pico/long-memory.sqlite
     extraction:
       provider: pi_model
       piProvider: openai-codex
