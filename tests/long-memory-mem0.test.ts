@@ -87,6 +87,35 @@ describe("Mem0 facility-memory provider", () => {
     expect(mem0.add).not.toHaveBeenCalled();
   });
 
+  it("rejects more than five drafts before calling Mem0", async () => {
+    const mem0 = client();
+    const provider = createMem0MemoryProvider({ client: mem0, scopeId: "facility:pico" });
+    const drafts = Array.from({ length: 6 }, (_, index) => ({
+      ...draft,
+      title: `施設記憶${String(index + 1)}`
+    }));
+
+    await expect(provider.addFacilityMemories(completedSession, drafts)).rejects.toThrow(
+      "pico facility memory draft count is invalid"
+    );
+    expect(mem0.add).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate cutoff entry ids before calling Mem0", async () => {
+    const mem0 = client();
+    const provider = createMem0MemoryProvider({ client: mem0, scopeId: "facility:pico" });
+    const duplicateEntrySession = {
+      ...completedSession,
+      sourceEntryIds: ["session-1-entry-1"],
+      entries: [completedSession.entries[0], completedSession.entries[0]]
+    };
+
+    await expect(provider.addFacilityMemories(duplicateEntrySession, [draft])).rejects.toThrow(
+      "pico session memory cutoff source entries are invalid"
+    );
+    expect(mem0.add).not.toHaveBeenCalled();
+  });
+
   it("surfaces extraction and Mem0 failures without retrying", async () => {
     const add = vi.fn<Mem0Client["add"]>().mockRejectedValue(new Error("qdrant unavailable"));
     const provider = createMem0MemoryProvider({
@@ -100,6 +129,28 @@ describe("Mem0 facility-memory provider", () => {
 
     await expect(worker.processCutoff(completedSession)).rejects.toThrow("qdrant unavailable");
     expect(add).toHaveBeenCalledOnce();
+  });
+
+  it("audits memories committed before a later draft fails", async () => {
+    const add = vi
+      .fn<Mem0Client["add"]>()
+      .mockResolvedValueOnce({ memories: [{ id: "mem0-partial-1" }] })
+      .mockRejectedValueOnce(new Error("second add failed"));
+    const audit = createStructuredAuditLog();
+    const provider = createMem0MemoryProvider({
+      client: client({ add }),
+      scopeId: "facility:pico",
+      audit
+    });
+    const secondDraft = { ...draft, title: "二つ目の施設記憶" };
+
+    await expect(
+      provider.addFacilityMemories(completedSession, [draft, secondDraft])
+    ).rejects.toThrow("second add failed");
+    expect(audit.entries().at(-1)).toMatchObject({
+      name: "long_memory.mem0.added",
+      attributes: { "pico.memory.created_count": 1 }
+    });
   });
 
   it("searches and deletes through the scoped Mem0 client without auditing content", async () => {

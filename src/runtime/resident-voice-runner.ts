@@ -179,8 +179,8 @@ export async function runResidentVoiceWithProviders(input: {
       },
       ...(audit === undefined ? {} : { voiceProbe: { audit } })
     });
-    const speechActivity = await createConfiguredSpeechActivityGate(config);
     const memoryWorker = await createResidentMemoryWorker(config, audit);
+    const speechActivity = await createConfiguredSpeechActivityGate(config);
 
     await runVoiceResidentRuntime({
       frames,

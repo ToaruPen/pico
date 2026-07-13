@@ -117,6 +117,29 @@ describe("pico memory search tool", () => {
     });
   });
 
+  it("retries lazy provider initialization on a later tool call", async () => {
+    const provider = {
+      search: vi.fn().mockResolvedValue([{ id: "mem0-1", content: "施設の手順" }])
+    } as unknown as Mem0MemoryProvider;
+    const createClient = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("qdrant starting"))
+      .mockResolvedValueOnce({});
+    const runtime = createPicoMemorySearchRuntime({
+      loadConfig: () => enabledConfig,
+      createClient,
+      createProvider: () => provider
+    });
+
+    expect(await execute(runtime, { query: "施設" })).toMatchObject({
+      result: { status: "unavailable", code: "provider_unavailable" }
+    });
+    expect(await execute(runtime, { query: "施設" })).toMatchObject({
+      result: { status: "completed" }
+    });
+    expect(createClient).toHaveBeenCalledTimes(2);
+  });
+
   it("audits counts and fixed codes without raw query or memory content", async () => {
     const audit = createStructuredAuditLog();
     const runtime = createPicoMemorySearchRuntime({

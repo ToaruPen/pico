@@ -126,17 +126,26 @@ function requireEntries(value: unknown): readonly SessionMemoryCutoffEntry[] {
     throw new Error("pico session memory cutoff entries are required");
   }
 
+  const seenIds = new Set<string>();
+
   return Object.freeze(
     value.map((entry) => {
       const record = requireRecord(entry, "pico session memory cutoff entries are required");
       const role = record.role;
+      const id = requireText(record.id, "pico session memory cutoff entry id is required");
+
+      if (seenIds.has(id)) {
+        throw new Error("pico session memory cutoff source entries are invalid");
+      }
+
+      seenIds.add(id);
 
       if (role !== "staff" && role !== "assistant" && role !== "system") {
         throw new Error("pico session memory cutoff entry role is invalid");
       }
 
       return Object.freeze({
-        id: requireText(record.id, "pico session memory cutoff entry id is required"),
+        id,
         role,
         content: requireText(record.content, "pico session memory cutoff entry content is required")
       });

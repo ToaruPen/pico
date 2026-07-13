@@ -190,6 +190,59 @@ describe("Mem0 runtime smoke", () => {
     expect(mem0RuntimeSmokeExitCode(report)).toBe(1);
   });
 
+  it("cleans up memories committed before a later smoke add fails", async () => {
+    const deletedMemoryIds: string[] = [];
+    let addCalls = 0;
+    const report = await runMem0RuntimeSmoke(enabledConfig(), {
+      createRunId: () => "partial-run",
+      createExtractor: (): FacilityMemoryExtractor => ({
+        extract: (cutoff) =>
+          Promise.resolve([
+            {
+              title: "一つ目の施設記憶",
+              body: "一つ目の施設知識。",
+              category: "facility_knowledge",
+              tags: ["smoke"],
+              sourceEntryIds: [cutoff.sourceEntryIds[0] ?? "missing"],
+              confidence: 0.9
+            },
+            {
+              title: "二つ目の施設記憶",
+              body: "二つ目の施設知識。",
+              category: "facility_knowledge",
+              tags: ["smoke"],
+              sourceEntryIds: [cutoff.sourceEntryIds[0] ?? "missing"],
+              confidence: 0.9
+            }
+          ])
+      }),
+      createClient: () => ({
+        add: () => {
+          addCalls += 1;
+
+          return addCalls === 1
+            ? Promise.resolve({ memories: [{ id: "mem0-partial-1" }] })
+            : Promise.reject(new Error("second add failed"));
+        },
+        search: () => Promise.resolve({ memories: [] }),
+        delete: (memoryId) => {
+          deletedMemoryIds.push(memoryId);
+
+          return Promise.resolve();
+        }
+      })
+    });
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(report).toEqual({
+      status: "failed",
+      provider: "mem0-oss",
+      reason: "pico Mem0 runtime smoke failed: second add failed"
+    });
+    expect(deletedMemoryIds).toEqual(["mem0-partial-1"]);
+  });
+
   it("fails when search does not return a memory created by this run", async () => {
     const calls: string[] = [];
     const report = await runMem0RuntimeSmoke(enabledConfig(), {

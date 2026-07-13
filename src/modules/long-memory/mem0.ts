@@ -3,6 +3,7 @@ import type { AutomatedFacilityMemoryDraft } from "./extractor.js";
 import {
   assertNoIndividualChildLongMemoryFields,
   defineSessionMemoryCutoffInput,
+  maximumAutomatedLongMemoryDraftCount,
   type SessionMemoryCutoffInput
 } from "./index.js";
 
@@ -60,6 +61,18 @@ export type Mem0SessionAddResult = {
   readonly sourceSessionId: string;
 };
 
+export class Mem0FacilityMemoryAddError extends Error {
+  readonly memoryIds: readonly string[];
+
+  constructor(memoryIds: readonly string[], cause: unknown) {
+    super(cause instanceof Error ? cause.message : "pico Mem0 facility memory add failed", {
+      cause
+    });
+    this.name = "Mem0FacilityMemoryAddError";
+    this.memoryIds = Object.freeze([...memoryIds]);
+  }
+}
+
 export type Mem0MemoryProvider = {
   readonly addFacilityMemories: (
     cutoff: SessionMemoryCutoffInput,
@@ -81,31 +94,49 @@ export function createMem0MemoryProvider(options: Mem0MemoryProviderOptions): Me
   return {
     async addFacilityMemories(cutoff, drafts) {
       const session = defineSessionMemoryCutoffInput(cutoff);
+
+      if (drafts.length > maximumAutomatedLongMemoryDraftCount) {
+        throw new Error("pico facility memory draft count is invalid");
+      }
+
       assertNoIndividualChildLongMemoryFields(drafts);
       const memoryIds: string[] = [];
 
-      for (const draft of drafts) {
-        const response = await options.client.add({
-          messages: [{ role: "user", content: `${draft.title}\n\n${draft.body}` }],
-          scopeId,
-          metadata: {
-            pico_scope_id: scopeId,
-            category: draft.category,
-            tags: draft.tags,
-            confidence: draft.confidence,
-            source_session_id: session.sessionId,
-            source_entry_ids: draft.sourceEntryIds,
-            cutoff_at: session.cutoffAt,
-            requested_by: session.requestedBy,
-            policy_version: "session-cutoff-v1"
-          }
-        });
+      try {
+        for (const draft of drafts) {
+          const response = await options.client.add({
+            messages: [{ role: "user", content: `${draft.title}\n\n${draft.body}` }],
+            scopeId,
+            metadata: {
+              pico_scope_id: scopeId,
+              category: draft.category,
+              tags: draft.tags,
+              confidence: draft.confidence,
+              source_session_id: session.sessionId,
+              source_entry_ids: draft.sourceEntryIds,
+              cutoff_at: session.cutoffAt,
+              requested_by: session.requestedBy,
+              policy_version: "session-cutoff-v1"
+            }
+          });
 
-        memoryIds.push(...response.memories.map((memory) => requireMem0Id(memory.id)));
+          memoryIds.push(...response.memories.map((memory) => requireMem0Id(memory.id)));
+        }
+      } catch (error) {
+        const committedMemoryIds = Object.freeze([...memoryIds]);
+
+        if (committedMemoryIds.length > 0) {
+          recordMem0AddAudit(options.audit, session, committedMemoryIds);
+        }
+
+        throw new Mem0FacilityMemoryAddError(committedMemoryIds, error);
       }
 
       const frozenIds = Object.freeze(memoryIds);
-      recordMem0AddAudit(options.audit, session, frozenIds);
+
+      if (frozenIds.length > 0) {
+        recordMem0AddAudit(options.audit, session, frozenIds);
+      }
 
       return Object.freeze({
         memoryIds: frozenIds,

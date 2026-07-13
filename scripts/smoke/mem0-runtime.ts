@@ -12,6 +12,7 @@ import type { SessionMemoryCutoffInput } from "../../src/modules/long-memory/ind
 import {
   createMem0MemoryProvider,
   type Mem0Client,
+  Mem0FacilityMemoryAddError,
   type Mem0SessionAddResult
 } from "../../src/modules/long-memory/mem0.js";
 import { createMem0OssClient } from "../../src/modules/long-memory/mem0-runtime.js";
@@ -193,10 +194,21 @@ async function cleanupLateProcessedMemories(
   provider: ReturnType<typeof createMem0MemoryProvider>,
   timeoutMs: number
 ): Promise<void> {
+  let memoryIds: readonly string[];
+
   try {
     const added = await processingOperation;
+    memoryIds = added.memoryIds;
+  } catch (error) {
+    if (!(error instanceof Mem0FacilityMemoryAddError)) {
+      return;
+    }
 
-    await cleanupAddedMemories(provider, added.memoryIds, timeoutMs);
+    memoryIds = error.memoryIds;
+  }
+
+  try {
+    await cleanupAddedMemories(provider, memoryIds, timeoutMs);
   } catch {
     // The smoke already failed on the original add path. This guard prevents
     // late completion or cleanup failures from becoming unhandled rejections.

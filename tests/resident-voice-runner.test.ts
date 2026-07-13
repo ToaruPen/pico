@@ -110,8 +110,8 @@ describe("resident voice runner ownership", () => {
     const callNames = [
       "warmResidentVoiceStartupProviders",
       "createConfiguredActivation",
-      "createConfiguredSpeechActivityGate",
       "createResidentMemoryWorker",
+      "createConfiguredSpeechActivityGate",
       "runVoiceResidentRuntime"
     ] as const;
     const orderedPositions = findFunctionCallPositions(

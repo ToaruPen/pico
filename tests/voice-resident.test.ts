@@ -453,6 +453,57 @@ describe("voice resident runtime", () => {
     expect(events).toEqual(["pi:disposeAll", "memory:close", "echo:flush"]);
   });
 
+  it("preserves every shutdown cleanup failure", async () => {
+    const events: string[] = [];
+    const error = await runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: createSessionLifecycle({
+        ending: {
+          mode: "timed",
+          durationMs: 60_000
+        }
+      }),
+      echoControl: createCleanupTrackingEchoControl(events),
+      stt: successfulStt(""),
+      tts: createSuccessfulTts("unused"),
+      playback: {
+        play: () => Promise.resolve()
+      },
+      piAgent: {
+        prompt: () => {
+          throw new Error("no prompt is expected");
+        },
+        disposeAll: () => {
+          events.push("pi:disposeAll");
+          throw new Error("Pi cleanup failed");
+        }
+      },
+      memoryWorker: {
+        processCutoff: () => {
+          throw new Error("no cutoff is expected");
+        },
+        close: () => {
+          events.push("memory:close");
+          throw new Error("memory cleanup failed");
+        }
+      }
+    }).then(
+      () => undefined,
+      (reason: unknown) => reason
+    );
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(
+      (error as AggregateError).errors.map((failure) =>
+        failure instanceof Error ? failure.message : String(failure)
+      )
+    ).toEqual(["Pi cleanup failed", "memory cleanup failed"]);
+    expect(events).toEqual(["pi:disposeAll", "memory:close", "echo:flush"]);
+  });
+
   it("keeps pre-trigger transcripts ephemeral and processes an active Pi Agent voice turn", async () => {
     const lifecycle = createSessionLifecycle({
       ending: {

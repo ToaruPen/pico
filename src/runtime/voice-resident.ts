@@ -308,12 +308,17 @@ async function runShutdownCleanup(
   });
 
   await collectShutdownCleanupErrors(options, errors);
+  const firstError = errors[0];
 
-  if (errors[0] !== undefined) {
-    throw errors[0];
+  if (firstError === undefined) {
+    return nextActiveSessionId;
   }
 
-  return nextActiveSessionId;
+  if (errors.length === 1) {
+    throw firstError;
+  }
+
+  throw new AggregateError(errors, firstError.message);
 }
 
 async function collectShutdownCleanupErrors(

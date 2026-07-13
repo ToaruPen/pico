@@ -47,7 +47,7 @@ PICO_CONFIG_PATH=.pico-local/field-session-cutoff.yaml node_modules/.bin/pi --ap
   `PICO_ENABLE_LIVE_PTZ_NUDGE=1`.
 - Passed sections: `pi_runtime`, `voice_stt`, `voice_tts`, `tapo_snapshot`,
   `person_detection`, `ollama_vlm`, `camera_vlm_scene`, `mem0_runtime`,
-  `memory_mem0`, and `audit_otel`.
+  `memory_candidate`, and `audit_otel`.
 
 Selected details:
 
