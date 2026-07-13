@@ -1,7 +1,8 @@
 # 2026-06-16 Integrated Field Test
 
-> Historical report. References to the former SQLite candidate path describe
-> the system tested on this date; current durable memory is Mem0-only.
+> Historical record: memory-related ownership in this document was superseded
+> by [Pi 所有 memory 責務境界設計](../superpowers/specs/2026-07-13-pi-owned-memory-boundary-design.md).
+> Current Pico has no short-term or durable-memory implementation.
 
 ## Scope
 

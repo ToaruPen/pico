@@ -1,11 +1,11 @@
 # Mem0 Memory Stack Implementation Plan
 
-Status: Historical — fully superseded by
-[`2026-07-13-mem0-only-long-memory-design.md`](../specs/2026-07-13-mem0-only-long-memory-design.md).
-The SQLite lifecycle and direct cutoff-mapping steps below record the original slice and must not
-be used as current implementation guidance.
+> Historical record: memory-related ownership in this document was superseded
+> by [Pi 所有 memory 責務境界設計](../specs/2026-07-13-pi-owned-memory-boundary-design.md).
+> Current Pico has no short-term or durable-memory implementation.
 
-> **Historical only:** Do not execute these tasks; use the replacement specification linked above.
+Status: Historical. The SQLite lifecycle and direct cutoff-mapping steps below
+record the original slice and must not be used as current implementation guidance.
 
 **Historical goal:** Add the first local-only Mem0-backed long-memory slice for
 pico.

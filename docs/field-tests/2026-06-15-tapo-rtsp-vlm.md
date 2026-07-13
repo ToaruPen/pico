@@ -1,5 +1,9 @@
 # 2026-06-15 Tapo RTSP and Camera-to-VLM Field Test
 
+> Historical record: memory-related ownership in this document was superseded
+> by [Pi 所有 memory 責務境界設計](../superpowers/specs/2026-07-13-pi-owned-memory-boundary-design.md).
+> Current Pico has no short-term or durable-memory implementation.
+
 ## Scope
 
 - Issue: #41.

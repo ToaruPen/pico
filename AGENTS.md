@@ -14,9 +14,15 @@ responsible decision makers.
 - Source of truth starts in `docs/superpowers/specs/` and
   `docs/superpowers/research/`.
 - Runtime shape is one Pi package with one TypeScript extension.
-- Pi owns the production process, parent conversation session, model loop,
-  tools, subagents, and normal agent cancellation. Pico owns facility audio,
-  address/attention rules, TTS/echo control, and facility runtime restrictions.
+- Pi owns the production process, parent conversation session, conversation
+  context and history, model loop, tools, subagents, normal cancellation, and
+  all memory capabilities. Pico owns facility audio, address/attention rules,
+  TTS/echo control, and facility runtime restrictions.
+- Durable memory, when enabled, is provided by a separately installed Pi-level
+  plugin. That plugin owns provider configuration, extraction, persistence,
+  retrieval, mutation, retention, and lifecycle. Pico does not register,
+  configure, wrap, proxy, or call memory tools or providers, and Pico
+  interaction ending has no memory side effect.
 - Normal Pi starts without the resident controller. `pi --pico` starts Pico in
   the same Pi-owned runtime; the `pico` command is only a convenience alias for
   that path. Pico's model is selected from YAML at startup.
@@ -24,14 +30,8 @@ responsible decision makers.
   Do not duplicate those allowlists in Pico runtime profiles or tests.
 - Internal modules are TypeScript modules under `src/`.
 - Module code uses one folder per module under `src/modules/<module>/index.ts`.
-- First-slice runtime modules are metadata/contract modules for context, memory,
-  local models, handoff, audit, and transport.
-- `long_memory` uses Mem0 OSS as the sole durable-memory and retrieval owner for
-  facility knowledge. A configured Pi worker extracts validated facility
-  memories at session cutoff; there is no separate SQLite memory engine or
-  persisted worker queue.
-- Planned heavy modules include voice, vision, camera, channels, and broader
-  long-memory integrations.
+- Runtime modules cover context, interaction-session control, local models,
+  handoff, audit, transport, voice, vision, camera, and channels.
 - Vision provider selection is `Qwen/Qwen3.5-9B` through Ollama `qwen3.5:9b`
   running on a protected Windows GPU host.
 - The `pico` host reaches the Windows vision host through a Tailscale or
@@ -70,9 +70,8 @@ responsible decision makers.
 - Human staff remain responsible for discipline, emergencies, safeguarding,
   parental communication, and final decisions.
 - Do not design durable memory around child tracking, scoring, or profiling.
-- Keep durable extraction scoped to facility knowledge. Reject explicit
-  child-profile fields structurally; do not add name, honorific, medical-term,
-  or other natural-language privacy classifiers to the memory path.
+- Do not add short-term or durable-memory stores, extraction workers,
+  memory-search tools, Mem0/Qdrant clients, or cutoff-memory hooks to Pico.
 
 ## Deterministic Checks
 

@@ -91,8 +91,8 @@ Field validation must be performed against the actual resident-agent operating
 path, not only the smoke scripts. A field report should include the date,
 operator, hardware used, config path, Pi Agent launch method, spoken session
 steps, audible TTS confirmation, Tapo camera observation, VLM scene summary,
-session cutoff, Mem0/long-memory result, OTel/audit evidence, and any follow-up
-issues created from failures.
+interaction ending, OTel/audit evidence, and any follow-up issues created from
+failures.
 
 Field test reports live under `docs/field-tests/`.
 
@@ -134,8 +134,8 @@ node_modules/.bin/pi --no-tools
 Use Pi settings to expose only the direct tools needed by each agent. For
 example, a harmless status check needs only `stackchan_get_status`. Do not
 enable the generic `mcp` proxy tool. Keep camera and Stack-chan tools exclusive
-to Pico through those settings; memory search remains available to every agent
-that loads this extension.
+to Pico through those settings. A separately installed Pi-level memory plugin,
+if used, owns its own tools and visibility; Pico does not register or proxy them.
 
 The adapter expires cached metadata after seven days. If resident startup
 reports `missing required tools`, repeat the trusted `--no-tools` cache-prime
@@ -243,40 +243,28 @@ resident voice integration is validated:
 PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice
 ```
 
-`resident:voice` owns live microphone, speaker, session cutoff, facility-memory
-extraction, and the awaited Mem0 write in the current terminal for direct field
-validation. It is not the public pico startup contract. There is no separate
-memory process or memory LaunchAgent.
+`resident:voice` owns the live microphone, speaker, and interaction lifecycle in
+the current terminal for direct field validation. It is not the public pico
+startup contract.
 
-### Long-memory operations
+### Memory ownership
 
-`memory.mem0` is the only durable-memory configuration. Mem0 OSS owns memory
-storage, history, and Qdrant retrieval. When a session ends, the configured Pi
-worker extracts zero to five reusable facility-memory drafts. Pico validates
-the structured response and stores each accepted draft with `infer:false`.
-The worker model id and thinking level come from YAML; runtime code does not
-select or allowlist a model name.
+Pi owns conversation sessions, transcripts, context, and history. Pico keeps
+only process-local interaction-control state for activation, inactivity timing,
+farewell, deferred-tool cancellation, and Pi session cleanup. It does not keep
+conversation entries or create a memory side effect when an interaction ends.
 
-The write is awaited before Pico acknowledges the session cutoff. Extraction,
-Mem0, Qdrant, or embedding failures are surfaced without a persisted queue,
-automatic retry, fallback database, or auto-resume path.
+Durable memory, when enabled, is a separately installed Pi-level plugin. That
+plugin—not Pico—owns provider configuration, extraction, persistence, search,
+updates, deletion, retention, tool registration, and runtime lifecycle. This
+repository provides no Mem0/Qdrant client, memory worker, memory configuration,
+memory-search tool, adapter, fallback, or provider smoke.
 
-Every agent that loads the Pico extension receives the same
-`pico_memory_search` implementation. Pi settings decide whether the tool is
-visible to that agent. Search uses the same scoped Mem0/Qdrant provider and
-returns bounded untrusted data. It has no SQLite fallback.
-
-Run the bounded configured-worker → Mem0 add/search/delete gate and the
-embedding provider gate after local services are ready:
-
-```bash
-PICO_CONFIG_PATH=config/pico.local.yaml npm run smoke:embedding-sidecar
-PICO_CONFIG_PATH=config/pico.local.yaml npm run smoke:mem0-runtime
-```
-
-Durable memory is limited to facility knowledge. Do not store child tracking,
-evaluation, scoring, profiling, child-linked individual records, or health,
-disability, abuse, and family-circumstance information.
+Any independently installed memory capability must not be designed for child
+tracking, evaluation, scoring, or profiling. It must not create child-linked
+individual records containing health, disability, abuse, or family-circumstance
+information. Pico does not enforce that product policy through a privacy filter
+or natural-language classifier.
 
 Rotate any provider, OTel, or Stack-chan token before production use if it has
 appeared in a terminal transcript, field artifact, or shared log. The remaining
@@ -303,9 +291,9 @@ The development terminal uses concise voice probe logs by default and does not
 support verbose mode. It shows utterance windows, STT completion, trigger
 decisions, session start, Pi Agent turns, Pi Agent response duration, wake
 acknowledgement prompts/responses, active user input text, active Pi Agent
-response text, TTS synthesis/playback, cutoff memory processing, and errors. Text payloads
-are displayed as indented multiline blocks so operator logs show the actual
-response shape without hiding line breaks. Per-frame successful
+response text, TTS synthesis/playback, interaction ending, and errors. Text
+payloads are displayed as indented multiline blocks so operator logs show the
+actual response shape without hiding line breaks. Per-frame successful
 capture/echo-control events are suppressed because they are too high-volume for
 operator-facing logs. Use `PICO_VOICE_PROBE_STDOUT=verbose npm run resident:voice` only
 when debugging the frame pipeline directly from a plain terminal, not from

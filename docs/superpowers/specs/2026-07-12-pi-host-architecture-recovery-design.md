@@ -1,8 +1,8 @@
 # Pi ホスト型アーキテクチャ回復設計
 
 **日付:** 2026-07-12
-**状態:** 一部廃止。Pi ownership と単一session境界は維持するが、runtime profile設計は
-`2026-07-11-autonomous-long-memory-retrieval-design.md` の起動設計で置き換えられた。
+**状態:** 一部廃止。Pi ownership と単一session境界は維持する。Memory ownership は
+[Pi 所有 memory 責務境界設計](./2026-07-13-pi-owned-memory-boundary-design.md)で置き換えられた。
 **対象:** `pico` resident voice の実行所有権回復
 **起点:** `origin/main` (`fdaf4955a829e4ad485a41153d38a29ce084afe3`)
 
@@ -14,7 +14,7 @@
 
 Pico の resident voice を、Pi をホストとする単一セッション構成へ戻す。
 
-Pi が会話セッション、モデル、ツール、subagent、イベント、通常キャンセルを所有し、
+Pi が会話セッション、context/history、モデル、ツール、subagent、イベント、通常キャンセルを所有し、
 Pico は施設固有の音声入出力、呼び掛け判定、状態表示、権限制約だけを所有する。
 
 本設計は、凍結した旧ブランチ
@@ -75,9 +75,6 @@ retrospective の対象である。
    返し、親がその結果を使って応答できる。
 4. 通常の RPC `abort` は実行中の子を `Subagent was aborted` として終了させ、親を
    `agent_settled` まで収束させる。
-5. Pi session の `appendEntry` と `SessionManager` は、小さな Pico 固有メタデータを
-   session と同じライフサイクルで保存できる。
-
 一方、親プロセスを強制終了した実験では、subagent が起動した OS 子プロセスが残った。
 通常キャンセル能力は実証済みだが、`SIGKILL` や電源断の後に、終了した Pi 自身が残留
 process を回収することはできない。この異常残留は Pico runtime の自動再開機構で扱わず、
@@ -87,8 +84,8 @@ Codex の定期 stale-process cleanup が、所有根拠を確認したうえで
 
 1. **単一セッション:** 音声入力と対話結果を、起動中の同じ Pi 親 session で処理する。
 2. **単一所有者:** Pi の機能は Pi が、施設固有機能は Pico が所有する。
-3. **ホスト API 優先:** Pico は `pi.sendUserMessage`、Pi events、`ctx.abort`、
-   `appendEntry` を使い、内部 session を再生成しない。
+3. **ホスト API 優先:** Pico は `pi.sendUserMessage`、Pi events、`ctx.abort` を使い、
+   内部 session を再生成しない。
 4. **起動とtool可視性を分離:** 通常Piはcontrollerなしで起動し、Picoだけを`--pico`で
    明示起動する。通常Pi、Pico、subagentのtool可視性はPi設定が所有する。
 5. **復旧情報を最小化:** Pi session にない会話本文やタスク複製を保存しない。
@@ -109,10 +106,12 @@ Codex の定期 stale-process cleanup が、所有根拠を確認したうえで
 | status/cancel/end の決定的コマンド | Pi abort を実行 | 意図判定と表示 |
 | TTS、echo control、単一出力キュー | No | Yes |
 | safeguarding と施設固有メッセージ | No | Yes |
-| 最小復旧メタデータ | 保存基盤 | schema と通知規則 |
+| conversation context/history | Yes | No |
+| durable memory | Pi-level plugin（導入時） | No |
 
-Pico は `createAgentSession()` を resident 本番起動経路から呼ばない。ただし
-`long_memory` など、別の明示的 provider 境界で行う SDK 利用まで一律禁止しない。
+Pico は `createAgentSession()` を resident 本番起動経路から呼ばない。Durable memory が
+必要な場合はPicoと同列のPi-level pluginとして導入し、Picoはprovider、config、tool、
+extraction、retention、lifecycleを所有しない。
 
 ## 6. 実行フロー
 
@@ -161,31 +160,14 @@ user input として扱う。
 通常PiはPico controllerを開始しない。`pi --pico`だけがYAML指定modelを選択してcontrollerを
 開始する。`pico` commandはこの起動経路への薄いaliasである。camera/StackChanなどagent別の
 tool可視性はPi設定で決定し、Pico runtimeにprofile、allowlist policy、fallbackを置かない。
-`pico_memory_search`はextensionへ一度登録し、extensionを読み込む通常Pi、Pico、subagentが
-同じ実装を利用できる。
+Memory pluginの読込みとtool可視性もPi設定が所有し、Picoはmemory toolを登録・proxyしない。
 
 ## 8. 最小復旧メタデータ
 
-Pi の session transcript と重複する TaskRun store は作らない。タスクの自動再開も行わない。
-必要な場合だけ、Pi の `appendEntry` に Pico namespaced entry を追加する。
-
-保存候補は以下に限定する。
-
-- `toolCallId`
-- `startedAt`
-- terminal state と `endedAt`
-- terminal reason の小さな分類
-- ユーザー通知済みかどうか
-- cleanup が process を Pico/Pi subagent 所有と判定するための非機密 owner marker
-
-保存しないもの:
-
-- 生の音声または transcript の複製
-- subagent prompt/result の複製
-- 子どもの識別、追跡、評価、スコア
-- Pi session から再構成可能な巨大 task snapshot
-
-初回PRで復旧メタデータが不要なら追加しない。将来追加するときもこの上限を契約にする。
+Pi の session transcript と重複する TaskRun store は作らず、タスクの自動再開も行わない。
+Picoはconversation entry、transcript、summary、memory cutoff payloadを保存しない。Picoの
+interaction stateはsession ID、active/ended、開始・終了時刻、trusted trigger、inactivity
+timerだけをprocess-localに保持し、terminal cleanup後に削除する。
 
 ## 9. 類似実装の判定
 
@@ -195,7 +177,7 @@ Pi の session transcript と重複する TaskRun store は作らない。タス
 | Pi 同梱 subagent extension | exact reuse with gate | 独自 runner を作らず使う。強制終了ゲートを別途満たす |
 | `src/runtime/pi-agent-turn.ts` | same behavior, wrong owner | embedded session 所有を本番経路から外す。必要な集約規則だけ再評価 |
 | `deferred-tool-coordinator` | superficially similar | camera の限定用途を維持し、汎用 task manager にしない |
-| `long_memory` の SDK session | unrelated explicit boundary | resident 起動の禁止規則を波及させない |
+| Pi-level memory plugin | separate owner | Picoから直接呼ばず、導入・tool可視性はPi設定へ委ねる |
 | 旧 `TaskRunManager` / `VoiceTurnCoordinator` | rejected duplicate | 移植しない |
 
 ## 10. 最初のPRの範囲

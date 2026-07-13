@@ -21,35 +21,27 @@ node_modules/.bin/pi --approve --no-session --no-tools --extension ./src/index.t
 ```
 
 This command verifies the actual Pi Agent extension loading path. It is not a
-substitute for later live microphone, speaker, camera, VLM, session cutoff,
-memory, or OTel validation.
+substitute for later live microphone, speaker, camera, VLM, interaction-ending,
+or OTel validation.
 
 The next field milestone is Pi Agent runtime interaction through pico tools:
 
 ```bash
-node_modules/.bin/pi --approve --no-session --no-builtin-tools --extension ./src/index.ts -p '<prompt that requires pico_session>'
+node_modules/.bin/pi --approve --no-session --no-builtin-tools --extension ./src/index.ts -p '<prompt that requires a Pico tool>'
 ```
 
-This verifies that the actual Pi Agent process can call pico runtime tools. It
-is still not a substitute for microphone, speaker, camera, VLM, memory, or OTel
+This verifies that the actual Pi Agent process can call Pico runtime tools. It
+is still not a substitute for microphone, speaker, camera, VLM, or OTel
 validation.
 
-Configured Pi worker extraction followed by Mem0 storage, search, delete, and
-redacted audit evidence is validated with:
-
-```bash
-PICO_CONFIG_PATH=config/pico.local.yaml npm run smoke:mem0-runtime
-```
-
-Embedding-sidecar readiness is validated separately:
-
-```bash
-PICO_CONFIG_PATH=config/pico.local.yaml npm run smoke:embedding-sidecar
-```
+Durable memory is outside Pico field validation. If enabled, it is a separately
+installed Pi-level plugin and must be validated in the repository or package
+that owns its provider, tools, extraction, persistence, retention, and
+lifecycle. Do not add a Pico memory smoke or adapter.
 
 Reports may contain IDs, counts, dimensions, durations, and status only. Do not
-add cutoff text, search query, memory title/body, device identifiers,
-credentials, or raw provider output.
+add raw audio, transcript text, device identifiers, credentials, or raw
+provider output.
 
 Visible-person PTZ follow behavior is validated separately from the smoke gate:
 
