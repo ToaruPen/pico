@@ -11,21 +11,11 @@ export type SessionStartTriggerKind =
   | "tool_event";
 
 export type SessionState = "active" | "ended";
-export type SessionEntryRole = "staff" | "assistant" | "system";
 
 export type SessionStartTrigger = {
   readonly kind: SessionStartTriggerKind;
   readonly label: string;
   readonly source: string;
-};
-
-export type SessionEntryInput = {
-  readonly role: SessionEntryRole;
-  readonly content: string;
-};
-
-export type SessionEntry = SessionEntryInput & {
-  readonly id: string;
 };
 
 export type TimedSessionEndingConfig = {
@@ -35,7 +25,6 @@ export type TimedSessionEndingConfig = {
 
 export type SessionLifecycleOptions = {
   readonly ending: TimedSessionEndingConfig;
-  readonly endedSessionRetentionMs?: number;
   readonly audit?: StructuredAuditLog;
 };
 
@@ -45,25 +34,14 @@ export type SessionRecord = {
   readonly startedAt: string;
   readonly endedAt: string | undefined;
   readonly trigger: SessionStartTrigger;
-  readonly entries: readonly SessionEntry[];
-};
-
-export type SessionCutoff = {
-  readonly sessionId: string;
-  readonly cutoffAt: string;
-  readonly sourceEntryIds: readonly string[];
-  readonly entries: readonly SessionEntry[];
-  readonly requestedBy: "session_lifecycle";
 };
 
 export type SessionLifecycle = {
   readonly start: (trigger: SessionStartTrigger) => SessionRecord;
   readonly read: (id: string) => SessionRecord | undefined;
-  readonly appendEntry: (id: string, input: SessionEntryInput) => SessionEntry;
   readonly refreshActivity: (id: string) => SessionRecord;
   readonly end: (id: string) => SessionRecord;
-  readonly cutoff: (id: string) => SessionCutoff;
-  readonly acknowledgeCutoff: (id: string) => void;
+  readonly remove: (id: string) => void;
 };
 
 type ManagedSession = {
@@ -72,9 +50,7 @@ type ManagedSession = {
   startedAt: string;
   endedAt: string | undefined;
   trigger: SessionStartTrigger;
-  entries: SessionEntry[];
   timeout: NodeJS.Timeout | undefined;
-  cleanupTimeout: NodeJS.Timeout | undefined;
 };
 
 const sessionStartTriggerKinds = new Set<SessionStartTriggerKind>([
@@ -100,8 +76,8 @@ export function createSessionModule(): PicoModule {
           description: "Start a pico interaction session from a trusted typed trigger."
         },
         {
-          id: "session.cutoff",
-          description: "Produce deterministic cutoff payloads when timed sessions end."
+          id: "session.end",
+          description: "End a pico interaction session explicitly or after inactivity."
         }
       ]
     }
@@ -110,7 +86,6 @@ export function createSessionModule(): PicoModule {
 
 export function createSessionLifecycle(options: SessionLifecycleOptions): SessionLifecycle {
   const durationMs = requireTimedDuration(options.ending);
-  const endedSessionRetentionMs = requireEndedSessionRetention(options.endedSessionRetentionMs);
   const sessions = new Map<string, ManagedSession>();
   let nextSessionId = 1;
 
@@ -124,13 +99,11 @@ export function createSessionLifecycle(options: SessionLifecycleOptions): Sessio
         startedAt,
         endedAt: undefined,
         trigger: normalizeTrigger(trigger),
-        entries: [],
-        timeout: undefined,
-        cleanupTimeout: undefined
+        timeout: undefined
       };
       nextSessionId += 1;
       session.timeout = scheduleSessionTimer(() => {
-        endSession(session, sessions, options.audit, endedSessionRetentionMs);
+        endSession(session, options.audit);
       }, durationMs);
       sessions.set(session.id, session);
       recordSessionAudit(options.audit, "session.started", startedAt, session);
@@ -142,23 +115,6 @@ export function createSessionLifecycle(options: SessionLifecycleOptions): Sessio
 
       return session === undefined ? undefined : cloneSession(session);
     },
-    appendEntry(id, input) {
-      const session = requireSession(sessions, id);
-
-      if (session.state !== "active") {
-        throw new Error("pico session is not active");
-      }
-
-      const entry = Object.freeze({
-        id: `${session.id}-entry-${session.entries.length + 1}`,
-        role: requireSessionEntryRole(input.role),
-        content: requireSessionText(input.content, "pico session entry content is required")
-      });
-      session.entries = [...session.entries, entry];
-      refreshSessionTimer(session, sessions, options.audit, endedSessionRetentionMs, durationMs);
-
-      return entry;
-    },
     refreshActivity(id) {
       const session = requireSession(sessions, id);
 
@@ -166,53 +122,33 @@ export function createSessionLifecycle(options: SessionLifecycleOptions): Sessio
         throw new Error("pico session is not active");
       }
 
-      refreshSessionTimer(session, sessions, options.audit, endedSessionRetentionMs, durationMs);
+      refreshSessionTimer(session, options.audit, durationMs);
 
       return cloneSession(session);
     },
     end(id) {
       const session = requireSession(sessions, id);
-      endSession(session, sessions, options.audit, endedSessionRetentionMs);
+      endSession(session, options.audit);
 
       return cloneSession(session);
     },
-    cutoff(id) {
-      const session = requireSession(sessions, id);
-
-      if (session.state !== "ended" || session.endedAt === undefined) {
-        throw new Error("pico session has not ended");
-      }
-
-      const cutoff = Object.freeze({
-        sessionId: session.id,
-        cutoffAt: session.endedAt,
-        sourceEntryIds: session.entries.map((entry) => entry.id),
-        entries: session.entries.map(cloneSessionEntry),
-        requestedBy: "session_lifecycle"
-      });
-      clearSessionCleanup(session);
-
-      return cutoff;
-    },
-    acknowledgeCutoff(id) {
+    remove(id) {
       const session = requireSession(sessions, id);
 
       if (session.state !== "ended") {
         throw new Error("pico session has not ended");
       }
 
-      clearSessionCleanup(session);
+      if (session.timeout !== undefined) {
+        clearTimeout(session.timeout);
+        session.timeout = undefined;
+      }
       sessions.delete(session.id);
     }
   };
 }
 
-function endSession(
-  session: ManagedSession,
-  sessions: Map<string, ManagedSession>,
-  audit: StructuredAuditLog | undefined,
-  endedSessionRetentionMs: number
-): void {
+function endSession(session: ManagedSession, audit: StructuredAuditLog | undefined): void {
   if (session.state === "ended") {
     return;
   }
@@ -225,16 +161,11 @@ function endSession(
   session.state = "ended";
   session.endedAt = nowIso();
   recordSessionAudit(audit, "session.ended", session.endedAt, session);
-  session.cleanupTimeout = scheduleSessionTimer(() => {
-    sessions.delete(session.id);
-  }, endedSessionRetentionMs);
 }
 
 function refreshSessionTimer(
   session: ManagedSession,
-  sessions: Map<string, ManagedSession>,
   audit: StructuredAuditLog | undefined,
-  endedSessionRetentionMs: number,
   durationMs: number
 ): void {
   if (session.timeout !== undefined) {
@@ -242,7 +173,7 @@ function refreshSessionTimer(
   }
 
   session.timeout = scheduleSessionTimer(() => {
-    endSession(session, sessions, audit, endedSessionRetentionMs);
+    endSession(session, audit);
   }, durationMs);
 }
 
@@ -251,13 +182,6 @@ function scheduleSessionTimer(callback: () => void, durationMs: number): NodeJS.
   timeout.unref();
 
   return timeout;
-}
-
-function clearSessionCleanup(session: ManagedSession): void {
-  if (session.cleanupTimeout !== undefined) {
-    clearTimeout(session.cleanupTimeout);
-    session.cleanupTimeout = undefined;
-  }
 }
 
 function recordSessionAudit(
@@ -275,8 +199,7 @@ function recordSessionAudit(
       summary: "Pico session lifecycle event.",
       attributes: {
         "pico.session.id": session.id,
-        "pico.session.trigger_kind": session.trigger.kind,
-        "pico.session.entry_count": session.entries.length
+        "pico.session.trigger_kind": session.trigger.kind
       }
     });
   } catch {
@@ -300,14 +223,6 @@ function requireSessionStartTriggerKind(value: unknown): SessionStartTriggerKind
   throw new Error("pico session start trigger kind is invalid");
 }
 
-function requireSessionEntryRole(value: unknown): SessionEntryRole {
-  if (value === "staff" || value === "assistant" || value === "system") {
-    return value;
-  }
-
-  throw new Error("pico session entry role is invalid");
-}
-
 function requireTimedDuration(ending: TimedSessionEndingConfig): number {
   if (!Number.isInteger(ending.durationMs) || ending.durationMs < 1) {
     throw new Error("pico session ending durationMs must be a positive integer");
@@ -320,24 +235,6 @@ function requireTimedDuration(ending: TimedSessionEndingConfig): number {
   }
 
   return ending.durationMs;
-}
-
-function requireEndedSessionRetention(value: number | undefined): number {
-  if (value === undefined) {
-    return 300_000;
-  }
-
-  if (!Number.isInteger(value) || value < 1) {
-    throw new Error("pico ended session retentionMs must be a positive integer");
-  }
-
-  if (value > maxNodeTimeoutMs) {
-    throw new Error(
-      `pico ended session retentionMs must be a positive integer <= ${maxNodeTimeoutMs}`
-    );
-  }
-
-  return value;
 }
 
 function requireNoActiveSession(sessions: ReadonlyMap<string, ManagedSession>): void {
@@ -378,13 +275,8 @@ function cloneSession(session: ManagedSession): SessionRecord {
     state: session.state,
     startedAt: session.startedAt,
     endedAt: session.endedAt,
-    trigger: Object.freeze({ ...session.trigger }),
-    entries: session.entries.map(cloneSessionEntry)
+    trigger: Object.freeze({ ...session.trigger })
   });
-}
-
-function cloneSessionEntry(entry: SessionEntry): SessionEntry {
-  return Object.freeze({ ...entry });
 }
 
 function nowIso(): string {
