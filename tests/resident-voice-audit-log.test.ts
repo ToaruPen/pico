@@ -153,18 +153,20 @@ describe("resident voice audit log", () => {
       }
     });
 
-    audit.record({
-      category: "transport_event",
-      name: "voice.runtime.stage",
-      severity: "info",
-      occurredAt: "2026-06-22T00:00:00.000Z",
-      summary: "Pico voice runtime stage completed.",
-      attributes: {
-        "pico.voice.stage": "session_cutoff_memory",
-        "pico.voice.stage_status": "ok",
-        "pico.voice.stage_duration_ms": 0
-      }
-    });
+    for (const stage of ["session_cutoff_enqueue", "session_cutoff_memory"]) {
+      audit.record({
+        category: "transport_event",
+        name: "voice.runtime.stage",
+        severity: "info",
+        occurredAt: "2026-06-22T00:00:00.000Z",
+        summary: "Pico voice runtime stage completed.",
+        attributes: {
+          "pico.voice.stage": stage,
+          "pico.voice.stage_status": "ok",
+          "pico.voice.stage_duration_ms": 0
+        }
+      });
+    }
 
     expect(writes).toEqual([]);
   });

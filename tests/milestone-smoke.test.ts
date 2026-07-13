@@ -135,9 +135,11 @@ describe("pico milestone smoke suite", () => {
       configuredSectionDependencies()
     );
 
-    expect(report.sections.map((section) => section.name)).not.toEqual(
-      expect.arrayContaining(["embedding_sidecar", "mem0_runtime", "memory_mem0"])
-    );
+    const sectionNames = report.sections.map((section) => section.name);
+
+    expect(sectionNames).not.toContain("embedding_sidecar");
+    expect(sectionNames).not.toContain("mem0_runtime");
+    expect(sectionNames).not.toContain("memory_mem0");
   });
 
   it("reports all milestone sections with deterministic audit evidence", async () => {
