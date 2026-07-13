@@ -43,6 +43,21 @@ async function withLongMemoryDatabase(run: (path: string) => Promise<void> | voi
   }
 }
 
+function readCandidateJobRow(
+  path: string,
+  id = 1
+): { readonly status: string; readonly cutoff_json: string } {
+  const database = new DatabaseSync(path);
+
+  try {
+    return database
+      .prepare("SELECT status, cutoff_json FROM long_memory_candidate_jobs WHERE id = ?")
+      .get(id) as { readonly status: string; readonly cutoff_json: string };
+  } finally {
+    database.close();
+  }
+}
+
 function listTables(path: string): readonly string[] {
   const database = new DatabaseSync(path);
 
@@ -132,25 +147,18 @@ describe("session long-memory candidate pipeline", () => {
 
         expect(JSON.stringify(candidates.listJobs())).not.toContain("工作セットを早めに出す");
         expect(JSON.stringify(candidates.listJobs())).not.toContain("工作セットを先に準備する候補");
-        const database = new DatabaseSync(path);
-        try {
-          const row = database
-            .prepare("SELECT cutoff_json FROM long_memory_candidate_jobs WHERE id = 1")
-            .get() as { readonly cutoff_json: string };
+        const row = readCandidateJobRow(path);
 
-          expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
-          expect(row.cutoff_json).not.toContain("工作セットを先に準備する候補");
-          expect(JSON.parse(row.cutoff_json)).toEqual({
-            sessionId: "session-2026-06-10-evening",
-            cutoffAt: "2026-06-10T18:30:00.000Z",
-            sourceEntryIds: ["memory-1", "memory-2"],
-            sourceEntryCount: 2,
-            requestedBy: "pico",
-            retention: "processed_metadata_only"
-          });
-        } finally {
-          database.close();
-        }
+        expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
+        expect(row.cutoff_json).not.toContain("工作セットを先に準備する候補");
+        expect(JSON.parse(row.cutoff_json)).toEqual({
+          sessionId: "session-2026-06-10-evening",
+          cutoffAt: "2026-06-10T18:30:00.000Z",
+          sourceEntryIds: ["memory-1", "memory-2"],
+          sourceEntryCount: 2,
+          requestedBy: "pico",
+          retention: "processed_metadata_only"
+        });
         expect(audit.entries().map((event) => event.name)).toEqual([
           "long_memory.candidate_job.enqueued",
           "long_memory.candidate.created",
@@ -190,18 +198,10 @@ describe("session long-memory candidate pipeline", () => {
           })
         ]);
 
-        const database = new DatabaseSync(path);
+        const row = readCandidateJobRow(path);
 
-        try {
-          const row = database
-            .prepare("SELECT status, cutoff_json FROM long_memory_candidate_jobs WHERE id = 1")
-            .get() as { readonly status: string; readonly cutoff_json: string };
-
-          expect(row.status).toBe("queued");
-          expect(JSON.parse(row.cutoff_json)).toEqual(completedSession);
-        } finally {
-          database.close();
-        }
+        expect(row.status).toBe("queued");
+        expect(JSON.parse(row.cutoff_json)).toEqual(completedSession);
         expect(JSON.stringify(audit.entries())).not.toContain(
           "processor unavailable with raw provider output"
         );
@@ -252,18 +252,10 @@ describe("session long-memory candidate pipeline", () => {
           })
         ]);
 
-        const database = new DatabaseSync(path);
+        const row = readCandidateJobRow(path);
 
-        try {
-          const row = database
-            .prepare("SELECT status, cutoff_json FROM long_memory_candidate_jobs WHERE id = 1")
-            .get() as { readonly status: string; readonly cutoff_json: string };
-
-          expect(row.status).toBe("dead_letter");
-          expect(JSON.parse(row.cutoff_json)).toEqual(completedSession);
-        } finally {
-          database.close();
-        }
+        expect(row.status).toBe("dead_letter");
+        expect(JSON.parse(row.cutoff_json)).toEqual(completedSession);
       } finally {
         candidates.close();
       }
@@ -296,21 +288,13 @@ describe("session long-memory candidate pipeline", () => {
           })
         ]);
 
-        const database = new DatabaseSync(path);
+        const row = readCandidateJobRow(path);
 
-        try {
-          const row = database
-            .prepare("SELECT cutoff_json FROM long_memory_candidate_jobs WHERE id = 1")
-            .get() as { readonly cutoff_json: string };
-
-          expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
-          expect(JSON.parse(row.cutoff_json)).toMatchObject({
-            sessionId: completedSession.sessionId,
-            retention: "dead_letter_metadata_only"
-          });
-        } finally {
-          database.close();
-        }
+        expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
+        expect(JSON.parse(row.cutoff_json)).toMatchObject({
+          sessionId: completedSession.sessionId,
+          retention: "dead_letter_metadata_only"
+        });
         expect(JSON.stringify(audit.entries())).not.toContain("raw policy-sensitive model output");
       } finally {
         candidates.close();
@@ -343,21 +327,13 @@ describe("session long-memory candidate pipeline", () => {
           1
         );
 
-        const database = new DatabaseSync(path);
+        const row = readCandidateJobRow(path);
 
-        try {
-          const row = database
-            .prepare("SELECT cutoff_json FROM long_memory_candidate_jobs WHERE id = 1")
-            .get() as { readonly cutoff_json: string };
-
-          expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
-          expect(JSON.parse(row.cutoff_json)).toMatchObject({
-            sessionId: completedSession.sessionId,
-            retention: "dead_letter_metadata_only"
-          });
-        } finally {
-          database.close();
-        }
+        expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
+        expect(JSON.parse(row.cutoff_json)).toMatchObject({
+          sessionId: completedSession.sessionId,
+          retention: "dead_letter_metadata_only"
+        });
       } finally {
         candidates.close();
       }
@@ -697,21 +673,13 @@ describe("session long-memory candidate pipeline", () => {
           })
         ]);
 
-        const database = new DatabaseSync(path);
+        const row = readCandidateJobRow(path);
 
-        try {
-          const row = database
-            .prepare("SELECT cutoff_json FROM long_memory_candidate_jobs WHERE id = 1")
-            .get() as { readonly cutoff_json: string };
-
-          expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
-          expect(JSON.parse(row.cutoff_json)).toMatchObject({
-            sessionId: completedSession.sessionId,
-            retention: "dead_letter_metadata_only"
-          });
-        } finally {
-          database.close();
-        }
+        expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
+        expect(JSON.parse(row.cutoff_json)).toMatchObject({
+          sessionId: completedSession.sessionId,
+          retention: "dead_letter_metadata_only"
+        });
       } finally {
         candidates.close();
       }
@@ -745,21 +713,13 @@ describe("session long-memory candidate pipeline", () => {
           })
         ]);
 
-        const database = new DatabaseSync(path);
+        const row = readCandidateJobRow(path);
 
-        try {
-          const row = database
-            .prepare("SELECT cutoff_json FROM long_memory_candidate_jobs WHERE id = 1")
-            .get() as { readonly cutoff_json: string };
-
-          expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
-          expect(JSON.parse(row.cutoff_json)).toMatchObject({
-            sessionId: completedSession.sessionId,
-            retention: "dead_letter_metadata_only"
-          });
-        } finally {
-          database.close();
-        }
+        expect(row.cutoff_json).not.toContain("工作セットを早めに出す");
+        expect(JSON.parse(row.cutoff_json)).toMatchObject({
+          sessionId: completedSession.sessionId,
+          retention: "dead_letter_metadata_only"
+        });
       } finally {
         candidates.close();
       }
@@ -801,17 +761,7 @@ describe("session long-memory candidate pipeline", () => {
           })
         ]);
 
-        const database = new DatabaseSync(path);
-
-        try {
-          const row = database
-            .prepare("SELECT cutoff_json FROM long_memory_candidate_jobs WHERE id = 1")
-            .get() as { readonly cutoff_json: string };
-
-          expect(JSON.parse(row.cutoff_json)).toEqual(completedSession);
-        } finally {
-          database.close();
-        }
+        expect(JSON.parse(readCandidateJobRow(path).cutoff_json)).toEqual(completedSession);
       } finally {
         candidates.close();
       }

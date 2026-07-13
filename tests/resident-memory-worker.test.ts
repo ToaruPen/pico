@@ -327,6 +327,69 @@ describe("resident memory drain worker", () => {
     });
   });
 
+  it("attributes two handled failures to their own attempts within one drain", async () => {
+    await withLongMemoryDatabase(async (path) => {
+      const queue = openSessionMemoryCandidateQueue(path, {
+        now: () => "2026-06-20T09:00:00.000Z"
+      });
+
+      try {
+        queue.enqueueSessionCutoff(cutoffInput("session-failure-one"));
+        queue.enqueueSessionCutoff(cutoffInput("session-failure-two"));
+      } finally {
+        queue.close();
+      }
+
+      const extractedSessions: string[] = [];
+      const worker = createResidentMemoryDrainWorker({
+        databasePath: path,
+        extractor: {
+          extract: (cutoff) => {
+            extractedSessions.push(cutoff.sessionId);
+            return Promise.reject(new Error(`provider failure for ${cutoff.sessionId}`));
+          }
+        },
+        now: () => "2026-06-20T09:00:01.000Z"
+      });
+
+      try {
+        await expect(worker.drainUntilIdle()).resolves.toEqual({
+          processedCount: 0,
+          recoveredCount: 0,
+          idle: false,
+          memoryWrittenCount: 0,
+          retryScheduledCount: 2,
+          deadLetterCount: 0,
+          lastErrorCode: "extraction_failed"
+        });
+        expect(extractedSessions).toEqual(["session-failure-one", "session-failure-two"]);
+      } finally {
+        worker.close();
+      }
+
+      const verificationQueue = openSessionMemoryCandidateQueue(path);
+
+      try {
+        expect(verificationQueue.listJobs()).toEqual([
+          expect.objectContaining({
+            sessionId: "session-failure-one",
+            status: "queued",
+            attemptCount: 1,
+            lastErrorCode: "extraction_failed"
+          }),
+          expect.objectContaining({
+            sessionId: "session-failure-two",
+            status: "queued",
+            attemptCount: 1,
+            lastErrorCode: "extraction_failed"
+          })
+        ]);
+      } finally {
+        verificationQueue.close();
+      }
+    });
+  });
+
   it("counts handled failures against the drain job limit", async () => {
     await withLongMemoryDatabase(async (path) => {
       const queue = openSessionMemoryCandidateQueue(path, {
