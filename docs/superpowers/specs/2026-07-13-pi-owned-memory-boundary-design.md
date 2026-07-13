@@ -141,4 +141,3 @@ Pico repository から以下を削除する。
 既存 PR #97 で完了済みの SQLite/FTS、candidate queue、custom worker、memory LaunchAgent の削除は
 維持する。PR 内で追加された Mem0 replacement は削除し、最終 diff を「Pico から memory ownership
 を除去する変更」として収束させる。
-
