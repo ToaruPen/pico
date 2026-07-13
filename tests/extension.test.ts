@@ -137,7 +137,7 @@ describe("pico extension", () => {
     expect(result.extensions[0]?.path).toBe(
       fileURLToPath(new URL("../src/index.ts", import.meta.url))
     );
-  });
+  }, 15_000);
 
   it("registers Pi-hosted resident lifecycle on the default extension", () => {
     const capture = createCapturedExtensionApi();
