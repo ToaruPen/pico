@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createResidentVoiceConsoleLog } from "../src/runtime/resident-voice-console-log.js";
-import type { VoiceResidentConsoleEvent } from "../src/runtime/voice-resident.js";
+import type { VoiceResidentLogEvent } from "../src/runtime/voice-resident.js";
 
 describe("resident voice console log", () => {
   it("writes metadata-only input and Pi Agent response events", () => {
@@ -54,7 +54,7 @@ describe("resident voice console log", () => {
       occurredAt: "2026-06-22T00:00:00.000Z",
       sessionId: "session-1",
       text: "123456789"
-    } as VoiceResidentConsoleEvent);
+    } as VoiceResidentLogEvent);
 
     expect(writes).toEqual([
       "[pico voice] 2026-06-22T00:00:00.000Z staff_input session=session-1\n"

@@ -510,7 +510,7 @@ describe("voice resident runtime", () => {
   });
 
   it("records active input and Pi Agent response metadata without duplicating text", async () => {
-    const consoleEvents: unknown[] = [];
+    const logEvents: unknown[] = [];
 
     await runVoiceResidentRuntime({
       now: sequenceNow([
@@ -553,14 +553,14 @@ describe("voice resident runtime", () => {
       piAgent: {
         prompt: () => Promise.resolve({ text: "了解です。" })
       },
-      console: {
+      log: {
         record: (event) => {
-          consoleEvents.push(event);
+          logEvents.push(event);
         }
       }
     });
 
-    expect(consoleEvents).toEqual([
+    expect(logEvents).toEqual([
       {
         kind: "staff_input",
         occurredAt: "2026-06-18T00:00:00.000Z",
@@ -573,9 +573,9 @@ describe("voice resident runtime", () => {
         durationMs: 250
       }
     ]);
-    expect(JSON.stringify(consoleEvents)).not.toContain("今日はテストです");
-    expect(JSON.stringify(consoleEvents)).not.toContain("了解です。");
-    expect(JSON.stringify(consoleEvents)).not.toContain('"text"');
+    expect(JSON.stringify(logEvents)).not.toContain("今日はテストです");
+    expect(JSON.stringify(logEvents)).not.toContain("了解です。");
+    expect(JSON.stringify(logEvents)).not.toContain('"text"');
   });
 
   it("passes deliverable deferred tool results separately from the active turn transcript", async () => {
@@ -1032,7 +1032,7 @@ describe("voice resident runtime", () => {
   });
 
   it("measures Pi Agent response duration with monotonic time instead of wall-clock timestamps", async () => {
-    const consoleEvents: unknown[] = [];
+    const logEvents: unknown[] = [];
 
     await runVoiceResidentRuntime({
       now: sequenceNow([
@@ -1075,14 +1075,14 @@ describe("voice resident runtime", () => {
       piAgent: {
         prompt: () => Promise.resolve({ text: "了解です。" })
       },
-      console: {
+      log: {
         record: (event) => {
-          consoleEvents.push(event);
+          logEvents.push(event);
         }
       }
     });
 
-    expect(consoleEvents).toContainEqual({
+    expect(logEvents).toContainEqual({
       kind: "pi_agent_response",
       occurredAt: "2026-06-18T00:00:08.000Z",
       sessionId: "session-1",
@@ -1090,7 +1090,7 @@ describe("voice resident runtime", () => {
     });
   });
 
-  it("keeps active voice turns running when resident console logging fails", async () => {
+  it("keeps active voice turns running when resident logging fails", async () => {
     const prompts: string[] = [];
     const spokenTexts: string[] = [];
     let playbackCalls = 0;
@@ -1135,7 +1135,7 @@ describe("voice resident runtime", () => {
           return Promise.resolve({ text: "了解です。" });
         }
       },
-      console: {
+      log: {
         record: () => {
           throw new Error("log sink unavailable");
         }
@@ -1152,7 +1152,7 @@ describe("voice resident runtime", () => {
   it("generates and speaks a wake acknowledgement through Pi Agent after a trigger starts a session", async () => {
     const prompts: string[] = [];
     const spokenTexts: string[] = [];
-    const consoleEvents: unknown[] = [];
+    const logEvents: unknown[] = [];
 
     const result = await runVoiceResidentRuntime({
       now: sequenceNow([
@@ -1195,9 +1195,9 @@ describe("voice resident runtime", () => {
       wakeAcknowledgement: {
         enabled: true
       },
-      console: {
+      log: {
         record: (event) => {
-          consoleEvents.push(event);
+          logEvents.push(event);
         }
       }
     });
@@ -1211,7 +1211,7 @@ describe("voice resident runtime", () => {
       'The user just woke you up by saying: "ピコ". Respond briefly in spoken Japanese to show you are listening. Do not answer a separate task yet.'
     ]);
     expect(spokenTexts).toEqual(["はい、聞いています。"]);
-    expect(consoleEvents).toEqual([
+    expect(logEvents).toEqual([
       {
         kind: "wake_ack_input",
         occurredAt: "2026-06-18T00:00:00.000Z",
@@ -1224,12 +1224,12 @@ describe("voice resident runtime", () => {
         durationMs: 180
       }
     ]);
-    expect(JSON.stringify(consoleEvents)).not.toContain("The user just woke you up by saying");
-    expect(JSON.stringify(consoleEvents)).not.toContain("はい、聞いています。");
-    expect(JSON.stringify(consoleEvents)).not.toContain('"text"');
+    expect(JSON.stringify(logEvents)).not.toContain("The user just woke you up by saying");
+    expect(JSON.stringify(logEvents)).not.toContain("はい、聞いています。");
+    expect(JSON.stringify(logEvents)).not.toContain('"text"');
   });
 
-  it("keeps wake acknowledgement running when resident console logging fails", async () => {
+  it("keeps wake acknowledgement running when resident logging fails", async () => {
     const prompts: string[] = [];
     const spokenTexts: string[] = [];
     let playbackCalls = 0;
@@ -1268,7 +1268,7 @@ describe("voice resident runtime", () => {
       wakeAcknowledgement: {
         enabled: true
       },
-      console: {
+      log: {
         record: () => {
           throw new Error("log sink unavailable");
         }

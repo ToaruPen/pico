@@ -15,7 +15,7 @@ describe("resident dev terminal", () => {
     }).not.toThrow();
   });
 
-  it("builds a Terminal.app session that streams resident voice logs to the screen and a local log file", () => {
+  it("builds a Terminal.app session that leaves Pi conversation output in the terminal", () => {
     const session = defineResidentDevelopmentTerminalSession({
       repoRoot: "/Users/monsoon/Dev/pico project",
       homeDirectory: "/Users/monsoon",
@@ -61,12 +61,15 @@ describe("resident dev terminal", () => {
     expect(session.shellCommand).not.toContain(": >");
     expect(session.shellCommand).toContain("PICO_DEV_TERMINAL_TTY=$(tty)");
     expect(session.shellCommand).toContain("printf '\\033]0;%s\\007' 'pico resident voice'");
+    expect(session.shellCommand).toContain("[pico] metadata log: %s");
     expect(session.shellCommand).toContain(
       "node_modules/.bin/pi --extension ./src/index.ts --pico"
     );
     expect(session.shellCommand).not.toContain("npm run resident:voice");
-    expect(session.shellCommand).toContain(
-      "2>&1 | tee -a '/Users/monsoon/.pico/resident-voice/development/processes/2026-06-22/2026-06-22T01-02-03-000Z-1234.log'"
+    expect(session.shellCommand).not.toContain("tee -a");
+    expect(session.shellCommand).not.toContain("--pico 2>&1");
+    expect(session.shellCommand).not.toContain(
+      "> '/Users/monsoon/.pico/resident-voice/development/processes/2026-06-22/2026-06-22T01-02-03-000Z-1234.log'"
     );
     expect(session.shellCommand).toContain("resident voice exited with status");
     expect(session.shellCommand).toContain("close windowItem saving no");

@@ -278,8 +278,10 @@ the voice resident process:
 PICO_CONFIG_PATH=config/pico.local.yaml pico dev
 ```
 
-This opens kitty by default, starts Pi Agent with `--pico`, streams
-stdout and stderr in that terminal window, and also appends the same output to
+This opens kitty by default, starts Pi Agent with `--pico`, and displays Pi's
+interactive output in that terminal window. The Pico wrapper does not duplicate
+that output into a file. Pico persists only output produced by its metadata-only
+log sink under
 `~/.pico/resident-voice/development/processes/YYYY-MM-DD/<run-id>.log`. Use
 `pico dev --terminal=terminal` to open Terminal.app instead. Stop it from the
 opened terminal with `Ctrl-C`; the development terminal closes after the

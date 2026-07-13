@@ -1,4 +1,4 @@
-import type { VoiceResidentConsoleEvent, VoiceResidentConsoleSink } from "./voice-resident.js";
+import type { VoiceResidentLogEvent, VoiceResidentLogSink } from "./voice-resident.js";
 
 export type ResidentVoiceConsoleLogOptions = {
   readonly writeStdout?: (line: string) => void;
@@ -6,7 +6,7 @@ export type ResidentVoiceConsoleLogOptions = {
 
 export function createResidentVoiceConsoleLog(
   options: ResidentVoiceConsoleLogOptions = {}
-): VoiceResidentConsoleSink {
+): VoiceResidentLogSink {
   const writeStdout = options.writeStdout ?? ((line) => process.stdout.write(line));
 
   return {
@@ -16,7 +16,7 @@ export function createResidentVoiceConsoleLog(
   };
 }
 
-export function formatResidentVoiceConsoleEvent(event: VoiceResidentConsoleEvent): string {
+export function formatResidentVoiceConsoleEvent(event: VoiceResidentLogEvent): string {
   const duration =
     event.kind === "pi_agent_response" || event.kind === "wake_ack_response"
       ? ` duration_ms=${event.durationMs}`

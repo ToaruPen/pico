@@ -20,7 +20,7 @@ import {
 import { createPicoCameraSceneDescriptionDeferredTool } from "../../src/runtime/perception-tool.js";
 import {
   runVoiceResidentRuntime,
-  type VoiceResidentConsoleEvent
+  type VoiceResidentLogEvent
 } from "../../src/runtime/voice-resident.js";
 
 export type ResidentVoiceDeferredRalliesReport = {
@@ -47,7 +47,7 @@ export type ResidentVoiceDeferredRalliesReport = {
     readonly acknowledgedDeferredJobs: readonly string[];
     readonly sceneDescriptions: readonly string[];
     readonly ttsRequests: readonly string[];
-    readonly consoleEvents: readonly VoiceResidentConsoleEvent[];
+    readonly logEvents: readonly VoiceResidentLogEvent[];
   };
 };
 
@@ -77,7 +77,7 @@ export async function runResidentVoiceDeferredRalliesField(): Promise<ResidentVo
   const acknowledgedDeferredJobs: string[] = [];
   const sceneDescriptions: string[] = [];
   const ttsRequests: string[] = [];
-  const consoleEvents: VoiceResidentConsoleEvent[] = [];
+  const logEvents: VoiceResidentLogEvent[] = [];
   const coordinator = createDeferredToolCoordinator({
     maxResultAgeMs: 60_000
   });
@@ -183,9 +183,9 @@ export async function runResidentVoiceDeferredRalliesField(): Promise<ResidentVo
       }
     },
     deferredTools,
-    console: {
+    log: {
       record: (event) => {
-        consoleEvents.push(event);
+        logEvents.push(event);
       }
     }
   });
@@ -213,7 +213,7 @@ export async function runResidentVoiceDeferredRalliesField(): Promise<ResidentVo
     acknowledgedDeferredJobs,
     sceneDescriptions,
     ttsRequests,
-    consoleEvents
+    logEvents
   };
 
   return {

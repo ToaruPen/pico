@@ -33,7 +33,7 @@ import {
 } from "./resident-voice-audit-log.js";
 import { createResidentVoiceConsoleLog } from "./resident-voice-console-log.js";
 import {
-  createResidentVoiceCompositeConsoleSink,
+  createResidentVoiceCompositeLogSink,
   createResidentVoiceFileLogSink,
   type ResidentVoiceLogRunMode,
   requireResidentVoiceRunId
@@ -195,7 +195,7 @@ export async function runResidentVoiceWithProviders(input: {
       farewell: {
         enabled: true
       },
-      console: createResidentVoiceRuntimeConsoleSink(logRunMode, fileLog, stdoutProbeMode),
+      log: createResidentVoiceRuntimeLogSink(logRunMode, fileLog, stdoutProbeMode),
       minTriggerConfidence: config.voice.resident.minTriggerConfidence,
       activation: activation.runtime,
       utteranceWindow: config.voice.resident.utteranceWindow,
@@ -227,13 +227,13 @@ export function requireResidentVoiceEnabled(config: PicoConfig): void {
   }
 }
 
-function createResidentVoiceRuntimeConsoleSink(
+function createResidentVoiceRuntimeLogSink(
   logRunMode: ResidentVoiceLogRunMode,
   fileLog: ReturnType<typeof createResidentVoiceFileLogSink>,
   stdoutProbeMode: ResidentVoiceAuditLogStdoutMode | undefined
 ) {
   if (stdoutProbeMode !== undefined && logRunMode === "development") {
-    return createResidentVoiceCompositeConsoleSink([createResidentVoiceConsoleLog(), fileLog]);
+    return createResidentVoiceCompositeLogSink([createResidentVoiceConsoleLog(), fileLog]);
   }
 
   return fileLog;

@@ -57,7 +57,7 @@ export type PiAgentTurnClient = {
   readonly disposeAll?: () => void | Promise<void>;
 };
 
-export type VoiceResidentConsoleEvent =
+export type VoiceResidentLogEvent =
   | {
       readonly kind: "staff_input";
       readonly occurredAt: string;
@@ -81,8 +81,8 @@ export type VoiceResidentConsoleEvent =
       readonly durationMs: number;
     };
 
-export type VoiceResidentConsoleSink = {
-  readonly record: (event: VoiceResidentConsoleEvent) => void;
+export type VoiceResidentLogSink = {
+  readonly record: (event: VoiceResidentLogEvent) => void;
 };
 
 export type VoiceResidentRuntimeOptions = {
@@ -106,7 +106,7 @@ export type VoiceResidentRuntimeOptions = {
     readonly cancelSession?: (sessionId: string, reason: "session_closed" | "shutdown") => void;
     readonly waitForIdle?: () => Promise<void>;
   };
-  readonly console?: VoiceResidentConsoleSink;
+  readonly log?: VoiceResidentLogSink;
   readonly wakeAcknowledgement?: {
     readonly enabled: boolean;
   };
@@ -804,7 +804,7 @@ async function runWakeAcknowledgement(
   const prompt = buildWakeAcknowledgementPrompt(trigger);
   const piStageStartedAt = now();
   const piStageStartedMs = (options.monotonicNow ?? defaultMonotonicNow)();
-  recordResidentConsoleEvent(options.console, {
+  recordResidentLogEvent(options.log, {
     kind: "wake_ack_input",
     occurredAt: piStageStartedAt,
     sessionId
@@ -823,7 +823,7 @@ async function runWakeAcknowledgement(
     return;
   }
 
-  recordResidentConsoleEvent(options.console, {
+  recordResidentLogEvent(options.log, {
     kind: "wake_ack_response",
     occurredAt: response.completedAt,
     sessionId,
@@ -883,7 +883,7 @@ async function runActiveVoiceTurn(
   const piStageStartedAt = now();
   const piStageStartedMs = (options.monotonicNow ?? defaultMonotonicNow)();
   const turnRequest = createActiveVoiceTurnRequest(transcript, options, activeSessionId, now);
-  recordResidentConsoleEvent(options.console, {
+  recordResidentLogEvent(options.log, {
     kind: "staff_input",
     occurredAt: piStageStartedAt,
     sessionId: activeSessionId
@@ -902,7 +902,7 @@ async function runActiveVoiceTurn(
     return;
   }
 
-  recordResidentConsoleEvent(options.console, {
+  recordResidentLogEvent(options.log, {
     kind: "pi_agent_response",
     occurredAt: response.completedAt,
     sessionId: activeSessionId,
@@ -1083,14 +1083,14 @@ async function synthesizeTurnResponse(
   return undefined;
 }
 
-function recordResidentConsoleEvent(
-  sink: VoiceResidentConsoleSink | undefined,
-  event: VoiceResidentConsoleEvent
+function recordResidentLogEvent(
+  sink: VoiceResidentLogSink | undefined,
+  event: VoiceResidentLogEvent
 ): void {
   try {
     sink?.record(event);
   } catch {
-    // Console and file logging must not break resident voice operation.
+    // Logging must not break resident voice operation.
   }
 }
 

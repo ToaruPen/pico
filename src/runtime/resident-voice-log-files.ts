@@ -2,7 +2,7 @@ import { appendFileSync, chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import type { AuditAttributeValue, AuditEvent } from "../modules/audit/index.js";
-import type { VoiceResidentConsoleEvent, VoiceResidentConsoleSink } from "./voice-resident.js";
+import type { VoiceResidentLogEvent, VoiceResidentLogSink } from "./voice-resident.js";
 
 export type ResidentVoiceLogRunMode = "development" | "normal";
 
@@ -53,7 +53,7 @@ const voiceMetricAttributeKeys = new Set([
 
 export function createResidentVoiceFileLogSink(
   options: ResidentVoiceFileLogSinkOptions
-): VoiceResidentConsoleSink & {
+): VoiceResidentLogSink & {
   readonly writeProcessLine: (line: string) => void;
   readonly writeAuditEvent: (event: ResidentVoiceLogAuditEvent) => void;
 } {
@@ -116,16 +116,16 @@ export function createResidentVoiceFileLogSink(
   };
 }
 
-export function createResidentVoiceCompositeConsoleSink(
-  sinks: readonly VoiceResidentConsoleSink[]
-): VoiceResidentConsoleSink {
+export function createResidentVoiceCompositeLogSink(
+  sinks: readonly VoiceResidentLogSink[]
+): VoiceResidentLogSink {
   return {
     record(event) {
       for (const sink of sinks) {
         try {
           sink.record(event);
         } catch {
-          // One console sink failure must not prevent the remaining sinks.
+          // One log sink failure must not prevent the remaining sinks.
         }
       }
     }
@@ -159,7 +159,7 @@ export function resolveResidentVoiceLogPaths(
 }
 
 function normalizeResidentVoiceEvent(
-  event: VoiceResidentConsoleEvent & {
+  event: VoiceResidentLogEvent & {
     readonly schemaVersion: number;
     readonly runMode: ResidentVoiceLogRunMode;
     readonly runId: string;

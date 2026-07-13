@@ -5,11 +5,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
-  createResidentVoiceCompositeConsoleSink,
+  createResidentVoiceCompositeLogSink,
   createResidentVoiceFileLogSink,
   resolveResidentVoiceLogPaths
 } from "../src/runtime/resident-voice-log-files.js";
-import type { VoiceResidentConsoleEvent } from "../src/runtime/voice-resident.js";
+import type { VoiceResidentLogEvent } from "../src/runtime/voice-resident.js";
 
 describe("resident voice file logs", () => {
   it("writes metadata-only daily and session events under the user pico directory", async () => {
@@ -28,7 +28,7 @@ describe("resident voice file logs", () => {
       sessionId: "session-1",
       durationMs: 1234,
       text: "はい。\n聞いています。"
-    } as VoiceResidentConsoleEvent);
+    } as VoiceResidentLogEvent);
 
     const paths = resolveResidentVoiceLogPaths({
       homeDirectory,
@@ -146,9 +146,9 @@ describe("resident voice file logs", () => {
     ).toContain("/.pico/resident-voice/normal/processes/2026-06-22");
   });
 
-  it("composes multiple console sinks without changing event payloads", () => {
+  it("composes multiple log sinks without changing event payloads", () => {
     const events: unknown[] = [];
-    const sink = createResidentVoiceCompositeConsoleSink([
+    const sink = createResidentVoiceCompositeLogSink([
       {
         record: (event) => {
           events.push(["first", event]);
@@ -174,9 +174,9 @@ describe("resident voice file logs", () => {
     ]);
   });
 
-  it("continues composite console fan-out when one sink fails", () => {
+  it("continues composite log fan-out when one sink fails", () => {
     const events: unknown[] = [];
-    const sink = createResidentVoiceCompositeConsoleSink([
+    const sink = createResidentVoiceCompositeLogSink([
       {
         record: () => {
           throw new Error("stdout unavailable");

@@ -14,7 +14,7 @@ import type {
 } from "../../src/modules/voice/index.js";
 import {
   runVoiceResidentRuntime,
-  type VoiceResidentConsoleEvent
+  type VoiceResidentLogEvent
 } from "../../src/runtime/voice-resident.js";
 
 export type ResidentVoicePseudoInputReport = {
@@ -39,7 +39,7 @@ export type ResidentVoicePseudoInputReport = {
     readonly ttsRequests: readonly string[];
     readonly playbackStarts: readonly string[];
     readonly injectedFrames: readonly InjectedFrameSummary[];
-    readonly consoleEvents: readonly VoiceResidentConsoleEvent[];
+    readonly logEvents: readonly VoiceResidentLogEvent[];
   };
 };
 
@@ -59,7 +59,7 @@ export async function runResidentVoicePseudoInputField(): Promise<ResidentVoiceP
   const ttsRequests: string[] = [];
   const playbackStarts: string[] = [];
   const injectedFrameSummaries: InjectedFrameSummary[] = [];
-  const consoleEvents: VoiceResidentConsoleEvent[] = [];
+  const logEvents: VoiceResidentLogEvent[] = [];
 
   const stt: SttClient = {
     warmup: () => {
@@ -122,9 +122,9 @@ export async function runResidentVoicePseudoInputField(): Promise<ResidentVoiceP
         return Promise.resolve({ text: "はい。" });
       }
     },
-    console: {
+    log: {
       record: (event) => {
-        consoleEvents.push(event);
+        logEvents.push(event);
       }
     }
   });
@@ -142,7 +142,7 @@ export async function runResidentVoicePseudoInputField(): Promise<ResidentVoiceP
     ttsRequests,
     playbackStarts,
     injectedFrames: injectedFrameSummaries,
-    consoleEvents
+    logEvents
   };
   const expected = {
     startedSessions: 1,
