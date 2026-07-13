@@ -146,8 +146,8 @@ function buildResidentDevelopmentTerminalShellCommand(input: {
 function buildResidentVoiceRunAndCloseCommand(terminal: ResidentDevelopmentTerminal): string {
   const commands = [
     "node_modules/.bin/pi --extension ./src/index.ts --pico",
-    "status=$?",
-    `printf '\\n[pico] resident voice exited with status %s\\n' "$status"`
+    "exit_code=$?",
+    `printf '\\n[pico] resident voice exited with status %s\\n' "$exit_code"`
   ];
 
   if (terminal === "terminal") {
@@ -158,7 +158,7 @@ function buildResidentVoiceRunAndCloseCommand(terminal: ResidentDevelopmentTermi
     );
   }
 
-  commands.push('exit "$status"');
+  commands.push('exit "$exit_code"');
 
   return commands.join("; ");
 }
