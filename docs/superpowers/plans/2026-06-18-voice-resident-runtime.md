@@ -3,8 +3,9 @@
 > Historical record: memory-related ownership in this document was superseded
 > by [Pi 所有 memory 責務境界設計](../specs/2026-07-13-pi-owned-memory-boundary-design.md).
 > Current Pico has no short-term or durable-memory implementation.
-
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Do not execute this plan. It is historical reference only; unchecked task
+> markers below are not pending work. Do not restore Mem0, cutoff processing,
+> memory hooks, or Pico-owned memory.
 
 **Goal:** Build the resident voice runtime that keeps listening, starts/stops timed sessions, calls Pi Agent through the SDK, plays Aivis output through echo control, processes ended sessions through the configured facility-memory worker, and records bounded stage probes. Pi Agent remains the production startup owner and loads pico as an extension; direct resident scripts are low-level validation and transition harnesses.
 

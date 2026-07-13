@@ -249,10 +249,13 @@ startup contract.
 
 ### Memory ownership
 
-Pi owns conversation sessions, transcripts, context, and history. Pico keeps
-only process-local interaction-control state for activation, inactivity timing,
-farewell, deferred-tool cancellation, and Pi session cleanup. It does not keep
-conversation entries or create a memory side effect when an interaction ends.
+Pi owns conversation sessions, transcripts, context, and history. Pico's
+process-local `SessionRecord` contains the session ID, active/ended state,
+start/end timestamps, and trusted trigger; the managed lifecycle additionally
+holds the inactivity timer. Farewell, deferred-tool cancellation, and Pi session
+cleanup are end-of-interaction operations, not retained state. Pico does not
+keep conversation entries or create a memory side effect when an interaction
+ends.
 
 Durable memory, when enabled, is a separately installed Pi-level plugin. That
 plugin—not Pico—owns provider configuration, extraction, persistence, search,
