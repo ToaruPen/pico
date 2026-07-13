@@ -1132,6 +1132,22 @@ voice:
         }
       })
     ).toThrow("pico config memory.mem0.vectorStore.localBaseUrl must use a local SSH tunnel URL");
+    expect(() =>
+      definePicoConfig({
+        memory: {
+          mem0: { ...base, embedder: { ...base.embedder, provider: "unsupported" } }
+        }
+      })
+    ).toThrow("pico config memory.mem0.embedder.provider must be ollama or sidecar");
+    expect(() =>
+      definePicoConfig({
+        memory: {
+          mem0: { ...base, embedder: { ...base.embedder, timeoutMs: 2_147_483_648 } }
+        }
+      })
+    ).toThrow(
+      "pico config memory.mem0.embedder.timeoutMs must be a positive integer <= 2147483647"
+    );
   });
 
   it("rejects Tapo timeout values beyond Node timer bounds", () => {

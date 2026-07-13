@@ -249,9 +249,9 @@ describe("voice resident runtime", () => {
     expect(transcribedDurations).toEqual([20]);
   });
 
-  it("uses shutdown grace rather than the conversation abort signal for the final cutoff", async () => {
+  it("does not pass the conversation abort signal to the final cutoff", async () => {
     const abortController = new AbortController();
-    const cutoffSignalStates: boolean[] = [];
+    const cutoffSignals: (AbortSignal | undefined)[] = [];
 
     await expect(
       runVoiceResidentRuntime({
@@ -283,7 +283,7 @@ describe("voice resident runtime", () => {
         },
         memoryWorker: {
           processCutoff: (cutoff, signal) => {
-            cutoffSignalStates.push(signal?.aborted === true);
+            cutoffSignals.push(signal);
 
             if (signal?.aborted === true) {
               return Promise.reject(new Error("final cutoff received the conversation abort"));
@@ -299,12 +299,13 @@ describe("voice resident runtime", () => {
       })
     ).rejects.toThrow("pico resident voice runtime aborted");
 
-    expect(cutoffSignalStates).toEqual([false]);
+    expect(cutoffSignals).toEqual([undefined]);
   });
 
   it("does not cancel an already-ended session cutoff with the conversation signal", async () => {
     const abortController = new AbortController();
     const calls: string[] = [];
+    const cutoffSignals: (AbortSignal | undefined)[] = [];
     const lifecycle = createOrderingLifecycle(calls);
 
     abortController.abort();
@@ -331,6 +332,7 @@ describe("voice resident runtime", () => {
         memoryWorker: {
           processCutoff: (cutoff, signal) => {
             calls.push(`process:${cutoff.sessionId}`);
+            cutoffSignals.push(signal);
 
             if (signal?.aborted === true) {
               return Promise.reject(new Error("ended cutoff received the conversation abort"));
@@ -349,6 +351,7 @@ describe("voice resident runtime", () => {
       "process:session-ended",
       "ack:session-ended"
     ]);
+    expect(cutoffSignals).toEqual([undefined]);
   });
 
   it("runs shutdown cleanup even when pending utterance flush fails", async () => {

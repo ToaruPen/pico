@@ -5,7 +5,7 @@ Status: Historical — fully superseded by
 The SQLite lifecycle and direct cutoff-mapping steps below record the original slice and must not
 be used as current implementation guidance.
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Historical only:** Do not execute these tasks; use the replacement specification linked above.
 
 **Historical goal:** Add the first local-only Mem0-backed long-memory slice for
 pico.
