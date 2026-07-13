@@ -98,6 +98,67 @@ describe("resident memory drain worker", () => {
     });
   });
 
+  it("shares one drain report across overlapping drain requests", async () => {
+    await withLongMemoryDatabase(async (path) => {
+      const queue = openSessionMemoryCandidateQueue(path);
+
+      try {
+        queue.enqueueSessionCutoff(cutoffInput("session-overlapping-drain"));
+      } finally {
+        queue.close();
+      }
+
+      let resolveExtraction:
+        | ((drafts: readonly AutomatedFacilityMemoryDraft[]) => void)
+        | undefined;
+      const extraction = new Promise<readonly AutomatedFacilityMemoryDraft[]>((resolve) => {
+        resolveExtraction = resolve;
+      });
+      const worker = createResidentMemoryDrainWorker({
+        databasePath: path,
+        extractor: {
+          extract: () => extraction
+        }
+      });
+
+      try {
+        const firstDrain = worker.drainUntilIdle();
+        const overlappingDrain = worker.drainUntilIdle();
+
+        expect(overlappingDrain).toBe(firstDrain);
+        resolveExtraction?.([
+          {
+            title: "Overlapping drain sentinel",
+            body: "Concurrent callers share the active facility-memory drain.",
+            category: "operational_note",
+            tags: ["worker"],
+            sourceEntryIds: ["session-overlapping-drain-entry-1"],
+            confidence: 0.8
+          }
+        ]);
+
+        await expect(firstDrain).resolves.toEqual({
+          processedCount: 1,
+          recoveredCount: 0,
+          idle: true,
+          memoryWrittenCount: 1,
+          writtenMemoryIds: [1],
+          deadLetterCount: 0
+        });
+        await expect(overlappingDrain).resolves.toEqual({
+          processedCount: 1,
+          recoveredCount: 0,
+          idle: true,
+          memoryWrittenCount: 1,
+          writtenMemoryIds: [1],
+          deadLetterCount: 0
+        });
+      } finally {
+        worker.close();
+      }
+    });
+  });
+
   it("deduplicates repeated automated drafts within one drain", async () => {
     await withLongMemoryDatabase(async (path) => {
       const queue = openSessionMemoryCandidateQueue(path);

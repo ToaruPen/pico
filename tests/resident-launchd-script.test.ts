@@ -1,20 +1,74 @@
-import { readFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   executeResidentLaunchdOperation,
   readResidentLaunchdArguments
 } from "../scripts/resident/launchd.js";
 
-const capturedCommandClosePattern =
-  /function runCapturedCommand[\s\S]*?child\.once\("close", \(code\) =>/u;
-
 describe("resident launchd script", () => {
   it("waits for captured stdout to close before resolving status output", async () => {
-    const source = await readFile(join(process.cwd(), "scripts/resident/launchd.ts"), "utf8");
+    await withLaunchctlExecutable(
+      `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const writer = spawn(
+  process.execPath,
+  ["-e", "setTimeout(() => process.stdout.write('pid = 31880\\\\n'), 50)"],
+  { stdio: ["ignore", "inherit", "ignore"] }
+);
+writer.unref();
+process.stdout.write("state = running\\n");
+`,
+      async () => {
+        const output: string[] = [];
 
-    expect(source).toMatch(capturedCommandClosePattern);
+        await executeResidentLaunchdOperation(
+          [
+            {
+              kind: "status",
+              command: "launchctl",
+              args: ["print", "gui/501/dev.toarupen.pico.resident-voice"],
+              allowedExitCodes: [0],
+              serviceKind: "voice"
+            }
+          ],
+          { writeOutput: (content) => output.push(content) }
+        );
+
+        expect(output).toEqual([`${JSON.stringify({ state: "running", pid: 31880 })}\n`]);
+      }
+    );
+  });
+
+  it("kills and rejects a captured status command that does not close", async () => {
+    vi.useFakeTimers();
+
+    try {
+      await withLaunchctlExecutable(
+        `#!/usr/bin/env node
+setInterval(() => undefined, 1_000);
+`,
+        async () => {
+          const operation = executeResidentLaunchdOperation([
+            {
+              kind: "status",
+              command: "launchctl",
+              args: ["print", "gui/501/dev.toarupen.pico.resident-voice"],
+              allowedExitCodes: [0],
+              serviceKind: "voice"
+            }
+          ]);
+          const rejection = expect(operation).rejects.toThrow("launchctl status command timed out");
+
+          await vi.advanceTimersByTimeAsync(10_000);
+          await rejection;
+        }
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reads the selected service independently of argument order", () => {
@@ -79,3 +133,18 @@ describe("resident launchd script", () => {
     expect(output.join("\n")).not.toContain("exposed-secret");
   });
 });
+
+async function withLaunchctlExecutable(source: string, run: () => Promise<void>): Promise<void> {
+  const directory = await mkdtemp(join(tmpdir(), "pico-launchctl-test-"));
+  const executablePath = join(directory, "launchctl");
+  const originalPath = process.env.PATH;
+
+  try {
+    await writeFile(executablePath, source, { mode: 0o700 });
+    process.env.PATH = `${directory}:${originalPath ?? ""}`;
+    await run();
+  } finally {
+    process.env.PATH = originalPath;
+    await rm(directory, { recursive: true, force: true });
+  }
+}

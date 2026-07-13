@@ -164,26 +164,48 @@ function runCapturedCommand(
     });
     const chunks: Buffer[] = [];
     let byteCount = 0;
+    let settled = false;
     const maximumStatusBytes = 1024 * 1024;
+    const commandTimeoutMs = 10_000;
+    const timeout = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      child.kill();
+      rejectCommand(new Error("launchctl status command timed out"));
+    }, commandTimeoutMs);
+    const rejectOnce = (error: Error): void => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeout);
+      rejectCommand(error);
+    };
 
     child.stdout.on("data", (chunk: Buffer) => {
       byteCount += chunk.byteLength;
 
       if (byteCount > maximumStatusBytes) {
         child.kill();
+        rejectOnce(new Error("resident launchd status output exceeded limit"));
         return;
       }
 
       chunks.push(chunk);
     });
-    child.once("error", rejectCommand);
+    child.once("error", rejectOnce);
     child.once("close", (code) => {
-      const exitCode = code ?? -1;
-
-      if (byteCount > maximumStatusBytes) {
-        rejectCommand(new Error("resident launchd status output exceeded limit"));
+      if (settled) {
         return;
       }
+
+      settled = true;
+      clearTimeout(timeout);
+      const exitCode = code ?? -1;
 
       if (!allowedExitCodes.includes(exitCode)) {
         rejectCommand(new Error(`${command} exited with code ${String(exitCode)}`));

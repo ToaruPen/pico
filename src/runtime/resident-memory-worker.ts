@@ -42,7 +42,12 @@ export type ResidentMemoryDrainWorker = Pick<
 export function createResidentMemoryDrainWorker(
   options: ResidentMemoryDrainWorkerOptions
 ): ResidentMemoryDrainWorker {
-  let activeWrittenMemoryIds: Set<number> | undefined;
+  let activeDrain:
+    | {
+        readonly promise: Promise<ResidentMemoryDrainReport>;
+        readonly writtenMemoryIds: Set<number>;
+      }
+    | undefined;
   const store = openSessionMemoryCandidateStore(
     options.databasePath,
     defineCandidateStoreOptions(
@@ -50,7 +55,7 @@ export function createResidentMemoryDrainWorker(
       (session) => options.extractor.extract(session, options.signal),
       (records) => {
         for (const record of records) {
-          activeWrittenMemoryIds?.add(record.id);
+          activeDrain?.writtenMemoryIds.add(record.id);
         }
       }
     )
@@ -64,9 +69,12 @@ export function createResidentMemoryDrainWorker(
     recoverStaleProcessingJobs: worker.recoverStaleProcessingJobs,
     drainOnce: worker.drainOnce,
     purgeExpiredDeadLetterPayloads: worker.purgeExpiredDeadLetterPayloads,
-    async drainUntilIdle() {
+    drainUntilIdle() {
+      if (activeDrain !== undefined) {
+        return activeDrain.promise;
+      }
+
       const writtenMemoryIds = new Set<number>();
-      activeWrittenMemoryIds = writtenMemoryIds;
       const beforeDeadLetters = store.countJobs(["dead_letter"]);
       const beforeRetryJobs = countRetryScheduledJobs();
       let processedCount = 0;
@@ -110,13 +118,17 @@ export function createResidentMemoryDrainWorker(
         return createReport(processedCount, recoveredCount, lastErrorCode);
       };
 
-      try {
-        return await drainJobs();
-      } finally {
-        if (activeWrittenMemoryIds === writtenMemoryIds) {
-          activeWrittenMemoryIds = undefined;
+      const drain = drainJobs();
+      const drainState = { promise: drain, writtenMemoryIds };
+      activeDrain = drainState;
+      const clearActiveDrain = (): void => {
+        if (activeDrain === drainState) {
+          activeDrain = undefined;
         }
-      }
+      };
+      void drain.then(clearActiveDrain, clearActiveDrain);
+
+      return drain;
 
       function createReport(
         processed: number,
