@@ -46,6 +46,7 @@ describe("justfile", () => {
     expect(
       [
         "src/modules/memory",
+        "src/modules/long-memory",
         "src/runtime/memory-tool.ts",
         "src/runtime/session-tool.ts",
         "scripts/resident/memory.ts"

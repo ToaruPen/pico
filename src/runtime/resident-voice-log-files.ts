@@ -47,7 +47,6 @@ const voiceMetricAttributeKeys = new Set([
   "pico.voice.speech_detected",
   "pico.voice.speech_probability",
   "pico.voice.rms_db",
-  "pico.voice.entry_count",
   "pico.voice.chunk_count",
   "pico.voice.frame_bytes",
   "pico.voice.vlm_frame_bytes",

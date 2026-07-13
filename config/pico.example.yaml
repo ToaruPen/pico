@@ -145,27 +145,3 @@ voice:
       localBaseUrl: http://127.0.0.1:10101
       speakerId: 888753760
       # Optional default text: こんにちは。picoの音声スモークです。
-
-memory:
-  mem0:
-    enabled: true
-    historyDbPath: /var/lib/pico/mem0-history.sqlite
-    vectorStore:
-      provider: qdrant
-      localBaseUrl: http://127.0.0.1:6333
-      collectionName: pico_long_memory_jina_v5_small_1024_v1
-    worker:
-      provider: pi_model
-      piProvider: openai-codex
-      api: openai-codex-responses
-      # Select any Pi model available in the local model registry.
-      model: configured-worker-model
-      thinkingLevel: high
-      timeoutMs: 60000
-    embedder:
-      provider: sidecar
-      localBaseUrl: http://127.0.0.1:18081
-      model: jinaai/jina-embeddings-v5-text-small
-      embeddingDims: 1024
-      timeoutMs: 30000
-      # Start with: uv run scripts/sidecars/jina-embedding-sidecar.py

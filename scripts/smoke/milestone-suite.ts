@@ -14,11 +14,7 @@ import {
   createOpenTelemetryAuditExporter,
   type OpenTelemetryAuditExporter
 } from "../../src/modules/audit/otel.js";
-import type { SessionMemoryCutoffInput } from "../../src/modules/long-memory/index.js";
-import { createMem0MemoryProvider, type Mem0Client } from "../../src/modules/long-memory/mem0.js";
 import { type CameraVlmSceneSmokeReport, runCameraVlmSceneSmoke } from "./camera-vlm-scene.js";
-import { type EmbeddingSidecarSmokeReport, runEmbeddingSidecarSmoke } from "./embedding-sidecar.js";
-import { type Mem0RuntimeSmokeReport, runMem0RuntimeSmoke } from "./mem0-runtime.js";
 import {
   type OllamaVlmSmokeReport,
   runOllamaVlmConnectivitySmoke
@@ -47,9 +43,6 @@ export type PicoMilestoneSmokeSectionName =
   | "person_detection"
   | "ollama_vlm"
   | "camera_vlm_scene"
-  | "embedding_sidecar"
-  | "mem0_runtime"
-  | "memory_mem0"
   | "audit_otel";
 
 export type PicoMilestoneSmokeSectionReport = {
@@ -85,8 +78,6 @@ export type PicoMilestoneSmokeDependencies = {
   readonly runPersonDetectionSmoke?: (config: PicoConfig) => Promise<PersonDetectionSmokeReport>;
   readonly runOllamaVlmConnectivitySmoke?: (config: PicoConfig) => Promise<OllamaVlmSmokeReport>;
   readonly runCameraVlmSceneSmoke?: (config: PicoConfig) => Promise<CameraVlmSceneSmokeReport>;
-  readonly runEmbeddingSidecarSmoke?: (config: PicoConfig) => Promise<EmbeddingSidecarSmokeReport>;
-  readonly runMem0RuntimeSmoke?: (config: PicoConfig) => Promise<Mem0RuntimeSmokeReport>;
   readonly createAuditOtelExporter?: (
     config: Required<PicoConfig["audit"]["otel"]>
   ) => OpenTelemetryAuditExporter;
@@ -94,25 +85,6 @@ export type PicoMilestoneSmokeDependencies = {
 
 const repositoryRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const missingPiCredentialsPattern = /requires configured Pi Agent model credentials/i;
-const completedSession = {
-  sessionId: "milestone-session-2026-06-10",
-  cutoffAt: "2026-06-10T18:30:00.000Z",
-  sourceEntryIds: ["milestone-memory-1", "milestone-memory-2"],
-  entries: [
-    {
-      id: "milestone-memory-1",
-      role: "staff",
-      content: "雨の日は工作セットを早めに準備すると活動へ入りやすい。"
-    },
-    {
-      id: "milestone-memory-2",
-      role: "assistant",
-      content: "次の雨の日も工作セットを先に準備する候補として扱う。"
-    }
-  ],
-  requestedBy: "pico"
-} as const satisfies SessionMemoryCutoffInput;
-
 export async function runPicoMilestoneSmokeSuite(
   env: NodeJS.ProcessEnv = process.env,
   dependencies: PicoMilestoneSmokeDependencies = {}
@@ -127,9 +99,7 @@ export async function runPicoMilestoneSmokeSuite(
     config = loadPicoConfigFromEnvironment(env);
   } catch (error) {
     sections.push(...failedConfigProviderSections(error));
-    sections.push(
-      ...auditConfigAwareMemoryAndAuditSections(await runMemoryAndAuditSections(), error)
-    );
+    sections.push(...auditConfigAwareSections(await runAuditSections(), error));
 
     return {
       status: summarizeStatus(sections),
@@ -188,23 +158,7 @@ export async function runPicoMilestoneSmokeSuite(
       )
     )
   );
-  sections.push(
-    await captureSection("embedding_sidecar", "embedding-sidecar", async () =>
-      toSection(
-        "embedding_sidecar",
-        await (dependencies.runEmbeddingSidecarSmoke ?? runEmbeddingSidecarSmoke)(config)
-      )
-    )
-  );
-  sections.push(
-    await captureSection("mem0_runtime", "mem0-oss", async () =>
-      toSection(
-        "mem0_runtime",
-        await (dependencies.runMem0RuntimeSmoke ?? runMem0RuntimeSmoke)(config)
-      )
-    )
-  );
-  sections.push(...(await runMemoryAndAuditSections(config, dependencies)));
+  sections.push(...(await runAuditSections(config, dependencies)));
 
   return {
     status: summarizeStatus(sections),
@@ -297,13 +251,11 @@ function failedConfigProviderSections(error: unknown): readonly PicoMilestoneSmo
     failedSection("tapo_ptz", "tapo-onvif-ptz", reason),
     failedSection("person_detection", "tapo-rtsp+onnxruntime", reason),
     failedSection("ollama_vlm", "ollama", reason),
-    failedSection("camera_vlm_scene", "tapo-rtsp+ollama", reason),
-    failedSection("embedding_sidecar", "embedding-sidecar", reason),
-    failedSection("mem0_runtime", "mem0-oss", reason)
+    failedSection("camera_vlm_scene", "tapo-rtsp+ollama", reason)
   ];
 }
 
-function auditConfigAwareMemoryAndAuditSections(
+function auditConfigAwareSections(
   sections: readonly PicoMilestoneSmokeSectionReport[],
   error: unknown
 ): readonly PicoMilestoneSmokeSectionReport[] {
@@ -340,55 +292,20 @@ async function runVoiceSections(
   }
 }
 
-async function runMemoryAndAuditSections(
+async function runAuditSections(
   config?: PicoConfig,
   dependencies: Pick<PicoMilestoneSmokeDependencies, "createAuditOtelExporter"> = {}
 ): Promise<readonly PicoMilestoneSmokeSectionReport[]> {
   try {
     const audit = createStructuredAuditLog();
-    const client: Mem0Client = {
-      add: () => Promise.resolve({ memories: [{ id: "milestone-mem0-1" }] }),
-      search: () =>
-        Promise.resolve({
-          memories: [
-            {
-              id: "milestone-mem0-1",
-              content: "雨の日は工作セットを早めに準備すると活動へ入りやすい。"
-            }
-          ]
-        }),
-      delete: () => Promise.resolve()
-    };
-    const provider = createMem0MemoryProvider({
-      client,
-      scopeId: "facility:pico:milestone-smoke",
-      audit
+    audit.record({
+      category: "session_lifecycle",
+      name: "session.started",
+      severity: "info",
+      occurredAt: "2026-07-13T00:00:00.000Z",
+      summary: "Pico interaction session started.",
+      attributes: { source: "milestone_smoke" }
     });
-    const added = await provider.addFacilityMemories(completedSession, [
-      {
-        title: "雨の日の工作準備",
-        body: "雨の日は工作セットを早めに準備すると活動へ入りやすい。",
-        category: "facility_knowledge",
-        tags: ["smoke"],
-        sourceEntryIds: ["milestone-memory-1"],
-        confidence: 1
-      }
-    ]);
-    const searchResults = await provider.search("工作準備", 3);
-
-    if (added.memoryIds.length !== 1 || searchResults[0]?.id !== added.memoryIds[0]) {
-      throw new Error("pico milestone smoke could not search the Mem0 facility memory");
-    }
-
-    const memorySection: PicoMilestoneSmokeSectionReport = {
-      name: "memory_mem0",
-      status: "passed",
-      provider: "mem0-oss",
-      details: {
-        memoryId: added.memoryIds[0],
-        category: "facility_knowledge"
-      }
-    };
     const auditEntries = audit.entries();
     const auditOtelSection = await captureSection(
       "audit_otel",
@@ -407,12 +324,9 @@ async function runMemoryAndAuditSections(
       }
     );
 
-    return [memorySection, auditOtelSection];
+    return [auditOtelSection];
   } catch (error) {
-    return [
-      failedSection("memory_mem0", "mem0-oss", errorMessage(error)),
-      failedSection("audit_otel", "structured-audit", errorMessage(error))
-    ];
+    return [failedSection("audit_otel", "structured-audit", errorMessage(error))];
   }
 }
 
@@ -549,14 +463,14 @@ function validateAuditOtelRecords(
   }
 
   for (const record of records) {
-    assertMemoryWriteOtelRecord(record);
+    assertAuditOtelRecord(record);
   }
 
   return firstRecord;
 }
 
-function assertMemoryWriteOtelRecord(record: OpenTelemetryAuditLogRecord): void {
-  if (record.attributes["pico.audit.category"] !== "memory_write") {
+function assertAuditOtelRecord(record: OpenTelemetryAuditLogRecord): void {
+  if (record.attributes["pico.audit.category"] !== "session_lifecycle") {
     throw new Error("pico milestone smoke emitted an unexpected audit OTel category");
   }
 

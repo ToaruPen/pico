@@ -34,6 +34,12 @@ function temporaryRepoConfigFile(content: string): {
 }
 
 describe("pico YAML config", () => {
+  it("loads the checked-in example without removed memory ownership", () => {
+    expect(() =>
+      loadPicoConfig({ cwd: process.cwd(), path: "config/pico.example.yaml" })
+    ).not.toThrow();
+  });
+
   it("rejects the removed memory config section", () => {
     expect(() => definePicoConfig({ memory: { mem0: { enabled: false } } })).toThrow(
       "pico config has unknown field memory"

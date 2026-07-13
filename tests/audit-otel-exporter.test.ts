@@ -137,13 +137,13 @@ describe("OpenTelemetry audit exporter", () => {
       serviceName: "pico-test"
     });
     const event = audit.record({
-      category: "memory_write",
-      name: "long_memory.mem0.added",
+      category: "session_lifecycle",
+      name: "session.started",
       severity: "info",
       occurredAt: "2026-06-10T09:00:00.000Z",
-      summary: "Session cutoff was submitted to the local Mem0 memory provider.",
+      summary: "Pico interaction session started.",
       attributes: {
-        "pico.memory.provider": "mem0"
+        "pico.session.trigger": "wake_name"
       }
     });
 
@@ -161,16 +161,16 @@ describe("OpenTelemetry audit exporter", () => {
       serviceName: "pico-test"
     });
     const firstEvent = audit.record({
-      category: "memory_write",
-      name: "long_memory.mem0.first",
+      category: "session_lifecycle",
+      name: "session.first",
       severity: "info",
       occurredAt: "2026-06-10T09:00:00.000Z",
       summary: "First export.",
       attributes: {}
     });
     const secondEvent = audit.record({
-      category: "memory_write",
-      name: "long_memory.mem0.second",
+      category: "session_lifecycle",
+      name: "session.second",
       severity: "info",
       occurredAt: "2026-06-10T09:00:01.000Z",
       summary: "Second export.",
@@ -200,8 +200,8 @@ describe("OpenTelemetry audit exporter", () => {
       serviceName: "pico-test"
     });
     const event = audit.record({
-      category: "memory_write",
-      name: "long_memory.mem0.after_shutdown",
+      category: "session_lifecycle",
+      name: "session.after_shutdown",
       severity: "info",
       occurredAt: "2026-06-10T09:00:00.000Z",
       summary: "Export after shutdown.",
@@ -221,8 +221,8 @@ describe("OpenTelemetry audit exporter", () => {
       serviceName: "pico-test"
     });
     const event = audit.record({
-      category: "memory_write",
-      name: "long_memory.mem0.in_flight_shutdown",
+      category: "session_lifecycle",
+      name: "session.in_flight_shutdown",
       severity: "info",
       occurredAt: "2026-06-10T09:00:00.000Z",
       summary: "In-flight export shutdown.",
@@ -247,8 +247,8 @@ describe("OpenTelemetry audit exporter", () => {
       serviceName: "pico-test"
     });
     const event = audit.record({
-      category: "memory_write",
-      name: "long_memory.mem0.sync_throw",
+      category: "session_lifecycle",
+      name: "session.sync_throw",
       severity: "info",
       occurredAt: "2026-06-10T09:00:00.000Z",
       summary: "Synchronous exporter failure.",
@@ -273,8 +273,8 @@ describe("OpenTelemetry audit exporter", () => {
       timeoutMs: 25
     });
     const event = audit.record({
-      category: "memory_write",
-      name: "long_memory.mem0.timeout",
+      category: "session_lifecycle",
+      name: "session.timeout",
       severity: "info",
       occurredAt: "2026-06-10T09:00:00.000Z",
       summary: "Export timeout.",

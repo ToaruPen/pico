@@ -54,16 +54,6 @@ ast-grep rule and test instead of relying on AGENTS.md prose.
 - TTS candidate: Aivis Speech.
 - Camera candidate: Tapo C210 through RTSP first, ONVIF only when bounded PTZ is
   needed.
-- Long-memory LLM provider: Pi Agent `openai-codex` through
-  `openai-codex-responses` when configured.
-- Long-memory embedding provider: explicit local-default provider; do not mix
-  embedding model families in one vector collection.
-- Long-memory embedding primary candidate: `jinaai/jina-embeddings-v5-text-small`
-  through an explicit local sidecar provider.
-- Long-memory embedding comparison candidates: `jinaai/jina-embeddings-v5-text-nano`
-  for a lighter Jina runtime, `bge-m3` for Ollama-native operation,
-  `Qwen3-Embedding-0.6B` for Ollama A/B testing, and `ruri-v3-310m` as the
-  Japanese-specialized control model.
 - Identity Registry XLSX processing: use ExcelJS with the fixed local roster
   schema and ordinary file/row/cell bounds. Do not add a custom ZIP parser.
 
