@@ -6,6 +6,16 @@ import {
 } from "../scripts/smoke/person-detection.js";
 import { definePicoConfig } from "../src/config/index.js";
 import type { PersonDetectionModel } from "../src/modules/vision/person-detection.js";
+import { buildCredentialedUrl } from "./support/url-fixtures.js";
+
+const defaultDetectionRtspUrl = buildCredentialedUrl("rtsp://192.168.10.25:554/stream2", {
+  username: "camera-user",
+  password: "camera-password"
+});
+const explicitDetectionRtspUrl = buildCredentialedUrl("rtsp://192.168.10.25:554/stream7", {
+  username: "camera-user",
+  password: "camera-password"
+});
 
 const configured = definePicoConfig({
   camera: {
@@ -145,7 +155,7 @@ describe("person detection smoke", () => {
       now: () => "2026-06-12T09:00:00.000Z"
     });
 
-    expect(observedUrls).toEqual(["rtsp://camera-user:camera-password@192.168.10.25:554/stream2"]);
+    expect(observedUrls).toEqual([defaultDetectionRtspUrl]);
   });
 
   it("uses an explicit Tapo detection stream when configured", async () => {
@@ -186,7 +196,7 @@ describe("person detection smoke", () => {
       }
     );
 
-    expect(observedUrls).toEqual(["rtsp://camera-user:camera-password@192.168.10.25:554/stream7"]);
+    expect(observedUrls).toEqual([explicitDetectionRtspUrl]);
   });
 
   it("redacts RTSP credentials from failed Tapo capture reports", async () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { defineSelectedModelEndpoint } from "../src/modules/local-models/index.js";
+import { buildCredentialedUrl } from "./support/url-fixtures.js";
 
 const protectedEndpoint = {
   id: "windows-ollama-qwen3-5",
@@ -94,6 +95,11 @@ describe("selected local model endpoint config", () => {
   });
 
   it("rejects credentialed local tunnel endpoint URLs", () => {
+    const credentialedTunnelUrl = buildCredentialedUrl(protectedEndpoint.host.tunnel.localBaseUrl, {
+      username: "fixture-user",
+      password: "fixture-password"
+    });
+
     expect(() =>
       defineSelectedModelEndpoint({
         ...protectedEndpoint,
@@ -101,7 +107,7 @@ describe("selected local model endpoint config", () => {
           platform: "windows",
           tunnel: {
             kind: "tailscale_ssh",
-            localBaseUrl: "http://user:pass@127.0.0.1:11434",
+            localBaseUrl: credentialedTunnelUrl,
             sshTarget: "pico-vision-host"
           }
         }
