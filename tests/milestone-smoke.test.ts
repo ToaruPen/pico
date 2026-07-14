@@ -443,12 +443,15 @@ audit:
 `
     );
     const exportedEvents: string[] = [];
+    const exportedTimestamps: string[] = [];
+    const occurredAt = "2026-07-14T13:58:39.000Z";
     let shutdownCalled = false;
 
     const report = await runPicoMilestoneSmokeSuite(
       { PICO_CONFIG_PATH: configPath },
       {
         ...configuredSectionDependencies(),
+        now: () => occurredAt,
         createAuditOtelExporter: (config) => {
           expect(config).toMatchObject({
             endpoint: "http://127.0.0.1:4318/v1/logs",
@@ -459,6 +462,7 @@ audit:
           return {
             export: (event) => {
               exportedEvents.push(event.name);
+              exportedTimestamps.push(event.occurredAt);
 
               return Promise.resolve();
             },
@@ -480,6 +484,7 @@ audit:
       exportedOtelRecordCount: 1
     });
     expect(exportedEvents).toEqual(["session.started"]);
+    expect(exportedTimestamps).toEqual([occurredAt]);
     expect(shutdownCalled).toBe(true);
   });
 

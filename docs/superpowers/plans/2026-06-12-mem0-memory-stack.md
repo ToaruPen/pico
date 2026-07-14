@@ -12,7 +12,10 @@ pico.
 
 > Status note, 2026-07-13: Mem0 OSS is now the sole durable owner. Do not retain
 > this plan's separate SQLite lifecycle, direct raw-cutoff mapping, or local-only
-> provider assumptions.
+> provider assumptions, including the Architecture section's obsolete claim
+> that Pico remains the lifecycle owner. Pico does not register, configure,
+> wrap, proxy, or call memory providers or tools, and interaction ending has no
+> memory side effect.
 
 **Architecture:** Pico remains the lifecycle owner: YAML validates explicit providers, SQLite owns provenance/decay metadata, and Mem0 is accessed through a narrow injected adapter. This first slice avoided real network integration by defining the adapter boundary and deterministic session-cutoff mapping; later worker slices should add the Pi model-registry LLM boundary and a replaceable embedding provider.
 

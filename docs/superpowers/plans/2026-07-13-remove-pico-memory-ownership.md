@@ -489,15 +489,15 @@ Expected: FAIL because milestone smoke and audit fixtures still contain Pico mem
 
 - [ ] **Step 3: Delete runtime and operational ownership**
 
-Delete the long-memory, sidecar, smoke, and dedicated test files listed above. Remove `mem0ai` and `@qdrant/js-client-rest` plus their scripts from `package.json`, then regenerate the lockfile:
+Delete the long-memory, sidecar, smoke, and dedicated test files listed above. Drop `mem0ai` and `@qdrant/js-client-rest` plus their scripts from `package.json`, then regenerate the lockfile:
 
 ```bash
 npm install
 ```
 
-Remove memory recipes from `Justfile`, memory provider/embedder routing from `TOOLS.md`, and the entire `memory:` block from `config/pico.example.yaml`.
+Clean memory recipes from `Justfile`, memory provider/embedder routing from `TOOLS.md`, and the entire `memory:` block from `config/pico.example.yaml`.
 
-Remove memory sections and dependencies from milestone smoke while preserving audit/OTel coverage with a generic runtime event. Remove the unused `memory_write` audit category and memory-specific event summaries.
+Preserve audit/OTel coverage with a generic runtime event while removing memory sections and dependencies from milestone smoke. Drop the unused `memory_write` audit category and memory-specific event summaries.
 
 - [ ] **Step 4: Run focused tests and verify GREEN**
 

@@ -65,6 +65,7 @@ export type PiRuntimeSmokeCommandResult = {
 };
 
 export type PicoMilestoneSmokeDependencies = {
+  readonly now?: () => string;
   readonly runPiRuntimeCommand?: (env: NodeJS.ProcessEnv) => PiRuntimeSmokeCommandResult;
   readonly runVoiceProviderSmoke?: (config: PicoConfig) => Promise<VoiceSmokeReport>;
   readonly runResidentAudioInputSmoke?: (
@@ -290,7 +291,7 @@ async function runVoiceSections(
 
 async function runAuditSection(
   config?: PicoConfig,
-  dependencies: Pick<PicoMilestoneSmokeDependencies, "createAuditOtelExporter"> = {}
+  dependencies: Pick<PicoMilestoneSmokeDependencies, "createAuditOtelExporter" | "now"> = {}
 ): Promise<PicoMilestoneSmokeSectionReport> {
   try {
     const audit = createStructuredAuditLog();
@@ -298,7 +299,7 @@ async function runAuditSection(
       category: "session_lifecycle",
       name: "session.started",
       severity: "info",
-      occurredAt: "2026-07-13T00:00:00.000Z",
+      occurredAt: dependencies.now?.() ?? new Date().toISOString(),
       summary: "Pico interaction session started.",
       attributes: { source: "milestone_smoke" }
     });
