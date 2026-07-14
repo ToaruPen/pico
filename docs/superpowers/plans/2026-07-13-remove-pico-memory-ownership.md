@@ -92,10 +92,8 @@ const repositoryRoot = process.cwd();
 
 for (const removedPath of [
   "src/modules/memory",
-  "src/modules/long-memory",
   "src/runtime/memory-tool.ts",
-  "src/runtime/session-tool.ts",
-  "scripts/resident/memory.ts"
+  "src/runtime/session-tool.ts"
 ]) {
   expect(existsSync(resolve(repositoryRoot, removedPath))).toBe(false);
 }
@@ -470,6 +468,14 @@ const auditEvent = {
 ```
 
 Update audit tests so `memory_write` is not an allowed Pico category and generic audit/OTel behavior remains covered.
+
+Extend the structural absence assertion from Task 1 with the operational units removed in this task:
+
+```ts
+for (const removedPath of ["src/modules/long-memory", "scripts/resident/memory.ts"]) {
+  expect(existsSync(resolve(repositoryRoot, removedPath))).toBe(false);
+}
+```
 
 - [ ] **Step 2: Run focused tests and verify RED**
 

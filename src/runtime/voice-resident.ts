@@ -233,7 +233,8 @@ export async function runVoiceResidentRuntime(
       pushToTalk
     });
 
-    activeSessionId = await collectEndedActiveSession(options.sessionLifecycle, activeSessionId, {
+    activeSessionId = await reconcileActiveSession(options.sessionLifecycle, activeSessionId, {
+      mode: "collect",
       pendingEndedSessionIds,
       piAgent: options.piAgent,
       deferredTools: options.deferredTools
@@ -335,10 +336,11 @@ async function processResidentFrameIteration(
     readonly currentActiveSessionId: string | undefined;
   }
 ): Promise<string | undefined> {
-  const activeSessionId = await collectEndedActiveSession(
+  const activeSessionId = await reconcileActiveSession(
     options.sessionLifecycle,
     state.currentActiveSessionId,
     {
+      mode: "collect",
       pendingEndedSessionIds: state.pendingEndedSessionIds,
       piAgent: options.piAgent,
       deferredTools: options.deferredTools
@@ -375,10 +377,11 @@ async function cleanupActiveSessionForShutdown(
   counters: VoiceResidentCounters,
   now: () => string
 ): Promise<string | undefined> {
-  const nextActiveSessionId = await endActiveSessionForShutdown(
+  const nextActiveSessionId = await reconcileActiveSession(
     options.sessionLifecycle,
     activeSessionId,
     {
+      mode: "shutdown",
       pendingEndedSessionIds,
       piAgent: options.piAgent,
       deferredTools: options.deferredTools
@@ -505,7 +508,8 @@ async function processTranscribedUtterance(
 
   await runActiveVoiceTurn(transcript.text, options, counters, now, activeSession.sessionId);
   state.activeSession.setActiveSessionId(
-    await collectEndedActiveSession(options.sessionLifecycle, activeSession.sessionId, {
+    await reconcileActiveSession(options.sessionLifecycle, activeSession.sessionId, {
+      mode: "collect",
       pendingEndedSessionIds: state.pendingEndedSessionIds,
       piAgent: options.piAgent,
       deferredTools: options.deferredTools
@@ -1143,10 +1147,11 @@ async function playTtsChunks(
   }
 }
 
-async function collectEndedActiveSession(
+async function reconcileActiveSession(
   lifecycle: SessionLifecycle,
   activeSessionId: string | undefined,
   options: {
+    readonly mode: "collect" | "shutdown";
     readonly pendingEndedSessionIds: Set<string>;
     readonly piAgent: PiAgentTurnClient;
     readonly deferredTools?: VoiceResidentRuntimeOptions["deferredTools"];
@@ -1159,42 +1164,20 @@ async function collectEndedActiveSession(
   const session = lifecycle.read(activeSessionId);
 
   if (session === undefined) {
-    cancelDeferredToolSession(options.deferredTools, activeSessionId, "session_closed");
+    cancelDeferredToolSession(
+      options.deferredTools,
+      activeSessionId,
+      options.mode === "shutdown" ? "shutdown" : "session_closed"
+    );
     await disposeSessionQuietly(options.piAgent, activeSessionId);
     return undefined;
   }
 
-  if (session.state !== "ended") {
+  if (options.mode === "collect" && session.state !== "ended") {
     return activeSessionId;
   }
 
-  options.pendingEndedSessionIds.add(activeSessionId);
-
-  return undefined;
-}
-
-async function endActiveSessionForShutdown(
-  lifecycle: SessionLifecycle,
-  activeSessionId: string | undefined,
-  options: {
-    readonly pendingEndedSessionIds: Set<string>;
-    readonly piAgent: PiAgentTurnClient;
-    readonly deferredTools?: VoiceResidentRuntimeOptions["deferredTools"];
-  }
-): Promise<string | undefined> {
-  if (activeSessionId === undefined) {
-    return undefined;
-  }
-
-  const session = lifecycle.read(activeSessionId);
-
-  if (session === undefined) {
-    cancelDeferredToolSession(options.deferredTools, activeSessionId, "shutdown");
-    await disposeSessionQuietly(options.piAgent, activeSessionId);
-    return undefined;
-  }
-
-  if (session.state === "active") {
+  if (options.mode === "shutdown" && session.state === "active") {
     lifecycle.end(activeSessionId);
   }
 

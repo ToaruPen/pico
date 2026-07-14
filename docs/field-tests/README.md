@@ -39,9 +39,10 @@ installed Pi-level plugin and must be validated in the repository or package
 that owns its provider, tools, extraction, persistence, retention, and
 lifecycle. Do not add a Pico memory smoke or adapter.
 
-Reports may contain IDs, counts, dimensions, durations, and status only. Do not
-add raw audio, transcript text, device identifiers, credentials, or raw
-provider output.
+Evidence derived from audio, transcripts, devices, credentials, or provider
+output may contain only test or session IDs, counts, dimensions, durations, and
+status. Do not add raw audio, transcript text, device identifiers, credentials,
+or raw provider output.
 
 Visible-person PTZ follow behavior is validated separately from the smoke gate:
 
