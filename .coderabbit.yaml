@@ -29,6 +29,13 @@ reviews:
     - Missing validation at module, API, configuration, and provider boundaries.
     - Test coverage gaps that make the changed behavior unverified.
 
+    Apply these review-evidence rules:
+    - Check the diff status before reporting a path as present. A deleted file is
+      evidence of removal, not a surviving runtime surface.
+    - Do not enforce JSDoc or docstring coverage. This repository has no such
+      quality gate; request comments only when they clarify a non-obvious public
+      contract or invariant.
+
     Enforce these project constraints:
     - No test-double modules, compatibility layers, or automatic provider switching.
     - Vision provider is Qwen/Qwen3.5-9B through Ollama qwen3.5:9b on a protected Windows GPU host.
