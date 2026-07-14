@@ -8,9 +8,6 @@ import {
   requireResidentLaunchdPlatform
 } from "../src/runtime/resident-launchd.js";
 
-const residentMemoryStdoutPattern = /resident-memory\.out\.log$/;
-const residentMemoryStderrPattern = /resident-memory\.err\.log$/;
-
 describe("resident launchd service", () => {
   it("formats only allowlisted status fields from launchctl output", () => {
     const rawStatus = `gui/501/dev.toarupen.pico.resident-memory = {
@@ -49,23 +46,6 @@ describe("resident launchd service", () => {
     });
   });
 
-  it("adds only bounded memory queue readiness fields", () => {
-    expect(
-      formatResidentLaunchdStatus("state = running\npid = 42", {
-        queueDepth: 3,
-        oldestQueuedAgeMs: 60_000,
-        deadLetterCount: 2
-      })
-    ).toEqual({
-      state: "running",
-      pid: 42,
-      lastExitCode: undefined,
-      queueDepth: 3,
-      oldestQueuedAgeMs: 60_000,
-      deadLetterCount: 2
-    });
-  });
-
   it("fails fast outside macOS before launchctl operations are planned", () => {
     expect(() => {
       requireResidentLaunchdPlatform("linux");
@@ -77,7 +57,6 @@ describe("resident launchd service", () => {
 
   it("builds a resident voice LaunchAgent without embedding local config contents", () => {
     const service = defineResidentLaunchdService({
-      serviceKind: "voice",
       repoRoot: "/Users/monsoon/Dev/pico project",
       homeDirectory: "/Users/monsoon",
       configPath: "/Users/monsoon/Dev/pico/config/pico.local.yaml",
@@ -85,6 +64,7 @@ describe("resident launchd service", () => {
       pathEnvironment: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
     });
 
+    expect(service).not.toHaveProperty("serviceKind");
     expect(service.label).toBe("dev.toarupen.pico.resident-voice");
     expect(service.plistPath).toBe(
       "/Users/monsoon/Library/LaunchAgents/dev.toarupen.pico.resident-voice.plist"
@@ -124,30 +104,8 @@ describe("resident launchd service", () => {
     expect(service.plist).not.toContain("HasunohaLabo7087");
   });
 
-  it("builds a separate resident memory worker LaunchAgent", () => {
-    const service = defineResidentLaunchdService({
-      serviceKind: "memory",
-      repoRoot: "/Users/monsoon/Dev/pico project",
-      homeDirectory: "/Users/monsoon",
-      configPath: "/Users/monsoon/Dev/pico/config/pico.local.yaml",
-      nodePath: "/Users/monsoon/.nvm/versions/node/v24.13.0/bin/node",
-      pathEnvironment: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-    });
-
-    expect(service.label).toBe("dev.toarupen.pico.resident-memory");
-    expect(service.logDirectory).toBe("/Users/monsoon/.pico/resident-memory/processes");
-    expect(service.standardOutputPath).toMatch(residentMemoryStdoutPattern);
-    expect(service.standardErrorPath).toMatch(residentMemoryStderrPattern);
-    expect(service.plist).toContain(
-      "<string>/Users/monsoon/Dev/pico project/scripts/resident/memory.ts</string>"
-    );
-    expect(service.plist).not.toContain("PICO_VOICE_PROBE_STDOUT");
-    expect(service.plist).not.toContain("PICO_RESIDENT_VOICE_LOG_MODE");
-  });
-
   it("escapes plist XML values for paths containing special characters", () => {
     const service = defineResidentLaunchdService({
-      serviceKind: "voice",
       repoRoot: "/tmp/pico's & lab",
       homeDirectory: "/tmp/home",
       configPath: "/tmp/pico's & lab/config/pico.local.yaml",
@@ -166,7 +124,6 @@ describe("resident launchd service", () => {
 
   it("builds launchctl commands for the current user agent domain", () => {
     const service = defineResidentLaunchdService({
-      serviceKind: "voice",
       repoRoot: "/repo/pico",
       homeDirectory: "/Users/monsoon",
       configPath: "/repo/pico/config/pico.local.yaml",
@@ -202,7 +159,6 @@ describe("resident launchd service", () => {
 
   it("plans install and uninstall filesystem operations around launchctl", () => {
     const service = defineResidentLaunchdService({
-      serviceKind: "voice",
       repoRoot: "/repo/pico",
       homeDirectory: "/Users/monsoon",
       configPath: "/repo/pico/config/pico.local.yaml",
@@ -251,26 +207,8 @@ describe("resident launchd service", () => {
     ]);
   });
 
-  it("rejects memory LaunchAgent activation until Pico startup owns it", () => {
-    const service = defineResidentLaunchdService({
-      serviceKind: "memory",
-      repoRoot: "/repo/pico",
-      homeDirectory: "/Users/monsoon",
-      configPath: "/repo/pico/config/pico.local.yaml",
-      nodePath: "/usr/local/bin/node",
-      pathEnvironment: "/bin"
-    });
-
-    for (const operation of ["install", "start", "restart"] as const) {
-      expect(() => createResidentLaunchdOperationPlan(service, operation, 501)).toThrow(
-        "resident memory LaunchAgent activation is deferred until Pico startup owns it"
-      );
-    }
-  });
-
   it("stops a KeepAlive service by booting it out while keeping the plist installed", () => {
     const service = defineResidentLaunchdService({
-      serviceKind: "voice",
       repoRoot: "/repo/pico",
       homeDirectory: "/Users/monsoon",
       configPath: "/repo/pico/config/pico.local.yaml",
@@ -288,9 +226,8 @@ describe("resident launchd service", () => {
     ]);
   });
 
-  it("plans status as captured output instead of inherited stdout", () => {
+  it("plans voice status as captured output instead of inherited stdout", () => {
     const service = defineResidentLaunchdService({
-      serviceKind: "memory",
       repoRoot: "/repo/pico",
       homeDirectory: "/Users/monsoon",
       configPath: "/repo/pico/config/pico.local.yaml",
@@ -302,10 +239,8 @@ describe("resident launchd service", () => {
       {
         kind: "status",
         command: "launchctl",
-        args: ["print", "gui/501/dev.toarupen.pico.resident-memory"],
-        allowedExitCodes: [0, 3, 113],
-        serviceKind: "memory",
-        configPath: "/repo/pico/config/pico.local.yaml"
+        args: ["print", "gui/501/dev.toarupen.pico.resident-voice"],
+        allowedExitCodes: [0]
       }
     ]);
   });

@@ -7,8 +7,13 @@ import {
 } from "../scripts/smoke/camera-vlm-scene.js";
 import { definePicoConfig, type PicoConfig } from "../src/config/index.js";
 import type { SceneDescription } from "../src/modules/vision/index.js";
+import { buildCredentialedUrl } from "./support/url-fixtures.js";
 
 const jpegFrame = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+const configuredRtspUrl = buildCredentialedUrl("rtsp://192.168.10.25:554/stream2", {
+  username: "camera-user",
+  password: "camera-passphrase"
+});
 const scene: SceneDescription = {
   summary: "Two people are visible near a table.",
   observedPeople: ["Two people are present."],
@@ -189,12 +194,7 @@ describe("camera to VLM scene smoke", () => {
 
   it("redacts RTSP URLs and camera credentials from capture failure reports", async () => {
     const report = await runCameraVlmSceneSmoke(configuredPicoConfig(), {
-      captureFrame: () =>
-        Promise.reject(
-          new Error(
-            "rtsp://camera-user:camera-passphrase@192.168.10.25:554/stream2 camera-passphrase"
-          )
-        ),
+      captureFrame: () => Promise.reject(new Error(`${configuredRtspUrl} camera-passphrase`)),
       prepareFrame: passThroughFrame,
       describeFrame: () => Promise.resolve(scene)
     });
@@ -228,7 +228,7 @@ describe("camera to VLM scene smoke", () => {
 
   it("redacts RTSP URLs and camera credentials from direct execution fatal errors", () => {
     const message = formatCameraVlmSceneSmokeFatalError(
-      new Error("rtsp://camera-user:camera-passphrase@192.168.10.25:554/stream2 camera-passphrase"),
+      new Error(`${configuredRtspUrl} camera-passphrase`),
       configuredPicoConfig()
     );
 

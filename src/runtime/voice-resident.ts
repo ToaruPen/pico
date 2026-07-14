@@ -1,4 +1,3 @@
-import type { SessionMemoryWorker } from "../modules/long-memory/session-worker.js";
 import type {
   SessionLifecycle,
   SessionRecord,
@@ -58,41 +57,32 @@ export type PiAgentTurnClient = {
   readonly disposeAll?: () => void | Promise<void>;
 };
 
-export type VoiceResidentMemoryWorker = Pick<SessionMemoryWorker, "enqueueCutoff"> & {
-  readonly close?: () => void;
-};
-
-export type VoiceResidentConsoleEvent =
+export type VoiceResidentLogEvent =
   | {
-      readonly kind: "staff_transcript";
+      readonly kind: "staff_input";
       readonly occurredAt: string;
       readonly sessionId: string;
-      readonly text: string;
     }
   | {
       readonly kind: "pi_agent_response";
       readonly occurredAt: string;
       readonly sessionId: string;
       readonly durationMs: number;
-      readonly text: string;
     }
   | {
       readonly kind: "wake_ack_input";
       readonly occurredAt: string;
       readonly sessionId: string;
-      readonly trigger: string;
-      readonly text: string;
     }
   | {
       readonly kind: "wake_ack_response";
       readonly occurredAt: string;
       readonly sessionId: string;
       readonly durationMs: number;
-      readonly text: string;
     };
 
-export type VoiceResidentConsoleSink = {
-  readonly record: (event: VoiceResidentConsoleEvent) => void;
+export type VoiceResidentLogSink = {
+  readonly record: (event: VoiceResidentLogEvent) => void;
 };
 
 export type VoiceResidentRuntimeOptions = {
@@ -106,7 +96,6 @@ export type VoiceResidentRuntimeOptions = {
   readonly tts: TtsClient;
   readonly playback: VoicePlaybackSink;
   readonly piAgent: PiAgentTurnClient;
-  readonly memoryWorker?: VoiceResidentMemoryWorker;
   readonly deferredTools?: {
     readonly collectDeliverableResults: (input: {
       readonly sessionId: string;
@@ -117,7 +106,7 @@ export type VoiceResidentRuntimeOptions = {
     readonly cancelSession?: (sessionId: string, reason: "session_closed" | "shutdown") => void;
     readonly waitForIdle?: () => Promise<void>;
   };
-  readonly console?: VoiceResidentConsoleSink;
+  readonly log?: VoiceResidentLogSink;
   readonly wakeAcknowledgement?: {
     readonly enabled: boolean;
   };
@@ -137,8 +126,6 @@ export type VoiceResidentRuntimeResult = {
   readonly processedFrames: number;
   readonly startedSessions: number;
   readonly completedTurns: number;
-  readonly enqueuedCutoffs: number;
-  readonly failedCutoffs: number;
   readonly failedFrames: number;
   readonly failedTurns: number;
   readonly suppressedFrames: number;
@@ -148,8 +135,6 @@ type VoiceResidentCounters = {
   processedFrames: number;
   startedSessions: number;
   completedTurns: number;
-  enqueuedCutoffs: number;
-  failedCutoffs: number;
   failedFrames: number;
   failedTurns: number;
   suppressedFrames: number;
@@ -162,7 +147,7 @@ type ActiveSessionState = {
 
 type PendingSessionState = {
   readonly activeSession: ActiveSessionState;
-  readonly pendingCutoffSessionIds: Set<string>;
+  readonly pendingEndedSessionIds: Set<string>;
   readonly farewelledSessionIds: Set<string>;
   readonly pushToTalk: PushToTalkActivationState;
 };
@@ -195,13 +180,11 @@ export async function runVoiceResidentRuntime(
     processedFrames: 0,
     startedSessions: 0,
     completedTurns: 0,
-    enqueuedCutoffs: 0,
-    failedCutoffs: 0,
     failedFrames: 0,
     failedTurns: 0,
     suppressedFrames: 0
   };
-  const pendingCutoffSessionIds = new Set(options.endedSessionIds ?? []);
+  const pendingEndedSessionIds = new Set(options.endedSessionIds ?? []);
   const farewelledSessionIds = new Set<string>();
   const pushToTalk: PushToTalkActivationState = {
     pendingActivation: undefined
@@ -222,9 +205,9 @@ export async function runVoiceResidentRuntime(
       throw new Error(`pico resident voice echo-control provider is unhealthy: ${health.message}`);
     }
 
-    await enqueueEndedSessions(
+    await finalizeEndedInteractions(
       options,
-      pendingCutoffSessionIds,
+      pendingEndedSessionIds,
       counters,
       now,
       farewelledSessionIds
@@ -234,7 +217,7 @@ export async function runVoiceResidentRuntime(
       throwIfAborted(options.signal);
       activeSessionId = await processResidentFrameIteration(rawFrame, options, counters, now, {
         activeSession,
-        pendingCutoffSessionIds,
+        pendingEndedSessionIds,
         farewelledSessionIds,
         pushToTalk,
         utteranceAssembler,
@@ -245,19 +228,20 @@ export async function runVoiceResidentRuntime(
 
     await flushPendingUtteranceWindow(utteranceAssembler, options, counters, now, {
       activeSession,
-      pendingCutoffSessionIds,
+      pendingEndedSessionIds,
       farewelledSessionIds,
       pushToTalk
     });
 
-    activeSessionId = collectEndedActiveSession(options.sessionLifecycle, activeSessionId, {
-      pendingCutoffSessionIds,
+    activeSessionId = await reconcileActiveSession(options.sessionLifecycle, activeSessionId, {
+      mode: "collect",
+      pendingEndedSessionIds,
       piAgent: options.piAgent,
       deferredTools: options.deferredTools
     });
-    await enqueueEndedSessions(
+    await finalizeEndedInteractions(
       options,
-      pendingCutoffSessionIds,
+      pendingEndedSessionIds,
       counters,
       now,
       farewelledSessionIds
@@ -266,7 +250,7 @@ export async function runVoiceResidentRuntime(
     try {
       await flushPendingUtteranceWindow(utteranceAssembler, options, counters, now, {
         activeSession,
-        pendingCutoffSessionIds,
+        pendingEndedSessionIds,
         farewelledSessionIds,
         pushToTalk
       });
@@ -274,7 +258,7 @@ export async function runVoiceResidentRuntime(
       activeSessionId = await runShutdownCleanup(
         options,
         activeSessionId,
-        pendingCutoffSessionIds,
+        pendingEndedSessionIds,
         farewelledSessionIds,
         counters,
         now
@@ -288,42 +272,47 @@ export async function runVoiceResidentRuntime(
 async function runShutdownCleanup(
   options: VoiceResidentRuntimeOptions,
   activeSessionId: string | undefined,
-  pendingCutoffSessionIds: Set<string>,
+  pendingEndedSessionIds: Set<string>,
   farewelledSessionIds: Set<string>,
   counters: VoiceResidentCounters,
   now: () => string
 ): Promise<string | undefined> {
-  const nextActiveSessionId = await cleanupActiveSessionForShutdown(
-    options,
-    activeSessionId,
-    pendingCutoffSessionIds,
-    farewelledSessionIds,
-    counters,
-    now
-  );
-  const firstError = await collectFirstShutdownCleanupError(options);
+  const errors: Error[] = [];
+  let nextActiveSessionId = activeSessionId;
 
-  if (firstError !== undefined) {
+  await recordCleanupError(errors, async () => {
+    nextActiveSessionId = await cleanupActiveSessionForShutdown(
+      options,
+      activeSessionId,
+      pendingEndedSessionIds,
+      farewelledSessionIds,
+      counters,
+      now
+    );
+  });
+
+  await collectShutdownCleanupErrors(options, errors);
+  const firstError = errors[0];
+
+  if (firstError === undefined) {
+    return nextActiveSessionId;
+  }
+
+  if (errors.length === 1) {
     throw firstError;
   }
 
-  return nextActiveSessionId;
+  throw new AggregateError(errors, firstError.message);
 }
 
-async function collectFirstShutdownCleanupError(
-  options: VoiceResidentRuntimeOptions
-): Promise<Error | undefined> {
-  const errors: Error[] = [];
-
+async function collectShutdownCleanupErrors(
+  options: VoiceResidentRuntimeOptions,
+  errors: Error[]
+): Promise<void> {
   await recordCleanupError(errors, () => options.piAgent.disposeAll?.());
   await recordCleanupError(errors, () => options.deferredTools?.waitForIdle?.());
-  await recordCleanupError(errors, () => {
-    options.memoryWorker?.close?.();
-  });
   await recordCleanupError(errors, () => options.echoControl.flush());
   await recordCleanupError(errors, () => options.speechActivity?.close?.());
-
-  return errors[0];
 }
 
 async function recordCleanupError(
@@ -347,19 +336,20 @@ async function processResidentFrameIteration(
     readonly currentActiveSessionId: string | undefined;
   }
 ): Promise<string | undefined> {
-  const activeSessionId = collectEndedActiveSession(
+  const activeSessionId = await reconcileActiveSession(
     options.sessionLifecycle,
     state.currentActiveSessionId,
     {
-      pendingCutoffSessionIds: state.pendingCutoffSessionIds,
+      mode: "collect",
+      pendingEndedSessionIds: state.pendingEndedSessionIds,
       piAgent: options.piAgent,
       deferredTools: options.deferredTools
     }
   );
   state.activeSession.setActiveSessionId(activeSessionId);
-  await enqueueEndedSessions(
+  await finalizeEndedInteractions(
     options,
-    state.pendingCutoffSessionIds,
+    state.pendingEndedSessionIds,
     counters,
     now,
     state.farewelledSessionIds
@@ -382,29 +372,28 @@ async function flushPendingUtteranceWindow(
 async function cleanupActiveSessionForShutdown(
   options: VoiceResidentRuntimeOptions,
   activeSessionId: string | undefined,
-  pendingCutoffSessionIds: Set<string>,
+  pendingEndedSessionIds: Set<string>,
   farewelledSessionIds: Set<string>,
   counters: VoiceResidentCounters,
   now: () => string
 ): Promise<string | undefined> {
-  if (options.memoryWorker === undefined) {
-    if (activeSessionId !== undefined) {
-      cancelDeferredToolSession(options.deferredTools, activeSessionId, "shutdown");
-    }
-
-    return activeSessionId;
-  }
-
-  const nextActiveSessionId = endActiveSessionForShutdown(
+  const nextActiveSessionId = await reconcileActiveSession(
     options.sessionLifecycle,
     activeSessionId,
     {
-      pendingCutoffSessionIds,
+      mode: "shutdown",
+      pendingEndedSessionIds,
       piAgent: options.piAgent,
       deferredTools: options.deferredTools
     }
   );
-  await enqueueEndedSessions(options, pendingCutoffSessionIds, counters, now, farewelledSessionIds);
+  await finalizeEndedInteractions(
+    options,
+    pendingEndedSessionIds,
+    counters,
+    now,
+    farewelledSessionIds
+  );
 
   return nextActiveSessionId;
 }
@@ -519,15 +508,16 @@ async function processTranscribedUtterance(
 
   await runActiveVoiceTurn(transcript.text, options, counters, now, activeSession.sessionId);
   state.activeSession.setActiveSessionId(
-    collectEndedActiveSession(options.sessionLifecycle, activeSession.sessionId, {
-      pendingCutoffSessionIds: state.pendingCutoffSessionIds,
+    await reconcileActiveSession(options.sessionLifecycle, activeSession.sessionId, {
+      mode: "collect",
+      pendingEndedSessionIds: state.pendingEndedSessionIds,
       piAgent: options.piAgent,
       deferredTools: options.deferredTools
     })
   );
-  await enqueueEndedSessions(
+  await finalizeEndedInteractions(
     options,
-    state.pendingCutoffSessionIds,
+    state.pendingEndedSessionIds,
     counters,
     now,
     state.farewelledSessionIds
@@ -818,12 +808,10 @@ async function runWakeAcknowledgement(
   const prompt = buildWakeAcknowledgementPrompt(trigger);
   const piStageStartedAt = now();
   const piStageStartedMs = (options.monotonicNow ?? defaultMonotonicNow)();
-  recordResidentConsoleEvent(options.console, {
+  recordResidentLogEvent(options.log, {
     kind: "wake_ack_input",
     occurredAt: piStageStartedAt,
-    sessionId,
-    trigger,
-    text: prompt
+    sessionId
   });
   const response = await requestPiAgentResponse(
     sessionId,
@@ -839,12 +827,11 @@ async function runWakeAcknowledgement(
     return;
   }
 
-  recordResidentConsoleEvent(options.console, {
+  recordResidentLogEvent(options.log, {
     kind: "wake_ack_response",
     occurredAt: response.completedAt,
     sessionId,
-    durationMs: response.durationMs,
-    text: response.text
+    durationMs: response.durationMs
   });
   recordVoiceStageProbe(options.probe ?? {}, {
     stage: "pi_turn",
@@ -893,18 +880,17 @@ async function runActiveVoiceTurn(
   now: () => string,
   activeSessionId: string
 ): Promise<void> {
-  if (!appendStaffEntryIfSessionActive(options.sessionLifecycle, activeSessionId, transcript)) {
+  if (!refreshActiveInteraction(options.sessionLifecycle, activeSessionId)) {
     return;
   }
 
   const piStageStartedAt = now();
   const piStageStartedMs = (options.monotonicNow ?? defaultMonotonicNow)();
   const turnRequest = createActiveVoiceTurnRequest(transcript, options, activeSessionId, now);
-  recordResidentConsoleEvent(options.console, {
-    kind: "staff_transcript",
+  recordResidentLogEvent(options.log, {
+    kind: "staff_input",
     occurredAt: piStageStartedAt,
-    sessionId: activeSessionId,
-    text: transcript
+    sessionId: activeSessionId
   });
   const response = await requestPiAgentResponse(
     activeSessionId,
@@ -920,13 +906,11 @@ async function runActiveVoiceTurn(
     return;
   }
 
-  appendAssistantEntryIfSessionActive(options.sessionLifecycle, activeSessionId, response.text);
-  recordResidentConsoleEvent(options.console, {
+  recordResidentLogEvent(options.log, {
     kind: "pi_agent_response",
     occurredAt: response.completedAt,
     sessionId: activeSessionId,
-    durationMs: response.durationMs,
-    text: response.text
+    durationMs: response.durationMs
   });
   recordVoiceStageProbe(options.probe ?? {}, {
     stage: "pi_turn",
@@ -1103,47 +1087,25 @@ async function synthesizeTurnResponse(
   return undefined;
 }
 
-function recordResidentConsoleEvent(
-  sink: VoiceResidentConsoleSink | undefined,
-  event: VoiceResidentConsoleEvent
+function recordResidentLogEvent(
+  sink: VoiceResidentLogSink | undefined,
+  event: VoiceResidentLogEvent
 ): void {
   try {
     sink?.record(event);
   } catch {
-    // Console and file logging must not break resident voice operation.
+    // Logging must not break resident voice operation.
   }
 }
 
-function appendStaffEntryIfSessionActive(
-  lifecycle: SessionLifecycle,
-  sessionId: string,
-  text: string
-): boolean {
+function refreshActiveInteraction(lifecycle: SessionLifecycle, sessionId: string): boolean {
   if (lifecycle.read(sessionId)?.state !== "active") {
     return false;
   }
 
-  lifecycle.appendEntry(sessionId, {
-    role: "staff",
-    content: text
-  });
+  lifecycle.refreshActivity(sessionId);
 
   return true;
-}
-
-function appendAssistantEntryIfSessionActive(
-  lifecycle: SessionLifecycle,
-  sessionId: string,
-  text: string
-): void {
-  if (lifecycle.read(sessionId)?.state !== "active") {
-    return;
-  }
-
-  lifecycle.appendEntry(sessionId, {
-    role: "assistant",
-    content: text
-  });
 }
 
 async function playTtsChunks(
@@ -1185,15 +1147,16 @@ async function playTtsChunks(
   }
 }
 
-function collectEndedActiveSession(
+async function reconcileActiveSession(
   lifecycle: SessionLifecycle,
   activeSessionId: string | undefined,
   options: {
-    readonly pendingCutoffSessionIds: Set<string>;
+    readonly mode: "collect" | "shutdown";
+    readonly pendingEndedSessionIds: Set<string>;
     readonly piAgent: PiAgentTurnClient;
     readonly deferredTools?: VoiceResidentRuntimeOptions["deferredTools"];
   }
-): string | undefined {
+): Promise<string | undefined> {
   if (activeSessionId === undefined) {
     return undefined;
   }
@@ -1201,48 +1164,24 @@ function collectEndedActiveSession(
   const session = lifecycle.read(activeSessionId);
 
   if (session === undefined) {
-    cancelDeferredToolSession(options.deferredTools, activeSessionId, "session_closed");
-    disposeSessionQuietly(options.piAgent, activeSessionId);
+    cancelDeferredToolSession(
+      options.deferredTools,
+      activeSessionId,
+      options.mode === "shutdown" ? "shutdown" : "session_closed"
+    );
+    await disposeSessionQuietly(options.piAgent, activeSessionId);
     return undefined;
   }
 
-  if (session.state !== "ended") {
+  if (options.mode === "collect" && session.state !== "ended") {
     return activeSessionId;
   }
 
-  cancelDeferredToolSession(options.deferredTools, activeSessionId, "session_closed");
-  options.pendingCutoffSessionIds.add(activeSessionId);
-
-  return undefined;
-}
-
-function endActiveSessionForShutdown(
-  lifecycle: SessionLifecycle,
-  activeSessionId: string | undefined,
-  options: {
-    readonly pendingCutoffSessionIds: Set<string>;
-    readonly piAgent: PiAgentTurnClient;
-    readonly deferredTools?: VoiceResidentRuntimeOptions["deferredTools"];
-  }
-): string | undefined {
-  if (activeSessionId === undefined) {
-    return undefined;
-  }
-
-  const session = lifecycle.read(activeSessionId);
-
-  if (session === undefined) {
-    cancelDeferredToolSession(options.deferredTools, activeSessionId, "shutdown");
-    disposeSessionQuietly(options.piAgent, activeSessionId);
-    return undefined;
-  }
-
-  if (session.state === "active") {
+  if (options.mode === "shutdown" && session.state === "active") {
     lifecycle.end(activeSessionId);
   }
 
-  cancelDeferredToolSession(options.deferredTools, activeSessionId, "shutdown");
-  options.pendingCutoffSessionIds.add(activeSessionId);
+  options.pendingEndedSessionIds.add(activeSessionId);
 
   return undefined;
 }
@@ -1259,53 +1198,26 @@ function cancelDeferredToolSession(
   }
 }
 
-async function enqueueEndedSessions(
+async function finalizeEndedInteractions(
   options: VoiceResidentRuntimeOptions,
-  pendingCutoffSessionIds: Set<string>,
+  pendingEndedSessionIds: Set<string>,
   counters: VoiceResidentCounters,
   now: () => string,
   farewelledSessionIds: Set<string>
 ): Promise<void> {
-  for (const sessionId of [...pendingCutoffSessionIds]) {
+  for (const sessionId of Array.from(pendingEndedSessionIds)) {
     const session = options.sessionLifecycle.read(sessionId);
 
     if (session?.state !== "ended") {
-      pendingCutoffSessionIds.delete(sessionId);
+      pendingEndedSessionIds.delete(sessionId);
       continue;
     }
 
     await runOptionalFarewell(session, options, counters, now, farewelledSessionIds);
-
-    if (options.memoryWorker === undefined) {
-      counters.failedCutoffs += 1;
-      recordCutoffEnqueueError(options, now(), "missing_memory_worker");
-      continue;
-    }
-
-    const startedAt = now();
-    const cutoff = options.sessionLifecycle.cutoff(sessionId);
-
-    try {
-      options.memoryWorker.enqueueCutoff(cutoff);
-    } catch {
-      counters.failedCutoffs += 1;
-      recordCutoffEnqueueError(options, startedAt, "enqueue_failed");
-      continue;
-    }
-
-    options.sessionLifecycle.acknowledgeCutoff(sessionId);
-    pendingCutoffSessionIds.delete(sessionId);
-    counters.enqueuedCutoffs += 1;
-    recordVoiceStageProbe(options.probe ?? {}, {
-      stage: "session_cutoff_enqueue",
-      status: "ok",
-      startedAt,
-      durationMs: 0,
-      attributes: {
-        "pico.voice.entry_count": cutoff.entries.length
-      }
-    });
-    disposeSessionQuietly(options.piAgent, sessionId);
+    cancelDeferredToolSession(options.deferredTools, sessionId, "session_closed");
+    await disposeSessionQuietly(options.piAgent, sessionId);
+    options.sessionLifecycle.remove(sessionId);
+    pendingEndedSessionIds.delete(sessionId);
   }
 }
 
@@ -1407,24 +1319,12 @@ function refreshSessionActivityQuietly(lifecycle: SessionLifecycle, sessionId: s
   }
 }
 
-function disposeSessionQuietly(piAgent: PiAgentTurnClient, sessionId: string): void {
-  void Promise.resolve(piAgent.disposeSession?.(sessionId)).catch(() => undefined);
-}
-
-function recordCutoffEnqueueError(
-  options: VoiceResidentRuntimeOptions,
-  startedAt: string,
-  errorCode: string
-): void {
-  recordVoiceStageProbe(options.probe ?? {}, {
-    stage: "session_cutoff_enqueue",
-    status: "error",
-    startedAt,
-    durationMs: 0,
-    attributes: {
-      "pico.voice.error_code": errorCode
-    }
-  });
+async function disposeSessionQuietly(piAgent: PiAgentTurnClient, sessionId: string): Promise<void> {
+  try {
+    await piAgent.disposeSession?.(sessionId);
+  } catch {
+    return;
+  }
 }
 
 async function* toAsyncIterable(frames: VoiceFrameSource): AsyncIterable<VoicePcmFrame> {

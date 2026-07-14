@@ -6,6 +6,12 @@ import {
   tapoRtspSmokeExitCode
 } from "../scripts/smoke/tapo-rtsp-snapshot.js";
 import { definePicoConfig } from "../src/config/index.js";
+import { buildCredentialedUrl } from "./support/url-fixtures.js";
+
+const configuredRtspUrl = buildCredentialedUrl("rtsp://192.168.10.25:554/stream1", {
+  username: "camera-user",
+  password: "camera-passphrase"
+});
 
 describe("Tapo RTSP snapshot smoke configuration", () => {
   it("skips when the Tapo host is not configured", async () => {
@@ -62,7 +68,7 @@ describe("Tapo RTSP snapshot smoke configuration", () => {
     expect(plan).toMatchObject({
       status: "run",
       source: {
-        url: "rtsp://camera-user:camera-passphrase@192.168.10.25:554/stream1"
+        url: configuredRtspUrl
       }
     });
   });
@@ -110,8 +116,7 @@ describe("Tapo RTSP snapshot smoke configuration", () => {
             ok: false,
             sourceId: "tapo-rtsp",
             reason: "capture_failed",
-            message:
-              "rtsp://camera-user:camera-passphrase@192.168.10.25:554/stream1 camera-passphrase"
+            message: `${configuredRtspUrl} camera-passphrase`
           })
       }
     );
@@ -138,12 +143,7 @@ describe("Tapo RTSP snapshot smoke configuration", () => {
         }
       }),
       {
-        captureSnapshot: () =>
-          Promise.reject(
-            new Error(
-              "rtsp://camera-user:camera-passphrase@192.168.10.25:554/stream1 camera-passphrase"
-            )
-          )
+        captureSnapshot: () => Promise.reject(new Error(`${configuredRtspUrl} camera-passphrase`))
       }
     );
     const reportText = JSON.stringify(report);

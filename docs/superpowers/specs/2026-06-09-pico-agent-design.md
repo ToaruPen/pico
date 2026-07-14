@@ -55,8 +55,7 @@ Pi Agent
       ├─ identity
       ├─ orchestrator
       ├─ context
-      ├─ memory
-      ├─ long_memory
+      ├─ session
       ├─ local_models
       ├─ voice
       ├─ vision
@@ -66,6 +65,11 @@ Pi Agent
       ├─ audit
       └─ transport
 ```
+
+Pi owns the parent conversation session, transcript, context, history, tools,
+and subagents. Durable memory, when enabled, is provided by a separately
+installed Pi-level plugin. Pico does not configure, register, wrap, proxy, or
+call memory providers or tools.
 
 ## Module Responsibilities
 
@@ -89,32 +93,11 @@ interaction state, and prevent modules from becoming a tangled control plane.
 Provides facility context such as rules, schedules, activity plans, room
 information, staff-provided notes, and operational knowledge.
 
-### memory
+### session
 
-Handles short-term interaction memory and working summaries.
-
-This module should help the agent keep continuity during an active interaction
-without making every detail durable.
-
-### long_memory
-
-Handles durable facility memory.
-
-The default framing is place memory and support knowledge, not child profiles.
-Long-term memory should be designed around what helps the facility provide
-consistent care.
-
-The initial durable slice is a SQLite store for facility knowledge,
-care-continuity notes, and operational notes. It is not a child dossier store
-or a vector-primary memory system. Session-cutoff automation may write facility
-memories without a human review gate, but SQLite remains the durable source of
-truth and vector storage remains a replaceable retrieval index.
-
-Session-cutoff processing should run outside the live response path. It may use
-an explicit cloud LLM provider through Pi Agent authentication when that is the
-selected operational provider. The worker must be bounded, observable, and
-replaceable; it must not become a hidden provider chain or block live
-conversation turns.
+Keeps process-local interaction-control state for activation, inactivity timing,
+farewell, deferred-tool cancellation, and Pi session cleanup. It does not store
+conversation entries, summaries, or memory-cutoff payloads.
 
 ### local_models
 
@@ -123,24 +106,14 @@ Provides local model capabilities around Pi Agent.
 The design goal is local-first for surrounding cognition where practical, while
 allowing explicit provider choices when local models would compromise accuracy,
 latency, or machine capacity. Aside from the Pi Agent brain itself, supporting
-model work such as speech, vision, classification, embedding, extraction, or
-summarization should name its provider and runtime boundary directly.
+model work such as speech, vision, or classification should name its provider
+and runtime boundary directly.
 
 `local` does not require every model to run on the same host as Pi Agent. The
 vision model is expected to run on a Windows GPU host and be reached through a
 protected Tailscale or Cloudflare SSH tunnel. From `pico`'s perspective this is
 still a selected local-first provider, not a cloud model and not an automatic
 provider chain.
-
-For long-memory work, generation/extraction and embedding are separate provider
-decisions. The main long-memory LLM path is expected to use Pi Agent's
-`openai-codex` model registry provider and the `openai-codex-responses` API
-through stored Pi authentication. The embedding path is expected to remain local
-by default and explicitly selectable, with `jinaai/jina-embeddings-v5-text-small`
-as the primary local sidecar candidate while the deployment remains
-non-commercial/private. Changing embedding models requires an intentional
-vector-index migration because vector dimensions and embedding spaces are not
-interchangeable.
 
 ### voice
 
@@ -187,9 +160,9 @@ escalation handoff text. Human staff remain the responsible decision makers.
 
 Records operationally important actions.
 
-Audit should focus on traceability for tool calls, external sends, memory
-changes, and module decisions that affect the facility. It should not become a
-full transcript store by default.
+Audit should focus on traceability for tool calls, external sends, and module
+decisions that affect the facility. It should not become a full transcript
+store by default.
 
 ### transport
 
@@ -207,8 +180,7 @@ rather than an exposed Ollama port.
 
 - Do not create a separate complex `policy` module or rules engine as an early
   architecture layer.
-- Do not start by implementing LINE, camera control, voice, or broad autonomous
-  long-term memory behavior in detail.
+- Do not add short-term or durable-memory implementation to Pico.
 - Do not split `pico` into many separate Pi plugins before the identity and
   module contract are stable.
 - Do not design the agent as a child-monitoring, scoring, or profiling system.
@@ -220,13 +192,11 @@ rather than an exposed Ollama port.
 - Protected transport over bespoke policy machinery.
 - Human staff keep final responsibility.
 - Capabilities can expand; responsibility boundaries should not silently expand.
-- Durable memory should serve facility care continuity, not individual tracking.
+- Any independently installed durable-memory capability must not be designed for
+  child tracking, scoring, or profiling.
 - External channels are output surfaces, not the core architecture.
 - No test-double modules, compatibility layers, or automatic provider switching
   in production architecture. Providers are selected explicitly.
-- Long-memory LLM and embedding providers are selected independently. A failed
-  cloud LLM must not silently switch to a local model, and a failed local
-  embedder must not silently switch to a cloud embedder.
 
 ## Initial Implementation Shape
 
@@ -239,14 +209,11 @@ Suggested first slice:
 2. Add `identity` prompt material and a minimal module registry.
 3. Add a small `orchestrator` that can call real metadata-only first-slice
    modules through typed contracts.
-4. Add first-slice modules for `context`, `memory`, `local_models`, `handoff`,
+4. Add first-slice modules for `context`, `session`, `local_models`, `handoff`,
    `audit`, and `transport`.
 5. Keep `voice`, `vision`, `camera`, and `channels` as explicit future modules
    with contracts but no runtime implementation until their real dependencies
    are selected and reachable.
-6. Keep the first `long_memory` runtime surface limited to SQLite facility
-   memory. Broader extraction, compaction, and integration behavior is future
-   work.
 
 ## Open Decisions
 
@@ -256,7 +223,4 @@ Suggested first slice:
   service.
 - Where protected Cloudflare transport is required in the first milestone.
 - Which local LLM/runtime should back `local_models`.
-- How long-term memory should be compacted, corrected, and decayed.
-- Which multilingual local embedding model should back the first production
-  vector index.
 - Which LINE/OpenClaw integration pattern, if any, should be adopted later.

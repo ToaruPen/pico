@@ -1,5 +1,8 @@
 # Pi Agent Perception Tools Implementation Plan
 
+> Historical record: memory-related ownership in this document was superseded
+> by [Pi 所有 memory 責務境界設計](../specs/2026-07-13-pi-owned-memory-boundary-design.md).
+> Current Pico has no short-term or durable-memory implementation.
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add actual Pi Agent extension tools for bounded Tapo snapshot, person detection, and camera-to-VLM scene description runtime field tests.

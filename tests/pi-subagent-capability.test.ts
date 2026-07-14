@@ -35,13 +35,13 @@ describe("Pi-owned subagent capability", () => {
       resourceLoader: loader,
       sessionManager: SessionManager.inMemory(process.cwd()),
       noTools: "builtin",
-      tools: ["pico_session", "subagent"]
+      tools: ["subagent"]
     });
 
     try {
       await session.bindExtensions({ mode: "print" });
 
-      expect(session.getActiveToolNames().sort()).toEqual(["pico_session", "subagent"]);
+      expect(session.getActiveToolNames()).toEqual(["subagent"]);
     } finally {
       session.dispose();
     }

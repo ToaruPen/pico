@@ -1,8 +1,6 @@
 #!/usr/bin/env jiti
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
@@ -16,14 +14,7 @@ import {
   createOpenTelemetryAuditExporter,
   type OpenTelemetryAuditExporter
 } from "../../src/modules/audit/otel.js";
-import {
-  openLongMemoryStore,
-  openSessionMemoryCandidateStore,
-  type SessionMemoryCutoffInput
-} from "../../src/modules/long-memory/index.js";
 import { type CameraVlmSceneSmokeReport, runCameraVlmSceneSmoke } from "./camera-vlm-scene.js";
-import { type EmbeddingSidecarSmokeReport, runEmbeddingSidecarSmoke } from "./embedding-sidecar.js";
-import { type Mem0RuntimeSmokeReport, runMem0RuntimeSmoke } from "./mem0-runtime.js";
 import {
   type OllamaVlmSmokeReport,
   runOllamaVlmConnectivitySmoke
@@ -52,9 +43,6 @@ export type PicoMilestoneSmokeSectionName =
   | "person_detection"
   | "ollama_vlm"
   | "camera_vlm_scene"
-  | "embedding_sidecar"
-  | "mem0_runtime"
-  | "memory_candidate"
   | "audit_otel";
 
 export type PicoMilestoneSmokeSectionReport = {
@@ -77,6 +65,7 @@ export type PiRuntimeSmokeCommandResult = {
 };
 
 export type PicoMilestoneSmokeDependencies = {
+  readonly now?: () => string;
   readonly runPiRuntimeCommand?: (env: NodeJS.ProcessEnv) => PiRuntimeSmokeCommandResult;
   readonly runVoiceProviderSmoke?: (config: PicoConfig) => Promise<VoiceSmokeReport>;
   readonly runResidentAudioInputSmoke?: (
@@ -90,8 +79,6 @@ export type PicoMilestoneSmokeDependencies = {
   readonly runPersonDetectionSmoke?: (config: PicoConfig) => Promise<PersonDetectionSmokeReport>;
   readonly runOllamaVlmConnectivitySmoke?: (config: PicoConfig) => Promise<OllamaVlmSmokeReport>;
   readonly runCameraVlmSceneSmoke?: (config: PicoConfig) => Promise<CameraVlmSceneSmokeReport>;
-  readonly runEmbeddingSidecarSmoke?: (config: PicoConfig) => Promise<EmbeddingSidecarSmokeReport>;
-  readonly runMem0RuntimeSmoke?: (config: PicoConfig) => Promise<Mem0RuntimeSmokeReport>;
   readonly createAuditOtelExporter?: (
     config: Required<PicoConfig["audit"]["otel"]>
   ) => OpenTelemetryAuditExporter;
@@ -99,25 +86,6 @@ export type PicoMilestoneSmokeDependencies = {
 
 const repositoryRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const missingPiCredentialsPattern = /requires configured Pi Agent model credentials/i;
-const completedSession = {
-  sessionId: "milestone-session-2026-06-10",
-  cutoffAt: "2026-06-10T18:30:00.000Z",
-  sourceEntryIds: ["milestone-memory-1", "milestone-memory-2"],
-  entries: [
-    {
-      id: "milestone-memory-1",
-      role: "staff",
-      content: "雨の日は工作セットを早めに準備すると活動へ入りやすい。"
-    },
-    {
-      id: "milestone-memory-2",
-      role: "assistant",
-      content: "次の雨の日も工作セットを先に準備する候補として扱う。"
-    }
-  ],
-  requestedBy: "pico"
-} as const satisfies SessionMemoryCutoffInput;
-
 export async function runPicoMilestoneSmokeSuite(
   env: NodeJS.ProcessEnv = process.env,
   dependencies: PicoMilestoneSmokeDependencies = {}
@@ -132,9 +100,7 @@ export async function runPicoMilestoneSmokeSuite(
     config = loadPicoConfigFromEnvironment(env);
   } catch (error) {
     sections.push(...failedConfigProviderSections(error));
-    sections.push(
-      ...auditConfigAwareMemoryAndAuditSections(await runMemoryAndAuditSections(), error)
-    );
+    sections.push(auditConfigAwareSection(await runAuditSection(), error));
 
     return {
       status: summarizeStatus(sections),
@@ -193,23 +159,7 @@ export async function runPicoMilestoneSmokeSuite(
       )
     )
   );
-  sections.push(
-    await captureSection("embedding_sidecar", "embedding-sidecar", async () =>
-      toSection(
-        "embedding_sidecar",
-        await (dependencies.runEmbeddingSidecarSmoke ?? runEmbeddingSidecarSmoke)(config)
-      )
-    )
-  );
-  sections.push(
-    await captureSection("mem0_runtime", "mem0-oss", async () =>
-      toSection(
-        "mem0_runtime",
-        await (dependencies.runMem0RuntimeSmoke ?? runMem0RuntimeSmoke)(config)
-      )
-    )
-  );
-  sections.push(...(await runMemoryAndAuditSections(config, dependencies)));
+  sections.push(await runAuditSection(config, dependencies));
 
   return {
     status: summarizeStatus(sections),
@@ -302,27 +252,21 @@ function failedConfigProviderSections(error: unknown): readonly PicoMilestoneSmo
     failedSection("tapo_ptz", "tapo-onvif-ptz", reason),
     failedSection("person_detection", "tapo-rtsp+onnxruntime", reason),
     failedSection("ollama_vlm", "ollama", reason),
-    failedSection("camera_vlm_scene", "tapo-rtsp+ollama", reason),
-    failedSection("embedding_sidecar", "embedding-sidecar", reason),
-    failedSection("mem0_runtime", "mem0-oss", reason)
+    failedSection("camera_vlm_scene", "tapo-rtsp+ollama", reason)
   ];
 }
 
-function auditConfigAwareMemoryAndAuditSections(
-  sections: readonly PicoMilestoneSmokeSectionReport[],
+function auditConfigAwareSection(
+  section: PicoMilestoneSmokeSectionReport,
   error: unknown
-): readonly PicoMilestoneSmokeSectionReport[] {
+): PicoMilestoneSmokeSectionReport {
   if (!isAuditOtelConfigError(error)) {
-    return sections;
+    return section;
   }
 
   const reason = `pico config load failed: ${errorMessage(error)}`;
 
-  return sections.map((section) =>
-    section.name === "audit_otel"
-      ? failedSection("audit_otel", "structured-audit+otel", reason)
-      : section
-  );
+  return failedSection("audit_otel", "structured-audit+otel", reason);
 }
 
 function isAuditOtelConfigError(error: unknown): boolean {
@@ -345,75 +289,35 @@ async function runVoiceSections(
   }
 }
 
-async function runMemoryAndAuditSections(
+async function runAuditSection(
   config?: PicoConfig,
-  dependencies: Pick<PicoMilestoneSmokeDependencies, "createAuditOtelExporter"> = {}
-): Promise<readonly PicoMilestoneSmokeSectionReport[]> {
-  const directory = await mkdtemp(join(tmpdir(), "pico-milestone-smoke-"));
-  const path = join(directory, "long-memory.sqlite");
-
+  dependencies: Pick<PicoMilestoneSmokeDependencies, "createAuditOtelExporter" | "now"> = {}
+): Promise<PicoMilestoneSmokeSectionReport> {
   try {
     const audit = createStructuredAuditLog();
-    const candidates = openSessionMemoryCandidateStore(path, {
-      audit,
-      now: () => "2026-06-10T18:31:00.000Z",
-      processSession: () =>
-        Promise.resolve([
-          {
-            title: "雨の日の工作準備",
-            body: "雨の日は工作セットを早めに準備すると活動へ入りやすい。",
-            category: "care_continuity"
-          }
-        ])
+    audit.record({
+      category: "session_lifecycle",
+      name: "session.started",
+      severity: "info",
+      occurredAt: dependencies.now?.() ?? new Date().toISOString(),
+      summary: "Pico interaction session started.",
+      attributes: { source: "milestone_smoke" }
     });
+    const auditEntries = audit.entries();
+    return await captureSection("audit_otel", auditOtelProviderName(config), async () => {
+      const otelRecords = auditEntries.map(toOpenTelemetryLogRecord);
+      const firstOtelRecord = validateAuditOtelRecords(auditEntries.length, otelRecords);
 
-    try {
-      candidates.enqueueSessionCutoff(completedSession);
-      await candidates.processNextJob();
-      const promoted = candidates.promoteReviewed(1, {
-        reviewedBy: "milestone-smoke",
-        reviewedAt: "2026-06-10T18:35:00.000Z",
-        note: "Milestone smoke reviewed memory candidate."
-      });
-      assertPromotedMemorySearch(path);
-      const memoryCandidateSection: PicoMilestoneSmokeSectionReport = {
-        name: "memory_candidate",
-        status: "passed",
-        provider: "sqlite",
-        details: {
-          promotedMemoryId: promoted.id,
-          category: promoted.category
-        }
-      };
-      const auditEntries = audit.entries();
-      const auditOtelSection = await captureSection(
-        "audit_otel",
-        auditOtelProviderName(config),
-        async () => {
-          const otelRecords = auditEntries.map(toOpenTelemetryLogRecord);
-          const firstOtelRecord = validateAuditOtelRecords(auditEntries.length, otelRecords);
-
-          return buildAuditOtelSection(
-            config,
-            dependencies,
-            auditEntries,
-            otelRecords,
-            firstOtelRecord
-          );
-        }
+      return buildAuditOtelSection(
+        config,
+        dependencies,
+        auditEntries,
+        otelRecords,
+        firstOtelRecord
       );
-
-      return [memoryCandidateSection, auditOtelSection];
-    } finally {
-      candidates.close();
-    }
+    });
   } catch (error) {
-    return [
-      failedSection("memory_candidate", "sqlite", errorMessage(error)),
-      failedSection("audit_otel", "structured-audit", errorMessage(error))
-    ];
-  } finally {
-    await rm(directory, { recursive: true, force: true });
+    return failedSection("audit_otel", "structured-audit", errorMessage(error));
   }
 }
 
@@ -550,31 +454,19 @@ function validateAuditOtelRecords(
   }
 
   for (const record of records) {
-    assertMemoryWriteOtelRecord(record);
+    assertAuditOtelRecord(record);
   }
 
   return firstRecord;
 }
 
-function assertMemoryWriteOtelRecord(record: OpenTelemetryAuditLogRecord): void {
-  if (record.attributes["pico.audit.category"] !== "memory_write") {
+function assertAuditOtelRecord(record: OpenTelemetryAuditLogRecord): void {
+  if (record.attributes["pico.audit.category"] !== "session_lifecycle") {
     throw new Error("pico milestone smoke emitted an unexpected audit OTel category");
   }
 
   if (typeof record.attributes["event.name"] !== "string") {
     throw new Error("pico milestone smoke did not emit an audit event.name attribute");
-  }
-}
-
-function assertPromotedMemorySearch(path: string): void {
-  const memory = openLongMemoryStore(path);
-
-  try {
-    if (memory.search("工作準備").length === 0) {
-      throw new Error("pico milestone smoke could not find promoted long memory");
-    }
-  } finally {
-    memory.close();
   }
 }
 

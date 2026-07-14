@@ -3,8 +3,8 @@
 ## 目的
 
 `pico` に、実利用前提の音声常駐 runtime を追加する。これは実地テスト用
-harness ではなく、施設内で `pico` が待機し、話しかけられたときに会話し、
-セッション終了後に長期記憶処理へ非同期に渡す本体 runtime である。
+harness ではなく、施設内で `pico` が待機し、話しかけられたときに Pi の親
+conversation session を通して会話する本体 runtime である。
 
 field validation はこの runtime を短時間・明示条件で起動して検証する薄い
 wrapper に留める。
@@ -13,8 +13,9 @@ wrapper に留める。
 
 - LINE 連携、日報配信、外部通知は扱わない。
 - production に mock、stub、fake、fallback provider chain は追加しない。
-- Durable memory を子どもの tracking、scoring、profiling 目的に使わない。
-- human review gate は追加しない。
+- short-term memory、durable memory、memory tool、cutoff-memory hook は Pico に
+  追加しない。
+- 子どもの tracking、scoring、profiling を行わない。
 - Pi Agent CLI を turn ごとに spawn する実装にはしない。
 
 ## 基本方針
@@ -43,68 +44,48 @@ provider へ自動で切り替えない。
    STT sidecar に渡さない。
 6. session 開始前の transcript は trigger 判定だけに使い、保存しない。
 7. wake name、greeting、将来の bell/tool event など trusted trigger が成立したら session を開始する。
-8. active session 中の staff utterance を session entry として append する。
-9. 同じ Pi Agent SDK session に turn を渡す。
-10. Pi Agent response text を assistant entry として append する。
-11. response text を Aivis Speech で synthesize し、`voice.audio` で再生する。
-12. 再生音声は playback 呼び出し前に同じ chunk start timestamp で
+8. active interaction 中の accepted utterance は activity timestamp だけを更新する。
+9. 同じ Pi 親 conversation session に turn を渡す。
+10. Pi Agent response text を Aivis Speech で synthesize し、`voice.audio` で再生する。
+11. 再生音声は playback 呼び出し前に同じ chunk start timestamp で
     `echoControl.acceptFarEndReference` へ渡す。
-13. configured timed duration で session を cut off する。
-14. cutoff payload を long-memory worker queue に enqueue する。
-15. live conversation path は memory worker の処理完了を待たない。
+12. configured timed duration で interaction state を ended にする。
+13. 必要な場合だけ farewell turn を完了する。
+14. session-owned deferred tool を cancel する。
+15. bounded direct harness では Pi SDK session を dispose する。
+16. Pico lifecycle record を削除する。
 
 ## Pi Agent Integration
 
-Pi Agent 連携は SDK session API を使う。
+production では Pi Agent が親 conversation session、model/auth、tool scope、event loop、
+subagent、通常 cancel を所有する。Pico は `pi.sendUserMessage()` と Pi events を使い、
+別の integration session を作らない。CLI per turn は使わない。
 
-`createAgentSession` / `AgentSession` を使い、同一 process 内で以下を扱う。
+`npm run resident:voice` は低レベルの direct field harness に限り Pi SDK session を
+同一 process 内に作成できる。この bounded harness は production ownership path ではない。
 
-- `prompt()` による turn 投入。
-- `subscribe()` による response/event 収集。
-- session cutoff 時の abort/cancel。
-- model/auth/resource loader/tool scope の一貫性。
+## Interaction Ending
 
-CLI per turn は使わない。CLI は smoke や手動検証用途に限定する。
+Pico の `SessionLifecycle` は activation と inactivity 制御に必要な process-local state
+だけを持つ。staff/assistant utterance、transcript、summary、memory candidate、cutoff
+payload は保持しない。
 
-既存 `registerPicoExtension` と resident runtime が別々の `SessionLifecycle` を
-持つと、`pico_session` tool が見る session と resident が cutoff/enqueue する
-session が分裂する。そのため、`pico_session` と perception tools を登録する
-helper を切り出し、extension path と resident SDK path の両方へ同じ
-`SessionLifecycle` を注入できるようにする。
+終了順序は以下に固定する。
 
-## Session And Memory Cutoff
+1. interaction state を ended にする。
+2. 必要な場合だけ farewell turn を完了する。
+3. session-owned deferred tool を cancel する。
+4. bounded harness では Pi SDK session disposal の完了を待つ。
+5. Pico lifecycle record を削除する。
 
-`SessionLifecycle.cutoff()` は現在 payload を返すだけなので、resident runtime が
-cutoff から enqueue までの順序を所有する。
-
-順序は以下に固定する。
-
-1. active session の cutoff payload を生成する。
-2. cutoff payload を durable queue に enqueue する。
-3. enqueue 成功後に session を cleanup 対象にする。
-
-enqueue が失敗した場合、live turn は止めない。ただし session payload を失わない
-ため、runtime は失敗を audit/probe し、session cleanup を成功扱いにしない。
-
-long-memory worker は非同期で drain する。worker timeout は default では設けない。
-embedding や外部 sidecar request の timeout は、session job lifetime とは別の
-外部 I/O 保護として扱う。
-
-`cutoff_json` は worker input queue であり、永続 memory そのものではない。ただし
-会話本文を含むため、一時 durable data として扱う。
-
-- 保存先は local private storage 配下に限定する。
-- 処理成功後は raw cutoff payload を削除または本文なし状態へ圧縮する。
-- 処理失敗後は retry しない failed job として本文なし状態へ圧縮する。
-- probe/audit には transcript 本文を出さない。
+Memory extraction、write、acknowledgement、retry、drain はこの順序に含めない。
 
 ## Pre-Trigger Transcript Policy
 
 session 開始前の STT 結果は ambient speech とみなす。
 
 - trigger 判定にだけ使う。
-- session entry にしない。
-- memory queue に入れない。
+- Pico interaction state に保存しない。
 - probe/audit に本文、断片、trigger phrase の値を出さない。
 
 trigger 判定は以下を満たす場合のみ成立する。
@@ -142,7 +123,6 @@ stage は固定 enum とする。
 - `pi_turn`
 - `tts_synthesize`
 - `tts_playback`
-- `session_cutoff_enqueue`
 
 event name は `voice.runtime.stage` に統一する。
 
@@ -156,11 +136,10 @@ event name は `voice.runtime.stage` に統一する。
 - `pico.voice.sample_rate_hz`
 - `pico.voice.channels`
 - `pico.voice.triggered`
-- `pico.voice.entry_count`
 - `pico.voice.chunk_count`
 - `pico.voice.error_code`
 
-high-cardinality な `sessionId`、`frameId`、`candidateJobId`、endpoint、model full name、
+high-cardinality な `sessionId`、`frameId`、endpoint、model full name、
 trigger phrase 値は metric label にしない。必要な場合でも短期 trace/log の bounded
 属性として扱い、audit schema の上限内に収める。
 
@@ -172,12 +151,11 @@ duration は monotonic clock で測る。wall-clock timestamp は event occurren
 resident runtime は fail closed を基本にする。
 
 - echo control が unhealthy: listening を停止し、別 provider へ fallback しない。
-- STT failure: 該当 window を破棄し、session へ append しない。
+- STT failure: 該当 window を破棄し、Piへ送らない。
 - trigger false/uncertain: Pi Agent に送らない。
 - Pi Agent turn failure: active session は維持し、該当 turn の TTS を行わない。
 - TTS failure: playback せず、far-end reference も追加しない。
 - playback failure: listening cooldown を延長し、自己音声誤認を避ける。
-- memory enqueue failure: live conversation を止めず、queue/backpressure event を出す。
 
 process lifecycle は以下を持つ。
 
@@ -185,9 +163,8 @@ process lifecycle は以下を持つ。
 - SIGINT/SIGTERM handling。
 - microphone/speaker resource cleanup。
 - echoControl flush。
-- active Pi Agent SDK session disposal。
-- active session の cutoff/enqueue 試行。ただし memory worker が構成されている
-  resident process に限る。
+- bounded direct harness の active Pi Agent SDK session disposal。
+- active interaction の end、farewell、deferred cancellation、terminal record removal。
 
 ## Mac Direct Resident Harness Management
 
@@ -255,11 +232,12 @@ interface 実装で runtime contract を検証する。
 優先テスト:
 
 - suppressed mic frame が STT に渡らない。
-- pre-trigger transcript が session/memory に保存されない。
+- pre-trigger transcript が Pico interaction state に保存されない。
 - trigger 成立後だけ session が start する。
 - Pi Agent SDK session が process 内で再利用される。
 - assistant response が TTS/playback/far-end reference の順に流れる。
-- cutoff 生成後、enqueue 成功まで session cleanup しない。
+- interaction ending が farewell、deferred cancellation、Pi session disposal、
+  terminal record removal の順に完了する。
 - probe が allowlist 属性だけを出す。
 - role-free runtime failure が fail closed する。
 
@@ -272,9 +250,6 @@ field validation は実機で以下を確認する。
 - Aivis Speech TTS playback。
 - echo control による自己音声抑制。
 - Pi Agent SDK turn。
-- session cutoff。
-- long-memory enqueue。
-- companion `resident:memory` drain worker による queued cutoff の Mem0
-  processing。worker は default job execution timeout を持たない。ただし
-  crash 後に残った stale `processing` job は復旧閾値で queued に戻せる。
+- timed interaction ending と shutdown cleanup。
+- memory config、worker、provider、tool、sidecar が Pico runtime にないこと。
 - OTel/probe event。

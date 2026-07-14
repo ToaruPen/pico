@@ -1,5 +1,9 @@
 # Pico Foundation Implementation Plan
 
+> Historical record: memory-related ownership in this document was superseded
+> by [Pi 所有 memory 責務境界設計](../specs/2026-07-13-pi-owned-memory-boundary-design.md).
+> Current Pico has no short-term or durable-memory implementation.
+
 Date: 2026-06-10
 Status: Historical
 

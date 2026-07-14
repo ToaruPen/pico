@@ -102,7 +102,7 @@ describe("resident voice runner ownership", () => {
     expect(events).toEqual(["release"]);
   });
 
-  it("opens the memory worker after startup setup and before runtime handoff", async () => {
+  it("hands off to the runtime without assembling a memory worker", async () => {
     const source = await readFile(
       new URL("../src/runtime/resident-voice-runner.ts", import.meta.url),
       "utf8"
@@ -111,7 +111,6 @@ describe("resident voice runner ownership", () => {
       "warmResidentVoiceStartupProviders",
       "createConfiguredActivation",
       "createConfiguredSpeechActivityGate",
-      "createResidentMemoryWorker",
       "runVoiceResidentRuntime"
     ] as const;
     const orderedPositions = findFunctionCallPositions(
@@ -121,6 +120,8 @@ describe("resident voice runner ownership", () => {
     );
 
     expect(orderedPositions).toEqual([...orderedPositions].sort((left, right) => left - right));
+    expect(source).not.toContain("createResidentMemoryWorker");
+    expect(source).not.toContain("memoryWorker");
   });
 });
 

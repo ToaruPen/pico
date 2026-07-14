@@ -2,8 +2,6 @@ import { homedir } from "node:os";
 
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../config/index.js";
 import type { AuditEvent } from "../modules/audit/index.js";
-import { openSessionMemoryCandidateQueue } from "../modules/long-memory/index.js";
-import { createSessionMemoryEnqueueWorker } from "../modules/long-memory/session-worker.js";
 import { createSessionLifecycle } from "../modules/session/index.js";
 import {
   createHalfDuplexEchoControl,
@@ -35,7 +33,7 @@ import {
 } from "./resident-voice-audit-log.js";
 import { createResidentVoiceConsoleLog } from "./resident-voice-console-log.js";
 import {
-  createResidentVoiceCompositeConsoleSink,
+  createResidentVoiceCompositeLogSink,
   createResidentVoiceFileLogSink,
   type ResidentVoiceLogRunMode,
   requireResidentVoiceRunId
@@ -64,8 +62,7 @@ const residentVoiceMetricStages = new Set([
   "tts_synthesize",
   "tts_playback",
   "camera_capture",
-  "vlm_scene_description",
-  "session_cutoff_enqueue"
+  "vlm_scene_description"
 ]);
 
 export async function runDirectResidentVoiceHarness(
@@ -171,14 +168,12 @@ export async function runResidentVoiceWithProviders(input: {
     const playback = createResidentPlaybackSink(config);
     const piAgent = resolveResidentPiAgent(input.piAgent, input.createPiAgent, {
       cwd: process.cwd(),
-      sessionLifecycle,
       deferredTools: {
         coordinator: deferredTools
       },
       ...(audit === undefined ? {} : { voiceProbe: { audit } })
     });
     const speechActivity = await createConfiguredSpeechActivityGate(config);
-    const memoryWorker = createResidentMemoryWorker(config);
 
     await runVoiceResidentRuntime({
       frames,
@@ -193,7 +188,6 @@ export async function runResidentVoiceWithProviders(input: {
       tts,
       playback,
       piAgent,
-      memoryWorker,
       deferredTools,
       wakeAcknowledgement: {
         enabled: config.voice.resident.activation.mode === "wake_word"
@@ -201,7 +195,7 @@ export async function runResidentVoiceWithProviders(input: {
       farewell: {
         enabled: true
       },
-      console: createResidentVoiceRuntimeConsoleSink(logRunMode, fileLog, stdoutProbeMode),
+      log: createResidentVoiceRuntimeLogSink(logRunMode, fileLog, stdoutProbeMode),
       minTriggerConfidence: config.voice.resident.minTriggerConfidence,
       activation: activation.runtime,
       utteranceWindow: config.voice.resident.utteranceWindow,
@@ -233,13 +227,13 @@ export function requireResidentVoiceEnabled(config: PicoConfig): void {
   }
 }
 
-function createResidentVoiceRuntimeConsoleSink(
+function createResidentVoiceRuntimeLogSink(
   logRunMode: ResidentVoiceLogRunMode,
   fileLog: ReturnType<typeof createResidentVoiceFileLogSink>,
   stdoutProbeMode: ResidentVoiceAuditLogStdoutMode | undefined
 ) {
   if (stdoutProbeMode !== undefined && logRunMode === "development") {
-    return createResidentVoiceCompositeConsoleSink([createResidentVoiceConsoleLog(), fileLog]);
+    return createResidentVoiceCompositeLogSink([createResidentVoiceConsoleLog(), fileLog]);
   }
 
   return fileLog;
@@ -457,24 +451,6 @@ function createConfiguredStt(config: PicoConfig) {
 
 function createConfiguredTts(config: PicoConfig) {
   return createAivisSpeechTtsClient(buildAivisSpeechService(config));
-}
-
-function createResidentMemoryWorker(config: PicoConfig) {
-  const mem0 = config.memory.mem0;
-
-  if (!mem0.enabled || mem0.historyDbPath === undefined) {
-    throw new Error("pico resident voice requires memory.mem0.enabled=true and historyDbPath");
-  }
-
-  const queue = openSessionMemoryCandidateQueue(mem0.historyDbPath);
-  const worker = createSessionMemoryEnqueueWorker({
-    queue
-  });
-
-  return {
-    ...worker,
-    close: () => queue.close()
-  };
 }
 
 async function assertResidentVoiceStartupReadiness(config: PicoConfig): Promise<void> {

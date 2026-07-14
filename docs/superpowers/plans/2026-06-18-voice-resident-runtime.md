@@ -1,12 +1,17 @@
 # Voice Resident Runtime Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Historical record: memory-related ownership in this document was superseded
+> by [Pi 所有 memory 責務境界設計](../specs/2026-07-13-pi-owned-memory-boundary-design.md).
+> Current Pico has no short-term or durable-memory implementation.
+> Do not execute this plan. It is historical reference only; unchecked task
+> markers below are not pending work. Do not restore Mem0, cutoff processing,
+> memory hooks, or Pico-owned memory.
 
-**Goal:** Build the resident voice runtime that keeps listening, starts/stops timed sessions, calls Pi Agent through the SDK, plays Aivis output through echo control, enqueues ended sessions for long-memory processing, and records bounded stage probes. Pi Agent remains the production startup owner and loads pico as an extension; direct resident scripts are low-level validation and transition harnesses.
+**Goal:** Build the resident voice runtime that keeps listening, starts/stops timed sessions, calls Pi Agent through the SDK, plays Aivis output through echo control, processes ended sessions through the configured facility-memory worker, and records bounded stage probes. Pi Agent remains the production startup owner and loads pico as an extension; direct resident scripts are low-level validation and transition harnesses.
 
-**Architecture:** The resident runtime is a dependency-injected loop that owns microphone frames, echo control, STT, trigger/session state, Pi Agent SDK turns, TTS playback, and memory enqueue ordering. `SessionLifecycle` separates cutoff generation from cleanup so a session is not discarded until its cutoff has been durably enqueued. Stage probes are recorded through the existing audit sink with a fixed schema and no raw audio, transcript, prompt, completion, secret, or profile payloads.
+**Architecture:** The resident runtime is a dependency-injected loop that owns microphone frames, echo control, STT, trigger/session state, Pi Agent SDK turns, TTS playback, and cutoff processing order. `SessionLifecycle` separates cutoff generation from cleanup so a session is not discarded until its validated facility memories have been written to Mem0. Stage probes are recorded through the existing audit sink with a fixed schema and no raw audio, transcript, prompt, completion, secret, or profile payloads.
 
-**Tech Stack:** TypeScript, Vitest, Pi Agent SDK, existing pico STT/TTS/AEC clients, existing structured audit log, existing long-memory session worker.
+**Tech Stack:** TypeScript, Vitest, Pi Agent SDK, Mem0 OSS, existing pico STT/TTS/AEC clients, and the existing structured audit log.
 
 ---
 
@@ -19,7 +24,7 @@
 - Create `src/runtime/voice-stage-probe.ts`: record bounded stage events through `StructuredAuditLog`.
 - Create `tests/voice-stage-probe.test.ts`: validate allowed stages, attributes, and raw payload rejection.
 - Create `src/runtime/voice-resident.ts`: implement the dependency-injected resident loop.
-- Create `tests/voice-resident.test.ts`: cover pre-trigger ephemerality, active-session turn flow, TTS far-end timing, cutoff enqueue ordering, and concurrent cutoff queueing.
+- Create `tests/voice-resident.test.ts`: cover pre-trigger ephemerality, active-session turn flow, TTS far-end timing, cutoff processing order, and shutdown cleanup.
 - Create `src/runtime/pi-agent-turn.ts`: adapt a resident turn to Pi Agent SDK `createAgentSession` without CLI subprocesses.
 - Create `tests/pi-agent-turn.test.ts`: verify SDK prompt/subscribe path and shared extension factory usage with injected SDK factory.
 - Modify `src/config/index.ts`, `tests/config.test.ts`, and `config/pico.example.yaml`: add `voice.resident` and `voice.probes` production config.
@@ -83,7 +88,7 @@ Change `cutoff(id)` so it returns the cutoff and clears the cleanup timer but do
 
 - [ ] **Step 4: Update session tool cutoff behavior**
 
-In `src/runtime/session-tool.ts`, after `const cutoff = lifecycle.cutoff(id)`, call `lifecycle.acknowledgeCutoff(id)` so model-triggered tool cutoffs keep the old one-shot behavior. The resident runtime will call `cutoff()`, enqueue memory, then call `acknowledgeCutoff()`.
+In `src/runtime/session-tool.ts`, after `const cutoff = lifecycle.cutoff(id)`, call `lifecycle.acknowledgeCutoff(id)` so model-triggered tool cutoffs keep the old one-shot behavior. The resident runtime will call `cutoff()`, process facility memory, then call `acknowledgeCutoff()`.
 
 - [ ] **Step 5: Run GREEN**
 
@@ -214,15 +219,15 @@ export type PiAgentTurnClient = {
 
 Implement `runVoiceResidentRuntime(options)` with a stop signal, trigger phrase matching, session start, turn processing, probe recording, TTS playback, far-end reference, and final echo-control flush.
 
-- [ ] **Step 4: Add cutoff enqueue ordering test**
+- [ ] **Step 4: Add cutoff processing-order test**
 
 Use fake timers and a worker that records calls. Verify ended session handling order is:
 
 ```text
-cutoff -> enqueueCutoff -> acknowledgeCutoff
+cutoff -> processCutoff -> acknowledgeCutoff
 ```
 
-When `enqueueCutoff` throws, verify `acknowledgeCutoff` is not called and the ended session remains readable.
+When `processCutoff` rejects, verify `acknowledgeCutoff` is not called and the failure is surfaced.
 
 - [ ] **Step 5: Run GREEN**
 
@@ -340,6 +345,6 @@ Commit the pico changes, push `codex/voice-resident-runtime`, create the PR, dis
 
 ## Self-Review
 
-- Spec coverage: the plan covers resident runtime, SDK instead of CLI, shared lifecycle, cutoff/enqueue ordering, pre-trigger ephemerality, AEC far-end timing, stage probes, config, signal entrypoint, and PR gates. LINE and human review gates are intentionally absent.
+- Spec coverage: the plan covers resident runtime, SDK instead of CLI, shared lifecycle, cutoff/Mem0 ordering, pre-trigger ephemerality, AEC far-end timing, stage probes, config, signal entrypoint, and PR gates. LINE and human review gates are intentionally absent.
 - Placeholder scan: no `TBD`, `TODO`, or open-ended implementation placeholders remain.
 - Type consistency: the same `acknowledgeCutoff`, `VoiceStageProbe`, `runVoiceResidentRuntime`, `PiAgentTurnClient`, and `registerPicoExtensionWithRuntime` names are used throughout.

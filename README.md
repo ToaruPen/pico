@@ -91,8 +91,8 @@ Field validation must be performed against the actual resident-agent operating
 path, not only the smoke scripts. A field report should include the date,
 operator, hardware used, config path, Pi Agent launch method, spoken session
 steps, audible TTS confirmation, Tapo camera observation, VLM scene summary,
-session cutoff, Mem0/long-memory result, OTel/audit evidence, and any follow-up
-issues created from failures.
+interaction ending, OTel/audit evidence, and any follow-up issues created from
+failures.
 
 Field test reports live under `docs/field-tests/`.
 
@@ -134,8 +134,8 @@ node_modules/.bin/pi --no-tools
 Use Pi settings to expose only the direct tools needed by each agent. For
 example, a harmless status check needs only `stackchan_get_status`. Do not
 enable the generic `mcp` proxy tool. Keep camera and Stack-chan tools exclusive
-to Pico through those settings; memory search remains available to every agent
-that loads this extension.
+to Pico through those settings. A separately installed Pi-level memory plugin,
+if used, owns its own tools and visibility; Pico does not register or proxy them.
 
 The adapter expires cached metadata after seven days. If resident startup
 reports `missing required tools`, repeat the trusted `--no-tools` cache-prime
@@ -241,68 +241,38 @@ resident voice integration is validated:
 
 ```bash
 PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice
-PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:memory
 ```
 
-`resident:voice` owns live microphone, speaker, session cutoff, and enqueueing in
+`resident:voice` owns the live microphone, speaker, and interaction lifecycle in
 the current terminal for direct field validation. It is not the public pico
 startup contract.
-`resident:memory` is the companion drain worker that writes queued session
-cutoffs to the SQLite long-memory source of truth through the configured Pi
-extractor and exports bounded OTel/audit events without adding a default job
-timeout. It recovers stale `processing` jobs after
-`PICO_RESIDENT_MEMORY_RECOVER_PROCESSING_OLDER_THAN_MS` or 10 minutes by
-default; this is crash recovery, not a per-job execution deadline. Mem0 remains
-an optional secondary integration and is not part of this first-slice drain
-path.
 
-The memory LaunchAgent definition is retained only as a field harness. The
-current rollout must not install, start, or restart it; those operations fail
-closed until Pico startup owns the memory-worker lifecycle. The remaining
-commands inspect or clean up a previously installed service. Status output is
-reduced to state, PID, last exit code, queue depth, oldest queued-job age, and
-dead-letter count; raw `launchctl` environment, arguments, and job payloads are
-not printed.
+### Memory ownership
 
-```bash
-just memory-status
-just memory-stop
-PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:memory:launchd -- uninstall
-```
+Pi owns conversation sessions, transcripts, context, and history. Pico's
+process-local `SessionRecord` contains the session ID, active/ended state,
+start/end timestamps, and trusted trigger; the managed lifecycle additionally
+holds the inactivity timer. Farewell, deferred-tool cancellation, and Pi session
+cleanup are end-of-interaction operations, not retained state. Pico does not
+keep conversation entries or create a memory side effect when an interaction
+ends.
 
-### Long-memory operations
+Durable memory, when enabled, is a separately installed Pi-level plugin. That
+plugin—not Pico—owns provider configuration, extraction, persistence, search,
+updates, deletion, retention, tool registration, and runtime lifecycle. This
+repository provides no Mem0/Qdrant client, memory worker, memory configuration,
+memory-search tool, adapter, fallback, or provider smoke.
 
-`memory.longMemory.databasePath` is the SQLite source of truth used by both the
-memory worker and `pico_memory_search`. During migration, stop the voice process
-and any direct memory-worker harness, point this field at the existing SQLite
-file previously used by `memory.mem0.historyDbPath`, and run the deterministic
-gates. Use `resident:memory -- --once` only for the bounded field drain in this
-rollout. Do not copy or merge databases while either process is running.
-
-The worker retries transient extraction failures after 30 seconds and 2
-minutes. A third failed attempt moves the job to `dead_letter`; its payload is
-retained for seven days and then scrubbed. Policy violations go directly to a
-metadata-only dead letter. `just memory-status` is intentionally sanitized and
-shows no job payload, query, memory body, provider credential, or launchd
-environment.
-
-Every agent that loads the Pico extension receives the same
-`pico_memory_search` implementation. Pi settings decide whether the tool is
-visible to that agent. Search reads only active SQLite entries, returns bounded
-untrusted data, and does not require Mem0, Qdrant, or an embedding sidecar.
-
-Run the live end-to-end gate after provider authentication and OTel readiness:
-
-```bash
-PICO_CONFIG_PATH=config/pico.local.yaml \
-PICO_ENABLE_LIVE_SESSION_MEMORY_RETRIEVAL=1 \
-npm run field:session-memory-retrieval
-```
+Any independently installed memory capability must not be designed for child
+tracking, evaluation, scoring, or profiling. It must not create child-linked
+individual records containing health, disability, abuse, or family-circumstance
+information. Pico does not enforce that product policy through a privacy filter
+or natural-language classifier.
 
 Rotate any provider, OTel, or Stack-chan token before production use if it has
 appeared in a terminal transcript, field artifact, or shared log. The remaining
 product risks are speaker authority, emergency/handoff behavior, and retention
-of operator and session logs; this slice does not claim to solve them.
+of operational log metadata; this slice does not claim to solve them.
 
 For local development on macOS, open a Minecraft-server-style log terminal for
 the voice resident process:
@@ -311,8 +281,10 @@ the voice resident process:
 PICO_CONFIG_PATH=config/pico.local.yaml pico dev
 ```
 
-This opens kitty by default, starts Pi Agent with `--pico`, streams
-stdout and stderr in that terminal window, and also appends the same output to
+This opens kitty by default, starts Pi Agent with `--pico`, and displays Pi's
+interactive output in that terminal window. The Pico wrapper does not duplicate
+that output into a file. Pico persists only output produced by its metadata-only
+log sink under
 `~/.pico/resident-voice/development/processes/YYYY-MM-DD/<run-id>.log`. Use
 `pico dev --terminal=terminal` to open Terminal.app instead. Stop it from the
 opened terminal with `Ctrl-C`; the development terminal closes after the
@@ -322,15 +294,13 @@ separately for bounded field validation.
 
 The development terminal uses concise voice probe logs by default and does not
 support verbose mode. It shows utterance windows, STT completion, trigger
-decisions, session start, Pi Agent turns, Pi Agent response duration, wake
-acknowledgement prompts/responses, active user input text, active Pi Agent
-response text, TTS synthesis/playback, cutoff enqueue, and errors. Text payloads
-are displayed as indented multiline blocks so operator logs show the actual
-response shape without hiding line breaks. Per-frame successful
-capture/echo-control events are suppressed because they are too high-volume for
-operator-facing logs. Use `PICO_VOICE_PROBE_STDOUT=verbose npm run resident:voice` only
-when debugging the frame pipeline directly from a plain terminal, not from
-`pico dev`.
+decisions, session start, Pi Agent turn and response-duration metadata, wake
+acknowledgement input/response events, TTS synthesis/playback, interaction
+ending, and errors. It does not log the wake prompt, staff input, or Pi Agent
+response text. Per-frame successful capture/echo-control events are suppressed
+because they are too high-volume for operator-facing logs. Use
+`PICO_VOICE_PROBE_STDOUT=verbose npm run resident:voice` only when debugging the
+frame pipeline directly from a plain terminal, not from `pico dev`.
 
 Resident voice logs are stored under `~/.pico` with local-user-only
 permissions. Development and normal resident runs are separated:
@@ -342,22 +312,21 @@ permissions. Development and normal resident runs are separated:
       processes/YYYY-MM-DD/<run-id>.log
       metrics/YYYY-MM-DD/<run-id>.jsonl
       events/YYYY-MM-DD.jsonl
-      sessions/YYYY-MM-DD/<run-id>/<session-id>.log
       sessions/YYYY-MM-DD/<run-id>/<session-id>.jsonl
     normal/
       processes/resident-voice.out.log
       processes/resident-voice.err.log
       processes/YYYY-MM-DD/<run-id>.log
       events/YYYY-MM-DD.jsonl
-      sessions/YYYY-MM-DD/<run-id>/<session-id>.log
       sessions/YYYY-MM-DD/<run-id>/<session-id>.jsonl
 ```
 
-Process logs contain stage summaries, durations, and errors. Session logs keep
-the spoken input and Pi Agent response text for review, while JSONL files carry
-the same session events in a script-friendly shape with `schemaVersion`,
-`runMode`, and `runId`. Raw audio is not stored continuously; use targeted field
-harnesses for short diagnostic audio artifacts.
+Process logs contain stage summaries, durations, and errors. Daily and session
+JSONL files contain metadata-only interaction events with `schemaVersion`,
+`runMode`, `runId`, event kind, timestamp, session ID, and duration where
+relevant. They contain no text field and do not store the wake prompt, staff
+input, or Pi Agent response. Raw audio is not stored continuously; use targeted
+field harnesses for short diagnostic audio artifacts.
 
 The resident voice process generates a short Pi Agent wake acknowledgement after
 trusted wake-name or greeting triggers. This confirms that pico is listening

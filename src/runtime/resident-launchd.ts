@@ -1,7 +1,6 @@
 import { dirname, join } from "node:path";
 
 export type ResidentLaunchdServiceOptions = {
-  readonly serviceKind: ResidentLaunchdServiceKind;
   readonly repoRoot: string;
   readonly homeDirectory: string;
   readonly configPath: string;
@@ -10,10 +9,7 @@ export type ResidentLaunchdServiceOptions = {
   readonly label?: string;
 };
 
-export type ResidentLaunchdServiceKind = "memory" | "voice";
-
 export type ResidentLaunchdService = {
-  readonly serviceKind: ResidentLaunchdServiceKind;
   readonly configPath: string;
   readonly label: string;
   readonly plistPath: string;
@@ -58,8 +54,6 @@ export type ResidentLaunchdOperationStep =
       readonly command: "launchctl";
       readonly args: readonly string[];
       readonly allowedExitCodes?: readonly number[];
-      readonly serviceKind?: ResidentLaunchdServiceKind;
-      readonly configPath?: string;
     }
   | {
       readonly kind: "mkdir";
@@ -81,39 +75,19 @@ export type ResidentLaunchdOperationStep =
     };
 
 const serviceDefaults = {
-  memory: {
-    label: "dev.toarupen.pico.resident-memory",
-    logDirectory: ["resident-memory", "processes"],
-    logName: "resident-memory",
-    scriptName: "memory.ts"
-  },
-  voice: {
-    label: "dev.toarupen.pico.resident-voice",
-    logDirectory: ["resident-voice", "normal", "processes"],
-    logName: "resident-voice",
-    scriptName: "voice.ts"
-  }
-} as const satisfies Record<ResidentLaunchdServiceKind, unknown>;
+  label: "dev.toarupen.pico.resident-voice",
+  logDirectory: ["resident-voice", "normal", "processes"],
+  logName: "resident-voice",
+  scriptName: "voice.ts"
+} as const;
 const residentLaunchdStates = new Set(["exited", "running", "waiting"]);
 const launchdIntegerPattern = /^-?\d+$/u;
-const deferredMemoryActivationOperations = new Set<ResidentLaunchdOperation>([
-  "install",
-  "restart",
-  "start"
-]);
 
 export type ResidentLaunchdStatus = {
   readonly state: "exited" | "running" | "unknown" | "waiting";
   readonly pid: number | undefined;
   readonly lastExitCode: number | undefined;
-  readonly queueDepth?: number;
-  readonly oldestQueuedAgeMs?: number;
-  readonly deadLetterCount?: number;
 };
-
-export type ResidentMemoryQueueStatus = Required<
-  Pick<ResidentLaunchdStatus, "queueDepth" | "oldestQueuedAgeMs" | "deadLetterCount">
->;
 
 export function requireResidentLaunchdPlatform(platform: NodeJS.Platform): void {
   if (platform !== "darwin") {
@@ -121,10 +95,7 @@ export function requireResidentLaunchdPlatform(platform: NodeJS.Platform): void 
   }
 }
 
-export function formatResidentLaunchdStatus(
-  rawStatus: string,
-  memoryQueueStatus?: ResidentMemoryQueueStatus
-): ResidentLaunchdStatus {
+export function formatResidentLaunchdStatus(rawStatus: string): ResidentLaunchdStatus {
   const stateValue = readStatusValue(rawStatus, "state");
 
   return {
@@ -133,15 +104,14 @@ export function formatResidentLaunchdStatus(
         ? (stateValue as ResidentLaunchdStatus["state"])
         : "unknown",
     pid: readStatusInteger(rawStatus, "pid", { positive: true }),
-    lastExitCode: readStatusInteger(rawStatus, "last exit code"),
-    ...memoryQueueStatus
+    lastExitCode: readStatusInteger(rawStatus, "last exit code")
   };
 }
 
 export function defineResidentLaunchdService(
   options: ResidentLaunchdServiceOptions
 ): ResidentLaunchdService {
-  const defaults = serviceDefaults[options.serviceKind];
+  const defaults = serviceDefaults;
   const label = requireNonEmpty(options.label ?? defaults.label, "resident launchd label");
   const repoRoot = requireNonEmpty(options.repoRoot, "resident launchd repoRoot");
   const homeDirectory = requireNonEmpty(options.homeDirectory, "resident launchd homeDirectory");
@@ -157,7 +127,6 @@ export function defineResidentLaunchdService(
   const standardErrorPath = join(logDirectory, `${defaults.logName}.err.log`);
 
   const service = {
-    serviceKind: options.serviceKind,
     configPath,
     label,
     plistPath: join(homeDirectory, "Library", "LaunchAgents", `${label}.plist`),
@@ -175,7 +144,6 @@ export function defineResidentLaunchdService(
       configPath,
       nodePath,
       pathEnvironment,
-      serviceKind: options.serviceKind,
       scriptName: defaults.scriptName
     })
   };
@@ -221,12 +189,6 @@ export function createResidentLaunchdOperationPlan(
   operation: ResidentLaunchdOperation,
   userId: number
 ): readonly ResidentLaunchdOperationStep[] {
-  if (service.serviceKind === "memory" && deferredMemoryActivationOperations.has(operation)) {
-    throw new Error(
-      "resident memory LaunchAgent activation is deferred until Pico startup owns it"
-    );
-  }
-
   if (operation === "install") {
     return [
       { kind: "mkdir", path: service.picoDirectory, mode: 0o700 },
@@ -258,9 +220,7 @@ export function createResidentLaunchdOperationPlan(
         kind: "status",
         command: plan.command,
         args: plan.args,
-        allowedExitCodes: service.serviceKind === "memory" ? [0, 3, 113] : [0],
-        serviceKind: service.serviceKind,
-        configPath: service.configPath
+        allowedExitCodes: [0]
       }
     ];
   }
@@ -288,19 +248,15 @@ function buildResidentLaunchdPlist(input: {
   readonly pathEnvironment: string;
   readonly standardOutputPath: string;
   readonly standardErrorPath: string;
-  readonly serviceKind: ResidentLaunchdServiceKind;
   readonly scriptName: string;
 }): string {
   const jitiCliPath = join(input.repoRoot, "node_modules", "jiti", "lib", "jiti-cli.mjs");
   const residentScriptPath = join(input.repoRoot, "scripts", "resident", input.scriptName);
-  const voiceEnvironment =
-    input.serviceKind === "voice"
-      ? `    <key>PICO_VOICE_PROBE_STDOUT</key>
+  const voiceEnvironment = `    <key>PICO_VOICE_PROBE_STDOUT</key>
     <string>summary</string>
     <key>PICO_RESIDENT_VOICE_LOG_MODE</key>
     <string>normal</string>
-`
-      : "";
+`;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

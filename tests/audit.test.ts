@@ -7,30 +7,44 @@ import {
 } from "../src/modules/audit/index.js";
 
 describe("operational audit events", () => {
+  it("rejects the removed Pico memory-write category", () => {
+    const log = createStructuredAuditLog();
+
+    expect(() =>
+      log.record({
+        category: "memory_write",
+        name: "long_memory.mem0.added",
+        severity: "info",
+        occurredAt: "2026-07-13T00:00:00.000Z",
+        summary: "Removed Pico memory event."
+      })
+    ).toThrow("pico audit event category is invalid");
+  });
+
   it("records validated audit events to a local structured log", () => {
     const log = createStructuredAuditLog();
 
     const event = log.record({
-      category: "memory_write",
-      name: "long_memory.reviewed_write",
+      category: "session_lifecycle",
+      name: "session.started",
       severity: "info",
       occurredAt: "2026-06-10T09:00:00.000Z",
-      summary: "Reviewed facility memory was written.",
+      summary: "Pico interaction session started.",
       attributes: {
-        "pico.memory.category": "facility_knowledge",
-        "pico.memory.reviewed": true
+        "pico.session.trigger": "wake_name",
+        "pico.session.active": true
       }
     });
 
     expect(event).toEqual({
-      category: "memory_write",
-      name: "long_memory.reviewed_write",
+      category: "session_lifecycle",
+      name: "session.started",
       severity: "info",
       occurredAt: "2026-06-10T09:00:00.000Z",
-      summary: "Reviewed facility memory was written.",
+      summary: "Pico interaction session started.",
       attributes: {
-        "pico.memory.category": "facility_knowledge",
-        "pico.memory.reviewed": true
+        "pico.session.trigger": "wake_name",
+        "pico.session.active": true
       },
       traceId: undefined,
       spanId: undefined
@@ -41,13 +55,13 @@ describe("operational audit events", () => {
   it("drains recorded events without retaining exported history", () => {
     const log = createStructuredAuditLog();
     const event = log.record({
-      category: "memory_write",
-      name: "long_memory.worker.drain_once",
+      category: "session_lifecycle",
+      name: "session.ended",
       severity: "info",
       occurredAt: "2026-06-10T09:00:00.000Z",
-      summary: "Session memory worker lifecycle event.",
+      summary: "Pico interaction session ended.",
       attributes: {
-        "pico.memory.processed_count": 0
+        "pico.session.duration_ms": 60_000
       }
     });
 

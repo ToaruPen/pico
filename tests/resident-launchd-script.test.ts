@@ -30,8 +30,7 @@ process.stdout.write("state = running\\n");
               kind: "status",
               command: "launchctl",
               args: ["print", "gui/501/dev.toarupen.pico.resident-voice"],
-              allowedExitCodes: [0],
-              serviceKind: "voice"
+              allowedExitCodes: [0]
             }
           ],
           { writeOutput: (content) => output.push(content) }
@@ -56,8 +55,7 @@ setInterval(() => undefined, 1_000);
               kind: "status",
               command: "launchctl",
               args: ["print", "gui/501/dev.toarupen.pico.resident-voice"],
-              allowedExitCodes: [0],
-              serviceKind: "voice"
+              allowedExitCodes: [0]
             }
           ]);
           const rejection = expect(operation).rejects.toThrow("launchctl status command timed out");
@@ -71,24 +69,12 @@ setInterval(() => undefined, 1_000);
     }
   });
 
-  it("reads the selected service independently of argument order", () => {
-    expect(readResidentLaunchdArguments(["status", "--service=memory"])).toEqual({
-      operation: "status",
-      serviceKind: "memory"
-    });
-    expect(readResidentLaunchdArguments(["--service=voice", "restart"])).toEqual({
-      operation: "restart",
-      serviceKind: "voice"
-    });
+  it("accepts one launchd operation without a service selector", () => {
     expect(readResidentLaunchdArguments(["status"])).toEqual({
-      operation: "status",
-      serviceKind: "voice"
+      operation: "status"
     });
-  });
-
-  it("rejects unknown service selectors", () => {
-    expect(() => readResidentLaunchdArguments(["status", "--service=other"])).toThrow(
-      "resident launchd service"
+    expect(() => readResidentLaunchdArguments(["--service=voice", "restart"])).toThrow(
+      "resident launchd arguments are invalid"
     );
   });
 
@@ -100,10 +86,8 @@ setInterval(() => undefined, 1_000);
         {
           kind: "status",
           command: "launchctl",
-          args: ["print", "gui/501/dev.toarupen.pico.resident-memory"],
-          allowedExitCodes: [0],
-          serviceKind: "memory",
-          configPath: "/repo/pico/config/pico.local.yaml"
+          args: ["print", "gui/501/dev.toarupen.pico.resident-voice"],
+          allowedExitCodes: [0]
         }
       ],
       {
@@ -111,11 +95,6 @@ setInterval(() => undefined, 1_000);
           Promise.resolve(
             "state = running\npid = 31880\nenvironment = { STACKCHAN_TOKEN => exposed-secret }"
           ),
-        readMemoryQueueStatus: () => ({
-          queueDepth: 3,
-          oldestQueuedAgeMs: 60_000,
-          deadLetterCount: 2
-        }),
         writeOutput: (content) => output.push(content)
       }
     );
@@ -123,10 +102,7 @@ setInterval(() => undefined, 1_000);
     expect(output).toEqual([
       `${JSON.stringify({
         state: "running",
-        pid: 31880,
-        queueDepth: 3,
-        oldestQueuedAgeMs: 60_000,
-        deadLetterCount: 2
+        pid: 31880
       })}\n`
     ]);
     expect(output.join("\n")).not.toContain("STACKCHAN_TOKEN");

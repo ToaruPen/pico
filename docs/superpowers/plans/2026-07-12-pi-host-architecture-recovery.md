@@ -1,5 +1,8 @@
 # Pi Host Architecture Recovery Implementation Plan
 
+> Historical record: memory-related ownership in this document was superseded
+> by [Pi 所有 memory 責務境界設計](../specs/2026-07-13-pi-owned-memory-boundary-design.md).
+> Current Pico has no short-term or durable-memory implementation.
 > **Superseded scope:** Pi ownership と単一sessionの成果は維持する。runtime profile、
 > Pico内tool filtering、profile用テストは
 > `2026-07-11-autonomous-long-memory-retrieval.md` Task 6Aにより置き換えられた。

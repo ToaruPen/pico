@@ -1,17 +1,21 @@
 # Mem0 Memory Stack Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Historical record: memory-related ownership in this document was superseded
+> by [Pi 所有 memory 責務境界設計](../specs/2026-07-13-pi-owned-memory-boundary-design.md).
+> Current Pico has no short-term or durable-memory implementation.
+
+Status: Historical. The SQLite lifecycle and direct cutoff-mapping steps below
+record the original slice and must not be used as current implementation guidance.
 
 **Historical goal:** Add the first local-only Mem0-backed long-memory slice for
 pico.
 
-> Status note, 2026-06-17: the local-only model-provider assumptions in this
-> plan are superseded for future long-memory worker work. Keep the adapter,
-> SQLite, and Mem0 boundary lessons, but use
-> `docs/superpowers/specs/2026-06-17-long-memory-model-provider-design.md` for
-> provider selection. In particular, do not keep `provider: ollama` as the only
-> valid LLM provider, and do not reject Pi `openai-codex-responses` model
-> access at the config boundary.
+> Status note, 2026-07-13: Mem0 OSS is now the sole durable owner. Do not retain
+> this plan's separate SQLite lifecycle, direct raw-cutoff mapping, or local-only
+> provider assumptions, including the Architecture section's obsolete claim
+> that Pico remains the lifecycle owner. Pico does not register, configure,
+> wrap, proxy, or call memory providers or tools, and interaction ending has no
+> memory side effect.
 
 **Architecture:** Pico remains the lifecycle owner: YAML validates explicit providers, SQLite owns provenance/decay metadata, and Mem0 is accessed through a narrow injected adapter. This first slice avoided real network integration by defining the adapter boundary and deterministic session-cutoff mapping; later worker slices should add the Pi model-registry LLM boundary and a replaceable embedding provider.
 

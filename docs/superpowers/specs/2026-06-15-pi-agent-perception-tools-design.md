@@ -18,7 +18,7 @@ detection uses the lower-cost detection stream:
 - LINE integration remains outside this issue.
 - PTZ movement and person-follow control are excluded.
 - Persistent person-detection daemons are not part of this slice.
-- Automatic long-memory writes stay out of scope.
+- Pico does not perform automatic memory writes.
 - Provider fallback chains are intentionally not added.
 - Alternate VLM provider selection remains a future choice.
 - Exposed inbound model ports are not allowed.
@@ -81,8 +81,7 @@ traits, do not diagnose or score, and do not make final safety decisions.
 
 ## Architecture
 
-Pi Agent tool definitions live under `src/runtime/`, following the existing
-`src/runtime/session-tool.ts` pattern.
+Pi Agent tool definitions live under `src/runtime/`.
 
 The implementation should add a small production runtime service rather than
 importing from `scripts/smoke/*`. Smoke scripts contain CLI report, skip, and
@@ -103,7 +102,7 @@ Recommended files:
   - Defines and exports `createPicoCameraSceneDescriptionTool`.
   - Converts service results to `AgentToolResult` text JSON.
 - `src/index.ts`
-  - Registers the three new tools beside `pico_session`.
+  - Registers the three perception tools.
 
 Existing production modules remain the source of truth for lower-level behavior:
 

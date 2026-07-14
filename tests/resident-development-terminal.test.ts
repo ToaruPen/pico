@@ -1,3 +1,8 @@
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -15,7 +20,7 @@ describe("resident dev terminal", () => {
     }).not.toThrow();
   });
 
-  it("builds a Terminal.app session that streams resident voice logs to the screen and a local log file", () => {
+  it("builds a Terminal.app session that leaves Pi conversation output in the terminal", () => {
     const session = defineResidentDevelopmentTerminalSession({
       repoRoot: "/Users/monsoon/Dev/pico project",
       homeDirectory: "/Users/monsoon",
@@ -61,17 +66,22 @@ describe("resident dev terminal", () => {
     expect(session.shellCommand).not.toContain(": >");
     expect(session.shellCommand).toContain("PICO_DEV_TERMINAL_TTY=$(tty)");
     expect(session.shellCommand).toContain("printf '\\033]0;%s\\007' 'pico resident voice'");
+    expect(session.shellCommand).toContain("[pico] metadata log: %s");
     expect(session.shellCommand).toContain(
       "node_modules/.bin/pi --extension ./src/index.ts --pico"
     );
     expect(session.shellCommand).not.toContain("npm run resident:voice");
-    expect(session.shellCommand).toContain(
-      "2>&1 | tee -a '/Users/monsoon/.pico/resident-voice/development/processes/2026-06-22/2026-06-22T01-02-03-000Z-1234.log'"
+    expect(session.shellCommand).not.toContain("tee -a");
+    expect(session.shellCommand).not.toContain("--pico 2>&1");
+    expect(session.shellCommand).not.toContain(
+      "> '/Users/monsoon/.pico/resident-voice/development/processes/2026-06-22/2026-06-22T01-02-03-000Z-1234.log'"
     );
     expect(session.shellCommand).toContain("resident voice exited with status");
+    expect(session.shellCommand).toContain("exit_code=$?");
+    expect(session.shellCommand).not.toContain("status=$?");
     expect(session.shellCommand).toContain("close windowItem saving no");
     expect(session.shellCommand).toContain("close tabItem saving no");
-    expect(session.shellCommand).toContain('exit "$status"');
+    expect(session.shellCommand).toContain('exit "$exit_code"');
     expect(session.shellCommand).not.toContain("pico_HotStation");
     expect(session.shellCommand).not.toContain("HasunohaLabo7087");
     expect(session.appleScript).toContain(
@@ -103,11 +113,52 @@ describe("resident dev terminal", () => {
       "node_modules/.bin/pi --extension ./src/index.ts --pico"
     );
     expect(session.shellCommand).not.toContain("npm run resident:voice");
-    expect(session.shellCommand).toContain('exit "$status"');
+    expect(session.shellCommand).toContain('exit "$exit_code"');
     expect(session.shellCommand).not.toContain("PICO_DEV_TERMINAL_TTY=$(tty)");
     expect(session.shellCommand).not.toContain("osascript");
     expect(session.appleScript).toBeUndefined();
   });
+
+  it.runIf(process.platform === "darwin")(
+    "propagates the Pi exit code without copying conversation output to the metadata log",
+    () => {
+      const root = mkdtempSync(join(tmpdir(), "pico-dev-terminal-"));
+      const repoRoot = join(root, "repo");
+      const homeDirectory = join(root, "home");
+      const piExecutablePath = join(repoRoot, "node_modules/.bin/pi");
+      const launcherPath = join(root, "generated-launcher.sh");
+      const conversationSentinel = "SENTINEL_STAFF_CONVERSATION";
+      mkdirSync(join(repoRoot, "node_modules/.bin"), { recursive: true });
+      mkdirSync(homeDirectory, { recursive: true });
+      writeFileSync(
+        piExecutablePath,
+        `#!/bin/zsh\nprint -r -- '${conversationSentinel}'\nprint -r -- '${conversationSentinel}' >&2\nexit 7\n`
+      );
+      chmodSync(piExecutablePath, 0o700);
+      const session = defineResidentDevelopmentTerminalSession({
+        repoRoot,
+        homeDirectory,
+        configPath: join(repoRoot, "config/pico.local.yaml"),
+        pathEnvironment: "/usr/bin:/bin",
+        terminal: "kitty",
+        now: () => "2026-06-22T01:02:03.000Z",
+        processId: 1234
+      });
+      writeFileSync(launcherPath, session.launcherScript);
+      chmodSync(launcherPath, 0o700);
+
+      const result = spawnSync("/bin/zsh", [launcherPath], { encoding: "utf8" });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(7);
+      expect(result.stdout).toContain(conversationSentinel);
+      expect(result.stderr).toContain(conversationSentinel);
+      expect(result.stderr).not.toContain("read-only variable");
+      expect(result.stdout).toContain("resident voice exited with status 7");
+      expect(readFileSync(session.logPath, "utf8")).not.toContain(conversationSentinel);
+      expect(session.shellCommand).not.toContain("tee");
+    }
+  );
 
   it("quotes shell paths and AppleScript strings with spaces, apostrophes, and double quotes", () => {
     const session = defineResidentDevelopmentTerminalSession({

@@ -7,7 +7,6 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { registerPicoExtensionWithRuntime } from "../index.js";
-import type { SessionLifecycle } from "../modules/session/index.js";
 import type {
   DeferredToolCoordinator,
   DeferredToolDeliverableResult
@@ -16,8 +15,6 @@ import type { PiAgentTurnClient } from "./voice-resident.js";
 import type { VoiceStageProbe } from "./voice-stage-probe.js";
 
 export const residentPiAgentToolNames = Object.freeze([
-  "pico_session",
-  "pico_memory_search",
   "pico_camera_scene_description_deferred",
   "stackchan_get_status",
   "stackchan_get_device_info",
@@ -74,7 +71,6 @@ export type PiAgentResourceLoader = {
 
 export type PiAgentTurnClientOptions = {
   readonly cwd: string;
-  readonly sessionLifecycle: SessionLifecycle;
   readonly voiceProbe?: VoiceStageProbe;
   readonly deferredTools?: {
     readonly coordinator: Pick<DeferredToolCoordinator, "enqueue">;
@@ -388,7 +384,6 @@ function createTurnResourceLoader(
       extensionFactories: [
         (pi) =>
           registerPicoExtensionWithRuntime(pi, {
-            sessionLifecycle: options.sessionLifecycle,
             ...(options.voiceProbe === undefined ? {} : { voiceProbe: options.voiceProbe }),
             perceptionMode: "resident_deferred",
             ...(options.deferredTools === undefined
@@ -398,10 +393,7 @@ function createTurnResourceLoader(
                     sessionId,
                     coordinator: options.deferredTools.coordinator
                   }
-                }),
-            sessionTool: {
-              allowCutoff: false
-            }
+                })
           })
       ]
     }) ?? createDefaultResourceLoader(options, sessionId)
@@ -494,7 +486,6 @@ function createDefaultResourceLoader(
     extensionFactories: [
       (pi) =>
         registerPicoExtensionWithRuntime(pi, {
-          sessionLifecycle: options.sessionLifecycle,
           ...(options.voiceProbe === undefined ? {} : { voiceProbe: options.voiceProbe }),
           perceptionMode: "resident_deferred",
           ...(options.deferredTools === undefined
@@ -504,10 +495,7 @@ function createDefaultResourceLoader(
                   sessionId,
                   coordinator: options.deferredTools.coordinator
                 }
-              }),
-          sessionTool: {
-            allowCutoff: false
-          }
+              })
         })
     ]
   });

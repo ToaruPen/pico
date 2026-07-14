@@ -36,8 +36,7 @@ const summaryVoiceStages = new Set([
   "tts_synthesize",
   "tts_playback",
   "camera_capture",
-  "vlm_scene_description",
-  "session_cutoff_enqueue"
+  "vlm_scene_description"
 ]);
 
 export function createResidentVoiceAuditLog(

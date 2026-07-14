@@ -1,5 +1,9 @@
 # 2026-06-16 Integrated Field Test
 
+> Historical record: memory-related ownership in this document was superseded
+> by [Pi 所有 memory 責務境界設計](../superpowers/specs/2026-07-13-pi-owned-memory-boundary-design.md).
+> Current Pico has no short-term or durable-memory implementation.
+
 ## Scope
 
 Verify the current live pico path across Pi Agent loading, voice providers, Tapo

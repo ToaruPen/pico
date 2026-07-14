@@ -38,8 +38,7 @@ export async function runResidentPiTurnMeasure(): Promise<ResidentPiTurnMeasureR
     source: "voice"
   });
   const client = createPiAgentTurnClient({
-    cwd: process.cwd(),
-    sessionLifecycle: lifecycle
+    cwd: process.cwd()
   });
   const startedAt = performance.now();
 
@@ -96,7 +95,7 @@ function closeStartedSessionQuietly(
     }
 
     if (lifecycle.read(sessionId)?.state === "ended") {
-      lifecycle.acknowledgeCutoff(sessionId);
+      lifecycle.remove(sessionId);
     }
   } catch {
     return;

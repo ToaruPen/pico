@@ -30,9 +30,6 @@ smoke-camera-tapo:
 smoke-voice-providers:
   npm run smoke:voice-providers
 
-smoke-embedding-sidecar:
-  npm run smoke:embedding-sidecar
-
 smoke-pi-runtime:
   npm run smoke:pi-runtime
 
@@ -47,12 +44,6 @@ voice-normal:
 
 voice-stop:
   npm run resident:voice:launchd -- stop
-
-memory-status:
-  npm run resident:memory:launchd -- status
-
-memory-stop:
-  npm run resident:memory:launchd -- stop
 
 voice-dev:
   -npm run resident:voice:launchd -- stop
@@ -73,9 +64,6 @@ field-voice-echo-pickup:
 
 field-resident-voice-deferred-rallies:
   npm run field:resident-voice-deferred-rallies
-
-field-session-memory-retrieval:
-  npm run field:session-memory-retrieval
 
 ast:
   npm run ast:test

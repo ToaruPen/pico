@@ -4,22 +4,17 @@ import { homedir, userInfo } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { loadPicoConfig } from "../../src/config/index.js";
-import { openSessionMemoryCandidateQueue } from "../../src/modules/long-memory/index.js";
 import {
   createResidentLaunchdOperationPlan,
   defineResidentLaunchdService,
   formatResidentLaunchdStatus,
   type ResidentLaunchdOperation,
   type ResidentLaunchdOperationStep,
-  type ResidentLaunchdServiceKind,
-  type ResidentMemoryQueueStatus,
   requireResidentLaunchdPlatform
 } from "../../src/runtime/resident-launchd.js";
 
 export type ResidentLaunchdArguments = {
   readonly operation: ResidentLaunchdOperation;
-  readonly serviceKind: ResidentLaunchdServiceKind;
 };
 
 export type ResidentLaunchdExecutionDependencies = {
@@ -29,22 +24,17 @@ export type ResidentLaunchdExecutionDependencies = {
     allowedExitCodes: readonly number[]
   ) => Promise<string>;
   readonly writeOutput?: (content: string) => void;
-  readonly readMemoryQueueStatus?: (configPath: string) => ResidentMemoryQueueStatus;
 };
 
 export function readResidentLaunchdArguments(
   arguments_: readonly string[]
 ): ResidentLaunchdArguments {
-  const operationArguments = arguments_.filter((value) => !value.startsWith("--service="));
-  const serviceArguments = arguments_.filter((value) => value.startsWith("--service="));
-
-  if (operationArguments.length !== 1 || serviceArguments.length > 1) {
+  if (arguments_.length !== 1) {
     throw new Error("resident launchd arguments are invalid");
   }
 
   return {
-    operation: readOperation(operationArguments[0]),
-    serviceKind: readServiceKind(serviceArguments[0])
+    operation: readOperation(arguments_[0])
   };
 }
 
@@ -113,44 +103,7 @@ async function executeStatusStep(
 ): Promise<void> {
   const execute = dependencies.runStatusCommand ?? runCapturedCommand;
   const rawStatus = await execute(step.command, step.args, step.allowedExitCodes ?? [0]);
-  const memoryQueueStatus =
-    step.serviceKind === "memory" && step.configPath !== undefined
-      ? (dependencies.readMemoryQueueStatus ?? readMemoryQueueStatus)(step.configPath)
-      : undefined;
-
-  writeOutput(
-    `${JSON.stringify(formatResidentLaunchdStatus(rawStatus, memoryQueueStatus))}\n`,
-    dependencies
-  );
-}
-
-function readMemoryQueueStatus(configPath: string): ResidentMemoryQueueStatus {
-  const config = loadPicoConfig({ path: configPath });
-
-  if (!config.memory.longMemory.enabled) {
-    throw new Error("resident memory status requires memory.longMemory.enabled=true");
-  }
-
-  const queue = openSessionMemoryCandidateQueue(config.memory.longMemory.databasePath);
-
-  try {
-    const jobs = queue.listJobs();
-    const oldestQueuedAt = jobs
-      .filter((job) => job.status === "queued")
-      .map((job) => Date.parse(job.queuedAt))
-      .filter(Number.isFinite)
-      .sort((left, right) => left - right)[0];
-
-    return {
-      queueDepth: jobs.filter((job) => job.status === "queued" || job.status === "processing")
-        .length,
-      oldestQueuedAgeMs:
-        oldestQueuedAt === undefined ? 0 : Math.max(0, Date.now() - oldestQueuedAt),
-      deadLetterCount: jobs.filter((job) => job.status === "dead_letter").length
-    };
-  } finally {
-    queue.close();
-  }
+  writeOutput(`${JSON.stringify(formatResidentLaunchdStatus(rawStatus))}\n`, dependencies);
 }
 
 function runCapturedCommand(
@@ -275,18 +228,6 @@ function isResidentLaunchdOperation(value: string | undefined): value is Residen
   );
 }
 
-function readServiceKind(value: string | undefined): ResidentLaunchdServiceKind {
-  if (value === undefined || value === "--service=voice") {
-    return "voice";
-  }
-
-  if (value === "--service=memory") {
-    return "memory";
-  }
-
-  throw new Error("resident launchd service must be voice or memory");
-}
-
 function readLaunchdPathEnvironment(environment: NodeJS.ProcessEnv, homeDirectory: string): string {
   if (environment.PICO_LAUNCHD_PATH !== undefined && environment.PICO_LAUNCHD_PATH.trim() !== "") {
     return environment.PICO_LAUNCHD_PATH;
@@ -314,7 +255,6 @@ if (isDirectExecution()) {
   const arguments_ = readResidentLaunchdArguments(process.argv.slice(2));
   const homeDirectory = homedir();
   const service = defineResidentLaunchdService({
-    serviceKind: arguments_.serviceKind,
     repoRoot: process.cwd(),
     homeDirectory,
     configPath: resolve(process.env.PICO_CONFIG_PATH ?? "config/pico.local.yaml"),

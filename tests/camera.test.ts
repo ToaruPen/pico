@@ -14,6 +14,12 @@ import {
   type PersonFollowPtzDriver,
   type RtspSnapshotTransport
 } from "../src/modules/camera/index.js";
+import { buildCredentialedUrl } from "./support/url-fixtures.js";
+
+const credentialedRtspUrl = buildCredentialedUrl("rtsp://192.168.10.25:554/stream2", {
+  username: "user",
+  password: "password"
+});
 
 const snapshotSourceInput = {
   id: "playroom-cam-1",
@@ -589,7 +595,7 @@ describe("ffmpeg RTSP snapshot transport", () => {
   it("rejects ffmpeg output that is not a complete JPEG frame", async () => {
     const harness = createFfmpegProcessHarness();
     const transport = createFfmpegRtspSnapshotTransport({ timeoutMs: 5000 }, () => harness.process);
-    const result = transport.captureJpeg("rtsp://user:password@192.168.10.25:554/stream2");
+    const result = transport.captureJpeg(credentialedRtspUrl);
 
     harness.stdout.write(Buffer.from([0xff, 0xd8, 0x01, 0x02]));
     harness.close(0);
@@ -602,9 +608,9 @@ describe("ffmpeg RTSP snapshot transport", () => {
   it("does not include RTSP credentials or stderr in ffmpeg failure messages", async () => {
     const harness = createFfmpegProcessHarness();
     const transport = createFfmpegRtspSnapshotTransport({ timeoutMs: 5000 }, () => harness.process);
-    const result = transport.captureJpeg("rtsp://user:password@192.168.10.25:554/stream2");
+    const result = transport.captureJpeg(credentialedRtspUrl);
 
-    harness.stderr.write("rtsp://user:password@192.168.10.25:554/stream2 Unauthorized");
+    harness.stderr.write(`${credentialedRtspUrl} Unauthorized`);
     harness.close(1);
 
     await expect(result).rejects.toThrow("ffmpeg RTSP snapshot capture failed with exit code 1");
@@ -618,7 +624,7 @@ describe("ffmpeg RTSP snapshot transport", () => {
       { timeoutMs: 5000, maxFrameBytes: 3 },
       () => harness.process
     );
-    const result = transport.captureJpeg("rtsp://user:password@192.168.10.25:554/stream2");
+    const result = transport.captureJpeg(credentialedRtspUrl);
 
     harness.stdout.write(Buffer.from([0xff, 0xd8, 0x01, 0x02]));
 
@@ -630,9 +636,9 @@ describe("ffmpeg RTSP snapshot transport", () => {
     const harness = createFfmpegProcessHarness();
     const transport = createFfmpegRtspSnapshotTransport({ timeoutMs: 10 }, () => harness.process);
 
-    await expect(
-      transport.captureJpeg("rtsp://user:password@192.168.10.25:554/stream2")
-    ).rejects.toThrow("ffmpeg RTSP snapshot capture timed out after 10 ms");
+    await expect(transport.captureJpeg(credentialedRtspUrl)).rejects.toThrow(
+      "ffmpeg RTSP snapshot capture timed out after 10 ms"
+    );
     expect(harness.killedSignals).toEqual(["SIGKILL"]);
   });
 });

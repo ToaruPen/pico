@@ -1,6 +1,5 @@
 export type PicoModuleKind =
   | "context"
-  | "memory"
   | "session"
   | "local_models"
   | "handoff"
@@ -8,7 +7,7 @@ export type PicoModuleKind =
   | "identity_registry"
   | "transport";
 
-export type FuturePicoModuleKind = "long_memory" | "voice" | "vision" | "camera" | "channels";
+export type FuturePicoModuleKind = "voice" | "vision" | "camera" | "channels";
 
 export type PicoModuleStatus = "available" | "planned";
 

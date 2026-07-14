@@ -138,19 +138,16 @@ function buildResidentDevelopmentTerminalShellCommand(input: {
     `export PATH=${quoteShell(input.pathEnvironment)}:"$PATH"`,
     ...(input.terminal === "terminal" ? ["PICO_DEV_TERMINAL_TTY=$(tty)"] : []),
     `printf '\\033]0;%s\\007' ${quoteShell(input.title)}`,
-    `printf '\\n[pico] resident voice dev terminal\\n[pico] log: %s\\n\\n' ${quoteShell(input.logPath)}`,
-    buildResidentVoiceRunAndCloseCommand(input.logPath, input.terminal)
+    `printf '\\n[pico] resident voice dev terminal\\n[pico] metadata log: %s\\n\\n' ${quoteShell(input.logPath)}`,
+    buildResidentVoiceRunAndCloseCommand(input.terminal)
   ].join(" && ");
 }
 
-function buildResidentVoiceRunAndCloseCommand(
-  logPath: string,
-  terminal: ResidentDevelopmentTerminal
-): string {
+function buildResidentVoiceRunAndCloseCommand(terminal: ResidentDevelopmentTerminal): string {
   const commands = [
-    `node_modules/.bin/pi --extension ./src/index.ts --pico 2>&1 | tee -a ${quoteShell(logPath)}`,
-    "status=$?",
-    `printf '\\n[pico] resident voice exited with status %s\\n' "$status" | tee -a ${quoteShell(logPath)}`
+    "node_modules/.bin/pi --extension ./src/index.ts --pico",
+    "exit_code=$?",
+    `printf '\\n[pico] resident voice exited with status %s\\n' "$exit_code"`
   ];
 
   if (terminal === "terminal") {
@@ -161,7 +158,7 @@ function buildResidentVoiceRunAndCloseCommand(
     );
   }
 
-  commands.push('exit "$status"');
+  commands.push('exit "$exit_code"');
 
   return commands.join("; ");
 }

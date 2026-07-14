@@ -1,5 +1,9 @@
 # 2026-06-14 Pi Agent Timed Cutoff Field Test
 
+> Historical record: memory-related ownership in this document was superseded
+> by [Pi 所有 memory 責務境界設計](../superpowers/specs/2026-07-13-pi-owned-memory-boundary-design.md).
+> Current Pico has no short-term or durable-memory implementation.
+
 ## Scope
 
 Verify that pico's configured timed session ending can end a Pi Agent runtime

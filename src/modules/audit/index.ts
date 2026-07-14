@@ -3,7 +3,6 @@ import type { PicoModule } from "../../orchestrator/contracts.js";
 export type AuditEventCategory =
   | "tool_call"
   | "external_send"
-  | "memory_write"
   | "identity_registry"
   | "session_lifecycle"
   | "transport_event"
@@ -47,7 +46,6 @@ export type DrainableStructuredAuditLog = StructuredAuditLog & {
 const auditEventCategories = new Set<AuditEventCategory>([
   "tool_call",
   "external_send",
-  "memory_write",
   "identity_registry",
   "session_lifecycle",
   "transport_event",
@@ -98,7 +96,7 @@ export function createAuditModule(): PicoModule {
     metadata: {
       kind: "audit",
       status: "available",
-      summary: "Records operationally important tool, memory, transport, and module events.",
+      summary: "Records operationally important tool, session, transport, and module events.",
       capabilities: [
         {
           id: "audit.describe_events",
