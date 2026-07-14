@@ -57,7 +57,6 @@ describe("resident launchd service", () => {
 
   it("builds a resident voice LaunchAgent without embedding local config contents", () => {
     const service = defineResidentLaunchdService({
-      serviceKind: "voice",
       repoRoot: "/Users/monsoon/Dev/pico project",
       homeDirectory: "/Users/monsoon",
       configPath: "/Users/monsoon/Dev/pico/config/pico.local.yaml",
@@ -65,6 +64,7 @@ describe("resident launchd service", () => {
       pathEnvironment: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
     });
 
+    expect(service).not.toHaveProperty("serviceKind");
     expect(service.label).toBe("dev.toarupen.pico.resident-voice");
     expect(service.plistPath).toBe(
       "/Users/monsoon/Library/LaunchAgents/dev.toarupen.pico.resident-voice.plist"
@@ -106,7 +106,6 @@ describe("resident launchd service", () => {
 
   it("escapes plist XML values for paths containing special characters", () => {
     const service = defineResidentLaunchdService({
-      serviceKind: "voice",
       repoRoot: "/tmp/pico's & lab",
       homeDirectory: "/tmp/home",
       configPath: "/tmp/pico's & lab/config/pico.local.yaml",
@@ -125,7 +124,6 @@ describe("resident launchd service", () => {
 
   it("builds launchctl commands for the current user agent domain", () => {
     const service = defineResidentLaunchdService({
-      serviceKind: "voice",
       repoRoot: "/repo/pico",
       homeDirectory: "/Users/monsoon",
       configPath: "/repo/pico/config/pico.local.yaml",
@@ -161,7 +159,6 @@ describe("resident launchd service", () => {
 
   it("plans install and uninstall filesystem operations around launchctl", () => {
     const service = defineResidentLaunchdService({
-      serviceKind: "voice",
       repoRoot: "/repo/pico",
       homeDirectory: "/Users/monsoon",
       configPath: "/repo/pico/config/pico.local.yaml",
@@ -212,7 +209,6 @@ describe("resident launchd service", () => {
 
   it("stops a KeepAlive service by booting it out while keeping the plist installed", () => {
     const service = defineResidentLaunchdService({
-      serviceKind: "voice",
       repoRoot: "/repo/pico",
       homeDirectory: "/Users/monsoon",
       configPath: "/repo/pico/config/pico.local.yaml",
@@ -232,7 +228,6 @@ describe("resident launchd service", () => {
 
   it("plans voice status as captured output instead of inherited stdout", () => {
     const service = defineResidentLaunchdService({
-      serviceKind: "voice",
       repoRoot: "/repo/pico",
       homeDirectory: "/Users/monsoon",
       configPath: "/repo/pico/config/pico.local.yaml",

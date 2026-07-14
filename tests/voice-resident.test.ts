@@ -68,6 +68,107 @@ describe("voice resident runtime", () => {
     expect(lifecycle.read("session-1")).toBeUndefined();
   });
 
+  it("waits for Pi disposal when an active interaction disappears before collection", async () => {
+    const lifecycle = createSessionLifecycle({
+      ending: { mode: "timed", durationMs: 60_000 }
+    });
+    const disposal = createPromiseGate();
+    const disposalStarted = createPromiseGate();
+
+    const runtime = runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: lifecycle,
+      echoControl: createIdleEchoControl(),
+      stt: (() => {
+        const texts = ["ピコ", "終了済みです。"];
+
+        return {
+          warmup: () => {
+            throw new Error("warmup is not part of resident runtime");
+          },
+          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
+        };
+      })(),
+      tts: createSuccessfulTts("はい。"),
+      playback: { play: () => Promise.resolve() },
+      piAgent: {
+        prompt: () => {
+          lifecycle.end("session-1");
+          lifecycle.remove("session-1");
+
+          return Promise.resolve({ text: "はい。" });
+        },
+        disposeSession: async () => {
+          disposalStarted.release();
+          await disposal.promise;
+        }
+      }
+    });
+
+    await disposalStarted.promise;
+    const settlement = await Promise.race([
+      runtime.then(() => "settled" as const),
+      new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 0))
+    ]);
+    disposal.release();
+    await runtime;
+
+    expect(settlement).toBe("pending");
+  });
+
+  it("waits for Pi disposal when an active interaction disappears during shutdown", async () => {
+    const lifecycle = createSessionLifecycle({
+      ending: { mode: "timed", durationMs: 60_000 }
+    });
+    const disposal = createPromiseGate();
+    const disposalStarted = createPromiseGate();
+    const frames = (function* () {
+      yield sampleNearEndFrame("mic-trigger");
+      lifecycle.end("session-1");
+      lifecycle.remove("session-1");
+      throw new Error("frame source failed");
+    })();
+
+    const runtime = runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames,
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: lifecycle,
+      echoControl: createIdleEchoControl(),
+      stt: successfulStt("ピコ"),
+      tts: createSuccessfulTts("unused"),
+      playback: { play: () => Promise.resolve() },
+      piAgent: {
+        prompt: () => {
+          throw new Error("wake-only shutdown should not prompt Pi Agent");
+        },
+        disposeSession: async () => {
+          disposalStarted.release();
+          await disposal.promise;
+        }
+      }
+    });
+    const runtimeOutcome = runtime.then(
+      () => "resolved" as const,
+      (error: unknown) => error
+    );
+
+    await disposalStarted.promise;
+    const settlement = await Promise.race([
+      runtimeOutcome,
+      new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 0))
+    ]);
+    disposal.release();
+    const error = await runtimeOutcome;
+
+    expect(settlement).toBe("pending");
+    expect(error).toEqual(new Error("frame source failed"));
+  });
+
   it("buffers speech frames into one utterance before sending audio to STT", async () => {
     const lifecycle = createSessionLifecycle({
       ending: {
@@ -2506,4 +2607,13 @@ function createOrderingLifecycle(calls: string[]): SessionLifecycle {
       removed = true;
     }
   };
+}
+
+function createPromiseGate(): { readonly promise: Promise<void>; readonly release: () => void } {
+  let release: () => void = () => undefined;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  return { promise, release };
 }

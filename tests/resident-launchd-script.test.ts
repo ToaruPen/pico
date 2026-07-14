@@ -69,17 +69,12 @@ setInterval(() => undefined, 1_000);
     }
   });
 
-  it("accepts only the resident voice service selector", () => {
-    expect(readResidentLaunchdArguments(["--service=voice", "restart"])).toEqual({
-      operation: "restart",
-      serviceKind: "voice"
-    });
+  it("accepts one launchd operation without a service selector", () => {
     expect(readResidentLaunchdArguments(["status"])).toEqual({
-      operation: "status",
-      serviceKind: "voice"
+      operation: "status"
     });
-    expect(() => readResidentLaunchdArguments(["status", "--service=memory"])).toThrow(
-      "resident launchd service must be voice"
+    expect(() => readResidentLaunchdArguments(["--service=voice", "restart"])).toThrow(
+      "resident launchd arguments are invalid"
     );
   });
 

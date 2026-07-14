@@ -1,7 +1,6 @@
 import { dirname, join } from "node:path";
 
 export type ResidentLaunchdServiceOptions = {
-  readonly serviceKind: ResidentLaunchdServiceKind;
   readonly repoRoot: string;
   readonly homeDirectory: string;
   readonly configPath: string;
@@ -10,10 +9,7 @@ export type ResidentLaunchdServiceOptions = {
   readonly label?: string;
 };
 
-export type ResidentLaunchdServiceKind = "voice";
-
 export type ResidentLaunchdService = {
-  readonly serviceKind: ResidentLaunchdServiceKind;
   readonly configPath: string;
   readonly label: string;
   readonly plistPath: string;
@@ -131,7 +127,6 @@ export function defineResidentLaunchdService(
   const standardErrorPath = join(logDirectory, `${defaults.logName}.err.log`);
 
   const service = {
-    serviceKind: options.serviceKind,
     configPath,
     label,
     plistPath: join(homeDirectory, "Library", "LaunchAgents", `${label}.plist`),
@@ -149,7 +144,6 @@ export function defineResidentLaunchdService(
       configPath,
       nodePath,
       pathEnvironment,
-      serviceKind: options.serviceKind,
       scriptName: defaults.scriptName
     })
   };
@@ -254,7 +248,6 @@ function buildResidentLaunchdPlist(input: {
   readonly pathEnvironment: string;
   readonly standardOutputPath: string;
   readonly standardErrorPath: string;
-  readonly serviceKind: ResidentLaunchdServiceKind;
   readonly scriptName: string;
 }): string {
   const jitiCliPath = join(input.repoRoot, "node_modules", "jiti", "lib", "jiti-cli.mjs");

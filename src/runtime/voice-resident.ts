@@ -233,7 +233,7 @@ export async function runVoiceResidentRuntime(
       pushToTalk
     });
 
-    activeSessionId = collectEndedActiveSession(options.sessionLifecycle, activeSessionId, {
+    activeSessionId = await collectEndedActiveSession(options.sessionLifecycle, activeSessionId, {
       pendingEndedSessionIds,
       piAgent: options.piAgent,
       deferredTools: options.deferredTools
@@ -335,7 +335,7 @@ async function processResidentFrameIteration(
     readonly currentActiveSessionId: string | undefined;
   }
 ): Promise<string | undefined> {
-  const activeSessionId = collectEndedActiveSession(
+  const activeSessionId = await collectEndedActiveSession(
     options.sessionLifecycle,
     state.currentActiveSessionId,
     {
@@ -375,7 +375,7 @@ async function cleanupActiveSessionForShutdown(
   counters: VoiceResidentCounters,
   now: () => string
 ): Promise<string | undefined> {
-  const nextActiveSessionId = endActiveSessionForShutdown(
+  const nextActiveSessionId = await endActiveSessionForShutdown(
     options.sessionLifecycle,
     activeSessionId,
     {
@@ -505,7 +505,7 @@ async function processTranscribedUtterance(
 
   await runActiveVoiceTurn(transcript.text, options, counters, now, activeSession.sessionId);
   state.activeSession.setActiveSessionId(
-    collectEndedActiveSession(options.sessionLifecycle, activeSession.sessionId, {
+    await collectEndedActiveSession(options.sessionLifecycle, activeSession.sessionId, {
       pendingEndedSessionIds: state.pendingEndedSessionIds,
       piAgent: options.piAgent,
       deferredTools: options.deferredTools
@@ -1143,7 +1143,7 @@ async function playTtsChunks(
   }
 }
 
-function collectEndedActiveSession(
+async function collectEndedActiveSession(
   lifecycle: SessionLifecycle,
   activeSessionId: string | undefined,
   options: {
@@ -1151,7 +1151,7 @@ function collectEndedActiveSession(
     readonly piAgent: PiAgentTurnClient;
     readonly deferredTools?: VoiceResidentRuntimeOptions["deferredTools"];
   }
-): string | undefined {
+): Promise<string | undefined> {
   if (activeSessionId === undefined) {
     return undefined;
   }
@@ -1160,7 +1160,7 @@ function collectEndedActiveSession(
 
   if (session === undefined) {
     cancelDeferredToolSession(options.deferredTools, activeSessionId, "session_closed");
-    disposeSessionQuietly(options.piAgent, activeSessionId).catch(() => undefined);
+    await disposeSessionQuietly(options.piAgent, activeSessionId);
     return undefined;
   }
 
@@ -1173,7 +1173,7 @@ function collectEndedActiveSession(
   return undefined;
 }
 
-function endActiveSessionForShutdown(
+async function endActiveSessionForShutdown(
   lifecycle: SessionLifecycle,
   activeSessionId: string | undefined,
   options: {
@@ -1181,7 +1181,7 @@ function endActiveSessionForShutdown(
     readonly piAgent: PiAgentTurnClient;
     readonly deferredTools?: VoiceResidentRuntimeOptions["deferredTools"];
   }
-): string | undefined {
+): Promise<string | undefined> {
   if (activeSessionId === undefined) {
     return undefined;
   }
@@ -1190,7 +1190,7 @@ function endActiveSessionForShutdown(
 
   if (session === undefined) {
     cancelDeferredToolSession(options.deferredTools, activeSessionId, "shutdown");
-    disposeSessionQuietly(options.piAgent, activeSessionId).catch(() => undefined);
+    await disposeSessionQuietly(options.piAgent, activeSessionId);
     return undefined;
   }
 

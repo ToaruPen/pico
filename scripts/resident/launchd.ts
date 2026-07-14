@@ -10,13 +10,11 @@ import {
   formatResidentLaunchdStatus,
   type ResidentLaunchdOperation,
   type ResidentLaunchdOperationStep,
-  type ResidentLaunchdServiceKind,
   requireResidentLaunchdPlatform
 } from "../../src/runtime/resident-launchd.js";
 
 export type ResidentLaunchdArguments = {
   readonly operation: ResidentLaunchdOperation;
-  readonly serviceKind: ResidentLaunchdServiceKind;
 };
 
 export type ResidentLaunchdExecutionDependencies = {
@@ -31,16 +29,12 @@ export type ResidentLaunchdExecutionDependencies = {
 export function readResidentLaunchdArguments(
   arguments_: readonly string[]
 ): ResidentLaunchdArguments {
-  const operationArguments = arguments_.filter((value) => !value.startsWith("--service="));
-  const serviceArguments = arguments_.filter((value) => value.startsWith("--service="));
-
-  if (operationArguments.length !== 1 || serviceArguments.length > 1) {
+  if (arguments_.length !== 1) {
     throw new Error("resident launchd arguments are invalid");
   }
 
   return {
-    operation: readOperation(operationArguments[0]),
-    serviceKind: readServiceKind(serviceArguments[0])
+    operation: readOperation(arguments_[0])
   };
 }
 
@@ -234,14 +228,6 @@ function isResidentLaunchdOperation(value: string | undefined): value is Residen
   );
 }
 
-function readServiceKind(value: string | undefined): ResidentLaunchdServiceKind {
-  if (value === undefined || value === "--service=voice") {
-    return "voice";
-  }
-
-  throw new Error("resident launchd service must be voice");
-}
-
 function readLaunchdPathEnvironment(environment: NodeJS.ProcessEnv, homeDirectory: string): string {
   if (environment.PICO_LAUNCHD_PATH !== undefined && environment.PICO_LAUNCHD_PATH.trim() !== "") {
     return environment.PICO_LAUNCHD_PATH;
@@ -269,7 +255,6 @@ if (isDirectExecution()) {
   const arguments_ = readResidentLaunchdArguments(process.argv.slice(2));
   const homeDirectory = homedir();
   const service = defineResidentLaunchdService({
-    serviceKind: arguments_.serviceKind,
     repoRoot: process.cwd(),
     homeDirectory,
     configPath: resolve(process.env.PICO_CONFIG_PATH ?? "config/pico.local.yaml"),

@@ -26,6 +26,7 @@ The implementation removes these obsolete ownership units:
 - `src/modules/long-memory/`
 - `src/runtime/memory-tool.ts`
 - `src/runtime/session-tool.ts`
+- `scripts/resident/memory.ts`
 - `scripts/smoke/mem0-runtime.ts`
 - `scripts/smoke/embedding-sidecar.ts`
 - `scripts/sidecars/jina-embedding-sidecar.py`
@@ -438,6 +439,7 @@ git commit -m "refactor(voice): decouple interaction ending from memory"
 - Delete: `src/modules/long-memory/mem0-runtime.ts`
 - Delete: `src/modules/long-memory/pi-extractor.ts`
 - Delete: `src/modules/long-memory/worker.ts`
+- Delete: `scripts/resident/memory.ts`
 - Delete: `scripts/smoke/mem0-runtime.ts`
 - Delete: `scripts/smoke/embedding-sidecar.ts`
 - Delete: `scripts/sidecars/jina-embedding-sidecar.py`
@@ -613,11 +615,11 @@ git commit -m "docs(memory): move memory ownership to Pi"
 ## Task 6: Clean local configuration and verify the complete runtime
 
 **Files:**
-- Modify if present and untracked: `/Users/monsoon/Dev/pico/config/pico.local.yaml`
+- Modify if present and untracked: `config/pico.local.yaml`
 
 - [ ] **Step 1: Remove the stale local Pico memory block**
 
-Delete only the top-level `memory:` block from `/Users/monsoon/Dev/pico/config/pico.local.yaml`. Preserve `pico.model`, voice, camera, vision, session, and audit settings. Do not move Mem0 settings into another file in this repository.
+Delete only the top-level `memory:` block from `config/pico.local.yaml`. Preserve `pico.model`, voice, camera, vision, session, and audit settings. Do not move Mem0 settings into another file in this repository.
 
 - [ ] **Step 2: Format and run the complete local gate**
 
@@ -651,7 +653,7 @@ Expected: all `test` commands exit zero, dependency tree is empty, and `rg` has 
 Run:
 
 ```bash
-PICO_CONFIG_PATH=/Users/monsoon/Dev/pico/config/pico.local.yaml npm run smoke:pi-runtime
+PICO_CONFIG_PATH="$PWD/config/pico.local.yaml" npm run smoke:pi-runtime
 ```
 
 Expected:
@@ -663,7 +665,7 @@ Expected:
 Then run an actual non-persistent Pi CLI turn with the Pico extension:
 
 ```bash
-PICO_CONFIG_PATH=/Users/monsoon/Dev/pico/config/pico.local.yaml node_modules/.bin/pi --no-approve --no-session --extension ./src/index.ts -p "Reply with the exact text: pico runtime ready"
+PICO_CONFIG_PATH="$PWD/config/pico.local.yaml" node_modules/.bin/pi --no-approve --no-session --extension ./src/index.ts -p "Reply with the exact text: pico runtime ready"
 ```
 
 Expected: the Pi process starts without `memory:` config, loads Pico, completes the turn, and emits no Mem0/Qdrant/Undici error.
