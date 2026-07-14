@@ -367,7 +367,7 @@ async function finalizeEndedInteractions(
   now: () => string,
   farewelledSessionIds: Set<string>
 ): Promise<void> {
-  for (const sessionId of [...pendingEndedSessionIds]) {
+  for (const sessionId of Array.from(pendingEndedSessionIds)) {
     const session = options.sessionLifecycle.read(sessionId);
     if (session?.state !== "ended") {
       pendingEndedSessionIds.delete(sessionId);
