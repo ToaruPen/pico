@@ -12,7 +12,7 @@
 
 Repository instructionによりcommit stepは実行しない。
 
-### Task 1: Production Terminal startup
+## Task 1: Production Terminal startup
 
 **Files:**
 - Modify: `tests/pico-cli.test.ts`
@@ -63,7 +63,7 @@ CLI defaultはproduction Terminal scriptへ変更し、scriptは`--mode`をstric
 Run: `npx vitest run tests/pico-cli.test.ts tests/resident-development-terminal.test.ts && just typecheck`
 Expected: exit 0。
 
-### Task 2: Process-local monitor
+## Task 2: Process-local monitor
 
 **Files:**
 - Create: `src/runtime/resident-voice-monitor.ts`
@@ -102,7 +102,7 @@ service → runner → voice runtimeへ渡す。
 Run: `npx vitest run tests/resident-voice-monitor.test.ts tests/pico-startup.test.ts tests/extension.test.ts`
 Expected: PASS。
 
-### Task 3: Wake payload and five-minute attention
+## Task 3: Wake payload and five-minute attention
 
 **Files:**
 - Create: `src/runtime/voice-addressing.ts`
@@ -161,7 +161,7 @@ inactivityをsuspendし、final playback後にresumeする。
 Run: `npx vitest run tests/voice-addressing.test.ts tests/session.test.ts tests/config.test.ts tests/voice-resident.test.ts`
 Expected: PASS。
 
-### Task 4: One-turn preface gate
+## Task 4: One-turn preface gate
 
 **Files:**
 - Modify: `tests/pi-host-turn.test.ts`
@@ -206,7 +206,7 @@ system promptへtool前に短い自然な日本語ackを出す英語instruction�
 Run: `npx vitest run tests/pi-host-turn.test.ts tests/voice-resident.test.ts tests/identity.test.ts`
 Expected: PASS。
 
-### Task 5: Busy control lane and cancellation
+## Task 5: Busy control lane and cancellation
 
 **Files:**
 - Modify: `tests/voice-addressing.test.ts`
@@ -257,7 +257,7 @@ title、Pi UI notificationを更新する。
 Run: `npx vitest run tests/voice-addressing.test.ts tests/voice-resident.test.ts tests/resident-voice-monitor.test.ts`
 Expected: PASS、unhandled rejectionなし。
 
-### Task 6: Full verification and live acceptance
+## Task 6: Full verification and live acceptance
 
 **Files:**
 - Modify only files required by failures within this feature scope.
@@ -304,7 +304,7 @@ Pi TUIを終了し、専用Terminal tab/window、今回のPico process、residen
 共有常駐provider/serviceは今回のPico processではないため停止せず、終了前後で同じPIDまたは
 health endpointが利用可能であることを確認する。
 
-### Task 7: Pi-level Qdrant recovery (separate owner repository)
+## Task 7: Pi-level Qdrant recovery (separate owner repository)
 
 **Files:**
 - Modify only files required in `/Users/monsoon/Dev/mem0-private/integrations/pi-agent`
@@ -326,7 +326,7 @@ terminal-state awareにする。provider不在を互換性check無効化だけ�
 memory pluginのfocused testsとPi起動smokeを実行し、Pico repositoryにQdrant/Mem0 client、config、
 tool、memory lifecycleが追加されていないことを`rg`で確認する。
 
-### Task 8: Pre-PR gates and convergence
+## Task 8: Pre-PR gates and convergence
 
 Picoとmemory pluginの対象差分をそれぞれ所有repositoryのgateで検証する。Pico差分はpolishment、
 ai-slop-cleanerの順に通し、対象repositoryごとにscopeを分けてPRを作成し、CIとactionable reviewが

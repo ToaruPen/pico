@@ -198,12 +198,15 @@ type ActiveVoiceTurn = {
   terminal: boolean;
   lastProgress: PiVoiceTurnProgress | undefined;
   cancelAcknowledgement: Promise<void> | undefined;
+  failed: boolean;
+  failureCounted: boolean;
   toolFailed: boolean;
 };
 
 type ActiveVoiceTurnEffects = {
   readonly isCurrent: () => boolean;
   readonly projectProgress: (event: PiVoiceTurnProgress) => void;
+  readonly recordFailure: (counted: boolean) => void;
 };
 
 type CompletedPiAgentResponse = {
@@ -233,7 +236,14 @@ const defaultMonotonicNow = (): number => performance.now();
 const farewellPrompt =
   "The voice session is ending now. Respond with one brief spoken Japanese farewell for the staff. Do not introduce a new topic.";
 
-class VoiceAudioOutputError extends Error {}
+class VoiceAudioOutputError extends Error {
+  constructor(
+    message: string,
+    readonly failureCounted: boolean
+  ) {
+    super(message);
+  }
+}
 
 export async function runVoiceResidentRuntime(
   options: VoiceResidentRuntimeOptions
@@ -772,13 +782,14 @@ function startOwnedActiveVoiceTurn(
     terminal: false,
     lastProgress: undefined,
     cancelAcknowledgement: undefined,
+    failed: false,
+    failureCounted: false,
     toolFailed: false
   };
   const turnSignal =
     options.signal === undefined
       ? abortController.signal
       : AbortSignal.any([options.signal, abortController.signal]);
-  const failedTurnsBefore = counters.failedTurns;
   state.current = operation;
   const effects: ActiveVoiceTurnEffects = {
     isCurrent: () =>
@@ -798,6 +809,10 @@ function startOwnedActiveVoiceTurn(
       }
 
       projectPiTurnProgress(event, options.monitor);
+    },
+    recordFailure(counted) {
+      operation.failed = true;
+      operation.failureCounted ||= counted;
     }
   };
   operation.completion = Promise.resolve()
@@ -812,24 +827,17 @@ function startOwnedActiveVoiceTurn(
       )
     )
     .then(
-      () =>
-        finalizeOwnedActiveVoiceTurn(
+      () => finalizeOwnedActiveVoiceTurn(operation, options, counters, state, undefined),
+      (error: unknown) => {
+        effects.recordFailure(error instanceof VoiceAudioOutputError && error.failureCounted);
+        return finalizeOwnedActiveVoiceTurn(
           operation,
           options,
           counters,
-          failedTurnsBefore,
           state,
-          undefined
-        ),
-      (error: unknown) =>
-        finalizeOwnedActiveVoiceTurn(
-          operation,
-          options,
-          counters,
-          failedTurnsBefore,
-          state,
-          error instanceof VoiceAudioOutputError ? "audio_output" : "other"
-        )
+          classifyVoiceTurnRejection(error)
+        );
+      }
     );
 }
 
@@ -837,7 +845,6 @@ async function finalizeOwnedActiveVoiceTurn(
   operation: ActiveVoiceTurn,
   options: VoiceResidentRuntimeOptions,
   counters: VoiceResidentCounters,
-  failedTurnsBefore: number,
   state: ActiveVoiceTurnState,
   rejectionReason: "audio_output" | "other" | undefined
 ): Promise<void> {
@@ -847,18 +854,17 @@ async function finalizeOwnedActiveVoiceTurn(
   }
 
   if (operation.cancelRequested) {
-    await finalizeCancelledVoiceTurn(operation, options, counters, failedTurnsBefore, state);
+    await finalizeCancelledVoiceTurn(operation, options, counters, state);
     return;
   }
 
-  finalizeSettledVoiceTurn(operation, options, counters, failedTurnsBefore, state, rejectionReason);
+  finalizeSettledVoiceTurn(operation, options, counters, state, rejectionReason);
 }
 
 async function finalizeCancelledVoiceTurn(
   operation: ActiveVoiceTurn,
   options: VoiceResidentRuntimeOptions,
   counters: VoiceResidentCounters,
-  failedTurnsBefore: number,
   state: ActiveVoiceTurnState
 ): Promise<void> {
   const acknowledgement = await waitForCancellationAcknowledgement(operation);
@@ -869,13 +875,7 @@ async function finalizeCancelledVoiceTurn(
   }
 
   if (acknowledgement === "failed") {
-    finalizeCancellationAcknowledgementFailure(
-      operation,
-      options,
-      counters,
-      failedTurnsBefore,
-      state
-    );
+    finalizeCancellationAcknowledgementFailure(operation, options, counters, state);
     return;
   }
 
@@ -895,7 +895,9 @@ async function waitForCancellationAcknowledgement(
   try {
     await operation.cancelAcknowledgement;
     return "delivered";
-  } catch {
+  } catch (error) {
+    operation.failed = true;
+    operation.failureCounted ||= error instanceof VoiceAudioOutputError && error.failureCounted;
     return "failed";
   }
 }
@@ -910,7 +912,6 @@ function finalizeCancellationAcknowledgementFailure(
   operation: ActiveVoiceTurn,
   options: VoiceResidentRuntimeOptions,
   counters: VoiceResidentCounters,
-  failedTurnsBefore: number,
   state: ActiveVoiceTurnState
 ): void {
   if (operation.endAfterTurn) {
@@ -919,7 +920,7 @@ function finalizeCancellationAcknowledgementFailure(
     resumeSessionInactivityQuietly(options.sessionLifecycle, operation.sessionId);
   }
 
-  incrementFailedTurnOnce(counters, failedTurnsBefore);
+  incrementOperationFailureIfNeeded(operation, counters);
   operation.terminal = true;
   state.latestTerminal = { state: "failed" };
   options.monitor?.setPhase("error", {
@@ -950,27 +951,35 @@ function finalizeSettledVoiceTurn(
   operation: ActiveVoiceTurn,
   options: VoiceResidentRuntimeOptions,
   counters: VoiceResidentCounters,
-  failedTurnsBefore: number,
   state: ActiveVoiceTurnState,
   rejectionReason: "audio_output" | "other" | undefined
 ): void {
-  const failed =
-    rejectionReason !== undefined ||
-    operation.toolFailed ||
-    counters.failedTurns > failedTurnsBefore;
+  const failed = rejectionReason !== undefined || operation.failed || operation.toolFailed;
 
   if (failed) {
-    incrementFailedTurnOnce(counters, failedTurnsBefore);
+    incrementOperationFailureIfNeeded(operation, counters);
   }
   operation.terminal = true;
   state.latestTerminal = createVoiceTerminalRecord(failed, rejectionReason);
   projectSettledVoiceTerminal(operation, options, failed, rejectionReason);
 }
 
-function incrementFailedTurnOnce(counters: VoiceResidentCounters, failedTurnsBefore: number): void {
-  if (counters.failedTurns === failedTurnsBefore) {
+function incrementOperationFailureIfNeeded(
+  operation: ActiveVoiceTurn,
+  counters: VoiceResidentCounters
+): void {
+  if (!operation.failureCounted) {
     counters.failedTurns += 1;
+    operation.failureCounted = true;
   }
+}
+
+function classifyVoiceTurnRejection(error: unknown): "audio_output" | "other" {
+  if (error instanceof VoiceAudioOutputError) {
+    return "audio_output";
+  }
+
+  return "other";
 }
 
 function createVoiceTerminalRecord(
@@ -1073,14 +1082,22 @@ async function handleBusyVoiceUtterance(
 
   if (control === "status") {
     const factualStatus = options.monitor?.describeCurrentWork() ?? "まだ作業中です。";
-    await playRequiredTurnText(`${factualStatus}終わったら声をかけます。`, options, counters);
-    restoreResidentVoicePhase(options, state);
+    await playBusyVoiceResponse(
+      `${factualStatus}終わったら声をかけます。`,
+      options,
+      counters,
+      state
+    );
     return;
   }
 
   if (control === "new_request") {
-    await playRequiredTurnText("今の作業が終わってから、もう一度お願いしてね。", options, counters);
-    restoreResidentVoicePhase(options, state);
+    await playBusyVoiceResponse(
+      "今の作業が終わってから、もう一度お願いしてね。",
+      options,
+      counters,
+      state
+    );
     return;
   }
 
@@ -1106,6 +1123,27 @@ async function handleBusyVoiceUtterance(
   }
 
   restoreResidentVoicePhase(options, state);
+}
+
+async function playBusyVoiceResponse(
+  text: string,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  state: PendingSessionState
+): Promise<void> {
+  try {
+    await playRequiredTurnText(text, options, counters);
+  } catch (error) {
+    if (!(error instanceof VoiceAudioOutputError)) {
+      throw error;
+    }
+
+    if (!error.failureCounted) {
+      counters.failedTurns += 1;
+    }
+  } finally {
+    restoreResidentVoicePhase(options, state);
+  }
 }
 
 function retainEndAfterTurn(current: boolean, control: BusyVoiceControl): boolean {
@@ -1688,7 +1726,7 @@ async function requireFinalTurnSynthesis(
   const ttsResult = await synthesizeTurnResponse(text, options, counters, startedAt);
 
   if (ttsResult === undefined) {
-    throw new VoiceAudioOutputError("pico resident voice final synthesis failed");
+    throw new VoiceAudioOutputError("pico resident voice final synthesis failed", true);
   }
 
   return ttsResult;
@@ -1702,7 +1740,7 @@ async function playFinalTurnResponse(
   try {
     await playTtsChunks(chunks, options, now);
   } catch {
-    throw new VoiceAudioOutputError("pico resident voice final playback failed");
+    throw new VoiceAudioOutputError("pico resident voice final playback failed", false);
   }
 }
 
@@ -1874,6 +1912,7 @@ async function handlePiAgentPromptFailure(
   }
 
   counters.failedTurns += 1;
+  effects?.recordFailure(true);
   recordVoiceStageProbe(options.probe ?? {}, {
     stage: "pi_turn",
     status: "error",
@@ -1901,7 +1940,7 @@ async function playRequiredTurnText(
   const ttsResult = await synthesizeTurnResponse(text, options, counters, startedAt);
 
   if (ttsResult === undefined) {
-    throw new VoiceAudioOutputError("pico resident voice required synthesis failed");
+    throw new VoiceAudioOutputError("pico resident voice required synthesis failed", true);
   }
 
   throwIfAborted(options.signal);
@@ -1910,7 +1949,7 @@ async function playRequiredTurnText(
   try {
     await playTtsChunks(ttsResult.chunks, options, options.now ?? defaultNow);
   } catch {
-    throw new VoiceAudioOutputError("pico resident voice required playback failed");
+    throw new VoiceAudioOutputError("pico resident voice required playback failed", false);
   }
 }
 

@@ -203,6 +203,92 @@ describe("resident voice monitor", () => {
     expect(systemNotifications).toEqual(["Picoの作業に失敗しました（音声出力障害）"]);
   });
 
+  it("clears audio output failure detail when the terminal phase expires", () => {
+    const events: string[] = [];
+    let expire = (): void => undefined;
+    const monitor = createResidentVoiceMonitor({
+      ui: createUi(events),
+      scheduleTimeout: (callback) => {
+        expire = callback;
+        return () => undefined;
+      }
+    });
+
+    monitor.setPhase("error", { errorDetail: "audio_output" });
+    expire();
+
+    expect(events).toContain("status:pico:聞き取り中");
+    expect(events).not.toContain("status:pico:聞き取り中・音声出力障害");
+  });
+
+  it("attempts every TUI cleanup when an earlier operation throws", () => {
+    const cleanupCalls: string[] = [];
+    const monitor = createResidentVoiceMonitor({
+      ui: {
+        setStatus: () => {
+          cleanupCalls.push("status");
+          throw new Error("status cleanup failed");
+        },
+        setWidget: () => {
+          cleanupCalls.push("widget");
+          throw new Error("widget cleanup failed");
+        },
+        setTitle: () => {
+          cleanupCalls.push("title");
+          throw new Error("title cleanup failed");
+        },
+        notify: () => undefined
+      }
+    });
+
+    expect(() => monitor.close()).not.toThrow();
+    expect(cleanupCalls).toEqual(["status", "widget", "title"]);
+  });
+
+  it("attempts TUI cleanup when scheduled-work cancellation throws", () => {
+    const cleanupCalls: string[] = [];
+    const monitor = createResidentVoiceMonitor({
+      ui: {
+        ...createUi([]),
+        setStatus: () => cleanupCalls.push("status"),
+        setWidget: () => cleanupCalls.push("widget"),
+        setTitle: () => cleanupCalls.push("title")
+      },
+      scheduleInterval: () => () => {
+        cleanupCalls.push("work-ticker");
+        throw new Error("work ticker cleanup failed");
+      }
+    });
+
+    monitor.setPhase("working");
+    cleanupCalls.length = 0;
+
+    expect(() => monitor.close()).not.toThrow();
+    expect(cleanupCalls).toEqual(["work-ticker", "status", "widget", "title"]);
+  });
+
+  it("attempts TUI cleanup when transient-phase cancellation throws", () => {
+    const cleanupCalls: string[] = [];
+    const monitor = createResidentVoiceMonitor({
+      ui: {
+        ...createUi([]),
+        setStatus: () => cleanupCalls.push("status"),
+        setWidget: () => cleanupCalls.push("widget"),
+        setTitle: () => cleanupCalls.push("title")
+      },
+      scheduleTimeout: () => () => {
+        cleanupCalls.push("transient-phase");
+        throw new Error("transient phase cleanup failed");
+      }
+    });
+
+    monitor.setPhase("completed");
+    cleanupCalls.length = 0;
+
+    expect(() => monitor.close()).not.toThrow();
+    expect(cleanupCalls).toEqual(["transient-phase", "status", "widget", "title"]);
+  });
+
   it("guards every public update and scheduled callback after close", () => {
     const events: string[] = [];
     const systemNotifications: string[] = [];

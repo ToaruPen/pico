@@ -2630,6 +2630,74 @@ describe("voice resident runtime", () => {
     expect(observedWhileBusy.lastPhase).toBe("working");
   });
 
+  it("does not mark a successful Pi turn failed when busy status audio fails", async () => {
+    const promptStarted = createPromiseGate();
+    const promptCompletion = createPromiseGate();
+    const statusFailed = createPromiseGate();
+    const terminalStates: string[] = [];
+    const transcripts = ["ピコ、長い作業をして", "今どう？"];
+
+    const runtime = runVoiceResidentRuntime({
+      now: fixedNow(),
+      frames: [sampleNearEndFrame("request"), sampleNearEndFrame("status")],
+      utteranceWindow: perFrameCompatibleUtteranceWindow(),
+      triggerPhrases: ["ピコ"],
+      sessionLifecycle: createSessionLifecycle({
+        ending: { mode: "timed", durationMs: 300_000 }
+      }),
+      echoControl: createIdleEchoControl(),
+      stt: {
+        warmup: () => {
+          throw new Error("warmup is not part of resident runtime");
+        },
+        transcribe: () => Promise.resolve(successfulTranscript(transcripts.shift() ?? ""))
+      },
+      tts: {
+        synthesize: (request) => {
+          if (request.text.endsWith("終わったら声をかけます。")) {
+            statusFailed.release();
+            return Promise.resolve({
+              ok: false as const,
+              reason: "backend_error" as const,
+              message: "status synthesis unavailable",
+              sentenceIndex: 0,
+              source: {
+                serviceId: "local-aivis",
+                provider: "aivis-speech" as const,
+                speakerId: 888_753_760
+              }
+            });
+          }
+
+          return createSuccessfulTts(request.text).synthesize(request);
+        }
+      },
+      playback: { play: () => Promise.resolve() },
+      piAgent: {
+        prompt: async () => {
+          promptStarted.release();
+          await promptCompletion.promise;
+          return { text: "作業が終わりました。" };
+        }
+      },
+      monitor: {
+        setPhase: () => undefined,
+        showAcceptedTranscript: () => undefined,
+        notifyTerminal: (state) => terminalStates.push(state),
+        describeCurrentWork: () => "writeを実行中です。開始から12秒です。",
+        close: () => undefined
+      }
+    });
+
+    await promptStarted.promise;
+    await statusFailed.promise;
+    promptCompletion.release();
+    const result = await runtime;
+
+    expect(result).toMatchObject({ completedTurns: 1, failedTurns: 1 });
+    expect(terminalStates).toEqual(["completed"]);
+  });
+
   it("refuses a new request while a Pi turn is busy", async () => {
     const promptCompletion = createPromiseGate();
     const refusalSpoken = createPromiseGate();

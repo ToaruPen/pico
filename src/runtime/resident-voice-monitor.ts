@@ -170,17 +170,27 @@ export function createResidentVoiceMonitor(options: {
       }
 
       closed = true;
+      const workTickerCleanup = cancelWorkTicker;
+      cancelWorkTicker = undefined;
+      const transientPhaseCleanup = cancelTransientPhase;
+      cancelTransientPhase = undefined;
 
-      try {
-        cancelWorkTicker?.();
-        cancelWorkTicker = undefined;
-        cancelTransientPhase?.();
-        cancelTransientPhase = undefined;
-        options.ui.setStatus("pico", undefined);
-        options.ui.setWidget("pico", undefined);
-        options.ui.setTitle("Pico");
-      } catch {
-        // UI cleanup is best effort during shutdown.
+      for (const cleanup of [
+        workTickerCleanup,
+        transientPhaseCleanup,
+        () => options.ui.setStatus("pico", undefined),
+        () => options.ui.setWidget("pico", undefined),
+        () => options.ui.setTitle("Pico")
+      ]) {
+        if (cleanup === undefined) {
+          continue;
+        }
+
+        try {
+          cleanup();
+        } catch {
+          // UI cleanup is best effort during shutdown.
+        }
       }
     }
   };
@@ -268,6 +278,7 @@ export function createResidentVoiceMonitor(options: {
       }
 
       cancelTransientPhase = undefined;
+      errorDetail = undefined;
       currentPhase = targetPhase;
       render();
     }, 2_000);
