@@ -412,7 +412,7 @@ audit:
     });
   });
 
-  it("defaults session ending to one timed minute", () => {
+  it("defaults session ending to a five-minute attention window", () => {
     expect(definePicoConfig({})).toMatchObject({
       session: {
         enabled: true,
@@ -423,7 +423,7 @@ audit:
         },
         ending: {
           mode: "timed",
-          durationMs: 60_000
+          durationMs: 300_000
         }
       },
       audit: {

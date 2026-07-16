@@ -281,7 +281,7 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
     },
     ending: {
       mode: "timed",
-      durationMs: 60_000
+      durationMs: 300_000
     }
   },
   audit: {
@@ -473,7 +473,7 @@ function defineSessionEnding(
         input?.durationMs,
         "pico config session.ending.durationMs",
         maxNodeTimeoutMs
-      ) ?? 60_000
+      ) ?? 300_000
   };
 }
 

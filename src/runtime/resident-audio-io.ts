@@ -10,6 +10,7 @@ import type { TtsAudioChunk } from "../modules/voice/index.js";
 import type { VoicePlaybackSink } from "./voice-resident.js";
 
 type Platform = NodeJS.Platform;
+const maximumBufferedCaptureMs = 1_000;
 
 export type Pcm16leAudioLevel = {
   readonly sampleCount: number;
@@ -160,13 +161,77 @@ export function createResidentPcmFrameSource(
   platform: Platform = process.platform,
   now: () => string = defaultNow
 ): AsyncIterable<VoicePcmFrame> {
-  return readPcmFrames(
-    createResidentAudioInputPlan(config, platform),
-    config,
-    signal,
-    spawnAudioProcess,
-    now
+  const bufferAbortController = new AbortController();
+  const captureSignal = AbortSignal.any([signal, bufferAbortController.signal]);
+  const maximumBufferedFrames = Math.ceil(
+    maximumBufferedCaptureMs / config.voice.echoControl.frameMs
   );
+
+  return keepLatestPcmFrames(
+    readPcmFrames(
+      createResidentAudioInputPlan(config, platform),
+      config,
+      captureSignal,
+      spawnAudioProcess,
+      now
+    ),
+    maximumBufferedFrames,
+    () => bufferAbortController.abort()
+  );
+}
+
+async function* keepLatestPcmFrames(
+  source: AsyncIterable<VoicePcmFrame>,
+  maximumBufferedFrames: number,
+  stop: () => void
+): AsyncIterable<VoicePcmFrame> {
+  const bufferedFrames: VoicePcmFrame[] = [];
+  const producerState: { done: boolean; error?: Error } = { done: false };
+  let notifyConsumer: (() => void) | undefined;
+  const notify = (): void => {
+    notifyConsumer?.();
+    notifyConsumer = undefined;
+  };
+  const producer = (async (): Promise<void> => {
+    try {
+      for await (const frame of source) {
+        bufferedFrames.push(frame);
+
+        if (bufferedFrames.length > maximumBufferedFrames) {
+          bufferedFrames.splice(0, bufferedFrames.length - maximumBufferedFrames);
+        }
+
+        notify();
+      }
+    } catch (error) {
+      producerState.error = error instanceof Error ? error : new Error(String(error));
+    } finally {
+      producerState.done = true;
+      notify();
+    }
+  })();
+
+  try {
+    while (!producerState.done || bufferedFrames.length > 0) {
+      const frame = bufferedFrames.shift();
+
+      if (frame !== undefined) {
+        yield frame;
+        continue;
+      }
+
+      await new Promise<void>((resolve) => {
+        notifyConsumer = resolve;
+      });
+    }
+
+    if (producerState.error !== undefined) {
+      throw producerState.error;
+    }
+  } finally {
+    stop();
+    await producer;
+  }
 }
 
 export async function measureResidentAudioInputLevel(
@@ -224,15 +289,15 @@ export function createResidentPlaybackSink(
 
   if (plan.provider === "alsa") {
     return {
-      play(chunk) {
-        return playRawPcm(plan, chunk, spawnAudioProcess);
+      play(chunk, _startedAt, signal) {
+        return playRawPcm(plan, chunk, spawnAudioProcess, signal);
       }
     };
   }
 
   return {
-    async play(chunk) {
-      await playWavFile(plan, chunk, spawnAudioProcess);
+    async play(chunk, _startedAt, signal) {
+      await playWavFile(plan, chunk, spawnAudioProcess, signal);
     }
   };
 }
@@ -418,7 +483,7 @@ async function* readPcmFrames(
   let frameIndex = 0;
   let pending = Buffer.alloc(0);
   let childFailure: Error | undefined;
-  const captureStartedAtMs = Date.parse(now());
+  let captureStartedAtMs: number | undefined;
   const abort = (): void => {
     child.kill("SIGTERM");
   };
@@ -445,11 +510,13 @@ async function* readPcmFrames(
   signal.addEventListener("abort", abort, { once: true });
 
   try {
-    if (Number.isNaN(captureStartedAtMs)) {
-      throw new Error("pico resident voice capture clock returned an invalid ISO timestamp");
-    }
-
     for await (const chunk of stdout) {
+      captureStartedAtMs ??= Date.parse(now());
+
+      if (Number.isNaN(captureStartedAtMs)) {
+        throw new Error("pico resident voice capture clock returned an invalid ISO timestamp");
+      }
+
       pending = Buffer.concat([pending, chunk as Buffer]);
 
       while (pending.byteLength >= plan.frameByteLength) {
@@ -488,8 +555,13 @@ const defaultNow = (): string => new Date().toISOString();
 function playRawPcm(
   plan: Extract<ResidentAudioOutputPlan, { readonly provider: "alsa" }>,
   chunk: TtsAudioChunk,
-  spawnAudioProcess: SpawnAudioProcess
+  spawnAudioProcess: SpawnAudioProcess,
+  signal: AbortSignal | undefined
 ): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(createPlaybackAbortError(plan.provider));
+  }
+
   return new Promise((resolve, reject) => {
     let settled = false;
     const settle = (error: Error | undefined): void => {
@@ -498,6 +570,7 @@ function playRawPcm(
       }
 
       settled = true;
+      signal?.removeEventListener("abort", abort);
 
       if (error === undefined) {
         resolve();
@@ -510,6 +583,10 @@ function playRawPcm(
       stdio: ["pipe", "ignore", "inherit"]
     });
     const stdin = child.stdin;
+    const abort = (): void => {
+      child.kill("SIGTERM");
+      settle(createPlaybackAbortError(plan.provider));
+    };
 
     if (stdin === null) {
       settle(new Error(`pico resident voice ${plan.provider} output did not expose stdin`));
@@ -528,6 +605,7 @@ function playRawPcm(
         new Error(`pico resident voice ${plan.provider} output exited with code ${String(code)}`)
       );
     });
+    signal?.addEventListener("abort", abort, { once: true });
     stdin.end(chunk.audio);
   });
 }
@@ -535,15 +613,18 @@ function playRawPcm(
 async function playWavFile(
   plan: Extract<ResidentAudioOutputPlan, { readonly provider: "afplay" }>,
   chunk: TtsAudioChunk,
-  spawnAudioProcess: SpawnAudioProcess
+  spawnAudioProcess: SpawnAudioProcess,
+  signal: AbortSignal | undefined
 ): Promise<void> {
+  throwIfPlaybackAborted(signal, plan.provider);
   const directory = await mkdtemp(join(tmpdir(), "pico-resident-voice-"));
   const path = join(directory, "tts.wav");
 
   await writeFile(path, encodePcm16leWav(chunk.audio, chunk.sampleRateHz, chunk.channels));
 
   try {
-    await playFile(plan.command, [path], spawnAudioProcess);
+    throwIfPlaybackAborted(signal, plan.provider);
+    await playFile(plan.command, [path], spawnAudioProcess, signal);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -571,23 +652,58 @@ function createAlsaPlaybackArguments(
 function playFile(
   command: string,
   arguments_: readonly string[],
-  spawnAudioProcess: SpawnAudioProcess
+  spawnAudioProcess: SpawnAudioProcess,
+  signal: AbortSignal | undefined
 ): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(createPlaybackAbortError(command));
+  }
+
   return new Promise((resolve, reject) => {
+    let settled = false;
     const child = spawnAudioProcess(command, arguments_, {
       stdio: ["ignore", "pipe", "inherit"]
     });
-
-    child.once("error", reject);
-    child.once("exit", (code) => {
-      if (code === 0) {
-        resolve();
+    const settle = (error: Error | undefined): void => {
+      if (settled) {
         return;
       }
 
-      reject(new Error(`pico resident voice ${command} output exited with code ${String(code)}`));
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+
+      if (error === undefined) {
+        resolve();
+      } else {
+        reject(error);
+      }
+    };
+    const abort = (): void => {
+      child.kill("SIGTERM");
+      settle(createPlaybackAbortError(command));
+    };
+
+    child.once("error", settle);
+    child.once("exit", (code) => {
+      if (code === 0) {
+        settle(undefined);
+        return;
+      }
+
+      settle(new Error(`pico resident voice ${command} output exited with code ${String(code)}`));
     });
+    signal?.addEventListener("abort", abort, { once: true });
   });
+}
+
+function throwIfPlaybackAborted(signal: AbortSignal | undefined, provider: string): void {
+  if (signal?.aborted) {
+    throw createPlaybackAbortError(provider);
+  }
+}
+
+function createPlaybackAbortError(provider: string): Error {
+  return new Error(`pico resident voice ${provider} output was aborted`);
 }
 
 function encodePcm16leWav(audio: Uint8Array, sampleRateHz: number, channels: number): Buffer {

@@ -29,5 +29,7 @@ describe("pico identity", () => {
     expect(prompt).toContain("- Do not use Markdown");
     expect(prompt).toContain("- Avoid bullet lists and visible line breaks");
     expect(prompt).toContain("- When asked for a wake acknowledgement");
+    expect(prompt).toContain("Before calling a tool for a spoken Pico request");
+    expect(prompt).toContain("speak again when the work is finished");
   });
 });

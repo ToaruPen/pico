@@ -6,6 +6,7 @@ import {
 } from "./resident-voice-log-files.js";
 
 export type ResidentDevelopmentTerminalSessionOptions = {
+  readonly mode?: ResidentTerminalMode;
   readonly repoRoot: string;
   readonly homeDirectory: string;
   readonly configPath: string;
@@ -18,6 +19,7 @@ export type ResidentDevelopmentTerminalSessionOptions = {
 };
 
 export type ResidentDevelopmentTerminal = "kitty" | "terminal";
+export type ResidentTerminalMode = "production" | "development";
 
 export type ResidentDevelopmentTerminalSession = {
   readonly runId: string;
@@ -47,6 +49,7 @@ export function requireResidentDevelopmentTerminalPlatform(platform: NodeJS.Plat
 export function defineResidentDevelopmentTerminalSession(
   options: ResidentDevelopmentTerminalSessionOptions
 ): ResidentDevelopmentTerminalSession {
+  const mode = resolveTerminalMode(options.mode);
   const repoRoot = requireNonEmpty(options.repoRoot, "resident dev terminal repoRoot");
   const homeDirectory = requireNonEmpty(
     options.homeDirectory,
@@ -82,6 +85,7 @@ export function defineResidentDevelopmentTerminalSession(
     configPath,
     pathEnvironment,
     terminal,
+    mode,
     title,
     runId
   });
@@ -102,6 +106,10 @@ export function defineResidentDevelopmentTerminalSession(
   };
 }
 
+function resolveTerminalMode(mode: ResidentTerminalMode | undefined): ResidentTerminalMode {
+  return mode ?? "development";
+}
+
 function buildLauncherScript(shellCommand: string): string {
   return `#!/bin/zsh\n${shellCommand}\n`;
 }
@@ -119,6 +127,7 @@ function buildResidentDevelopmentTerminalShellCommand(input: {
   readonly configPath: string;
   readonly pathEnvironment: string;
   readonly terminal: ResidentDevelopmentTerminal;
+  readonly mode: ResidentTerminalMode;
   readonly title: string;
   readonly runId: string;
 }): string {
@@ -127,18 +136,30 @@ function buildResidentDevelopmentTerminalShellCommand(input: {
     "umask 077",
     "set -o pipefail",
     `mkdir -p ${quoteShell(input.launcherDirectory)}`,
-    `mkdir -p ${quoteShell(input.logDirectory)}`,
     `chmod 700 ${quoteShell(input.picoDirectory)}`,
-    `touch ${quoteShell(input.logPath)}`,
-    `chmod 600 ${quoteShell(input.logPath)}`,
-    `export PICO_RESIDENT_VOICE_RUN_ID=${quoteShell(input.runId)}`,
+    ...(input.mode === "development"
+      ? [
+          `mkdir -p ${quoteShell(input.logDirectory)}`,
+          `touch ${quoteShell(input.logPath)}`,
+          `chmod 600 ${quoteShell(input.logPath)}`,
+          `export PICO_RESIDENT_VOICE_RUN_ID=${quoteShell(input.runId)}`
+        ]
+      : []),
     `export PICO_CONFIG_PATH=${quoteShell(input.configPath)}`,
-    "export PICO_VOICE_PROBE_STDOUT='summary'",
-    "export PICO_RESIDENT_VOICE_LOG_MODE='development'",
+    ...(input.mode === "development"
+      ? [
+          "export PICO_VOICE_PROBE_STDOUT='summary'",
+          "export PICO_RESIDENT_VOICE_LOG_MODE='development'"
+        ]
+      : []),
     `export PATH=${quoteShell(input.pathEnvironment)}:"$PATH"`,
     ...(input.terminal === "terminal" ? ["PICO_DEV_TERMINAL_TTY=$(tty)"] : []),
     `printf '\\033]0;%s\\007' ${quoteShell(input.title)}`,
-    `printf '\\n[pico] resident voice dev terminal\\n[pico] metadata log: %s\\n\\n' ${quoteShell(input.logPath)}`,
+    ...(input.mode === "development"
+      ? [
+          `printf '\\n[pico] resident voice dev terminal\\n[pico] metadata log: %s\\n\\n' ${quoteShell(input.logPath)}`
+        ]
+      : ["printf '\\n[pico] resident voice terminal\\n\\n'"]),
     buildResidentVoiceRunAndCloseCommand(input.terminal)
   ].join(" && ");
 }
@@ -152,9 +173,9 @@ function buildResidentVoiceRunAndCloseCommand(terminal: ResidentDevelopmentTermi
 
   if (terminal === "terminal") {
     commands.push(
-      "(sleep 0.2; osascript " +
+      "(trap '' HUP; sleep 0.2; osascript " +
         buildCloseTerminalTabAppleScriptArguments('"$PICO_DEV_TERMINAL_TTY"') +
-        " >/dev/null 2>&1 &)"
+        " >/dev/null 2>&1) &!"
     );
   }
 

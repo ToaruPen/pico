@@ -11,6 +11,7 @@ export type SessionStartTriggerKind =
   | "tool_event";
 
 export type SessionState = "active" | "ended";
+export type SessionEndReason = "explicit" | "inactivity" | "shutdown";
 
 export type SessionStartTrigger = {
   readonly kind: SessionStartTriggerKind;
@@ -33,6 +34,7 @@ export type SessionRecord = {
   readonly state: SessionState;
   readonly startedAt: string;
   readonly endedAt: string | undefined;
+  readonly endReason: SessionEndReason | undefined;
   readonly trigger: SessionStartTrigger;
 };
 
@@ -40,7 +42,9 @@ export type SessionLifecycle = {
   readonly start: (trigger: SessionStartTrigger) => SessionRecord;
   readonly read: (id: string) => SessionRecord | undefined;
   readonly refreshActivity: (id: string) => SessionRecord;
-  readonly end: (id: string) => SessionRecord;
+  readonly suspendInactivity: (id: string) => SessionRecord;
+  readonly resumeInactivity: (id: string) => SessionRecord;
+  readonly end: (id: string, reason?: Exclude<SessionEndReason, "inactivity">) => SessionRecord;
   readonly remove: (id: string) => void;
 };
 
@@ -49,8 +53,10 @@ type ManagedSession = {
   state: SessionState;
   startedAt: string;
   endedAt: string | undefined;
+  endReason: SessionEndReason | undefined;
   trigger: SessionStartTrigger;
   timeout: NodeJS.Timeout | undefined;
+  inactivitySuspended: boolean;
 };
 
 const sessionStartTriggerKinds = new Set<SessionStartTriggerKind>([
@@ -98,12 +104,14 @@ export function createSessionLifecycle(options: SessionLifecycleOptions): Sessio
         state: "active",
         startedAt,
         endedAt: undefined,
+        endReason: undefined,
         trigger: normalizeTrigger(trigger),
-        timeout: undefined
+        timeout: undefined,
+        inactivitySuspended: false
       };
       nextSessionId += 1;
       session.timeout = scheduleSessionTimer(() => {
-        endSession(session, options.audit);
+        endSession(session, options.audit, "inactivity");
       }, durationMs);
       sessions.set(session.id, session);
       recordSessionAudit(options.audit, "session.started", startedAt, session);
@@ -122,13 +130,35 @@ export function createSessionLifecycle(options: SessionLifecycleOptions): Sessio
         throw new Error("pico session is not active");
       }
 
-      refreshSessionTimer(session, options.audit, durationMs);
+      if (!session.inactivitySuspended) {
+        refreshSessionTimer(session, options.audit, durationMs);
+      }
 
       return cloneSession(session);
     },
-    end(id) {
+    suspendInactivity(id) {
+      const session = requireActiveSession(sessions, id);
+
+      if (!session.inactivitySuspended) {
+        session.inactivitySuspended = true;
+        clearSessionTimer(session);
+      }
+
+      return cloneSession(session);
+    },
+    resumeInactivity(id) {
+      const session = requireActiveSession(sessions, id);
+
+      if (session.inactivitySuspended) {
+        session.inactivitySuspended = false;
+        refreshSessionTimer(session, options.audit, durationMs);
+      }
+
+      return cloneSession(session);
+    },
+    end(id, reason = "explicit") {
       const session = requireSession(sessions, id);
-      endSession(session, options.audit);
+      endSession(session, options.audit, reason);
 
       return cloneSession(session);
     },
@@ -148,19 +178,41 @@ export function createSessionLifecycle(options: SessionLifecycleOptions): Sessio
   };
 }
 
-function endSession(session: ManagedSession, audit: StructuredAuditLog | undefined): void {
+function endSession(
+  session: ManagedSession,
+  audit: StructuredAuditLog | undefined,
+  reason: SessionEndReason
+): void {
   if (session.state === "ended") {
     return;
   }
 
-  if (session.timeout !== undefined) {
-    clearTimeout(session.timeout);
-    session.timeout = undefined;
-  }
+  clearSessionTimer(session);
+  session.inactivitySuspended = false;
 
   session.state = "ended";
   session.endedAt = nowIso();
+  session.endReason = reason;
   recordSessionAudit(audit, "session.ended", session.endedAt, session);
+}
+
+function clearSessionTimer(session: ManagedSession): void {
+  if (session.timeout === undefined) {
+    return;
+  }
+
+  clearTimeout(session.timeout);
+  session.timeout = undefined;
+}
+
+function requireActiveSession(sessions: Map<string, ManagedSession>, id: string): ManagedSession {
+  const session = requireSession(sessions, id);
+
+  if (session.state !== "active") {
+    throw new Error("pico session is not active");
+  }
+
+  return session;
 }
 
 function refreshSessionTimer(
@@ -173,7 +225,7 @@ function refreshSessionTimer(
   }
 
   session.timeout = scheduleSessionTimer(() => {
-    endSession(session, audit);
+    endSession(session, audit, "inactivity");
   }, durationMs);
 }
 
@@ -275,6 +327,7 @@ function cloneSession(session: ManagedSession): SessionRecord {
     state: session.state,
     startedAt: session.startedAt,
     endedAt: session.endedAt,
+    endReason: session.endReason,
     trigger: Object.freeze({ ...session.trigger })
   });
 }

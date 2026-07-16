@@ -20,10 +20,11 @@ describe("pico cli", () => {
     expect(result.stderr).toContain(join(repoRoot, "scripts/roster.ts"));
   });
 
-  it("starts Pi with --pico for an empty invocation without model arguments", () => {
+  it("opens a dedicated production Terminal for an empty invocation", () => {
     expect(createPicoCliPlan([])).toEqual({
-      kind: "pi",
-      args: ["--pico"]
+      kind: "script",
+      scriptPath: "scripts/resident/development-terminal.ts",
+      args: ["--mode=production", "--terminal=terminal"]
     });
   });
 

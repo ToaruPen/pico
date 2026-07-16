@@ -6,18 +6,31 @@ import { resolve } from "node:path";
 import {
   defineResidentDevelopmentTerminalSession,
   type ResidentDevelopmentTerminal,
+  type ResidentTerminalMode,
   requireResidentDevelopmentTerminalPlatform
 } from "../../src/runtime/resident-development-terminal.js";
 
 requireResidentDevelopmentTerminalPlatform(process.platform);
 
 const session = defineResidentDevelopmentTerminalSession({
+  mode: readTerminalMode(process.argv.slice(2)),
   repoRoot: process.cwd(),
   homeDirectory: homedir(),
   configPath: resolve(process.env.PICO_CONFIG_PATH ?? "config/pico.local.yaml"),
   pathEnvironment: readDevelopmentTerminalPathEnvironment(process.env, homedir()),
   terminal: readDevelopmentTerminal(process.argv.slice(2), process.env)
 });
+
+function readTerminalMode(arguments_: readonly string[]): ResidentTerminalMode {
+  const option = arguments_.find((argument) => argument.startsWith("--mode="));
+  const value = option?.slice("--mode=".length) ?? "development";
+
+  if (value === "production" || value === "development") {
+    return value;
+  }
+
+  throw new Error("--mode must be production or development");
+}
 
 await writeLauncherScript(session);
 

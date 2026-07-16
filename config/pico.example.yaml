@@ -19,7 +19,7 @@ session:
     candidateTimeoutMs: 10000
   ending:
     mode: timed
-    durationMs: 60000
+    durationMs: 300000
 
 camera:
   tapo:

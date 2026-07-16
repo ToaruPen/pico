@@ -38,6 +38,7 @@ import {
   type ResidentVoiceLogRunMode,
   requireResidentVoiceRunId
 } from "./resident-voice-log-files.js";
+import type { ResidentVoiceMonitor } from "./resident-voice-monitor.js";
 import { warmResidentVoiceStartupProviders } from "./resident-voice-startup-warmup.js";
 import {
   createEnergySpeechActivityGate,
@@ -114,6 +115,7 @@ export async function runResidentVoiceWithProviders(input: {
   readonly signal: AbortSignal;
   readonly piAgent?: PiAgentTurnClient;
   readonly createPiAgent?: (options: PiAgentTurnClientOptions) => PiAgentTurnClient;
+  readonly monitor?: ResidentVoiceMonitor;
 }): Promise<void> {
   const { config, signal } = input;
   requireResidentVoiceEnabled(config);
@@ -188,6 +190,7 @@ export async function runResidentVoiceWithProviders(input: {
       tts,
       playback,
       piAgent,
+      ...optionalResidentMonitor(input.monitor),
       deferredTools,
       wakeAcknowledgement: {
         enabled: config.voice.resident.activation.mode === "wake_word"
@@ -205,6 +208,12 @@ export async function runResidentVoiceWithProviders(input: {
   } finally {
     await activation.close();
   }
+}
+
+function optionalResidentMonitor(monitor: ResidentVoiceMonitor | undefined): {
+  readonly monitor?: ResidentVoiceMonitor;
+} {
+  return monitor === undefined ? {} : { monitor };
 }
 
 function resolveResidentPiAgent(

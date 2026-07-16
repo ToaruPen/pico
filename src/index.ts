@@ -21,6 +21,8 @@ import {
 } from "./runtime/perception-tool.js";
 import { createPiHostTurnClient } from "./runtime/pi-host-turn.js";
 import { registerPicoStartup } from "./runtime/pico-startup.js";
+import { sendMacOsResidentNotification } from "./runtime/resident-system-notification.js";
+import { createResidentVoiceMonitor } from "./runtime/resident-voice-monitor.js";
 import { createResidentVoiceService } from "./runtime/resident-voice-service.js";
 import type { VoiceStageProbe } from "./runtime/voice-stage-probe.js";
 
@@ -128,13 +130,31 @@ export default function registerPicoExtension(pi: ExtensionAPI): void {
   const piAgent = createPiHostTurnClient(pi);
 
   registerPicoStartup(pi, {
-    createController: (context) =>
-      createResidentVoiceService({
+    createController: (context) => {
+      const monitor = createResidentVoiceMonitor({
+        ui: context.ui,
+        notifySystem: sendMacOsResidentNotification
+      });
+      const service = createResidentVoiceService({
         piAgent,
+        monitor,
         onError: (error) => {
+          monitor.setPhase("error");
           context.ui.notify(error.message, "error");
           context.shutdown();
         }
-      })
+      });
+
+      return {
+        start: service.start,
+        stop: async () => {
+          try {
+            await service.stop();
+          } finally {
+            monitor.close();
+          }
+        }
+      };
+    }
   });
 }

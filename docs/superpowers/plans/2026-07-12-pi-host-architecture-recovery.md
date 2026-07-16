@@ -3,9 +3,10 @@
 > Historical record: memory-related ownership in this document was superseded
 > by [Pi 所有 memory 責務境界設計](../specs/2026-07-13-pi-owned-memory-boundary-design.md).
 > Current Pico has no short-term or durable-memory implementation.
-> **Superseded scope:** Pi ownership と単一sessionの成果は維持する。runtime profile、
-> Pico内tool filtering、profile用テストは
-> `2026-07-11-autonomous-long-memory-retrieval.md` Task 6Aにより置き換えられた。
+> **Superseded scope:** Pi ownership と単一sessionの成果だけを維持する。runtime profileと
+> Pico内tool filteringは
+> [Pi Host Architecture Recovery Design](../specs/2026-07-12-pi-host-architecture-recovery-design.md)
+> の2026-07-12 decisionで廃止済みであり、memory ownershipは上記設計に従う。
 >
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

@@ -1,6 +1,7 @@
 import { loadPicoConfigFromEnvironment } from "../config/index.js";
 import type { PicoController as ResidentVoiceController } from "./pico-startup.js";
 import { acquireResidentSingleInstanceLock } from "./resident-single-instance-lock.js";
+import type { ResidentVoiceMonitor } from "./resident-voice-monitor.js";
 import {
   requireResidentVoiceEnabled,
   runResidentVoiceWithProviders
@@ -20,6 +21,7 @@ export type ResidentVoiceServiceControllerOptions = {
 
 export function createResidentVoiceService(options: {
   readonly piAgent: PiAgentTurnClient;
+  readonly monitor?: ResidentVoiceMonitor;
   readonly onError: (error: Error) => void;
 }): ResidentVoiceController {
   const config = loadPicoConfigFromEnvironment();
@@ -33,7 +35,8 @@ export function createResidentVoiceService(options: {
       runResidentVoiceWithProviders({
         config,
         signal,
-        piAgent: options.piAgent
+        piAgent: options.piAgent,
+        ...(options.monitor === undefined ? {} : { monitor: options.monitor })
       }),
     onError: options.onError
   });

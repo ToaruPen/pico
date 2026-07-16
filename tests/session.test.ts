@@ -24,6 +24,7 @@ describe("session lifecycle", () => {
         state: "active",
         startedAt: "2026-06-12T09:00:00.000Z",
         endedAt: undefined,
+        endReason: undefined,
         trigger
       });
       expect(lifecycle.read("session-1")).not.toHaveProperty("entries");
@@ -48,7 +49,8 @@ describe("session lifecycle", () => {
 
       expect(lifecycle.read("session-1")).toMatchObject({
         state: "ended",
-        endedAt: "2026-06-12T09:01:00.000Z"
+        endedAt: "2026-06-12T09:01:00.000Z",
+        endReason: "inactivity"
       });
       expect(audit.entries().map((event) => event.name)).toEqual([
         "session.started",
@@ -96,6 +98,49 @@ describe("session lifecycle", () => {
     }
   });
 
+  it("suspends inactivity while work is active and restarts a full window afterward", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-12T09:00:00.000Z"));
+
+    try {
+      const lifecycle = createSessionLifecycle({
+        ending: { mode: "timed", durationMs: 300_000 }
+      });
+      lifecycle.start(trigger);
+      lifecycle.suspendInactivity("session-1");
+
+      vi.advanceTimersByTime(600_000);
+      expect(lifecycle.read("session-1")?.state).toBe("active");
+
+      lifecycle.resumeInactivity("session-1");
+      vi.advanceTimersByTime(299_999);
+      expect(lifecycle.read("session-1")?.state).toBe("active");
+
+      vi.advanceTimersByTime(1);
+      expect(lifecycle.read("session-1")?.state).toBe("ended");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps inactivity suspension and resumption idempotent", () => {
+    vi.useFakeTimers();
+
+    try {
+      const lifecycle = createSessionLifecycle({
+        ending: { mode: "timed", durationMs: 300_000 }
+      });
+      lifecycle.start(trigger);
+
+      expect(() => lifecycle.suspendInactivity("session-1")).not.toThrow();
+      expect(() => lifecycle.suspendInactivity("session-1")).not.toThrow();
+      expect(() => lifecycle.resumeInactivity("session-1")).not.toThrow();
+      expect(() => lifecycle.resumeInactivity("session-1")).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("enforces one active interaction and allows another after ending", () => {
     const lifecycle = createSessionLifecycle({
       ending: { mode: "timed", durationMs: 60_000 }
@@ -123,6 +168,8 @@ describe("session lifecycle", () => {
       });
       lifecycle.start(trigger);
       const first = lifecycle.end("session-1");
+
+      expect(first.endReason).toBe("explicit");
 
       vi.setSystemTime(new Date("2026-06-12T09:01:00.000Z"));
 

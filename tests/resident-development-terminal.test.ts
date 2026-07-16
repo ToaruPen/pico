@@ -20,6 +20,25 @@ describe("resident dev terminal", () => {
     }).not.toThrow();
   });
 
+  it("builds a production Terminal session without development transcript logs", () => {
+    const session = defineResidentDevelopmentTerminalSession({
+      mode: "production",
+      repoRoot: "/Users/monsoon/Dev/pico",
+      homeDirectory: "/Users/monsoon",
+      configPath: "/Users/monsoon/Dev/pico/config/pico.local.yaml",
+      pathEnvironment: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+      terminal: "terminal"
+    });
+
+    expect(session.shellCommand).toContain(
+      "node_modules/.bin/pi --extension ./src/index.ts --pico"
+    );
+    expect(session.shellCommand).not.toContain("PICO_RESIDENT_VOICE_LOG_MODE='development'");
+    expect(session.shellCommand).not.toContain("PICO_VOICE_PROBE_STDOUT='summary'");
+    expect(session.shellCommand).not.toContain("metadata log");
+    expect(session.appleScript).toContain('tell application "Terminal"');
+  });
+
   it("builds a Terminal.app session that leaves Pi conversation output in the terminal", () => {
     const session = defineResidentDevelopmentTerminalSession({
       repoRoot: "/Users/monsoon/Dev/pico project",
@@ -81,6 +100,10 @@ describe("resident dev terminal", () => {
     expect(session.shellCommand).not.toContain("status=$?");
     expect(session.shellCommand).toContain("close windowItem saving no");
     expect(session.shellCommand).toContain("close tabItem saving no");
+    expect(session.shellCommand).toContain("(trap '' HUP; sleep 0.2; osascript ");
+    expect(session.shellCommand).toContain(' >/dev/null 2>&1) &!; exit "$exit_code"');
+    expect(session.shellCommand).not.toContain(" >/dev/null 2>&1 &)");
+    expect(session.shellCommand).not.toContain(' >/dev/null 2>&1) &; exit "$exit_code"');
     expect(session.shellCommand).toContain('exit "$exit_code"');
     expect(session.shellCommand).not.toContain("pico_HotStation");
     expect(session.shellCommand).not.toContain("HasunohaLabo7087");
@@ -88,6 +111,25 @@ describe("resident dev terminal", () => {
       "exec /bin/zsh '/Users/monsoon/.pico/dev-terminal/resident-voice-launcher.sh'"
     );
     expect(session.appleScript).not.toContain("npm run resident:voice");
+  });
+
+  it.runIf(process.platform === "darwin")("emits a zsh-valid Terminal launcher", () => {
+    const session = defineResidentDevelopmentTerminalSession({
+      repoRoot: "/Users/monsoon/Dev/pico",
+      homeDirectory: "/Users/monsoon",
+      configPath: "/Users/monsoon/Dev/pico/config/pico.local.yaml",
+      pathEnvironment: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+      terminal: "terminal"
+    });
+
+    const result = spawnSync("/bin/zsh", ["-n"], {
+      input: session.launcherScript,
+      encoding: "utf8"
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
   });
 
   it("builds a kitty session without Terminal.app AppleScript tab management", () => {

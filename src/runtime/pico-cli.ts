@@ -24,8 +24,9 @@ export function createPicoCliPlan(arguments_: readonly string[]): PicoCliPlan {
 
   if (command === undefined) {
     return {
-      kind: "pi",
-      args: ["--pico"]
+      kind: "script",
+      scriptPath: "scripts/resident/development-terminal.ts",
+      args: ["--mode=production", "--terminal=terminal"]
     };
   }
 

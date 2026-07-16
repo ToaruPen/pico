@@ -17,7 +17,13 @@ import type {
 } from "../modules/voice/index.js";
 import type { DeferredToolDeliverableResult } from "./deferred-tool-coordinator.js";
 import type { ResidentActivationEvent } from "./resident-activation.js";
+import type { ResidentVoiceMonitor } from "./resident-voice-monitor.js";
 import type { SpeechActivityGate, SpeechActivityGateResult } from "./speech-activity-gate.js";
+import {
+  type BusyVoiceControl,
+  classifyBusyVoiceControl,
+  extractAddressedRequest
+} from "./voice-addressing.js";
 import { recordVoiceStageProbe, type VoiceStageProbe } from "./voice-stage-probe.js";
 import {
   createVoiceUtteranceAssembler,
@@ -29,7 +35,7 @@ import {
 export type VoiceFrameSource = AsyncIterable<VoicePcmFrame> | Iterable<VoicePcmFrame>;
 
 export type VoicePlaybackSink = {
-  readonly play: (chunk: TtsAudioChunk, startedAt: string) => Promise<void>;
+  readonly play: (chunk: TtsAudioChunk, startedAt: string, signal?: AbortSignal) => Promise<void>;
 };
 
 export type VoiceResidentActivationSource = {
@@ -52,10 +58,22 @@ export type PiAgentTurnClient = {
     readonly text: string;
     readonly deferredToolResults?: readonly DeferredToolDeliverableResult[];
     readonly signal?: AbortSignal;
+    readonly beforeFirstTool?: (preface: string) => Promise<void>;
+    readonly onProgress?: (event: PiVoiceTurnProgress) => void;
   }) => Promise<{ readonly text: string }>;
   readonly disposeSession?: (sessionId: string) => void | Promise<void>;
   readonly disposeAll?: () => void | Promise<void>;
 };
+
+export type PiVoiceTurnProgress =
+  | { readonly phase: "thinking" }
+  | { readonly phase: "preparing" | "working"; readonly toolName: string }
+  | {
+      readonly phase: "tool_finished";
+      readonly toolName: string;
+      readonly succeeded: boolean;
+    }
+  | { readonly phase: "finalizing" };
 
 export type VoiceResidentLogEvent =
   | {
@@ -96,6 +114,7 @@ export type VoiceResidentRuntimeOptions = {
   readonly tts: TtsClient;
   readonly playback: VoicePlaybackSink;
   readonly piAgent: PiAgentTurnClient;
+  readonly monitor?: ResidentVoiceMonitor;
   readonly deferredTools?: {
     readonly collectDeliverableResults: (input: {
       readonly sessionId: string;
@@ -120,6 +139,12 @@ export type VoiceResidentRuntimeOptions = {
   readonly activation?: VoiceResidentActivation;
   readonly utteranceWindow: VoiceUtteranceWindowConfig;
   readonly monotonicNow?: () => number;
+  readonly outputQueue?: VoiceOutputQueue;
+};
+
+type VoiceOutputQueue = {
+  readonly enqueue: <T>(operation: () => Promise<T>) => Promise<T>;
+  readonly drain: () => Promise<void>;
 };
 
 export type VoiceResidentRuntimeResult = {
@@ -150,6 +175,41 @@ type PendingSessionState = {
   readonly pendingEndedSessionIds: Set<string>;
   readonly farewelledSessionIds: Set<string>;
   readonly pushToTalk: PushToTalkActivationState;
+  readonly activeVoiceTurn: ActiveVoiceTurnState;
+};
+
+type ActiveVoiceTurnState = {
+  current: ActiveVoiceTurn | undefined;
+  latestTerminal: VoiceTerminalRecord | undefined;
+};
+
+type VoiceTerminalRecord = {
+  readonly state: "completed" | "failed" | "cancelled" | "closed";
+  readonly reason?: "audio_output";
+};
+
+type ActiveVoiceTurn = {
+  readonly sessionId: string;
+  readonly abortController: AbortController;
+  completion: Promise<void>;
+  cancelRequested: boolean;
+  closed: boolean;
+  endAfterTurn: boolean;
+  terminal: boolean;
+  lastProgress: PiVoiceTurnProgress | undefined;
+  cancelAcknowledgement: Promise<void> | undefined;
+  toolFailed: boolean;
+};
+
+type ActiveVoiceTurnEffects = {
+  readonly isCurrent: () => boolean;
+  readonly projectProgress: (event: PiVoiceTurnProgress) => void;
+};
+
+type CompletedPiAgentResponse = {
+  readonly text: string;
+  readonly completedAt: string;
+  readonly durationMs: number;
 };
 
 type PushToTalkActivationState = {
@@ -165,6 +225,7 @@ type ActiveVoiceSessionResult =
       readonly kind: "started";
       readonly sessionId: string;
       readonly trigger: string;
+      readonly request: string;
     };
 
 const defaultNow = (): string => new Date().toISOString();
@@ -172,9 +233,12 @@ const defaultMonotonicNow = (): number => performance.now();
 const farewellPrompt =
   "The voice session is ending now. Respond with one brief spoken Japanese farewell for the staff. Do not introduce a new topic.";
 
+class VoiceAudioOutputError extends Error {}
+
 export async function runVoiceResidentRuntime(
   options: VoiceResidentRuntimeOptions
 ): Promise<VoiceResidentRuntimeResult> {
+  options = { ...options, outputQueue: options.outputQueue ?? createVoiceOutputQueue() };
   const now = options.now ?? defaultNow;
   const counters: VoiceResidentCounters = {
     processedFrames: 0,
@@ -189,6 +253,10 @@ export async function runVoiceResidentRuntime(
   const pushToTalk: PushToTalkActivationState = {
     pendingActivation: undefined
   };
+  const activeVoiceTurn: ActiveVoiceTurnState = {
+    current: undefined,
+    latestTerminal: undefined
+  };
   let activeSessionId: string | undefined;
   const utteranceAssembler = createVoiceUtteranceAssembler(options.utteranceWindow);
   const activeSession = {
@@ -199,74 +267,142 @@ export async function runVoiceResidentRuntime(
   };
 
   try {
-    const health = await options.echoControl.checkHealth();
-
-    if (!health.ok) {
-      throw new Error(`pico resident voice echo-control provider is unhealthy: ${health.message}`);
-    }
-
-    await finalizeEndedInteractions(
+    activeSessionId = await runResidentCapture(
       options,
-      pendingEndedSessionIds,
       counters,
       now,
-      farewelledSessionIds
-    );
-
-    for await (const rawFrame of toAsyncIterable(options.frames)) {
-      throwIfAborted(options.signal);
-      activeSessionId = await processResidentFrameIteration(rawFrame, options, counters, now, {
-        activeSession,
-        pendingEndedSessionIds,
-        farewelledSessionIds,
-        pushToTalk,
-        utteranceAssembler,
-        currentActiveSessionId: activeSessionId
-      });
-      counters.processedFrames += 1;
-    }
-
-    await flushPendingUtteranceWindow(utteranceAssembler, options, counters, now, {
-      activeSession,
       pendingEndedSessionIds,
       farewelledSessionIds,
-      pushToTalk
-    });
-
-    activeSessionId = await reconcileActiveSession(options.sessionLifecycle, activeSessionId, {
-      mode: "collect",
-      pendingEndedSessionIds,
-      piAgent: options.piAgent,
-      deferredTools: options.deferredTools
-    });
-    await finalizeEndedInteractions(
-      options,
-      pendingEndedSessionIds,
-      counters,
-      now,
-      farewelledSessionIds
+      pushToTalk,
+      activeVoiceTurn,
+      utteranceAssembler,
+      activeSession,
+      activeSessionId
     );
   } finally {
     try {
-      await flushPendingUtteranceWindow(utteranceAssembler, options, counters, now, {
-        activeSession,
-        pendingEndedSessionIds,
-        farewelledSessionIds,
-        pushToTalk
-      });
+      if (options.signal?.aborted !== true) {
+        await flushPendingUtteranceWindow(utteranceAssembler, options, counters, now, {
+          activeSession,
+          pendingEndedSessionIds,
+          farewelledSessionIds,
+          pushToTalk,
+          activeVoiceTurn
+        });
+      }
     } finally {
+      abortActiveVoiceTurn(activeVoiceTurn);
       activeSessionId = await runShutdownCleanup(
         options,
         activeSessionId,
         pendingEndedSessionIds,
         farewelledSessionIds,
         counters,
-        now
+        now,
+        activeVoiceTurn
       );
     }
   }
 
   return Object.freeze({ ...counters });
+}
+
+async function runResidentCapture(
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string,
+  pendingEndedSessionIds: Set<string>,
+  farewelledSessionIds: Set<string>,
+  pushToTalk: PushToTalkActivationState,
+  activeVoiceTurn: ActiveVoiceTurnState,
+  utteranceAssembler: VoiceUtteranceAssembler,
+  activeSession: ActiveSessionState,
+  initialActiveSessionId: string | undefined
+): Promise<string | undefined> {
+  const health = await options.echoControl.checkHealth();
+
+  if (!health.ok) {
+    throw new Error(`pico resident voice echo-control provider is unhealthy: ${health.message}`);
+  }
+
+  options.monitor?.setPhase("waiting");
+  await finalizeEndedInteractions(
+    options,
+    pendingEndedSessionIds,
+    counters,
+    now,
+    farewelledSessionIds
+  );
+
+  let activeSessionId = initialActiveSessionId;
+
+  for await (const rawFrame of toAsyncIterable(options.frames)) {
+    throwIfAborted(options.signal);
+    activeSessionId = await processResidentFrameIteration(rawFrame, options, counters, now, {
+      activeSession,
+      pendingEndedSessionIds,
+      farewelledSessionIds,
+      pushToTalk,
+      activeVoiceTurn,
+      utteranceAssembler,
+      currentActiveSessionId: activeSessionId
+    });
+    counters.processedFrames += 1;
+  }
+
+  throwIfAborted(options.signal);
+  await flushPendingUtteranceWindow(utteranceAssembler, options, counters, now, {
+    activeSession,
+    pendingEndedSessionIds,
+    farewelledSessionIds,
+    pushToTalk,
+    activeVoiceTurn
+  });
+  await waitForActiveVoiceTurn(activeVoiceTurn);
+
+  return reconcileAndFinalizeActiveSession(
+    activeSessionId,
+    "collect",
+    options,
+    pendingEndedSessionIds,
+    counters,
+    now,
+    farewelledSessionIds
+  );
+}
+
+async function reconcileAndFinalizeActiveSession(
+  activeSessionId: string | undefined,
+  mode: "collect" | "shutdown",
+  options: VoiceResidentRuntimeOptions,
+  pendingEndedSessionIds: Set<string>,
+  counters: VoiceResidentCounters,
+  now: () => string,
+  farewelledSessionIds: Set<string>
+): Promise<string | undefined> {
+  const nextActiveSessionId = await reconcileActiveSession(
+    options.sessionLifecycle,
+    activeSessionId,
+    {
+      mode,
+      pendingEndedSessionIds,
+      piAgent: options.piAgent,
+      deferredTools: options.deferredTools
+    }
+  );
+  await finalizeEndedInteractions(
+    options,
+    pendingEndedSessionIds,
+    counters,
+    now,
+    farewelledSessionIds
+  );
+
+  if (mode === "collect" && activeSessionId !== undefined && nextActiveSessionId === undefined) {
+    options.monitor?.setPhase("waiting");
+  }
+
+  return nextActiveSessionId;
 }
 
 async function runShutdownCleanup(
@@ -275,19 +411,24 @@ async function runShutdownCleanup(
   pendingEndedSessionIds: Set<string>,
   farewelledSessionIds: Set<string>,
   counters: VoiceResidentCounters,
-  now: () => string
+  now: () => string,
+  activeVoiceTurn: ActiveVoiceTurnState
 ): Promise<string | undefined> {
   const errors: Error[] = [];
   let nextActiveSessionId = activeSessionId;
 
+  await recordCleanupError(errors, () => options.piAgent.disposeAll?.());
+  await recordCleanupError(errors, () => waitForActiveVoiceTurn(activeVoiceTurn));
+
   await recordCleanupError(errors, async () => {
-    nextActiveSessionId = await cleanupActiveSessionForShutdown(
-      options,
+    nextActiveSessionId = await reconcileAndFinalizeActiveSession(
       activeSessionId,
+      "shutdown",
+      options,
       pendingEndedSessionIds,
-      farewelledSessionIds,
       counters,
-      now
+      now,
+      farewelledSessionIds
     );
   });
 
@@ -309,8 +450,8 @@ async function collectShutdownCleanupErrors(
   options: VoiceResidentRuntimeOptions,
   errors: Error[]
 ): Promise<void> {
-  await recordCleanupError(errors, () => options.piAgent.disposeAll?.());
   await recordCleanupError(errors, () => options.deferredTools?.waitForIdle?.());
+  await recordCleanupError(errors, () => options.outputQueue?.drain());
   await recordCleanupError(errors, () => options.echoControl.flush());
   await recordCleanupError(errors, () => options.speechActivity?.close?.());
 }
@@ -367,35 +508,6 @@ async function flushPendingUtteranceWindow(
   state: PendingSessionState
 ): Promise<void> {
   await processTranscribedUtterances(utteranceAssembler.flush(), options, counters, now, state);
-}
-
-async function cleanupActiveSessionForShutdown(
-  options: VoiceResidentRuntimeOptions,
-  activeSessionId: string | undefined,
-  pendingEndedSessionIds: Set<string>,
-  farewelledSessionIds: Set<string>,
-  counters: VoiceResidentCounters,
-  now: () => string
-): Promise<string | undefined> {
-  const nextActiveSessionId = await reconcileActiveSession(
-    options.sessionLifecycle,
-    activeSessionId,
-    {
-      mode: "shutdown",
-      pendingEndedSessionIds,
-      piAgent: options.piAgent,
-      deferredTools: options.deferredTools
-    }
-  );
-  await finalizeEndedInteractions(
-    options,
-    pendingEndedSessionIds,
-    counters,
-    now,
-    farewelledSessionIds
-  );
-
-  return nextActiveSessionId;
 }
 
 async function processNearEndFrame(
@@ -481,40 +593,44 @@ async function processTranscribedUtterance(
   state: PendingSessionState
 ): Promise<void> {
   recordUtteranceWindowProbe(utterance, options);
+  options.monitor?.setPhase("transcribing");
   const transcript = await transcribePassedFrame(utterance, options, counters, now);
+  await reconcileSessionAfterTranscription(options, counters, now, state);
+  throwIfAborted(options.signal);
 
-  if (
-    transcript === undefined ||
-    transcript.text === "" ||
-    isLikelyNoSpeechHallucination(transcript.text)
-  ) {
+  if (!isUsableTranscript(transcript)) {
+    restoreResidentVoicePhase(options, state);
     return;
   }
 
   const activeSession = ensureActiveVoiceSession(transcript, options, counters, now, state);
 
   if (activeSession === undefined) {
+    restoreResidentVoicePhase(options, state);
     return;
   }
 
-  if (activeSession.kind === "started") {
-    await runOptionalWakeAcknowledgement(activeSession, options, counters, now);
-    return;
-  }
+  options.monitor?.showAcceptedTranscript(transcript.text);
+  await routeAcceptedVoiceTranscript(transcript.text, activeSession, options, counters, now, state);
+}
 
-  if (activeSession.sessionId !== state.activeSession.getActiveSessionId()) {
-    return;
-  }
-
-  await runActiveVoiceTurn(transcript.text, options, counters, now, activeSession.sessionId);
-  state.activeSession.setActiveSessionId(
-    await reconcileActiveSession(options.sessionLifecycle, activeSession.sessionId, {
+async function reconcileSessionAfterTranscription(
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string,
+  state: PendingSessionState
+): Promise<void> {
+  const activeSessionId = await reconcileActiveSession(
+    options.sessionLifecycle,
+    state.activeSession.getActiveSessionId(),
+    {
       mode: "collect",
       pendingEndedSessionIds: state.pendingEndedSessionIds,
       piAgent: options.piAgent,
       deferredTools: options.deferredTools
-    })
+    }
   );
+  state.activeSession.setActiveSessionId(activeSessionId);
   await finalizeEndedInteractions(
     options,
     state.pendingEndedSessionIds,
@@ -522,6 +638,549 @@ async function processTranscribedUtterance(
     now,
     state.farewelledSessionIds
   );
+}
+
+function isUsableTranscript(
+  transcript: { readonly text: string; readonly confidence: number } | undefined
+): transcript is { readonly text: string; readonly confidence: number } {
+  return (
+    transcript !== undefined &&
+    transcript.text !== "" &&
+    !isLikelyNoSpeechHallucination(transcript.text)
+  );
+}
+
+async function routeAcceptedVoiceTranscript(
+  transcript: string,
+  activeSession: ActiveVoiceSessionResult,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string,
+  state: PendingSessionState
+): Promise<void> {
+  await settleTerminalVoiceTurn(state.activeVoiceTurn);
+
+  if (activeSession.kind === "started") {
+    await handleStartedVoiceSession(activeSession, options, counters, now, state);
+    return;
+  }
+
+  if (activeSession.sessionId !== state.activeSession.getActiveSessionId()) {
+    return;
+  }
+
+  if (state.activeVoiceTurn.current !== undefined) {
+    await handleBusyVoiceUtterance(
+      transcript,
+      options,
+      counters,
+      state.activeVoiceTurn.current,
+      state
+    );
+    return;
+  }
+
+  const idleControl = classifyBusyVoiceControl(transcript);
+
+  if (idleControl === "status" && state.activeVoiceTurn.latestTerminal !== undefined) {
+    await playTerminalStatusResponse(
+      describeLatestTerminalVoiceTurn(state.activeVoiceTurn.latestTerminal),
+      activeSession.sessionId,
+      options,
+      counters
+    );
+    return;
+  }
+
+  if (idleControl === "end") {
+    options.sessionLifecycle.end(activeSession.sessionId);
+    return;
+  }
+
+  startOwnedActiveVoiceTurn(
+    transcript,
+    options,
+    counters,
+    now,
+    activeSession.sessionId,
+    state.activeVoiceTurn
+  );
+}
+
+function describeLatestTerminalVoiceTurn(terminal: VoiceTerminalRecord): string {
+  if (terminal.state === "completed") {
+    return "直前の作業は完了しています。";
+  }
+
+  if (terminal.state === "cancelled") {
+    return "直前の作業は中止されています。";
+  }
+
+  if (terminal.state === "closed") {
+    return "直前の作業は終了しています。";
+  }
+
+  return terminal.reason === "audio_output"
+    ? "直前の作業は音声出力障害で終了しました。"
+    : "直前の作業はエラーで終了しました。";
+}
+
+async function handleStartedVoiceSession(
+  activeSession: Extract<ActiveVoiceSessionResult, { readonly kind: "started" }>,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string,
+  state: PendingSessionState
+): Promise<void> {
+  if (activeSession.request === "") {
+    await runOptionalWakeAcknowledgement(activeSession, options, counters, now);
+    restoreResidentVoicePhase(options, state);
+    return;
+  }
+
+  startOwnedActiveVoiceTurn(
+    activeSession.request,
+    options,
+    counters,
+    now,
+    activeSession.sessionId,
+    state.activeVoiceTurn
+  );
+}
+
+function startOwnedActiveVoiceTurn(
+  transcript: string,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string,
+  sessionId: string,
+  state: ActiveVoiceTurnState
+): void {
+  if (state.current !== undefined) {
+    throw new Error("pico resident voice already has an active turn");
+  }
+
+  options.monitor?.resetTurn?.();
+  const abortController = new AbortController();
+  const operation: ActiveVoiceTurn = {
+    sessionId,
+    abortController,
+    completion: Promise.resolve(),
+    cancelRequested: false,
+    closed: false,
+    endAfterTurn: false,
+    terminal: false,
+    lastProgress: undefined,
+    cancelAcknowledgement: undefined,
+    toolFailed: false
+  };
+  const turnSignal =
+    options.signal === undefined
+      ? abortController.signal
+      : AbortSignal.any([options.signal, abortController.signal]);
+  const failedTurnsBefore = counters.failedTurns;
+  state.current = operation;
+  const effects: ActiveVoiceTurnEffects = {
+    isCurrent: () =>
+      state.current === operation &&
+      !operation.cancelRequested &&
+      !operation.terminal &&
+      !turnSignal.aborted,
+    projectProgress(event) {
+      if (!effects.isCurrent()) {
+        return;
+      }
+
+      operation.lastProgress = event;
+
+      if (event.phase === "tool_finished" && !event.succeeded) {
+        operation.toolFailed = true;
+      }
+
+      projectPiTurnProgress(event, options.monitor);
+    }
+  };
+  operation.completion = Promise.resolve()
+    .then(() =>
+      runActiveVoiceTurn(
+        transcript,
+        { ...options, signal: turnSignal },
+        counters,
+        now,
+        sessionId,
+        effects
+      )
+    )
+    .then(
+      () =>
+        finalizeOwnedActiveVoiceTurn(
+          operation,
+          options,
+          counters,
+          failedTurnsBefore,
+          state,
+          undefined
+        ),
+      (error: unknown) =>
+        finalizeOwnedActiveVoiceTurn(
+          operation,
+          options,
+          counters,
+          failedTurnsBefore,
+          state,
+          error instanceof VoiceAudioOutputError ? "audio_output" : "other"
+        )
+    );
+}
+
+async function finalizeOwnedActiveVoiceTurn(
+  operation: ActiveVoiceTurn,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  failedTurnsBefore: number,
+  state: ActiveVoiceTurnState,
+  rejectionReason: "audio_output" | "other" | undefined
+): Promise<void> {
+  if (operation.closed || options.signal?.aborted === true) {
+    finalizeClosedVoiceTurn(operation, state);
+    return;
+  }
+
+  if (operation.cancelRequested) {
+    await finalizeCancelledVoiceTurn(operation, options, counters, failedTurnsBefore, state);
+    return;
+  }
+
+  finalizeSettledVoiceTurn(operation, options, counters, failedTurnsBefore, state, rejectionReason);
+}
+
+async function finalizeCancelledVoiceTurn(
+  operation: ActiveVoiceTurn,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  failedTurnsBefore: number,
+  state: ActiveVoiceTurnState
+): Promise<void> {
+  const acknowledgement = await waitForCancellationAcknowledgement(operation);
+
+  if (operation.closed || options.signal?.aborted === true) {
+    finalizeClosedVoiceTurn(operation, state);
+    return;
+  }
+
+  if (acknowledgement === "failed") {
+    finalizeCancellationAcknowledgementFailure(
+      operation,
+      options,
+      counters,
+      failedTurnsBefore,
+      state
+    );
+    return;
+  }
+
+  resumeAfterCancellationIfNeeded(operation, options);
+  endSessionAfterCancellationIfNeeded(operation, options.sessionLifecycle);
+  operation.terminal = true;
+  state.latestTerminal = { state: "cancelled" };
+  options.monitor?.setPhase("cancelled", {
+    resumePhase: readSessionResumePhase(options.sessionLifecycle, operation.sessionId)
+  });
+  options.monitor?.notifyTerminal("cancelled");
+}
+
+async function waitForCancellationAcknowledgement(
+  operation: ActiveVoiceTurn
+): Promise<"delivered" | "failed"> {
+  try {
+    await operation.cancelAcknowledgement;
+    return "delivered";
+  } catch {
+    return "failed";
+  }
+}
+
+function finalizeClosedVoiceTurn(operation: ActiveVoiceTurn, state: ActiveVoiceTurnState): void {
+  operation.closed = true;
+  operation.terminal = true;
+  state.latestTerminal = { state: "closed" };
+}
+
+function finalizeCancellationAcknowledgementFailure(
+  operation: ActiveVoiceTurn,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  failedTurnsBefore: number,
+  state: ActiveVoiceTurnState
+): void {
+  if (operation.endAfterTurn) {
+    endSessionAfterCancellationIfNeeded(operation, options.sessionLifecycle);
+  } else if (options.signal?.aborted !== true) {
+    resumeSessionInactivityQuietly(options.sessionLifecycle, operation.sessionId);
+  }
+
+  incrementFailedTurnOnce(counters, failedTurnsBefore);
+  operation.terminal = true;
+  state.latestTerminal = { state: "failed" };
+  options.monitor?.setPhase("error", {
+    resumePhase: readSessionResumePhase(options.sessionLifecycle, operation.sessionId)
+  });
+  options.monitor?.notifyTerminal("failed");
+}
+
+function resumeAfterCancellationIfNeeded(
+  operation: ActiveVoiceTurn,
+  options: VoiceResidentRuntimeOptions
+): void {
+  if (options.signal?.aborted !== true && !operation.endAfterTurn) {
+    resumeSessionInactivityQuietly(options.sessionLifecycle, operation.sessionId);
+  }
+}
+
+function endSessionAfterCancellationIfNeeded(
+  operation: ActiveVoiceTurn,
+  lifecycle: SessionLifecycle
+): void {
+  if (operation.endAfterTurn && lifecycle.read(operation.sessionId)?.state === "active") {
+    lifecycle.end(operation.sessionId);
+  }
+}
+
+function finalizeSettledVoiceTurn(
+  operation: ActiveVoiceTurn,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  failedTurnsBefore: number,
+  state: ActiveVoiceTurnState,
+  rejectionReason: "audio_output" | "other" | undefined
+): void {
+  const failed =
+    rejectionReason !== undefined ||
+    operation.toolFailed ||
+    counters.failedTurns > failedTurnsBefore;
+
+  if (failed) {
+    incrementFailedTurnOnce(counters, failedTurnsBefore);
+  }
+  operation.terminal = true;
+  state.latestTerminal = createVoiceTerminalRecord(failed, rejectionReason);
+  projectSettledVoiceTerminal(operation, options, failed, rejectionReason);
+}
+
+function incrementFailedTurnOnce(counters: VoiceResidentCounters, failedTurnsBefore: number): void {
+  if (counters.failedTurns === failedTurnsBefore) {
+    counters.failedTurns += 1;
+  }
+}
+
+function createVoiceTerminalRecord(
+  failed: boolean,
+  rejectionReason: "audio_output" | "other" | undefined
+): VoiceTerminalRecord {
+  if (!failed) {
+    return { state: "completed" };
+  }
+
+  return rejectionReason === "audio_output"
+    ? { state: "failed", reason: "audio_output" }
+    : { state: "failed" };
+}
+
+function projectSettledVoiceTerminal(
+  operation: ActiveVoiceTurn,
+  options: VoiceResidentRuntimeOptions,
+  failed: boolean,
+  rejectionReason: "audio_output" | "other" | undefined
+): void {
+  const resumePhase = readSessionResumePhase(options.sessionLifecycle, operation.sessionId);
+  const monitor = options.monitor;
+
+  if (monitor === undefined) {
+    return;
+  }
+
+  if (!failed) {
+    monitor.setPhase("completed", { resumePhase });
+    monitor.notifyTerminal("completed");
+    return;
+  }
+
+  if (rejectionReason === "audio_output") {
+    monitor.setPhase("error", { resumePhase, errorDetail: "audio_output" });
+    monitor.notifyTerminal("failed", { reason: "audio_output" });
+    return;
+  }
+
+  monitor.setPhase("error", { resumePhase });
+  monitor.notifyTerminal("failed");
+}
+
+function readSessionResumePhase(
+  lifecycle: SessionLifecycle,
+  sessionId: string
+): "waiting" | "listening" {
+  return lifecycle.read(sessionId)?.state === "active" ? "listening" : "waiting";
+}
+
+function restoreResidentVoicePhase(
+  options: VoiceResidentRuntimeOptions,
+  state: PendingSessionState
+): void {
+  const operation = state.activeVoiceTurn.current;
+
+  if (restoreActiveVoiceTurnPhase(operation, options.monitor)) {
+    return;
+  }
+
+  const sessionId = state.activeSession.getActiveSessionId();
+  options.monitor?.setPhase(
+    sessionId !== undefined && options.sessionLifecycle.read(sessionId)?.state === "active"
+      ? "listening"
+      : "waiting"
+  );
+}
+
+function restoreActiveVoiceTurnPhase(
+  operation: ActiveVoiceTurn | undefined,
+  monitor: ResidentVoiceMonitor | undefined
+): boolean {
+  if (operation === undefined || operation.terminal) {
+    return false;
+  }
+
+  if (operation.cancelRequested) {
+    monitor?.setPhase("cancelling");
+    return true;
+  }
+
+  if (operation.lastProgress !== undefined) {
+    projectPiTurnProgress(operation.lastProgress, monitor);
+    return true;
+  }
+
+  monitor?.setPhase("thinking");
+  return true;
+}
+
+async function handleBusyVoiceUtterance(
+  transcript: string,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  operation: ActiveVoiceTurn,
+  state: PendingSessionState
+): Promise<void> {
+  const control = classifyBusyVoiceControl(transcript);
+
+  if (control === "status") {
+    const factualStatus = options.monitor?.describeCurrentWork() ?? "まだ作業中です。";
+    await playRequiredTurnText(`${factualStatus}終わったら声をかけます。`, options, counters);
+    restoreResidentVoicePhase(options, state);
+    return;
+  }
+
+  if (control === "new_request") {
+    await playRequiredTurnText("今の作業が終わってから、もう一度お願いしてね。", options, counters);
+    restoreResidentVoicePhase(options, state);
+    return;
+  }
+
+  operation.endAfterTurn = retainEndAfterTurn(operation.endAfterTurn, control);
+
+  if (!operation.cancelRequested) {
+    operation.cancelRequested = true;
+    options.monitor?.setPhase("cancelling");
+    operation.cancelAcknowledgement = Promise.resolve().then(() =>
+      playRequiredTurnText(
+        control === "end" ? "わかった。作業を止めて終わりにするね。" : "わかった。中止するね。",
+        options,
+        counters
+      )
+    );
+    operation.abortController.abort();
+  }
+
+  try {
+    await operation.cancelAcknowledgement;
+  } catch {
+    return;
+  }
+
+  restoreResidentVoicePhase(options, state);
+}
+
+function retainEndAfterTurn(current: boolean, control: BusyVoiceControl): boolean {
+  return current || control === "end";
+}
+
+async function playTerminalStatusResponse(
+  text: string,
+  sessionId: string,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters
+): Promise<void> {
+  if (options.sessionLifecycle.read(sessionId)?.state !== "active") {
+    return;
+  }
+
+  options.sessionLifecycle.suspendInactivity(sessionId);
+
+  try {
+    await playRequiredTurnText(text, options, counters);
+  } finally {
+    resumeSessionInactivityQuietly(options.sessionLifecycle, sessionId);
+    options.monitor?.setPhase(
+      options.sessionLifecycle.read(sessionId)?.state === "active" ? "listening" : "waiting"
+    );
+  }
+}
+
+function abortActiveVoiceTurn(state: ActiveVoiceTurnState): void {
+  const operation = state.current;
+
+  if (operation === undefined || operation.terminal || operation.closed) {
+    return;
+  }
+
+  operation.closed = true;
+  operation.cancelRequested = true;
+  operation.abortController.abort();
+}
+
+async function waitForActiveVoiceTurn(state: ActiveVoiceTurnState): Promise<void> {
+  const operation = state.current;
+
+  if (operation === undefined) {
+    return;
+  }
+
+  try {
+    await operation.completion;
+  } finally {
+    if (state.current === operation) {
+      state.current = undefined;
+    }
+  }
+}
+
+async function settleTerminalVoiceTurn(state: ActiveVoiceTurnState): Promise<void> {
+  const operation = state.current;
+
+  if (operation === undefined || operation.terminal) {
+    await waitForActiveVoiceTurn(state);
+    return;
+  }
+
+  const outcome = await Promise.race([
+    operation.completion.then(
+      () => "terminal" as const,
+      () => "terminal" as const
+    ),
+    new Promise<"active">((resolve) => setImmediate(() => resolve("active")))
+  ]);
+
+  if (outcome === "terminal") {
+    await waitForActiveVoiceTurn(state);
+  }
 }
 
 function isLikelyNoSpeechHallucination(text: string): boolean {
@@ -564,13 +1223,19 @@ async function runOptionalWakeAcknowledgement(
     return;
   }
 
-  await runWakeAcknowledgement(
-    activeSession.sessionId,
-    activeSession.trigger,
-    options,
-    counters,
-    now
-  );
+  options.sessionLifecycle.suspendInactivity(activeSession.sessionId);
+
+  try {
+    await runWakeAcknowledgement(
+      activeSession.sessionId,
+      activeSession.trigger,
+      options,
+      counters,
+      now
+    );
+  } finally {
+    resumeSessionInactivityQuietly(options.sessionLifecycle, activeSession.sessionId);
+  }
 }
 
 async function processEchoControlledFrame(
@@ -702,25 +1367,27 @@ function ensureActiveVoiceSession(
     };
   }
 
-  const trigger =
+  const addressed =
     transcript.confidence >= (options.minTriggerConfidence ?? 0.5)
-      ? findTrigger(transcript.text, options.triggerPhrases)
+      ? extractAddressedRequest(transcript.text, options.triggerPhrases)
       : undefined;
-  recordTriggerProbe(trigger, options, now);
+  recordTriggerProbe(addressed?.trigger, options, now);
 
-  if (trigger === undefined) {
+  if (addressed === undefined) {
     return undefined;
   }
 
+  const trigger = addressed.trigger;
   const started = options.sessionLifecycle.start(buildVoiceTrigger(trigger));
   state.activeSession.setActiveSessionId(started.id);
   counters.startedSessions += 1;
-  recordSessionStartProbe(started.id, options, now);
+  recordSessionStartProbe(options, now);
 
   return {
     kind: "started",
     sessionId: started.id,
-    trigger
+    trigger,
+    request: addressed.request
   };
 }
 
@@ -760,7 +1427,7 @@ function ensurePushToTalkVoiceSession(
   const started = options.sessionLifecycle.start(activation.trigger);
   state.activeSession.setActiveSessionId(started.id);
   counters.startedSessions += 1;
-  recordSessionStartProbe(started.id, options, now);
+  recordSessionStartProbe(options, now);
 
   return {
     kind: "active",
@@ -784,11 +1451,7 @@ function recordTriggerProbe(
   });
 }
 
-function recordSessionStartProbe(
-  _sessionId: string,
-  options: VoiceResidentRuntimeOptions,
-  now: () => string
-): void {
+function recordSessionStartProbe(options: VoiceResidentRuntimeOptions, now: () => string): void {
   recordVoiceStageProbe(options.probe ?? {}, {
     stage: "session_start",
     status: "ok",
@@ -862,7 +1525,9 @@ async function runWakeAcknowledgement(
       "pico.voice.chunk_count": ttsResult.chunks.length
     }
   });
+  options.monitor?.setPhase("speaking");
   await playTtsChunks(ttsResult.chunks, options, now);
+
   refreshSessionActivityQuietly(options.sessionLifecycle, sessionId);
   counters.completedTurns += 1;
 }
@@ -878,12 +1543,39 @@ async function runActiveVoiceTurn(
   options: VoiceResidentRuntimeOptions,
   counters: VoiceResidentCounters,
   now: () => string,
-  activeSessionId: string
+  activeSessionId: string,
+  effects: ActiveVoiceTurnEffects
 ): Promise<void> {
   if (!refreshActiveInteraction(options.sessionLifecycle, activeSessionId)) {
     return;
   }
 
+  options.sessionLifecycle.suspendInactivity(activeSessionId);
+
+  try {
+    await runActiveVoiceTurnWhileInactivityIsSuspended(
+      transcript,
+      options,
+      counters,
+      now,
+      activeSessionId,
+      effects
+    );
+  } finally {
+    if (options.signal?.aborted !== true) {
+      resumeSessionInactivityQuietly(options.sessionLifecycle, activeSessionId);
+    }
+  }
+}
+
+async function runActiveVoiceTurnWhileInactivityIsSuspended(
+  transcript: string,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string,
+  activeSessionId: string,
+  effects: ActiveVoiceTurnEffects
+): Promise<void> {
   const piStageStartedAt = now();
   const piStageStartedMs = (options.monotonicNow ?? defaultMonotonicNow)();
   const turnRequest = createActiveVoiceTurnRequest(transcript, options, activeSessionId, now);
@@ -899,13 +1591,46 @@ async function runActiveVoiceTurn(
     options,
     counters,
     piStageStartedAt,
-    piStageStartedMs
+    piStageStartedMs,
+    effects
   );
 
   if (response === undefined) {
     return;
   }
 
+  if (!effects.isCurrent()) {
+    return;
+  }
+
+  recordCompletedPiAgentResponse(response, activeSessionId, piStageStartedAt, options);
+  const responsePlayed = await synthesizeAndPlayActiveTurnResponse(
+    response,
+    options,
+    counters,
+    now,
+    effects
+  );
+
+  if (!responsePlayed) {
+    return;
+  }
+
+  if (!effects.isCurrent()) {
+    return;
+  }
+
+  acknowledgeDeferredToolDelivery(options, turnRequest.deferredResults);
+  refreshSessionActivityQuietly(options.sessionLifecycle, activeSessionId);
+  counters.completedTurns += 1;
+}
+
+function recordCompletedPiAgentResponse(
+  response: CompletedPiAgentResponse,
+  activeSessionId: string,
+  piStageStartedAt: string,
+  options: VoiceResidentRuntimeOptions
+): void {
   recordResidentLogEvent(options.log, {
     kind: "pi_agent_response",
     occurredAt: response.completedAt,
@@ -919,17 +1644,25 @@ async function runActiveVoiceTurn(
     durationMs: response.durationMs,
     attributes: {}
   });
+}
 
+async function synthesizeAndPlayActiveTurnResponse(
+  response: CompletedPiAgentResponse,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  now: () => string,
+  effects: ActiveVoiceTurnEffects
+): Promise<boolean> {
   const ttsStageStartedAt = now();
-  const ttsResult = await synthesizeTurnResponse(
+  const ttsResult = await requireFinalTurnSynthesis(
     response.text,
     options,
     counters,
     ttsStageStartedAt
   );
 
-  if (ttsResult === undefined) {
-    return;
+  if (!effects.isCurrent()) {
+    return false;
   }
 
   recordVoiceStageProbe(options.probe ?? {}, {
@@ -941,10 +1674,46 @@ async function runActiveVoiceTurn(
       "pico.voice.chunk_count": ttsResult.chunks.length
     }
   });
-  await playTtsChunks(ttsResult.chunks, options, now);
-  acknowledgeDeferredToolDelivery(options, turnRequest.deferredResults);
-  refreshSessionActivityQuietly(options.sessionLifecycle, activeSessionId);
-  counters.completedTurns += 1;
+  options.monitor?.setPhase("speaking");
+  await playFinalTurnResponse(ttsResult.chunks, options, now);
+  return true;
+}
+
+async function requireFinalTurnSynthesis(
+  text: string,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  startedAt: string
+): Promise<TtsSynthesisSuccess> {
+  const ttsResult = await synthesizeTurnResponse(text, options, counters, startedAt);
+
+  if (ttsResult === undefined) {
+    throw new VoiceAudioOutputError("pico resident voice final synthesis failed");
+  }
+
+  return ttsResult;
+}
+
+async function playFinalTurnResponse(
+  chunks: readonly TtsAudioChunk[],
+  options: VoiceResidentRuntimeOptions,
+  now: () => string
+): Promise<void> {
+  try {
+    await playTtsChunks(chunks, options, now);
+  } catch {
+    throw new VoiceAudioOutputError("pico resident voice final playback failed");
+  }
+}
+
+function resumeSessionInactivityQuietly(lifecycle: SessionLifecycle, sessionId: string): void {
+  try {
+    if (lifecycle.read(sessionId)?.state === "active") {
+      lifecycle.resumeInactivity(sessionId);
+    }
+  } catch {
+    // A turn may end or remove its interaction before playback cleanup.
+  }
 }
 
 function createActiveVoiceTurnRequest(
@@ -996,43 +1765,198 @@ async function requestPiAgentResponse(
   options: VoiceResidentRuntimeOptions,
   counters: VoiceResidentCounters,
   startedAt: string,
-  startedAtMs: number
-): Promise<
-  | {
-      readonly text: string;
-      readonly completedAt: string;
-      readonly durationMs: number;
-    }
-  | undefined
-> {
+  startedAtMs: number,
+  effects?: ActiveVoiceTurnEffects
+): Promise<CompletedPiAgentResponse | undefined> {
   try {
-    const response = await options.piAgent.prompt({
-      sessionId,
-      text: transcript,
-      ...(deferredToolResults.length === 0 ? {} : { deferredToolResults }),
+    const response = await options.piAgent.prompt(
+      createPiAgentPromptInput(
+        sessionId,
+        transcript,
+        deferredToolResults,
+        options,
+        counters,
+        effects
+      )
+    );
+
+    if (isInactiveVoiceTurn(effects)) {
+      return undefined;
+    }
+
+    return completePiAgentResponse(response.text, options, startedAtMs);
+  } catch (error) {
+    return handlePiAgentPromptFailure(error, options, counters, startedAt, effects);
+  }
+}
+
+function createPiAgentPromptInput(
+  sessionId: string,
+  transcript: string,
+  deferredToolResults: readonly DeferredToolDeliverableResult[],
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  effects: ActiveVoiceTurnEffects | undefined
+): Parameters<PiAgentTurnClient["prompt"]>[0] {
+  return {
+    sessionId,
+    text: transcript,
+    beforeFirstTool: createBeforeFirstToolHandler(options, counters, effects),
+    onProgress: (event) => projectPromptProgress(event, effects, options.monitor),
+    ...(deferredToolResults.length === 0 ? {} : { deferredToolResults }),
+    ...(options.signal === undefined ? {} : { signal: options.signal })
+  };
+}
+
+function createBeforeFirstToolHandler(
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  effects: ActiveVoiceTurnEffects | undefined
+): (preface: string) => Promise<void> {
+  return async (preface) => {
+    assertCurrentVoiceTurn(effects);
+    await playRequiredTurnText(preface, options, counters);
+    assertCurrentVoiceTurn(effects);
+  };
+}
+
+function assertCurrentVoiceTurn(effects: ActiveVoiceTurnEffects | undefined): void {
+  if (isInactiveVoiceTurn(effects)) {
+    throw new Error("pico resident voice turn is no longer active");
+  }
+}
+
+function isInactiveVoiceTurn(effects: ActiveVoiceTurnEffects | undefined): boolean {
+  return effects !== undefined && !effects.isCurrent();
+}
+
+function projectPromptProgress(
+  event: PiVoiceTurnProgress,
+  effects: ActiveVoiceTurnEffects | undefined,
+  monitor: ResidentVoiceMonitor | undefined
+): void {
+  if (effects === undefined) {
+    projectPiTurnProgress(event, monitor);
+    return;
+  }
+
+  effects.projectProgress(event);
+}
+
+function completePiAgentResponse(
+  text: string,
+  options: VoiceResidentRuntimeOptions,
+  startedAtMs: number
+): CompletedPiAgentResponse {
+  const completedAt = (options.now ?? defaultNow)();
+  const completedAtMs = (options.monotonicNow ?? defaultMonotonicNow)();
+
+  return {
+    text,
+    completedAt,
+    durationMs: Math.max(0, completedAtMs - startedAtMs)
+  };
+}
+
+async function handlePiAgentPromptFailure(
+  error: unknown,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters,
+  startedAt: string,
+  effects: ActiveVoiceTurnEffects | undefined
+): Promise<undefined> {
+  if (isInactiveVoiceTurn(effects)) {
+    return undefined;
+  }
+
+  if (error instanceof VoiceAudioOutputError) {
+    throw error;
+  }
+
+  counters.failedTurns += 1;
+  recordVoiceStageProbe(options.probe ?? {}, {
+    stage: "pi_turn",
+    status: "error",
+    startedAt,
+    durationMs: 0,
+    attributes: {
+      "pico.voice.error_code": "pi_agent_prompt_failed"
+    }
+  });
+
+  if (effects !== undefined) {
+    await tryPlayPromptFailureAcknowledgement(options);
+  }
+
+  return undefined;
+}
+
+async function playRequiredTurnText(
+  text: string,
+  options: VoiceResidentRuntimeOptions,
+  counters: VoiceResidentCounters
+): Promise<void> {
+  throwIfAborted(options.signal);
+  const startedAt = (options.now ?? defaultNow)();
+  const ttsResult = await synthesizeTurnResponse(text, options, counters, startedAt);
+
+  if (ttsResult === undefined) {
+    throw new VoiceAudioOutputError("pico resident voice required synthesis failed");
+  }
+
+  throwIfAborted(options.signal);
+
+  options.monitor?.setPhase("speaking");
+  try {
+    await playTtsChunks(ttsResult.chunks, options, options.now ?? defaultNow);
+  } catch {
+    throw new VoiceAudioOutputError("pico resident voice required playback failed");
+  }
+}
+
+async function tryPlayPromptFailureAcknowledgement(
+  options: VoiceResidentRuntimeOptions
+): Promise<void> {
+  try {
+    const result = await options.tts.synthesize({
+      text: "ごめん、作業を続けられませんでした。",
       ...(options.signal === undefined ? {} : { signal: options.signal })
     });
-    const completedAt = (options.now ?? defaultNow)();
-    const completedAtMs = (options.monotonicNow ?? defaultMonotonicNow)();
 
-    return {
-      text: response.text,
-      completedAt,
-      durationMs: Math.max(0, completedAtMs - startedAtMs)
-    };
+    if (!result.ok) {
+      return;
+    }
+
+    options.monitor?.setPhase("speaking");
+    await playTtsChunks(result.chunks, options, options.now ?? defaultNow);
   } catch {
-    counters.failedTurns += 1;
-    recordVoiceStageProbe(options.probe ?? {}, {
-      stage: "pi_turn",
-      status: "error",
-      startedAt,
-      durationMs: 0,
-      attributes: {
-        "pico.voice.error_code": "pi_agent_prompt_failed"
-      }
-    });
+    // Failure feedback is best effort and must not stop the capture loop.
+  }
+}
 
-    return undefined;
+function projectPiTurnProgress(
+  event: PiVoiceTurnProgress,
+  monitor: ResidentVoiceMonitor | undefined
+): void {
+  if (monitor === undefined) {
+    return;
+  }
+
+  switch (event.phase) {
+    case "thinking":
+    case "finalizing":
+      monitor.setPhase("thinking");
+      return;
+    case "preparing":
+      monitor.setPhase("preparing", { toolName: event.toolName });
+      return;
+    case "tool_finished":
+      monitor.setPhase("working", {
+        completedTool: { toolName: event.toolName, succeeded: event.succeeded }
+      });
+      return;
+    case "working":
+      monitor.setPhase("working", { toolName: event.toolName });
   }
 }
 
@@ -1113,10 +2037,21 @@ async function playTtsChunks(
   options: VoiceResidentRuntimeOptions,
   now: () => string
 ): Promise<void> {
+  const play = (): Promise<void> => playTtsChunksWithoutQueue(chunks, options, now);
+
+  return options.outputQueue?.enqueue(play) ?? play();
+}
+
+async function playTtsChunksWithoutQueue(
+  chunks: readonly TtsAudioChunk[],
+  options: VoiceResidentRuntimeOptions,
+  now: () => string
+): Promise<void> {
   const playbackStartedAt = now();
   let playbackOffsetMs = 0;
 
   for (const chunk of chunks) {
+    throwIfAborted(options.signal);
     const chunkStartedAt = addMilliseconds(playbackStartedAt, playbackOffsetMs);
 
     await options.echoControl.acceptFarEndReference(
@@ -1131,7 +2066,9 @@ async function playTtsChunks(
         durationMs: chunk.durationMs
       })
     );
-    await options.playback.play(chunk, chunkStartedAt);
+    throwIfAborted(options.signal);
+    await options.playback.play(chunk, chunkStartedAt, options.signal);
+    throwIfAborted(options.signal);
     recordVoiceStageProbe(options.probe ?? {}, {
       stage: "tts_playback",
       status: "ok",
@@ -1145,6 +2082,23 @@ async function playTtsChunks(
     });
     playbackOffsetMs += chunk.durationMs;
   }
+}
+
+function createVoiceOutputQueue(): VoiceOutputQueue {
+  let tail = Promise.resolve();
+
+  return {
+    enqueue(operation) {
+      const result = tail.catch(() => undefined).then(operation);
+      tail = result.then(
+        () => undefined,
+        () => undefined
+      );
+
+      return result;
+    },
+    drain: () => tail
+  };
 }
 
 async function reconcileActiveSession(
@@ -1178,7 +2132,7 @@ async function reconcileActiveSession(
   }
 
   if (options.mode === "shutdown" && session.state === "active") {
-    lifecycle.end(activeSessionId);
+    lifecycle.end(activeSessionId, "shutdown");
   }
 
   options.pendingEndedSessionIds.add(activeSessionId);
@@ -1228,7 +2182,7 @@ async function runOptionalFarewell(
   now: () => string,
   farewelledSessionIds: Set<string>
 ): Promise<void> {
-  if (!claimFarewell(session.id, options, farewelledSessionIds)) {
+  if (!claimFarewell(session, options, farewelledSessionIds)) {
     return;
   }
 
@@ -1240,15 +2194,19 @@ async function runOptionalFarewell(
 }
 
 function claimFarewell(
-  sessionId: string,
+  session: SessionRecord,
   options: VoiceResidentRuntimeOptions,
   farewelledSessionIds: Set<string>
 ): boolean {
-  if (options.farewell?.enabled !== true || farewelledSessionIds.has(sessionId)) {
+  if (
+    options.farewell?.enabled !== true ||
+    session.endReason !== "explicit" ||
+    farewelledSessionIds.has(session.id)
+  ) {
     return false;
   }
 
-  farewelledSessionIds.add(sessionId);
+  farewelledSessionIds.add(session.id);
 
   return true;
 }
@@ -1329,16 +2287,6 @@ async function disposeSessionQuietly(piAgent: PiAgentTurnClient, sessionId: stri
 
 async function* toAsyncIterable(frames: VoiceFrameSource): AsyncIterable<VoicePcmFrame> {
   yield* frames;
-}
-
-function findTrigger(transcript: string, triggerPhrases: readonly string[]): string | undefined {
-  const normalizedTranscript = transcript.toLowerCase();
-
-  return triggerPhrases.find((phrase) => {
-    const normalizedPhrase = phrase.trim().toLowerCase();
-
-    return normalizedPhrase !== "" && normalizedTranscript.includes(normalizedPhrase);
-  });
 }
 
 function buildVoiceTrigger(label: string): SessionStartTrigger {
