@@ -19,9 +19,6 @@ export const voiceRuntimeStagePolicies = Object.freeze({
 
 export type VoiceRuntimeStage = keyof typeof voiceRuntimeStagePolicies;
 export type VoiceRuntimeStagePolicy = (typeof voiceRuntimeStagePolicies)[VoiceRuntimeStage];
-export const voiceRuntimeStages = Object.freeze(
-  Object.keys(voiceRuntimeStagePolicies) as VoiceRuntimeStage[]
-);
 
 export type VoiceStageStatus = "ok" | "error" | "skipped" | "suppressed";
 
