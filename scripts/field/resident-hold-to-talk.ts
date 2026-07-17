@@ -252,12 +252,12 @@ export async function runResidentHoldToTalkFieldValidation(
       await turn.collection;
       const completedAtMs = performance.now();
       const cancelledAtMs = turn.cancelledAtMs;
-      const settled =
+      const claimedTerminalState =
         cancelledAtMs === undefined
           ? owner.finish(turn.generation.id, "transcribing")
           : owner.completeCancellation(turn.generation.id);
 
-      if (settled) {
+      if (claimedTerminalState) {
         recordCaptureMetrics(turn);
 
         if (cancelledAtMs === undefined) {
