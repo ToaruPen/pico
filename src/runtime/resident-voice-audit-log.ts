@@ -28,6 +28,8 @@ const summaryVoiceStages = new Set([
   "session_start",
   "pi_turn",
   "tts_request_wall",
+  "tts_audio_duration",
+  "tts_synthesize",
   "tts_playback",
   "camera_capture",
   "vlm_scene_description"

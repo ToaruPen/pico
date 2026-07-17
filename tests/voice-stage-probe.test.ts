@@ -162,20 +162,4 @@ describe("voice stage probe", () => {
       )
     ).toThrow("pico voice runtime stage is invalid");
   });
-
-  it("rejects removed TTS stage names", () => {
-    for (const stage of ["tts_synthesize", "tts_audio_duration"]) {
-      expect(() =>
-        recordVoiceStageProbe(
-          { audit: createStructuredAuditLog() },
-          {
-            stage: stage as "stt",
-            status: "ok",
-            startedAt: "2026-06-18T00:00:00.000Z",
-            durationMs: 1
-          }
-        )
-      ).toThrow("pico voice runtime stage is invalid");
-    }
-  });
 });

@@ -12,6 +12,8 @@ export type VoiceRuntimeStage =
   | "session_start"
   | "pi_turn"
   | "tts_request_wall"
+  | "tts_audio_duration"
+  | "tts_synthesize"
   | "tts_playback"
   | "camera_capture"
   | "vlm_scene_description";
@@ -38,6 +40,8 @@ const voiceRuntimeStages = new Set<VoiceRuntimeStage>([
   "session_start",
   "pi_turn",
   "tts_request_wall",
+  "tts_audio_duration",
+  "tts_synthesize",
   "tts_playback",
   "camera_capture",
   "vlm_scene_description"

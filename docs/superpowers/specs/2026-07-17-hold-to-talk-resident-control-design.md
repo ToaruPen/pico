@@ -395,22 +395,6 @@ Probe and logs must not include physical key names, raw audio, transcript text,
 prompt text, completion text, secrets, endpoint query data, or high-cardinality
 generation IDs.
 
-### レイテンシ計測契約
-
-`pico.voice.stage_duration_ms` は、runtime の monotonic clock で測った実際の
-wall-clock 経過時間だけを記録する。`stt`、`pi_turn`、`tts_request_wall`、
-`tts_playback` は、それぞれ provider request または playback の開始から非同期処理が
-settle するまでを計測する。
-
-STT provider が返す発話長と、TTS が生成した音声長は処理時間ではない。これらは
-`pico.voice.utterance_duration_ms` に分離し、stage duration の代わりに使用しない。
-TTS request は `tts_request_wall`、再生は `tts_playback` として記録する。意味が曖昧な
-`tts_synthesize` と、wall-clock stage ではない `tts_audio_duration` は出力しない。
-
-成功、失敗、cancel のいずれでも、settle までに経過した wall-clock 時間を保持する。
-cancel は `skipped`、provider または playback の失敗は `error` とする。この計測にも、
-transcript、prompt、completion、endpoint、model 名、物理キー名、session ID を含めない。
-
 Required counters include:
 
 - idle STT calls;

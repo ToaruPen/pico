@@ -121,11 +121,8 @@ stage は固定 enum とする。
 - `trigger_match`
 - `session_start`
 - `pi_turn`
-- `tts_request_wall`
+- `tts_synthesize`
 - `tts_playback`
-
-TTS の wall-clock stage は `tts_request_wall` と `tts_playback` とする。
-音声長は `pico.voice.utterance_duration_ms` 属性に分離し、stage にはしない。
 
 event name は `voice.runtime.stage` に統一する。
 
