@@ -81,14 +81,14 @@ describe("resident voice measurements", () => {
       [
         JSON.stringify(stageEvent("baseline", "stt", "ok", 100)),
         JSON.stringify(stageEvent("baseline", "stt", "ok", 300)),
-        JSON.stringify(stageEvent("baseline", "tts_synthesize", "ok", 400))
+        JSON.stringify(stageEvent("baseline", "tts_request_wall", "ok", 400))
       ].join("\n")
     );
     const candidate = summarizeResidentVoiceMetricsJsonl(
       [
         JSON.stringify(stageEvent("candidate", "stt", "ok", 80)),
         JSON.stringify(stageEvent("candidate", "stt", "ok", 120)),
-        JSON.stringify(stageEvent("candidate", "tts_synthesize", "ok", 500))
+        JSON.stringify(stageEvent("candidate", "tts_request_wall", "ok", 500))
       ].join("\n")
     );
     const baselineRun = requireRun(baseline.runs[0]);
@@ -104,7 +104,7 @@ describe("resident voice measurements", () => {
         p95DeltaMs: -180
       },
       {
-        stage: "tts_synthesize",
+        stage: "tts_request_wall",
         status: "ok",
         baselineCount: 1,
         candidateCount: 1,

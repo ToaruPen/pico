@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createStructuredAuditLog } from "../src/modules/audit/index.js";
 import { createSessionLifecycle } from "../src/modules/session/index.js";
 import type { VoicePcmFrame } from "../src/modules/voice/echo-control.js";
 import type {
@@ -73,6 +74,109 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
+  it("records STT wall time separately from utterance duration", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    const sttGate = createGate<SttTranscriptionResult>();
+    const piGate = createGate<{ readonly text: string }>();
+    let monotonicTimeMs = 0;
+    const driver = createDriver({
+      audit,
+      monotonicNow: () => monotonicTimeMs,
+      sttResponse: () => sttGate.promise,
+      piResponse: () => piGate.promise
+    });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("transcribing"));
+    monotonicTimeMs = 175;
+    sttGate.resolve(successfulTranscript("職員の発話", 1_000));
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("processing"));
+
+    expect(voiceStageEvent(audit, "stt")).toMatchObject({
+      attributes: {
+        "pico.voice.stage": "stt",
+        "pico.voice.stage_duration_ms": 175,
+        "pico.voice.utterance_duration_ms": 1_000
+      }
+    });
+
+    piGate.resolve({ text: "応答" });
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+    await driver.runtime.stop();
+  });
+
+  it("records TTS request and playback wall time", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    const ttsGate = createGate<TtsSynthesisResult>();
+    const playbackGate = createGate<undefined>();
+    let monotonicTimeMs = 0;
+    const driver = createDriver({
+      audit,
+      monotonicNow: () => monotonicTimeMs,
+      ttsResponse: () => ttsGate.promise,
+      playbackCompletion: () => playbackGate.promise
+    });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("synthesizing"));
+    monotonicTimeMs = 450;
+    ttsGate.resolve(successfulSynthesis(1_200));
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
+    monotonicTimeMs = 1_650;
+    playbackGate.resolve(undefined);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(voiceStageEvent(audit, "tts_request_wall")).toMatchObject({
+      attributes: {
+        "pico.voice.stage_duration_ms": 450,
+        "pico.voice.utterance_duration_ms": 1_200,
+        "pico.voice.chunk_count": 1
+      }
+    });
+    expect(voiceStageEvent(audit, "tts_playback")).toMatchObject({
+      attributes: {
+        "pico.voice.stage_duration_ms": 1_200,
+        "pico.voice.utterance_duration_ms": 1_200,
+        "pico.voice.chunk_count": 1
+      }
+    });
+
+    await driver.runtime.stop();
+  });
+
+  it("records Pi prompt failure wall time", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    const piGate = createGate<{ readonly text: string }>();
+    let monotonicTimeMs = 0;
+    const driver = createDriver({
+      audit,
+      monotonicNow: () => monotonicTimeMs,
+      piResponse: () => piGate.promise
+    });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("processing"));
+    monotonicTimeMs = 900;
+    piGate.reject(new Error("Pi prompt failed"));
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(voiceStageEvent(audit, "pi_turn")).toMatchObject({
+      attributes: {
+        "pico.voice.stage_status": "error",
+        "pico.voice.stage_duration_ms": 900,
+        "pico.voice.error_code": "pi_agent_prompt_failed"
+      }
+    });
+
+    await driver.runtime.stop();
+  });
+
   it("reuses the Pi parent conversation across separate holds", async () => {
     vi.useFakeTimers();
     const driver = createDriver();
@@ -131,6 +235,41 @@ describe("resident hold-to-talk voice runtime", () => {
     await expect(driver.runtime.completion).resolves.toMatchObject({
       emptyHolds: 0,
       failedTurns: 1
+    });
+  });
+
+  it("records a rejected STT request as a failed turn with wall time", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    const sttGate = createGate<SttTranscriptionResult>();
+    let monotonicTimeMs = 0;
+    const driver = createDriver({
+      audit,
+      monotonicNow: () => monotonicTimeMs,
+      sttResponse: () => sttGate.promise
+    });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("transcribing"));
+    monotonicTimeMs = 275;
+    sttGate.reject(new Error("STT request rejected"));
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    const sttEvents = voiceStageEvents(audit, "stt");
+    expect(sttEvents).toHaveLength(1);
+    expect(sttEvents[0]).toMatchObject({
+      attributes: {
+        "pico.voice.stage_status": "error",
+        "pico.voice.stage_duration_ms": 275,
+        "pico.voice.error_code": "stt_request_failed"
+      }
+    });
+
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({
+      failedTurns: 1,
+      failedCaptures: 0
     });
   });
 
@@ -219,30 +358,53 @@ describe("resident hold-to-talk voice runtime", () => {
 
   it("stops playback once when cancelled while speaking", async () => {
     vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
     const playbackGate = createGate<undefined>();
-    const driver = createDriver({ playbackCompletion: () => playbackGate.promise });
+    let monotonicTimeMs = 0;
+    const driver = createDriver({
+      audit,
+      monotonicNow: () => monotonicTimeMs,
+      playbackCompletion: () => playbackGate.promise
+    });
 
     await startReleasedHold(driver);
     await vi.advanceTimersByTimeAsync(250);
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
+    monotonicTimeMs = 500;
     await expect(driver.cancel()).resolves.toBe("accepted");
     expect(driver.playbackStops()).toBe(1);
     playbackGate.resolve(undefined);
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
     expect(driver.playbackStops()).toBe(1);
+    const playbackEvents = voiceStageEvents(audit, "tts_playback");
+    expect(playbackEvents).toHaveLength(1);
+    expect(playbackEvents[0]).toMatchObject({
+      attributes: {
+        "pico.voice.stage_status": "skipped",
+        "pico.voice.stage_duration_ms": 500,
+        "pico.voice.error_code": "cancelled"
+      }
+    });
 
     await driver.runtime.stop();
   });
 
   it("suppresses a late STT result from a cancelled generation", async () => {
     vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
     const sttGate = createGate<SttTranscriptionResult>();
-    const driver = createDriver({ sttResponse: () => sttGate.promise });
+    let monotonicTimeMs = 0;
+    const driver = createDriver({
+      audit,
+      monotonicNow: () => monotonicTimeMs,
+      sttResponse: () => sttGate.promise
+    });
 
     await startReleasedHold(driver);
     await vi.advanceTimersByTimeAsync(250);
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("transcribing"));
+    monotonicTimeMs = 125;
     await expect(driver.cancel()).resolves.toBe("accepted");
     expect(driver.runtime.state()).toBe("cancelling");
     sttGate.resolve(successfulTranscript("遅い結果"));
@@ -250,6 +412,15 @@ describe("resident hold-to-talk voice runtime", () => {
 
     expect(driver.piRequests).toEqual([]);
     expect(driver.playedChunks).toEqual([]);
+    const sttEvents = voiceStageEvents(audit, "stt");
+    expect(sttEvents).toHaveLength(1);
+    expect(sttEvents[0]).toMatchObject({
+      attributes: {
+        "pico.voice.stage_status": "skipped",
+        "pico.voice.stage_duration_ms": 125,
+        "pico.voice.error_code": "cancelled"
+      }
+    });
 
     await driver.runtime.stop();
   });
@@ -278,17 +449,33 @@ describe("resident hold-to-talk voice runtime", () => {
 
   it("suppresses a late synthesis result after cancellation", async () => {
     vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
     const ttsGate = createGate<TtsSynthesisResult>();
-    const driver = createDriver({ ttsResponse: () => ttsGate.promise });
+    let monotonicTimeMs = 0;
+    const driver = createDriver({
+      audit,
+      monotonicNow: () => monotonicTimeMs,
+      ttsResponse: () => ttsGate.promise
+    });
 
     await startReleasedHold(driver);
     await vi.advanceTimersByTimeAsync(250);
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("synthesizing"));
+    monotonicTimeMs = 300;
     await expect(driver.cancel()).resolves.toBe("accepted");
     ttsGate.resolve(successfulSynthesis());
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
     expect(driver.playedChunks).toEqual([]);
+    const ttsEvents = voiceStageEvents(audit, "tts_request_wall");
+    expect(ttsEvents).toHaveLength(1);
+    expect(ttsEvents[0]).toMatchObject({
+      attributes: {
+        "pico.voice.stage_status": "skipped",
+        "pico.voice.stage_duration_ms": 300,
+        "pico.voice.error_code": "cancelled"
+      }
+    });
     await driver.runtime.stop();
   });
 
@@ -667,6 +854,8 @@ function createDriver(
     readonly processedFrameIds?: string[];
     readonly farewellEnabled?: boolean;
     readonly sessionDurationMs?: number;
+    readonly audit?: ReturnType<typeof createStructuredAuditLog>;
+    readonly monotonicNow?: () => number;
   } = {}
 ) {
   const capture = createControlledCapture();
@@ -786,8 +975,9 @@ function createDriver(
             }
           }
         }),
+    ...(options.audit === undefined ? {} : { probe: { audit: options.audit } }),
     now: () => "2026-07-17T00:00:00.000Z",
-    monotonicNow: () => 0
+    monotonicNow: options.monotonicNow ?? (() => 0)
   });
 
   return {
@@ -971,13 +1161,13 @@ function frame(id: string, audio: readonly number[], capturedAt = "2026-07-17T00
   } as const satisfies VoicePcmFrame;
 }
 
-function successfulTranscript(text: string): SttTranscriptionResult {
+function successfulTranscript(text: string, durationMs = 10): SttTranscriptionResult {
   return {
     ok: true,
     text,
     language: "ja-JP",
     confidence: 1,
-    durationMs: 10,
+    durationMs,
     segments: [],
     source: {
       sidecarId: "test-stt",
@@ -987,7 +1177,7 @@ function successfulTranscript(text: string): SttTranscriptionResult {
   };
 }
 
-function successfulSynthesis(): TtsSynthesisSuccess {
+function successfulSynthesis(durationMs = 10): TtsSynthesisSuccess {
   return {
     ok: true,
     chunks: [
@@ -998,7 +1188,7 @@ function successfulSynthesis(): TtsSynthesisSuccess {
         encoding: "pcm16le",
         sampleRateHz: 16_000,
         channels: 1,
-        durationMs: 10,
+        durationMs,
         source: {
           serviceId: "test-tts",
           provider: "aivis-speech",
@@ -1006,7 +1196,7 @@ function successfulSynthesis(): TtsSynthesisSuccess {
         }
       }
     ],
-    totalDurationMs: 10,
+    totalDurationMs: durationMs,
     source: {
       serviceId: "test-tts",
       provider: "aivis-speech",
@@ -1015,14 +1205,25 @@ function successfulSynthesis(): TtsSynthesisSuccess {
   };
 }
 
+function voiceStageEvent(audit: ReturnType<typeof createStructuredAuditLog>, stage: string) {
+  return voiceStageEvents(audit, stage)[0];
+}
+
+function voiceStageEvents(audit: ReturnType<typeof createStructuredAuditLog>, stage: string) {
+  return audit.entries().filter((event) => event.attributes["pico.voice.stage"] === stage);
+}
+
 function createGate<T>(): {
   readonly promise: Promise<T>;
   readonly resolve: (value: T) => void;
+  readonly reject: (error: Error) => void;
 } {
   let resolveGate: (value: T) => void = () => undefined;
-  const promise = new Promise<T>((resolve) => {
+  let rejectGate: (error: Error) => void = () => undefined;
+  const promise = new Promise<T>((resolve, reject) => {
     resolveGate = resolve;
+    rejectGate = reject;
   });
 
-  return { promise, resolve: resolveGate };
+  return { promise, resolve: resolveGate, reject: rejectGate };
 }
