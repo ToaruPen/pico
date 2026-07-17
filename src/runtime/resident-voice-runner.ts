@@ -21,8 +21,8 @@ import {
   defineAppleSpeechSidecar
 } from "../modules/voice/index.js";
 import { createDeferredToolCoordinator } from "./deferred-tool-coordinator.js";
+import { type MacOSControlBridge, startMacOSControlBridge } from "./macos-control-bridge.js";
 import type { PiAgentTurnClientOptions } from "./pi-agent-turn.js";
-import { startMacOSControlBridge, type MacOSControlBridge } from "./macos-control-bridge.js";
 import { createResidentAudioCapture, createResidentPlaybackSink } from "./resident-audio-io.js";
 import {
   createLoopbackHttpResidentControlServer,

@@ -7,6 +7,7 @@ import {
 import type { SttClient, TtsAudioChunk, TtsClient } from "../modules/voice/index.js";
 import type { DeferredToolDeliverableResult } from "./deferred-tool-coordinator.js";
 import type { ResidentAudioCapture, ResidentCaptureSession } from "./resident-audio-io.js";
+import type { ResidentControlEvent, ResidentControlResult } from "./resident-control.js";
 import {
   createResidentControlController,
   type ResidentControlController,
@@ -14,7 +15,6 @@ import {
   type ResidentControlState,
   type ResidentTurnGeneration
 } from "./resident-control-controller.js";
-import type { ResidentControlEvent, ResidentControlResult } from "./resident-control.js";
 import type { SpeechActivityGate } from "./speech-activity-gate.js";
 import { recordVoiceStageProbe, type VoiceStageProbe } from "./voice-stage-probe.js";
 

@@ -9,13 +9,13 @@ import {
   type ResidentCaptureSession
 } from "../../src/runtime/resident-audio-io.js";
 import {
-  createResidentControlController,
-  type ResidentTurnGeneration
-} from "../../src/runtime/resident-control-controller.js";
-import {
   createLoopbackHttpResidentControlServer,
   type ResidentControlResult
 } from "../../src/runtime/resident-control.js";
+import {
+  createResidentControlController,
+  type ResidentTurnGeneration
+} from "../../src/runtime/resident-control-controller.js";
 
 export type ResidentHoldToTalkArguments = {
   readonly durationMs: number;

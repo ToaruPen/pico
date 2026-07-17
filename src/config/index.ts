@@ -701,10 +701,7 @@ function defineResidentControlConfig(input: Record<string, unknown>): PicoReside
     throw new Error("pico config voice.resident.control.provider must be loopback_http");
   }
 
-  const keyboard = requireRecord(
-    input.keyboard,
-    "pico config voice.resident.control.keyboard"
-  );
+  const keyboard = requireRecord(input.keyboard, "pico config voice.resident.control.keyboard");
   requireKnownConfigFields(keyboard, "pico config voice.resident.control.keyboard", [
     "provider",
     "talkKey",

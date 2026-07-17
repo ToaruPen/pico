@@ -69,7 +69,8 @@ describe("resident hold-to-talk control controller", () => {
     "speaking"
   ] as const)("cancels idempotently from %s", (state) => {
     const scheduler = createScheduler();
-    const cancelled: Array<{ state: ResidentControlState; generation: ResidentTurnGeneration }> = [];
+    const cancelled: Array<{ state: ResidentControlState; generation: ResidentTurnGeneration }> =
+      [];
     const controller = createResidentControlController({
       scheduler,
       onCancel: (generation, cancelledState) => {

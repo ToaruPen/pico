@@ -5,9 +5,9 @@ import { describe, expect, it } from "vitest";
 
 import type { PicoResidentControlConfig } from "../src/config/index.js";
 import {
+  type MacOSControlProcess,
   resolveMacOSControlExecutablePath,
-  startMacOSControlBridge,
-  type MacOSControlProcess
+  startMacOSControlBridge
 } from "../src/runtime/macos-control-bridge.js";
 
 describe("managed macOS resident control bridge", () => {

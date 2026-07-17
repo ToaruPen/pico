@@ -55,7 +55,13 @@ describe("resident hold-to-talk voice runtime", () => {
 
     expect(driver.capture.stops()).toBe(1);
     expect(driver.sttRequests).toHaveLength(1);
-    expect([...driver.sttRequests[0]!.audio]).toEqual([1, 0, 2, 0]);
+    const sttRequest = driver.sttRequests[0];
+
+    if (sttRequest === undefined) {
+      throw new Error("expected one STT request");
+    }
+
+    expect([...sttRequest.audio]).toEqual([1, 0, 2, 0]);
     expect(driver.piRequests).toHaveLength(1);
     expect(driver.piRequests[0]).toMatchObject({
       sessionId: "session-1",
@@ -220,13 +226,15 @@ describe("resident hold-to-talk voice runtime", () => {
 
 type Driver = ReturnType<typeof createDriver>;
 
-function createDriver(options: {
-  readonly speechDetected?: boolean;
-  readonly sttResponse?: (signal: AbortSignal | undefined) => Promise<SttTranscriptionResult>;
-  readonly piResponse?: (signal: AbortSignal | undefined) => Promise<{ readonly text: string }>;
-  readonly ttsResponse?: (signal: AbortSignal | undefined) => Promise<TtsSynthesisResult>;
-  readonly playbackCompletion?: (signal: AbortSignal | undefined) => Promise<void>;
-} = {}) {
+function createDriver(
+  options: {
+    readonly speechDetected?: boolean;
+    readonly sttResponse?: (signal: AbortSignal | undefined) => Promise<SttTranscriptionResult>;
+    readonly piResponse?: (signal: AbortSignal | undefined) => Promise<{ readonly text: string }>;
+    readonly ttsResponse?: (signal: AbortSignal | undefined) => Promise<TtsSynthesisResult>;
+    readonly playbackCompletion?: (signal: AbortSignal | undefined) => Promise<void>;
+  } = {}
+) {
   const capture = createControlledCapture();
   const sttRequests: Array<Parameters<SttClient["transcribe"]>[0]> = [];
   const piRequests: Array<Parameters<PiAgentTurnClient["prompt"]>[0]> = [];
@@ -238,8 +246,9 @@ function createDriver(options: {
     warmup: () => Promise.resolve(successfulTranscript("warm")),
     transcribe(request) {
       sttRequests.push(request);
-      return options.sttResponse?.(request.signal) ??
-        Promise.resolve(successfulTranscript("職員の発話"));
+      return (
+        options.sttResponse?.(request.signal) ?? Promise.resolve(successfulTranscript("職員の発話"))
+      );
     }
   };
   const piAgent: PiAgentTurnClient = {

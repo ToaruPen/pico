@@ -17,8 +17,7 @@ export function createResidentVoiceConsoleLog(
 }
 
 export function formatResidentVoiceConsoleEvent(event: VoiceResidentLogEvent): string {
-  const duration =
-    event.kind === "pi_agent_response" ? ` duration_ms=${event.durationMs}` : "";
+  const duration = event.kind === "pi_agent_response" ? ` duration_ms=${event.durationMs}` : "";
 
   return `[pico voice] ${event.occurredAt} ${event.kind} session=${event.sessionId}${duration}\n`;
 }

@@ -6,9 +6,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import { definePicoConfig } from "../src/config/index.js";
 import {
+  createResidentAudioCapture,
   createResidentAudioInputPlan,
   createResidentAudioOutputPlan,
-  createResidentAudioCapture,
   createResidentPlaybackSink,
   measurePcm16leAudioLevel,
   measureResidentAudioInputLevel

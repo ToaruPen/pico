@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import type { EventEmitter } from "node:events";
-import { fileURLToPath } from "node:url";
 import type { Readable } from "node:stream";
+import { fileURLToPath } from "node:url";
 
 import type { PicoResidentControlConfig } from "../config/index.js";
 

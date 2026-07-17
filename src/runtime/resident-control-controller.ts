@@ -1,7 +1,4 @@
-import type {
-  ResidentControlEvent,
-  ResidentControlResult
-} from "./resident-control.js";
+import type { ResidentControlEvent, ResidentControlResult } from "./resident-control.js";
 
 export type ResidentControlState =
   | "idle"
@@ -21,10 +18,7 @@ export type ResidentTurnGeneration = {
 };
 
 export type ResidentControlScheduler = {
-  readonly schedule: (
-    delayMs: number,
-    operation: () => void
-  ) => { readonly cancel: () => void };
+  readonly schedule: (delayMs: number, operation: () => void) => { readonly cancel: () => void };
 };
 
 export type ResidentControlController = {
