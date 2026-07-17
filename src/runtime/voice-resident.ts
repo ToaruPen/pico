@@ -304,6 +304,7 @@ export function createVoiceResidentRuntime(
     }
 
     options.signal?.removeEventListener("abort", stopFromSignal);
+    cancelInteractionEnding(true);
     const turn = activeTurn;
 
     if (turn !== undefined && isCancellableControlState(controller.state())) {

@@ -529,6 +529,42 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(lifecycleEvents).toEqual(["cancel_session", "dispose_all", "wait_idle"]);
   });
 
+  it("aborts an existing inactivity farewell when shutdown starts", async () => {
+    vi.useFakeTimers();
+    const farewellGate = createGate<{ readonly text: string }>();
+    let promptCount = 0;
+    let farewellSignal: AbortSignal | undefined;
+    const driver = createDriver({
+      farewellEnabled: true,
+      sessionDurationMs: 1_000,
+      piResponse: (signal) => {
+        promptCount += 1;
+
+        if (promptCount === 1) {
+          return Promise.resolve({ text: "通常の応答" });
+        }
+
+        farewellSignal = signal;
+        return farewellGate.promise;
+      }
+    });
+
+    await completeHold(driver, "shutdown-existing-farewell");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(driver.piRequests).toHaveLength(2));
+    const stopping = driver.runtime.stop();
+
+    try {
+      expect(farewellSignal?.aborted).toBe(true);
+    } finally {
+      farewellGate.resolve({ text: "遅い終了の挨拶" });
+      await stopping;
+    }
+
+    expect(driver.playedChunks).toHaveLength(1);
+    expect(driver.disposedSessions).toEqual(["session-1"]);
+  });
+
   it("drains owned work on shutdown and rejects later controls", async () => {
     const driver = createDriver();
 

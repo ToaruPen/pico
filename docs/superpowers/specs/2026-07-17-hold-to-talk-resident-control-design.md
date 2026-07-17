@@ -285,10 +285,11 @@ continue to own interaction ending.
    mutation, cancel-triggered interaction end, concurrent farewell and active
    Pi turns, or new talk admission while ended-session cleanup is active.
 7. **Required tests:** timer and explicit ending notify once; unsubscribe stops
-   notification; inactivity and shutdown run one farewell and cleanup; cancel
-   runs neither when it initiates from an active turn; cancel during an existing
-   interaction ending suppresses farewell but preserves cleanup; a later hold
-   starts only after cleanup reaches terminal state.
+   notification; inactivity and shutdown-initiated ending run one farewell and
+   cleanup; cancel runs neither when it initiates from an active turn; cancel or
+   shutdown during an existing interaction ending suppresses its remaining
+   farewell but preserves cleanup; a later hold starts only after cleanup
+   reaches terminal state.
 8. **Async ownership and terminal states:** the resident runtime owns one
    serialized interaction-ending promise. It waits for the active turn,
    suppresses new talk admission while ending, drains farewell playback,
