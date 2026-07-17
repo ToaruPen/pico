@@ -20,10 +20,10 @@ describe("pico cli", () => {
     expect(result.stderr).toContain(join(repoRoot, "scripts/roster.ts"));
   });
 
-  it("starts Pi with --pico for an empty invocation without model arguments", () => {
+  it("loads the local extension before starting Pi with --pico", () => {
     expect(createPicoCliPlan([])).toEqual({
       kind: "pi",
-      args: ["--pico"]
+      args: ["--extension", "./src/index.ts", "--pico"]
     });
   });
 
