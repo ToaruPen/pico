@@ -320,6 +320,11 @@ export function createResidentPlaybackSink(
       };
       abortController.signal.addEventListener("abort", killChild, { once: true });
       signal?.addEventListener("abort", onExternalAbort, { once: true });
+
+      if (signal?.aborted === true) {
+        onExternalAbort();
+      }
+
       active = owned;
       const completion =
         plan.provider === "alsa"

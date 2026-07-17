@@ -172,6 +172,7 @@ export async function runResidentHoldToTalkFieldValidation(
   const failure = new Promise<never>((_resolve, reject) => {
     rejectFailure = reject;
   });
+  void failure.catch(() => undefined);
   const fail = (error: unknown, generationId?: number): void => {
     controller.fail(generationId);
     rejectFailure(error instanceof Error ? error : new Error(String(error)));

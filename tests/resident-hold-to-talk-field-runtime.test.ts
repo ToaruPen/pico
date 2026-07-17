@@ -5,7 +5,8 @@ const fieldTestState = vi.hoisted(() => ({
     | ((event: { readonly kind: string; readonly occurredAt: string }) => string)
     | undefined,
   failNextCapture: false,
-  starts: 0
+  starts: 0,
+  bridgeStartup: undefined as Promise<void> | undefined
 }));
 
 vi.mock("../src/config/index.js", () => ({
@@ -25,11 +26,13 @@ vi.mock("../src/config/index.js", () => ({
 }));
 
 vi.mock("../src/runtime/macos-control-bridge.js", () => ({
-  startMacOSControlBridge: () =>
-    Promise.resolve({
+  startMacOSControlBridge: async () => {
+    await fieldTestState.bridgeStartup;
+    return {
       completion: new Promise<void>(() => undefined),
       close: () => Promise.resolve()
-    })
+    };
+  }
 }));
 
 vi.mock("../src/runtime/resident-control.js", () => ({
@@ -81,6 +84,7 @@ describe("resident hold-to-talk field runtime", () => {
     fieldTestState.handle = undefined;
     fieldTestState.failNextCapture = false;
     fieldTestState.starts = 0;
+    fieldTestState.bridgeStartup = undefined;
   });
 
   afterEach(() => {
@@ -129,7 +133,22 @@ describe("resident hold-to-talk field runtime", () => {
     const handle = await waitForHandle();
 
     expect(handle(control("talk_pressed"))).toBe("accepted");
-    await vi.advanceTimersByTimeAsync(1_000);
+    await rejection;
+  });
+
+  it("observes capture failure while the macOS bridge is still starting", async () => {
+    fieldTestState.failNextCapture = true;
+    let finishBridgeStartup: () => void = () => undefined;
+    fieldTestState.bridgeStartup = new Promise<void>((resolve) => {
+      finishBridgeStartup = resolve;
+    });
+    const validation = runResidentHoldToTalkFieldValidation({ durationMs: 1_000, help: false });
+    const rejection = expect(validation).rejects.toThrow("field capture failed");
+    const handle = await waitForHandle();
+
+    expect(handle(control("talk_pressed"))).toBe("accepted");
+    await vi.advanceTimersByTimeAsync(1);
+    finishBridgeStartup();
     await rejection;
   });
 });

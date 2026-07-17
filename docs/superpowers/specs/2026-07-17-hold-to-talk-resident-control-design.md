@@ -63,6 +63,8 @@ control producer and will not revive substring matching over general STT.
    cancelling, error, stopped, and idle treat it as a no-op.
 7. Cancel preserves the Pi parent conversation context, emits no farewell, and
    returns to idle after owned work reaches its cancellation terminal state.
+   If normal interaction ending has already started, cancel suppresses its
+   remaining farewell Pi/TTS/playback work but does not reverse session cleanup.
 8. Pi owns conversation context and history. Pico owns only facility control,
    audio, and ephemeral per-turn state.
 9. No maximum hold duration is added. Audio exists only in process memory for
@@ -284,7 +286,9 @@ continue to own interaction ending.
    Pi turns, or new talk admission while ended-session cleanup is active.
 7. **Required tests:** timer and explicit ending notify once; unsubscribe stops
    notification; inactivity and shutdown run one farewell and cleanup; cancel
-   runs neither; a later hold starts only after cleanup reaches terminal state.
+   runs neither when it initiates from an active turn; cancel during an existing
+   interaction ending suppresses farewell but preserves cleanup; a later hold
+   starts only after cleanup reaches terminal state.
 8. **Async ownership and terminal states:** the resident runtime owns one
    serialized interaction-ending promise. It waits for the active turn,
    suppresses new talk admission while ending, drains farewell playback,
@@ -306,6 +310,8 @@ results.
   generation.
 - Speaking: stop Pico-owned playback exactly once, clear echo suppression
   state, and suppress later playback completion.
+- Interaction ending: abort remaining farewell Pi/TTS/playback work, clear echo
+  suppression state, and continue terminal session cleanup.
 - Cancelling: repeated cancel is a no-op.
 - Idle: cancel is a no-op.
 
@@ -499,8 +505,9 @@ Required counters include:
 - The audio sent to STT contains no pre-press frames and includes the configured
   250 ms release tail.
 - Talk presses while busy are ignored and cannot execute later.
-- Cancel converges from every non-idle state without farewell or parent-session
-  disposal.
+- Cancel converges from every active turn state without farewell or
+  parent-session disposal; during existing interaction ending it suppresses the
+  farewell while preserving terminal cleanup.
 - Cancelled or stale async results cannot synthesize or play audio.
 - Configured talk and cancel keys can be changed without modifying TypeScript
   voice logic.

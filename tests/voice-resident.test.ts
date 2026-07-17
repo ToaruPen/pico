@@ -6,7 +6,8 @@ import type {
   SttClient,
   SttTranscriptionResult,
   TtsClient,
-  TtsSynthesisResult
+  TtsSynthesisResult,
+  TtsSynthesisSuccess
 } from "../src/modules/voice/index.js";
 import type {
   ResidentAudioCapture,
@@ -375,6 +376,144 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(driver.playedChunks).toHaveLength(3);
   });
 
+  it("cancels a pending inactivity farewell without skipping session cleanup", async () => {
+    vi.useFakeTimers();
+    const farewellGate = createGate<{ readonly text: string }>();
+    let promptCount = 0;
+    let farewellAborts = 0;
+    const driver = createDriver({
+      farewellEnabled: true,
+      sessionDurationMs: 1_000,
+      piResponse: (signal) => {
+        promptCount += 1;
+
+        if (promptCount === 1) {
+          return Promise.resolve({ text: "通常の応答" });
+        }
+
+        signal?.addEventListener("abort", () => {
+          farewellAborts += 1;
+        });
+        return farewellGate.promise;
+      }
+    });
+
+    await completeHold(driver, "farewell-cancel");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(driver.piRequests).toHaveLength(2));
+    const result = await driver.cancel();
+    farewellGate.resolve({ text: "遅い終了の挨拶" });
+    await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
+    await driver.runtime.stop();
+
+    expect(result).toBe("accepted");
+    expect(farewellAborts).toBe(1);
+    expect(driver.playedChunks).toHaveLength(1);
+  });
+
+  it("stops farewell playback when interaction ending is cancelled", async () => {
+    vi.useFakeTimers();
+    const farewellPlaybackGate = createGate<undefined>();
+    let playbackCount = 0;
+    const driver = createDriver({
+      farewellEnabled: true,
+      sessionDurationMs: 1_000,
+      playbackCompletion: () => {
+        playbackCount += 1;
+        return playbackCount === 1 ? Promise.resolve() : farewellPlaybackGate.promise;
+      }
+    });
+
+    await completeHold(driver, "farewell-playback-cancel");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(driver.playedChunks).toHaveLength(2));
+    const result = await driver.cancel();
+    farewellPlaybackGate.resolve(undefined);
+    await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
+
+    expect(result).toBe("accepted");
+    expect(driver.playbackStops()).toBe(1);
+    expect(driver.echoFlushes()).toBe(1);
+    await driver.runtime.stop();
+  });
+
+  it("does not start later farewell chunks after interaction ending is cancelled", async () => {
+    vi.useFakeTimers();
+    const firstFarewellChunkGate = createGate<undefined>();
+    let playbackCount = 0;
+    let synthesisCount = 0;
+    const driver = createDriver({
+      farewellEnabled: true,
+      sessionDurationMs: 1_000,
+      ttsResponse: () => {
+        synthesisCount += 1;
+        const synthesis = successfulSynthesis();
+
+        if (synthesisCount === 1) {
+          return Promise.resolve(synthesis);
+        }
+
+        const first = synthesis.chunks[0];
+
+        if (first === undefined) {
+          throw new Error("expected a synthesis chunk");
+        }
+
+        return Promise.resolve({
+          ...synthesis,
+          chunks: [first, { ...first, sentenceIndex: 1, text: "二つ目の挨拶" }],
+          totalDurationMs: first.durationMs * 2
+        });
+      },
+      playbackCompletion: () => {
+        playbackCount += 1;
+        return playbackCount === 2 ? firstFarewellChunkGate.promise : Promise.resolve();
+      }
+    });
+
+    await completeHold(driver, "multi-chunk-farewell-cancel");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(driver.playedChunks).toHaveLength(2));
+    expect(await driver.cancel()).toBe("accepted");
+    firstFarewellChunkGate.resolve(undefined);
+    await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
+
+    expect(driver.playedChunks).toHaveLength(2);
+    expect(driver.echoFarEndReferences()).toBe(2);
+    expect(driver.echoFlushes()).toBe(1);
+    await driver.runtime.stop();
+  });
+
+  it("finishes session cleanup when farewell cancellation cleanup fails", async () => {
+    vi.useFakeTimers();
+    const farewellPlaybackGate = createGate<undefined>();
+    let playbackCount = 0;
+    const driver = createDriver({
+      farewellEnabled: true,
+      sessionDurationMs: 1_000,
+      playbackStopError: new Error("speaker stop failed"),
+      playbackCompletion: () => {
+        playbackCount += 1;
+        return playbackCount === 1 ? Promise.resolve() : farewellPlaybackGate.promise;
+      }
+    });
+    const completionFailure = driver.runtime.completion.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+
+    await completeHold(driver, "farewell-cancel-cleanup-failure");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(driver.playedChunks).toHaveLength(2));
+    expect(await driver.cancel()).toBe("accepted");
+    farewellPlaybackGate.resolve(undefined);
+    await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
+
+    await expect(completionFailure).resolves.toEqual(new Error("speaker stop failed"));
+    expect(driver.disposedSessions).toEqual(["session-1"]);
+    await expect(driver.runtime.stop()).rejects.toThrow("speaker stop failed");
+  });
+
   it("runs normal interaction ending before shared-owner shutdown", async () => {
     vi.useFakeTimers();
     const lifecycleEvents: string[] = [];
@@ -415,6 +554,7 @@ function createDriver(
     readonly piResponse?: (signal: AbortSignal | undefined) => Promise<{ readonly text: string }>;
     readonly ttsResponse?: (signal: AbortSignal | undefined) => Promise<TtsSynthesisResult>;
     readonly playbackCompletion?: (signal: AbortSignal | undefined) => Promise<void>;
+    readonly playbackStopError?: Error;
     readonly lifecycleEvents?: string[];
     readonly farewellEnabled?: boolean;
     readonly sessionDurationMs?: number;
@@ -428,6 +568,7 @@ function createDriver(
   let playbackStopCount = 0;
   let playbackCloseCount = 0;
   let echoFlushCount = 0;
+  let echoFarEndReferenceCount = 0;
   const stt: SttClient = {
     warmup: () => Promise.resolve(successfulTranscript("warm")),
     transcribe(request) {
@@ -461,7 +602,9 @@ function createDriver(
     },
     stop() {
       playbackStopCount += 1;
-      return Promise.resolve();
+      return options.playbackStopError === undefined
+        ? Promise.resolve()
+        : Promise.reject(options.playbackStopError);
     },
     close() {
       playbackCloseCount += 1;
@@ -483,7 +626,10 @@ function createDriver(
           mode: "half_duplex",
           engine: "test"
         }),
-      acceptFarEndReference: () => Promise.resolve(),
+      acceptFarEndReference: () => {
+        echoFarEndReferenceCount += 1;
+        return Promise.resolve();
+      },
       processNearEnd: (input) =>
         Promise.resolve({
           action: "pass",
@@ -541,6 +687,7 @@ function createDriver(
     playbackStops: () => playbackStopCount,
     playbackCloses: () => playbackCloseCount,
     echoFlushes: () => echoFlushCount,
+    echoFarEndReferences: () => echoFarEndReferenceCount,
     press: () =>
       runtime.handleControl({
         kind: "talk_pressed",
@@ -727,7 +874,7 @@ function successfulTranscript(text: string): SttTranscriptionResult {
   };
 }
 
-function successfulSynthesis(): TtsSynthesisResult {
+function successfulSynthesis(): TtsSynthesisSuccess {
   return {
     ok: true,
     chunks: [

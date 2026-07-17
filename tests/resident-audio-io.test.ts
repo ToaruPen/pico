@@ -627,6 +627,46 @@ describe("resident audio I/O plans", () => {
     await expect(done).rejects.toThrow("pipe failed");
   });
 
+  it("stops ALSA playback immediately when its signal is already aborted", async () => {
+    const config = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: { provider: "alsa", device: "hw:1,0" },
+          audioOutput: { provider: "alsa", device: "hw:0,0" }
+        }
+      }
+    });
+    const process = createAudioProcess({ stdin: new PassThrough() });
+    const spawn = vi.fn(() => process.child);
+    const playback = createResidentPlaybackSink(config, spawn, "linux");
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled before playback"));
+
+    const playing = playback.play(
+      {
+        sentenceIndex: 0,
+        text: "hello",
+        audio: new Uint8Array([1, 2]),
+        encoding: "pcm16le",
+        sampleRateHz: 24_000,
+        channels: 1,
+        durationMs: 1,
+        source: {
+          serviceId: "test-aivis",
+          provider: "aivis-speech",
+          speakerId: 1
+        }
+      },
+      "2026-07-17T00:00:00.000Z",
+      controller.signal
+    );
+
+    expect(process.kill).toHaveBeenCalledWith("SIGTERM");
+    process.emitExit(143);
+    await expect(playing).resolves.toBeUndefined();
+  });
+
   it("stops only the current owned playback process and is idempotent", async () => {
     const config = definePicoConfig({
       voice: {
