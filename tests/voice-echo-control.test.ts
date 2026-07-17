@@ -68,11 +68,12 @@ describe("voice echo control", () => {
       encoding: "pcm16le",
       sampleRateHz: 16_000,
       channels: 1,
-      capturedAt: "2026-06-14T10:00:01.100Z",
+      capturedAt: "2026-06-14T10:00:00.400Z",
       durationMs: 100
     });
 
     await echoControl.acceptFarEndReference(farEnd);
+    await echoControl.flush();
 
     await expect(echoControl.processNearEnd(nearEnd)).resolves.toEqual({
       action: "pass",

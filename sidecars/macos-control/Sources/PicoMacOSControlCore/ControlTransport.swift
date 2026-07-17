@@ -83,13 +83,19 @@ public final class ControlTransport: @unchecked Sendable {
 }
 
 public func readControlToken(path: String) throws -> String {
-  var metadata = stat()
-  guard lstat(path, &metadata) == 0 else {
+  let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+  guard descriptor >= 0 else {
+    if errno == ELOOP {
+      throw ControlTransportError.tokenSymbolicLink
+    }
+
     throw CocoaError(.fileReadNoSuchFile)
   }
+  defer { close(descriptor) }
 
-  if (metadata.st_mode & S_IFMT) == S_IFLNK {
-    throw ControlTransportError.tokenSymbolicLink
+  var metadata = stat()
+  guard fstat(descriptor, &metadata) == 0 else {
+    throw CocoaError(.fileReadUnknown)
   }
 
   if (metadata.st_mode & S_IFMT) != S_IFREG {
@@ -101,8 +107,13 @@ public func readControlToken(path: String) throws -> String {
     throw ControlTransportError.tokenPermissions(permissions)
   }
 
-  let token = try String(contentsOfFile: path, encoding: .utf8)
-    .trimmingCharacters(in: .whitespacesAndNewlines)
+  let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+  let data = try handle.readToEnd() ?? Data()
+  guard let contents = String(data: data, encoding: .utf8) else {
+    throw CocoaError(.fileReadInapplicableStringEncoding)
+  }
+
+  let token = contents.trimmingCharacters(in: .whitespacesAndNewlines)
   guard !token.isEmpty else {
     throw ControlTransportError.tokenEmpty
   }

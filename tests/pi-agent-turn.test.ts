@@ -1064,4 +1064,53 @@ describe("Pi Agent turn adapter", () => {
     await expect(prompt).rejects.toThrow("pico resident Pi Agent turn aborted");
     expect(abortCalls).toBe(1);
   });
+
+  it("does not start an SDK prompt when cancellation wins session initialization", async () => {
+    let releaseSession: (() => void) | undefined;
+    let promptCalls = 0;
+    let abortCalls = 0;
+    const sessionGate = new Promise<void>((resolve) => {
+      releaseSession = resolve;
+    });
+    const abortController = new AbortController();
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      createResourceLoader: () => ({
+        reload: () => Promise.resolve()
+      }),
+      createAgentSession: async () => {
+        await sessionGate;
+
+        return {
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: () => () => undefined,
+            prompt: () => {
+              promptCalls += 1;
+              return Promise.resolve();
+            },
+            abort: () => {
+              abortCalls += 1;
+              return Promise.resolve();
+            },
+            dispose: () => undefined
+          }
+        };
+      }
+    });
+    const prompt = client.prompt({
+      sessionId: "session-1",
+      text: "開始前に止める",
+      signal: abortController.signal
+    });
+
+    abortController.abort();
+    releaseSession?.();
+
+    await expect(prompt).rejects.toThrow("pico resident Pi Agent turn aborted");
+    expect(promptCalls).toBe(0);
+    expect(abortCalls).toBe(1);
+  });
 });

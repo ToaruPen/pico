@@ -438,7 +438,11 @@ async function transcribeWithAppleSpeechSidecar(
   }
 
   const abortController = new AbortController();
-  const abortFromRequest = (): void => abortController.abort(request.signal?.reason);
+  let requestAborted = false;
+  const abortFromRequest = (): void => {
+    requestAborted = true;
+    abortController.abort(request.signal?.reason);
+  };
   const timeout = setTimeout(() => {
     abortController.abort();
   }, sidecar.timeoutMs);
@@ -460,7 +464,7 @@ async function transcribeWithAppleSpeechSidecar(
 
     return await mapAppleSpeechResponse(response, source);
   } catch (error) {
-    return appleSpeechRequestFailure(error, request.signal, source);
+    return appleSpeechRequestFailure(error, requestAborted, source);
   } finally {
     clearTimeout(timeout);
     request.signal?.removeEventListener("abort", abortFromRequest);
@@ -469,10 +473,10 @@ async function transcribeWithAppleSpeechSidecar(
 
 function appleSpeechRequestFailure(
   error: unknown,
-  requestSignal: AbortSignal | undefined,
+  requestAborted: boolean,
   source: SttTranscriptionSource
 ): SttTranscriptionFailure {
-  if (isAbortError(error) && requestSignal?.aborted) {
+  if (requestAborted) {
     return {
       ok: false,
       reason: "aborted",

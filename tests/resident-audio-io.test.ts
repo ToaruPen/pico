@@ -491,6 +491,32 @@ describe("resident audio I/O plans", () => {
     await expect(capture.close()).resolves.toBeUndefined();
   });
 
+  it("retains an unexpected capture failure that races an explicit stop", async () => {
+    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const capture = createResidentAudioCapture(
+      config,
+      vi.fn(() => process.child),
+      "darwin"
+    );
+    const session = capture.start(new AbortController().signal);
+    const collection = (async (): Promise<void> => {
+      for await (const frame of session.frames) {
+        void frame;
+      }
+    })();
+
+    const stopped = session.stop();
+    process.stdout.end();
+    process.emitClose(1, undefined);
+
+    await expect(stopped).resolves.toBeUndefined();
+    await expect(collection).rejects.toThrow(
+      "pico resident voice avfoundation input exited with code 1 signal undefined"
+    );
+    await expect(capture.close()).resolves.toBeUndefined();
+  });
+
   it("rejects overlapping microphone capture sessions", async () => {
     const config = avfoundationResidentAudioConfig({ frameMs: 10 });
     const process = createAudioProcess({ stdout: new PassThrough() });

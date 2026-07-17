@@ -59,7 +59,8 @@ control producer and will not revive substring matching over general STT.
 4. Only idle accepts a new talk press. Talk presses during transcribing,
    processing, cancellation, or speaking are ignored and never queued.
 5. One completed hold produces at most one Pi turn.
-6. A cancel press is accepted in every non-idle state and is idempotent.
+6. A cancel press is accepted in every active turn state and is idempotent;
+   cancelling, error, stopped, and idle treat it as a no-op.
 7. Cancel preserves the Pi parent conversation context, emits no farewell, and
    returns to idle after owned work reaches its cancellation terminal state.
 8. Pi owns conversation context and history. Pico owns only facility control,
@@ -255,6 +256,40 @@ requires a new accepted `talk_pressed`.
 Cancel does not end the Pi conversation, dispose the parent session, refresh
 activity as a successful turn, or run farewell. Normal inactivity and shutdown
 continue to own interaction ending.
+
+## State Boundary: Interaction Ending Notification
+
+1. **State being changed:** `SessionLifecycle` gains an ended-session
+   notification owned by the same lifecycle that mutates `active` to `ended`.
+   The resident voice runtime owns the resulting farewell, deferred-work
+   cancellation, Pi-session disposal, and lifecycle removal operation.
+2. **Lifecycle boundary:** `hot-reloadable` subscription. A resident runtime
+   subscribes once at construction and unsubscribes during shutdown; session
+   ending configuration remains startup-only.
+3. **Mutation path inventory:** the inactivity timer and explicit
+   `SessionLifecycle.end()` both pass through the existing `endSession`
+   boundary. Resident shutdown explicitly ends its active interaction through
+   that same boundary. Cancel, config watchers, CLI, environment variables,
+   migrations, admin jobs, and background workers are not interaction-ending
+   mutation paths.
+4. **Consumer/invariant inventory:** session audit observes the state mutation;
+   the resident runtime observes the notification and serializes farewell,
+   deferred cancellation, Pi disposal, session removal, and shutdown drain.
+   Microphone ownership and hold-to-talk admission remain independent.
+5. **Central enforcement point:** `endSession` performs the state transition
+   exactly once and then notifies subscribers. Timer and explicit ending may
+   not notify independently.
+6. **Forbidden paths:** no polling loop, idle microphone, direct session-field
+   mutation, cancel-triggered interaction end, concurrent farewell and active
+   Pi turns, or new talk admission while ended-session cleanup is active.
+7. **Required tests:** timer and explicit ending notify once; unsubscribe stops
+   notification; inactivity and shutdown run one farewell and cleanup; cancel
+   runs neither; a later hold starts only after cleanup reaches terminal state.
+8. **Async ownership and terminal states:** the resident runtime owns one
+   serialized interaction-ending promise. It waits for the active turn,
+   suppresses new talk admission while ending, drains farewell playback,
+   cancels deferred work, disposes the Pi session, removes the ended lifecycle
+   record, and awaits that terminal promise before closing shared owners.
 
 ## Cancellation Contract
 

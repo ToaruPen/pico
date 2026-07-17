@@ -24,6 +24,7 @@ struct ControlTransportTests {
         == ["event": "talk_pressed"])
     #expect(health.url?.path == "/v1/resident-control/health")
     #expect(health.httpMethod == "GET")
+    #expect(health.value(forHTTPHeaderField: "Authorization") == "Bearer secret-token")
   }
 
   @Test("reads only a regular nonempty 0600 token file")

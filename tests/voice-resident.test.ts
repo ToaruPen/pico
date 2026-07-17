@@ -61,7 +61,7 @@ describe("resident hold-to-talk voice runtime", () => {
       throw new Error("expected one STT request");
     }
 
-    expect([...sttRequest.audio]).toEqual([1, 0, 2, 0]);
+    expect(Array.from(sttRequest.audio)).toEqual([1, 0, 2, 0]);
     expect(driver.piRequests).toHaveLength(1);
     expect(driver.piRequests[0]).toMatchObject({
       sessionId: "session-1",
@@ -142,6 +142,23 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
+  it("cancels the release tail without starting transcription", async () => {
+    vi.useFakeTimers();
+    const driver = createDriver();
+
+    await driver.press();
+    driver.capture.emit(frame("tail-cancel", [1, 0]));
+    await driver.release();
+    expect(driver.runtime.state()).toBe("tailing");
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(driver.sttRequests).toEqual([]);
+    expect(driver.piRequests).toEqual([]);
+    await driver.runtime.stop();
+  });
+
   it("aborts the active Pi turn exactly once and preserves its parent session", async () => {
     vi.useFakeTimers();
     let aborts = 0;
@@ -208,6 +225,171 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
+  it("suppresses a late synthesis result after cancellation", async () => {
+    vi.useFakeTimers();
+    const ttsGate = createGate<TtsSynthesisResult>();
+    const driver = createDriver({ ttsResponse: () => ttsGate.promise });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("synthesizing"));
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    ttsGate.resolve(successfulSynthesis());
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(driver.playedChunks).toEqual([]);
+    await driver.runtime.stop();
+  });
+
+  it("fails the runtime immediately when capture frames reject during a hold", async () => {
+    const driver = createDriver();
+
+    await driver.press();
+    driver.capture.fail(new Error("capture stream failed"));
+
+    await expect(driver.runtime.completion).rejects.toThrow("capture stream failed");
+    expect(driver.runtime.state()).toBe("error");
+    await expect(driver.runtime.stop()).rejects.toThrow("capture stream failed");
+  });
+
+  it("clears playback and echo state after playback fails", async () => {
+    vi.useFakeTimers();
+    const driver = createDriver({
+      playbackCompletion: () => Promise.reject(new Error("speaker failed"))
+    });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(driver.playbackStops()).toBe(1);
+    expect(driver.echoFlushes()).toBe(1);
+    await driver.runtime.stop();
+  });
+
+  it("cancels deferred work and drains the active turn before disposing owners", async () => {
+    vi.useFakeTimers();
+    const lifecycleEvents: string[] = [];
+    const piGate = createGate<{ readonly text: string }>();
+    const driver = createDriver({
+      lifecycleEvents,
+      piResponse: () => piGate.promise
+    });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("processing"));
+
+    const stopping = driver.runtime.stop();
+    await Promise.resolve();
+    expect(lifecycleEvents).toEqual(["cancel_session"]);
+
+    piGate.resolve({ text: "late response" });
+    await stopping;
+    expect(lifecycleEvents).toEqual(["cancel_session", "dispose_all", "wait_idle"]);
+  });
+
+  it("runs farewell and cleanup when inactivity ends the interaction", async () => {
+    vi.useFakeTimers();
+    const lifecycleEvents: string[] = [];
+    const driver = createDriver({
+      farewellEnabled: true,
+      lifecycleEvents,
+      sessionDurationMs: 1_000
+    });
+
+    await completeHold(driver, "inactivity");
+    expect(driver.piRequests).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
+
+    expect(driver.piRequests).toHaveLength(2);
+    expect(driver.piRequests[1]?.text).toContain("voice session is ending");
+    expect(driver.playedChunks).toHaveLength(2);
+    expect(lifecycleEvents).toContain("cancel_session");
+    await driver.runtime.stop();
+  });
+
+  it("lets an active turn finish before inactivity farewell and cleanup", async () => {
+    vi.useFakeTimers();
+    const piGate = createGate<{ readonly text: string }>();
+    let promptCount = 0;
+    let aborts = 0;
+    const driver = createDriver({
+      farewellEnabled: true,
+      sessionDurationMs: 1_000,
+      piResponse: (signal) => {
+        promptCount += 1;
+
+        if (promptCount > 1) {
+          return Promise.resolve({ text: "終了の挨拶" });
+        }
+
+        signal?.addEventListener("abort", () => {
+          aborts += 1;
+        });
+        return piGate.promise;
+      }
+    });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("processing"));
+    await vi.advanceTimersByTimeAsync(1_000);
+    const stateAfterInactivity = driver.runtime.state();
+
+    piGate.resolve({ text: "通常の応答" });
+    await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
+    await driver.runtime.stop();
+
+    expect(stateAfterInactivity).toBe("processing");
+    expect(aborts).toBe(0);
+    expect(driver.piRequests).toHaveLength(2);
+    expect(driver.playedChunks).toHaveLength(2);
+  });
+
+  it("waits for a listening hold before inactivity farewell and cleanup", async () => {
+    vi.useFakeTimers();
+    const driver = createDriver({
+      farewellEnabled: true,
+      sessionDurationMs: 1_000
+    });
+
+    await completeHold(driver, "first");
+    await driver.press();
+    driver.capture.emit(frame("second", [1, 0]));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(driver.runtime.state()).toBe("listening");
+
+    await driver.release();
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
+    await driver.runtime.stop();
+
+    expect(driver.piRequests.map((request) => request.sessionId)).toEqual([
+      "session-1",
+      "session-1",
+      "session-1"
+    ]);
+    expect(driver.piRequests[2]?.text).toContain("voice session is ending");
+    expect(driver.playedChunks).toHaveLength(3);
+  });
+
+  it("runs normal interaction ending before shared-owner shutdown", async () => {
+    vi.useFakeTimers();
+    const lifecycleEvents: string[] = [];
+    const driver = createDriver({ farewellEnabled: true, lifecycleEvents });
+
+    await completeHold(driver, "shutdown");
+    await driver.runtime.stop();
+
+    expect(driver.piRequests).toHaveLength(2);
+    expect(driver.piRequests[1]?.text).toContain("voice session is ending");
+    expect(driver.playedChunks).toHaveLength(2);
+    expect(driver.disposedSessions).toEqual(["session-1"]);
+    expect(lifecycleEvents).toEqual(["cancel_session", "dispose_all", "wait_idle"]);
+  });
+
   it("drains owned work on shutdown and rejects later controls", async () => {
     const driver = createDriver();
 
@@ -233,6 +415,9 @@ function createDriver(
     readonly piResponse?: (signal: AbortSignal | undefined) => Promise<{ readonly text: string }>;
     readonly ttsResponse?: (signal: AbortSignal | undefined) => Promise<TtsSynthesisResult>;
     readonly playbackCompletion?: (signal: AbortSignal | undefined) => Promise<void>;
+    readonly lifecycleEvents?: string[];
+    readonly farewellEnabled?: boolean;
+    readonly sessionDurationMs?: number;
   } = {}
 ) {
   const capture = createControlledCapture();
@@ -242,6 +427,7 @@ function createDriver(
   const disposedSessions: string[] = [];
   let playbackStopCount = 0;
   let playbackCloseCount = 0;
+  let echoFlushCount = 0;
   const stt: SttClient = {
     warmup: () => Promise.resolve(successfulTranscript("warm")),
     transcribe(request) {
@@ -259,7 +445,9 @@ function createDriver(
     disposeSession(sessionId) {
       disposedSessions.push(sessionId);
     },
-    disposeAll() {}
+    disposeAll() {
+      options.lifecycleEvents?.push("dispose_all");
+    }
   };
   const tts: TtsClient = {
     synthesize(request) {
@@ -280,11 +468,12 @@ function createDriver(
       return Promise.resolve();
     }
   };
+  const sessionLifecycle = createSessionLifecycle({
+    ending: { mode: "timed", durationMs: options.sessionDurationMs ?? 60_000 }
+  });
   const runtime = createVoiceResidentRuntime({
     audioCapture: capture.provider,
-    sessionLifecycle: createSessionLifecycle({
-      ending: { mode: "timed", durationMs: 60_000 }
-    }),
+    sessionLifecycle,
     echoControl: {
       describe: () => ({ provider: "half_duplex", mode: "half_duplex" }),
       checkHealth: () =>
@@ -306,7 +495,10 @@ function createDriver(
             voiceActivity: options.speechDetected ?? true
           }
         }),
-      flush: () => Promise.resolve()
+      flush: () => {
+        echoFlushCount += 1;
+        return Promise.resolve();
+      }
     },
     speechActivity: {
       process: () =>
@@ -320,6 +512,21 @@ function createDriver(
     tts,
     playback,
     piAgent,
+    ...(options.farewellEnabled === undefined
+      ? {}
+      : { farewell: { enabled: options.farewellEnabled } }),
+    ...(options.lifecycleEvents === undefined
+      ? {}
+      : {
+          deferredTools: {
+            collectDeliverableResults: () => [],
+            cancelSession: () => options.lifecycleEvents?.push("cancel_session"),
+            waitForIdle: () => {
+              options.lifecycleEvents?.push("wait_idle");
+              return Promise.resolve();
+            }
+          }
+        }),
     now: () => "2026-07-17T00:00:00.000Z",
     monotonicNow: () => 0
   });
@@ -333,6 +540,7 @@ function createDriver(
     disposedSessions,
     playbackStops: () => playbackStopCount,
     playbackCloses: () => playbackCloseCount,
+    echoFlushes: () => echoFlushCount,
     press: () =>
       runtime.handleControl({
         kind: "talk_pressed",
@@ -370,6 +578,7 @@ function createControlledCapture(): {
   readonly starts: () => number;
   readonly stops: () => number;
   readonly emit: (frame: VoicePcmFrame) => void;
+  readonly fail: (error: Error) => void;
 } {
   let startCount = 0;
   let stopCount = 0;
@@ -411,6 +620,13 @@ function createControlledCapture(): {
       }
 
       active.emit(value);
+    },
+    fail(error) {
+      if (active === undefined) {
+        throw new Error("capture is not active");
+      }
+
+      active.fail(error);
     }
   };
 }
@@ -419,16 +635,25 @@ function createFrameChannel(): {
   readonly frames: AsyncIterable<VoicePcmFrame>;
   readonly emit: (frame: VoicePcmFrame) => void;
   readonly end: () => void;
+  readonly fail: (error: Error) => void;
 } {
   const queued: VoicePcmFrame[] = [];
-  const waiters: Array<(result: IteratorResult<VoicePcmFrame>) => void> = [];
+  const waiters: Array<{
+    readonly resolve: (result: IteratorResult<VoicePcmFrame>) => void;
+    readonly reject: (error: Error) => void;
+  }> = [];
   let ended = false;
+  let failure: Error | undefined;
 
   return {
     frames: {
       [Symbol.asyncIterator]() {
         return {
           next() {
+            if (failure !== undefined) {
+              return Promise.reject(failure);
+            }
+
             const value = queued.shift();
 
             if (value !== undefined) {
@@ -439,8 +664,8 @@ function createFrameChannel(): {
               return Promise.resolve({ value: undefined, done: true });
             }
 
-            return new Promise<IteratorResult<VoicePcmFrame>>((resolve) => {
-              waiters.push(resolve);
+            return new Promise<IteratorResult<VoicePcmFrame>>((resolve, reject) => {
+              waiters.push({ resolve, reject });
             });
           }
         };
@@ -454,13 +679,20 @@ function createFrameChannel(): {
         return;
       }
 
-      waiter({ value, done: false });
+      waiter.resolve({ value, done: false });
     },
     end() {
       ended = true;
 
       for (const waiter of waiters.splice(0)) {
-        waiter({ value: undefined, done: true });
+        waiter.resolve({ value: undefined, done: true });
+      }
+    },
+    fail(error) {
+      failure = error;
+
+      for (const waiter of waiters.splice(0)) {
+        waiter.reject(error);
       }
     }
   };

@@ -160,6 +160,7 @@ export function createHalfDuplexEchoControl(
       });
     },
     flush() {
+      recordResumeIfNeeded(options.audit);
       return Promise.resolve();
     }
   };

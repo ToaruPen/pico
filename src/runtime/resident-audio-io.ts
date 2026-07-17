@@ -554,8 +554,9 @@ function createResidentCaptureSession(
   const closedOperation = new Promise<void>((resolve) => {
     child.once("close", (code, signalName) => {
       closed = true;
+      const expectedStopExit = stopping && (code === 0 || signalName === "SIGTERM");
 
-      if (!stopping && code !== 0) {
+      if (code !== 0 && !expectedStopExit) {
         childFailure = new Error(
           `pico resident voice ${plan.provider} input exited with code ${String(
             code

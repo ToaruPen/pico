@@ -191,6 +191,7 @@ export async function runResidentHoldToTalkFieldValidation(
         operation: undefined
       };
       turn.collection = collectFrames(turn);
+      void turn.collection.catch((error: unknown) => fail(error, generation.id));
       active = turn;
     },
     onTailReady(generation) {
@@ -277,12 +278,13 @@ export async function runResidentHoldToTalkFieldValidation(
     handle: (event) => {
       const turn = active;
 
-      if (event.kind === "talk_released" && turn !== undefined) {
-        turn.releasedAtMs ??= performance.now();
-      }
-
       try {
         const outcome = controller.handle(event);
+
+        if (event.kind === "talk_released" && outcome === "accepted" && turn !== undefined) {
+          turn.releasedAtMs ??= performance.now();
+        }
+
         outcomes[outcome] += 1;
         return outcome;
       } catch (error) {

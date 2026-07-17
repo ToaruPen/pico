@@ -42,6 +42,7 @@ export type SessionLifecycle = {
   readonly refreshActivity: (id: string) => SessionRecord;
   readonly end: (id: string) => SessionRecord;
   readonly remove: (id: string) => void;
+  readonly subscribeEnded: (listener: (session: SessionRecord) => void) => () => void;
 };
 
 type ManagedSession = {
@@ -87,7 +88,19 @@ export function createSessionModule(): PicoModule {
 export function createSessionLifecycle(options: SessionLifecycleOptions): SessionLifecycle {
   const durationMs = requireTimedDuration(options.ending);
   const sessions = new Map<string, ManagedSession>();
+  const endedSubscribers = new Set<(session: SessionRecord) => void>();
   let nextSessionId = 1;
+  const notifyEnded = (session: ManagedSession): void => {
+    const snapshot = cloneSession(session);
+
+    for (const subscriber of endedSubscribers) {
+      try {
+        subscriber(snapshot);
+      } catch {
+        // Session state changes must not depend on subscriber availability.
+      }
+    }
+  };
 
   return {
     start(trigger) {
@@ -103,7 +116,7 @@ export function createSessionLifecycle(options: SessionLifecycleOptions): Sessio
       };
       nextSessionId += 1;
       session.timeout = scheduleSessionTimer(() => {
-        endSession(session, options.audit);
+        endSession(session, options.audit, notifyEnded);
       }, durationMs);
       sessions.set(session.id, session);
       recordSessionAudit(options.audit, "session.started", startedAt, session);
@@ -122,13 +135,13 @@ export function createSessionLifecycle(options: SessionLifecycleOptions): Sessio
         throw new Error("pico session is not active");
       }
 
-      refreshSessionTimer(session, options.audit, durationMs);
+      refreshSessionTimer(session, options.audit, durationMs, notifyEnded);
 
       return cloneSession(session);
     },
     end(id) {
       const session = requireSession(sessions, id);
-      endSession(session, options.audit);
+      endSession(session, options.audit, notifyEnded);
 
       return cloneSession(session);
     },
@@ -144,11 +157,20 @@ export function createSessionLifecycle(options: SessionLifecycleOptions): Sessio
         session.timeout = undefined;
       }
       sessions.delete(session.id);
+    },
+    subscribeEnded(listener) {
+      endedSubscribers.add(listener);
+
+      return () => endedSubscribers.delete(listener);
     }
   };
 }
 
-function endSession(session: ManagedSession, audit: StructuredAuditLog | undefined): void {
+function endSession(
+  session: ManagedSession,
+  audit: StructuredAuditLog | undefined,
+  notifyEnded: (session: ManagedSession) => void
+): void {
   if (session.state === "ended") {
     return;
   }
@@ -161,19 +183,21 @@ function endSession(session: ManagedSession, audit: StructuredAuditLog | undefin
   session.state = "ended";
   session.endedAt = nowIso();
   recordSessionAudit(audit, "session.ended", session.endedAt, session);
+  notifyEnded(session);
 }
 
 function refreshSessionTimer(
   session: ManagedSession,
   audit: StructuredAuditLog | undefined,
-  durationMs: number
+  durationMs: number,
+  notifyEnded: (session: ManagedSession) => void
 ): void {
   if (session.timeout !== undefined) {
     clearTimeout(session.timeout);
   }
 
   session.timeout = scheduleSessionTimer(() => {
-    endSession(session, audit);
+    endSession(session, audit, notifyEnded);
   }, durationMs);
 }
 

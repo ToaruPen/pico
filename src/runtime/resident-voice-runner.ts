@@ -190,6 +190,7 @@ export async function runResidentVoiceWithProviders(input: {
         playback,
         piAgent,
         deferredTools,
+        farewell: { enabled: true },
         log: createResidentVoiceRuntimeLogSink(logRunMode, fileLog, stdoutProbeMode),
         ...(audit === undefined ? {} : { probe: { audit } }),
         signal

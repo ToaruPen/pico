@@ -27,9 +27,9 @@ enum PicoMacOSControlMain {
       throw BridgeError.runLoopUnavailable
     }
     let reporter = FailureReporter(runLoop: runLoop)
-    let (events, continuation) = AsyncStream<SemanticControlEvent>.makeStream()
+    let eventChannel = ControlEventChannel()
     let sender = Task {
-      for await event in events {
+      for await event in eventChannel.events {
         do {
           try await transport.send(event)
         } catch {
@@ -43,7 +43,7 @@ enum PicoMacOSControlMain {
         talkKeyCode: configuration.talkKeyCode,
         cancelKeyCode: configuration.cancelKeyCode
       ),
-      continuation: continuation,
+      eventChannel: eventChannel,
       reporter: reporter
     )
     let contextPointer = Unmanaged.passUnretained(context).toOpaque()
@@ -60,13 +60,13 @@ enum PicoMacOSControlMain {
         userInfo: contextPointer
       )
     else {
-      continuation.finish()
+      eventChannel.finish()
       sender.cancel()
       throw BridgeError.eventTapUnavailable
     }
     guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
       CFMachPortInvalidate(tap)
-      continuation.finish()
+      eventChannel.finish()
       sender.cancel()
       throw BridgeError.runLoopSourceUnavailable
     }
@@ -78,7 +78,7 @@ enum PicoMacOSControlMain {
     CFRunLoopRun()
 
     signalSource.cancel()
-    continuation.finish()
+    eventChannel.finish()
     sender.cancel()
     CFRunLoopRemoveSource(runLoop, source, .commonModes)
     CFMachPortInvalidate(tap)
@@ -114,16 +114,16 @@ private let eventTapCallback: CGEventTapCallBack = { _, type, event, userInfo in
 
 private final class BridgeContext {
   private var mapper: ControlEventMapper
-  private let continuation: AsyncStream<SemanticControlEvent>.Continuation
+  private let eventChannel: ControlEventChannel
   private let reporter: FailureReporter
 
   init(
     mapper: ControlEventMapper,
-    continuation: AsyncStream<SemanticControlEvent>.Continuation,
+    eventChannel: ControlEventChannel,
     reporter: FailureReporter
   ) {
     self.mapper = mapper
-    self.continuation = continuation
+    self.eventChannel = eventChannel
     self.reporter = reporter
   }
 
@@ -131,7 +131,9 @@ private final class BridgeContext {
     let decision = mapper.handle(keyCode: keyCode, isKeyDown: isKeyDown, isRepeat: isRepeat)
 
     if let event = decision.event {
-      continuation.yield(event)
+      if !eventChannel.send(event) {
+        reporter.fail("semantic control buffer rejected an event")
+      }
     }
 
     return decision

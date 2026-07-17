@@ -4,6 +4,16 @@ import Testing
 
 @Suite("macOS semantic key mapping")
 struct ControlEventTests {
+  @Test("bounds pending semantic events and reports overflow")
+  func boundsPendingEvents() {
+    let channel = ControlEventChannel()
+
+    #expect(channel.send(.talkPressed))
+    #expect(!channel.send(.talkReleased))
+    channel.finish()
+    #expect(!channel.send(.cancelPressed))
+  }
+
   @Test("maps one talk hold and suppresses repeats")
   func mapsTalkHold() {
     var mapper = ControlEventMapper(talkKeyCode: 105, cancelKeyCode: 107)
@@ -32,6 +42,12 @@ struct ControlEventTests {
     #expect(
       mapper.handle(keyCode: 107, isKeyDown: true, isRepeat: true)
         == KeyboardEventDecision(event: nil, consume: true))
+    #expect(
+      mapper.handle(keyCode: 107, isKeyDown: false, isRepeat: false)
+        == KeyboardEventDecision(event: nil, consume: true))
+    #expect(
+      mapper.handle(keyCode: 107, isKeyDown: true, isRepeat: false)
+        == KeyboardEventDecision(event: .cancelPressed, consume: true))
     #expect(
       mapper.handle(keyCode: 0, isKeyDown: true, isRepeat: false)
         == KeyboardEventDecision(event: nil, consume: false))

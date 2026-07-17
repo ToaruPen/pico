@@ -6,6 +6,33 @@ public enum SemanticControlEvent: String, Codable, Sendable {
   case cancelPressed = "cancel_pressed"
 }
 
+public struct ControlEventChannel: Sendable {
+  public let events: AsyncStream<SemanticControlEvent>
+  private let continuation: AsyncStream<SemanticControlEvent>.Continuation
+
+  public init() {
+    let (events, continuation) = AsyncStream<SemanticControlEvent>.makeStream(
+      bufferingPolicy: .bufferingOldest(1))
+    self.events = events
+    self.continuation = continuation
+  }
+
+  public func send(_ event: SemanticControlEvent) -> Bool {
+    switch continuation.yield(event) {
+    case .enqueued:
+      true
+    case .dropped, .terminated:
+      false
+    @unknown default:
+      false
+    }
+  }
+
+  public func finish() {
+    continuation.finish()
+  }
+}
+
 public struct KeyboardEventDecision: Equatable, Sendable {
   public let event: SemanticControlEvent?
   public let consume: Bool

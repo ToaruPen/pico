@@ -132,6 +132,30 @@ describe("session lifecycle", () => {
     }
   });
 
+  it("notifies ended-session subscribers once and supports unsubscribe", () => {
+    vi.useFakeTimers();
+
+    try {
+      const lifecycle = createSessionLifecycle({
+        ending: { mode: "timed", durationMs: 1_000 }
+      });
+      const ended: string[] = [];
+      const unsubscribe = lifecycle.subscribeEnded((session) => ended.push(session.id));
+      lifecycle.start(trigger);
+
+      lifecycle.end("session-1");
+      lifecycle.end("session-1");
+      expect(ended).toEqual(["session-1"]);
+
+      lifecycle.start(trigger);
+      unsubscribe();
+      vi.advanceTimersByTime(1_000);
+      expect(ended).toEqual(["session-1"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("returns immutable interaction snapshots", () => {
     const lifecycle = createSessionLifecycle({
       ending: { mode: "timed", durationMs: 60_000 }

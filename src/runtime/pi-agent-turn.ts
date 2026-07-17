@@ -104,6 +104,7 @@ export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAg
         const session = await getOrCreateTurnSession(options, sessions, input.sessionId);
         unsubscribe = subscribeTextDeltas(session, output);
         abortHandle = installPromptAbort(session, input.signal);
+        throwIfSignalAborted(input.signal);
         await session.prompt(
           formatPromptForSdkSession(input.text, input.deferredToolResults ?? [])
         );
