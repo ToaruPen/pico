@@ -517,6 +517,30 @@ describe("resident audio I/O plans", () => {
     await expect(capture.close()).resolves.toBeUndefined();
   });
 
+  it("accepts FFmpeg code 255 after an explicit AVFoundation stop", async () => {
+    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const capture = createResidentAudioCapture(
+      config,
+      vi.fn(() => process.child),
+      "darwin"
+    );
+    const session = capture.start(new AbortController().signal);
+    const collection = (async (): Promise<void> => {
+      for await (const frame of session.frames) {
+        void frame;
+      }
+    })();
+
+    const stopped = session.stop();
+    process.stdout.end();
+    process.emitClose(255, undefined);
+
+    await expect(stopped).resolves.toBeUndefined();
+    await expect(collection).resolves.toBeUndefined();
+    await expect(capture.close()).resolves.toBeUndefined();
+  });
+
   it("rejects overlapping microphone capture sessions", async () => {
     const config = avfoundationResidentAudioConfig({ frameMs: 10 });
     const process = createAudioProcess({ stdout: new PassThrough() });

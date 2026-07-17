@@ -559,7 +559,11 @@ function createResidentCaptureSession(
   const closedOperation = new Promise<void>((resolve) => {
     child.once("close", (code, signalName) => {
       closed = true;
-      const expectedStopExit = stopping && (code === 0 || signalName === "SIGTERM");
+      const expectedStopExit =
+        stopping &&
+        (code === 0 ||
+          signalName === "SIGTERM" ||
+          (plan.provider === "avfoundation" && code === 255));
 
       if (code !== 0 && !expectedStopExit) {
         childFailure = new Error(
