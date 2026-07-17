@@ -172,9 +172,7 @@ function normalizeResidentVoiceEvent(
     kind: event.kind,
     occurredAt: event.occurredAt,
     sessionId: event.sessionId,
-    ...(event.kind === "pi_agent_response" || event.kind === "wake_ack_response"
-      ? { durationMs: event.durationMs }
-      : {})
+    ...(event.kind === "pi_agent_response" ? { durationMs: event.durationMs } : {})
   });
 }
 

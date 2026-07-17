@@ -23,17 +23,9 @@ describe("resident voice console log", () => {
       sessionId: "session-1",
       durationMs: 250
     });
-    log.record({
-      kind: "wake_ack_response",
-      occurredAt: "2026-06-22T00:00:00.500Z",
-      sessionId: "session-1",
-      durationMs: 120
-    });
-
     expect(writes).toEqual([
       "[pico voice] 2026-06-22T00:00:00.000Z staff_input session=session-1\n",
-      "[pico voice] 2026-06-22T00:00:00.250Z pi_agent_response session=session-1 duration_ms=250\n",
-      "[pico voice] 2026-06-22T00:00:00.500Z wake_ack_response session=session-1 duration_ms=120\n"
+      "[pico voice] 2026-06-22T00:00:00.250Z pi_agent_response session=session-1 duration_ms=250\n"
     ]);
     expect(writes.join("\n")).not.toContain('今日は"テスト"です');
     expect(writes.join("\n")).not.toContain("了解です。");

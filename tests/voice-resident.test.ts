@@ -1,2619 +1,527 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createStructuredAuditLog } from "../src/modules/audit/index.js";
-import { createSessionLifecycle, type SessionLifecycle } from "../src/modules/session/index.js";
+import { createSessionLifecycle } from "../src/modules/session/index.js";
+import type { VoicePcmFrame } from "../src/modules/voice/echo-control.js";
+import type {
+  SttClient,
+  SttTranscriptionResult,
+  TtsClient,
+  TtsSynthesisResult
+} from "../src/modules/voice/index.js";
+import type {
+  ResidentAudioCapture,
+  ResidentCaptureSession
+} from "../src/runtime/resident-audio-io.js";
 import {
-  createHalfDuplexEchoControl,
-  type EchoControlProvider,
-  type VoicePcmFrame
-} from "../src/modules/voice/echo-control.js";
-import type { SttClient, TtsAudioChunk, TtsClient } from "../src/modules/voice/index.js";
-import {
-  runVoiceResidentRuntime,
-  type VoicePlaybackSink,
-  type VoiceResidentActivationSource
+  createVoiceResidentRuntime,
+  type PiAgentTurnClient,
+  type VoicePlaybackSink
 } from "../src/runtime/voice-resident.js";
 
-describe("voice resident runtime", () => {
-  it("finalizes an ended interaction without memory processing", async () => {
-    const lifecycle = createSessionLifecycle({
-      ending: { mode: "timed", durationMs: 60_000 }
-    });
-    const calls: string[] = [];
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: lifecycle,
-      echoControl: createIdleEchoControl(),
-      stt: (() => {
-        const texts = ["ピコ", "この会話は終わりです。"];
-        return {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-        };
-      })(),
-      tts: createSuccessfulTts("はい。"),
-      playback: { play: () => Promise.resolve() },
-      piAgent: {
-        prompt: () => {
-          lifecycle.end("session-1");
-          return Promise.resolve({ text: "はい。" });
-        },
-        disposeSession: async (sessionId) => {
-          calls.push(`dispose:${sessionId}:start`);
-          await Promise.resolve();
-          calls.push(`dispose:${sessionId}:end`);
-        }
-      },
-      deferredTools: {
-        collectDeliverableResults: () => [],
-        cancelSession: (sessionId, reason) => {
-          calls.push(`cancel:${sessionId}:${reason}`);
-        }
-      }
-    });
-
-    expect(result).not.toHaveProperty("processedCutoffs");
-    expect(result).not.toHaveProperty("failedCutoffs");
-    expect(calls).toEqual([
-      "cancel:session-1:session_closed",
-      "dispose:session-1:start",
-      "dispose:session-1:end"
-    ]);
-    expect(lifecycle.read("session-1")).toBeUndefined();
-  });
-
-  it("waits for Pi disposal when an active interaction disappears before collection", async () => {
-    const lifecycle = createSessionLifecycle({
-      ending: { mode: "timed", durationMs: 60_000 }
-    });
-    const disposal = createPromiseGate();
-    const disposalStarted = createPromiseGate();
-
-    const runtime = runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: lifecycle,
-      echoControl: createIdleEchoControl(),
-      stt: (() => {
-        const texts = ["ピコ", "終了済みです。"];
-
-        return {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-        };
-      })(),
-      tts: createSuccessfulTts("はい。"),
-      playback: { play: () => Promise.resolve() },
-      piAgent: {
-        prompt: () => {
-          lifecycle.end("session-1");
-          lifecycle.remove("session-1");
-
-          return Promise.resolve({ text: "はい。" });
-        },
-        disposeSession: async () => {
-          disposalStarted.release();
-          await disposal.promise;
-        }
-      }
-    });
-
-    await disposalStarted.promise;
-    const settlement = await Promise.race([
-      runtime.then(() => "settled" as const),
-      new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 0))
-    ]);
-    disposal.release();
-    await runtime;
-
-    expect(settlement).toBe("pending");
-  });
-
-  it("waits for Pi disposal when an active interaction disappears during shutdown", async () => {
-    const lifecycle = createSessionLifecycle({
-      ending: { mode: "timed", durationMs: 60_000 }
-    });
-    const disposal = createPromiseGate();
-    const disposalStarted = createPromiseGate();
-    const frames = (function* () {
-      yield sampleNearEndFrame("mic-trigger");
-      lifecycle.end("session-1");
-      lifecycle.remove("session-1");
-      throw new Error("frame source failed");
-    })();
-
-    const runtime = runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames,
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: lifecycle,
-      echoControl: createIdleEchoControl(),
-      stt: successfulStt("ピコ"),
-      tts: createSuccessfulTts("unused"),
-      playback: { play: () => Promise.resolve() },
-      piAgent: {
-        prompt: () => {
-          throw new Error("wake-only shutdown should not prompt Pi Agent");
-        },
-        disposeSession: async () => {
-          disposalStarted.release();
-          await disposal.promise;
-        }
-      }
-    });
-    const runtimeOutcome = runtime.then(
-      () => "resolved" as const,
-      (error: unknown) => error
-    );
-
-    await disposalStarted.promise;
-    const settlement = await Promise.race([
-      runtimeOutcome,
-      new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 0))
-    ]);
-    disposal.release();
-    const error = await runtimeOutcome;
-
-    expect(settlement).toBe("pending");
-    expect(error).toEqual(new Error("frame source failed"));
-  });
-
-  it("buffers speech frames into one utterance before sending audio to STT", async () => {
-    const lifecycle = createSessionLifecycle({
-      ending: {
-        mode: "timed",
-        durationMs: 60_000
-      }
-    });
-    const transcribedDurations: number[] = [];
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [
-        speechFrame("speech-1", 0),
-        speechFrame("speech-2", 10),
-        speechFrame("speech-3", 20),
-        silenceFrame("silence-1", 30),
-        silenceFrame("silence-2", 40)
-      ],
-      utteranceWindow: testUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: lifecycle,
-      echoControl: createIdleEchoControl(),
-      stt: {
-        warmup: () => {
-          throw new Error("warmup is not part of resident runtime");
-        },
-        transcribe: (request) => {
-          transcribedDurations.push((request.audio.byteLength / 2 / 16_000) * 1_000);
-          return Promise.resolve(successfulTranscript("ピコ"));
-        }
-      },
-      tts: createSuccessfulTts("はい。"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => Promise.resolve({ text: "はい。" })
-      }
-    });
-
-    expect(transcribedDurations).toEqual([50]);
-    expect(result.processedFrames).toBe(5);
-    expect(result.startedSessions).toBe(1);
-  });
-
-  it("does not send silence-only windows to STT", async () => {
-    let sttCalls = 0;
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [silenceFrame("silence-1", 0), silenceFrame("silence-2", 10)],
-      utteranceWindow: testUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createIdleEchoControl(),
-      stt: {
-        warmup: () => {
-          throw new Error("warmup is not part of resident runtime");
-        },
-        transcribe: () => {
-          sttCalls += 1;
-          throw new Error("silence-only windows must not be transcribed");
-        }
-      },
-      tts: createSuccessfulTts("unused"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => {
-          throw new Error("silence-only windows must not reach Pi Agent");
-        }
-      }
-    });
-
-    expect(sttCalls).toBe(0);
-    expect(result.processedFrames).toBe(2);
-    expect(result.completedTurns).toBe(0);
-  });
-
-  it("does not send known no-speech hallucination transcripts to Pi Agent during an active session", async () => {
-    let piAgentCalls = 0;
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [
-        sampleNearEndFrameAt("wake", 0),
-        sampleNearEndFrameAt("hallucinated-no-speech", 1_000)
-      ],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createIdleEchoControl(),
-      stt: (() => {
-        const texts = ["ピコ", "ご視聴ありがとうございました"];
-
-        return {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-        };
-      })(),
-      tts: createSuccessfulTts("unused"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => {
-          piAgentCalls += 1;
-          throw new Error("no-speech hallucination must not reach Pi Agent");
-        }
-      },
-      wakeAcknowledgement: {
-        enabled: false
-      }
-    });
-
-    expect(result.startedSessions).toBe(1);
-    expect(result.completedTurns).toBe(0);
-    expect(piAgentCalls).toBe(0);
-  });
-
-  it("does not send echo-passed frames to STT when the speech gate rejects them", async () => {
-    let sttCalls = 0;
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [speechFrame("trigger", 0), speechFrame("noise-after-trigger", 1_000)],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createIdleEchoControl(),
-      speechActivity: {
-        process: (() => {
-          const values = [true, false];
-
-          return () =>
-            Promise.resolve({
-              speech: values.shift() ?? false,
-              provider: "energy" as const,
-              rmsDb: -20
-            });
-        })()
-      },
-      stt: {
-        warmup: () => {
-          throw new Error("warmup is not part of resident runtime");
-        },
-        transcribe: () => {
-          sttCalls += 1;
-          return Promise.resolve(successfulTranscript("ピコ"));
-        }
-      },
-      tts: createSuccessfulTts("unused"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => {
-          throw new Error("speech-gated noise must not reach Pi Agent");
-        }
-      },
-      wakeAcknowledgement: {
-        enabled: false
-      }
-    });
-
-    expect(sttCalls).toBe(1);
-    expect(result.startedSessions).toBe(1);
-    expect(result.completedTurns).toBe(0);
-  });
-
-  it("flushes a pending utterance before shutdown cleanup after abort", async () => {
-    const abortController = new AbortController();
-    const transcribedDurations: number[] = [];
-
-    await expect(
-      runVoiceResidentRuntime({
-        now: fixedNow(),
-        frames: abortingFrames(abortController),
-        utteranceWindow: {
-          minSpeechMs: 20,
-          silenceMs: 700,
-          maxUtteranceMs: 1_000,
-          minRmsDb: -50
-        },
-        triggerPhrases: ["ピコ"],
-        sessionLifecycle: createSessionLifecycle({
-          ending: {
-            mode: "timed",
-            durationMs: 60_000
-          }
-        }),
-        echoControl: createIdleEchoControl(),
-        stt: {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: (request) => {
-            transcribedDurations.push((request.audio.byteLength / 2 / 16_000) * 1_000);
-            return Promise.resolve(successfulTranscript("ピコ"));
-          }
-        },
-        tts: createSuccessfulTts("はい。"),
-        playback: {
-          play: () => Promise.resolve()
-        },
-        piAgent: {
-          prompt: () => Promise.resolve({ text: "はい。" })
-        },
-        signal: abortController.signal
-      })
-    ).rejects.toThrow("pico resident voice runtime aborted");
-
-    expect(transcribedDurations).toEqual([20]);
-  });
-
-  it("runs shutdown cleanup even when pending utterance flush fails", async () => {
-    const events: string[] = [];
-    const abortController = new AbortController();
-
-    await expect(
-      runVoiceResidentRuntime({
-        now: fixedNow(),
-        frames: abortingFrames(abortController),
-        utteranceWindow: {
-          minSpeechMs: 20,
-          silenceMs: 700,
-          maxUtteranceMs: 1_000,
-          minRmsDb: -50
-        },
-        triggerPhrases: ["ピコ"],
-        sessionLifecycle: createSessionLifecycle({
-          ending: {
-            mode: "timed",
-            durationMs: 60_000
-          }
-        }),
-        echoControl: createCleanupTrackingEchoControl(events),
-        stt: {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: () => {
-            events.push("stt:throw");
-            throw new Error("stt failed during pending flush");
-          }
-        },
-        tts: createSuccessfulTts("unused"),
-        playback: {
-          play: () => Promise.resolve()
-        },
-        piAgent: {
-          prompt: () => {
-            throw new Error("Pi Agent must not run after failed STT");
-          },
-          disposeAll: () => {
-            events.push("pi:disposeAll");
-          }
-        },
-        signal: abortController.signal
-      })
-    ).rejects.toThrow("stt failed during pending flush");
-
-    expect(events).toEqual(["stt:throw", "pi:disposeAll", "echo:flush"]);
-  });
-
-  it("continues shutdown cleanup when Pi Agent disposal fails", async () => {
-    const events: string[] = [];
-
-    await expect(
-      runVoiceResidentRuntime({
-        now: fixedNow(),
-        frames: [],
-        utteranceWindow: perFrameCompatibleUtteranceWindow(),
-        triggerPhrases: ["ピコ"],
-        sessionLifecycle: createSessionLifecycle({
-          ending: {
-            mode: "timed",
-            durationMs: 60_000
-          }
-        }),
-        echoControl: createCleanupTrackingEchoControl(events),
-        stt: successfulStt(""),
-        tts: createSuccessfulTts("unused"),
-        playback: {
-          play: () => Promise.resolve()
-        },
-        piAgent: {
-          prompt: () => {
-            throw new Error("no prompt is expected");
-          },
-          disposeAll: () => {
-            events.push("pi:disposeAll");
-            throw new Error("dispose failed");
-          }
-        }
-      })
-    ).rejects.toThrow("dispose failed");
-
-    expect(events).toEqual(["pi:disposeAll", "echo:flush"]);
-  });
-
-  it("preserves every shutdown cleanup failure", async () => {
-    const events: string[] = [];
-    const error = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createCleanupTrackingEchoControl(events),
-      stt: successfulStt(""),
-      tts: createSuccessfulTts("unused"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => {
-          throw new Error("no prompt is expected");
-        },
-        disposeAll: () => {
-          events.push("pi:disposeAll");
-          throw new Error("Pi cleanup failed");
-        }
-      },
-      deferredTools: {
-        collectDeliverableResults: () => [],
-        waitForIdle: () => {
-          events.push("deferred:wait");
-          throw new Error("deferred cleanup failed");
-        }
-      }
-    }).then(
-      () => undefined,
-      (reason: unknown) => reason
-    );
-
-    expect(error).toBeInstanceOf(AggregateError);
-    expect(
-      (error as AggregateError).errors.map((failure) =>
-        failure instanceof Error ? failure.message : String(failure)
-      )
-    ).toEqual(["Pi cleanup failed", "deferred cleanup failed"]);
-    expect(events).toEqual(["pi:disposeAll", "deferred:wait", "echo:flush"]);
-  });
-
-  it("keeps pre-trigger transcripts ephemeral and processes an active Pi Agent voice turn", async () => {
-    const lifecycle = createSessionLifecycle({
-      ending: {
-        mode: "timed",
-        durationMs: 60_000
-      }
-    });
-    const echoCalls: string[] = [];
-    const farEndFrames: VoicePcmFrame[] = [];
-    const playbackCalls: Array<{
-      readonly chunk: TtsAudioChunk;
-      readonly startedAt: string;
-      readonly farEndReferenceCountAtPlayback: number;
-    }> = [];
-    const echoControl = createPassingEchoControl(echoCalls, farEndFrames);
-    const sttTexts = ["雑談です", "ピコ", "今日の予定は？"];
-    const stt: SttClient = {
-      warmup: () => {
-        throw new Error("warmup is not part of resident runtime");
-      },
-      transcribe: () => Promise.resolve(successfulTranscript(sttTexts.shift() ?? "追加の発話です"))
-    };
-    const tts = createSuccessfulTts("予定を確認します。");
-    const playback: VoicePlaybackSink = {
-      play: (chunk, startedAt) => {
-        playbackCalls.push({
-          chunk,
-          startedAt,
-          farEndReferenceCountAtPlayback: farEndFrames.length
-        });
-        return Promise.resolve();
-      }
-    };
-    const agentPrompts: string[] = [];
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [
-        sampleNearEndFrame("mic-1"),
-        sampleNearEndFrame("mic-2"),
-        sampleNearEndFrame("mic-3")
-      ],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: lifecycle,
-      echoControl,
-      stt,
-      tts,
-      playback,
-      piAgent: {
-        prompt: (input) => {
-          agentPrompts.push(input.text);
-          return Promise.resolve({ text: "予定を確認します。" });
-        }
-      }
-    });
-
-    expect(result).toEqual({
-      processedFrames: 3,
-      startedSessions: 1,
-      completedTurns: 1,
-      failedFrames: 0,
-      failedTurns: 0,
-      suppressedFrames: 0
-    });
-    expect(agentPrompts).toEqual(["今日の予定は？"]);
-    expect(lifecycle.read("session-1")).toBeUndefined();
-    expect(echoCalls).toEqual(["near:mic-1", "near:mic-2", "near:mic-3", "far:tts-0"]);
-    expect(playbackCalls.map((call) => call.startedAt)).toEqual(["2026-06-18T00:00:00.000Z"]);
-    expect(playbackCalls.map((call) => call.farEndReferenceCountAtPlayback)).toEqual([1]);
-    expect(farEndFrames.map((frame) => frame.capturedAt)).toEqual(["2026-06-18T00:00:00.000Z"]);
-  });
-
-  it("records active input and Pi Agent response metadata without duplicating text", async () => {
-    const logEvents: unknown[] = [];
-
-    await runVoiceResidentRuntime({
-      now: sequenceNow([
-        "2026-06-18T00:00:00.000Z",
-        "2026-06-18T00:00:00.000Z",
-        "2026-06-18T00:00:00.000Z",
-        "2026-06-18T00:00:00.000Z",
-        "2026-06-18T00:00:00.000Z",
-        "2026-06-18T00:00:00.000Z",
-        "2026-06-18T00:00:00.000Z",
-        "2026-06-18T00:00:00.250Z",
-        "2026-06-18T00:00:00.250Z",
-        "2026-06-18T00:00:00.250Z"
-      ]),
-      monotonicNow: sequenceNumber([1_000, 1_250]),
-      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createIdleEchoControl(),
-      stt: (() => {
-        const texts = ["ピコ", "今日はテストです"];
-
-        return {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-        };
-      })(),
-      tts: createSuccessfulTts("了解です。"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => Promise.resolve({ text: "了解です。" })
-      },
-      log: {
-        record: (event) => {
-          logEvents.push(event);
-        }
-      }
-    });
-
-    expect(logEvents).toEqual([
-      {
-        kind: "staff_input",
-        occurredAt: "2026-06-18T00:00:00.000Z",
-        sessionId: "session-1"
-      },
-      {
-        kind: "pi_agent_response",
-        occurredAt: "2026-06-18T00:00:00.250Z",
-        sessionId: "session-1",
-        durationMs: 250
-      }
-    ]);
-    expect(JSON.stringify(logEvents)).not.toContain("今日はテストです");
-    expect(JSON.stringify(logEvents)).not.toContain("了解です。");
-    expect(JSON.stringify(logEvents)).not.toContain('"text"');
-  });
-
-  it("passes deliverable deferred tool results separately from the active turn transcript", async () => {
-    const lifecycle = createSessionLifecycle({
-      ending: {
-        mode: "timed",
-        durationMs: 60_000
-      }
-    });
-    const deferredResult = {
-      jobId: "deferred-job-1",
-      kind: "camera_scene_description" as const,
-      status: "completed" as const,
-      capturedAt: "2026-06-18T00:00:02.000Z",
-      completedAt: "2026-06-18T00:00:03.000Z",
-      summary: "撮影時点では机の上に教材が見えました。"
-    };
-    const prompts: Array<{
-      readonly text: string;
-      readonly deferredToolResults: unknown;
-    }> = [];
-
-    await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: lifecycle,
-      echoControl: createIdleEchoControl(),
-      stt: (() => {
-        const texts = ["ピコ", "それで、さっきの確認は？"];
-
-        return {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-        };
-      })(),
-      tts: createSuccessfulTts("確認結果を伝えます。"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: (input) => {
-          prompts.push({
-            text: input.text,
-            deferredToolResults: input.deferredToolResults
-          });
-          return Promise.resolve({ text: "確認結果を伝えます。" });
-        }
-      },
-      deferredTools: {
-        collectDeliverableResults: (input) => {
-          expect(input).toMatchObject({
-            sessionId: "session-1",
-            activeSessionId: "session-1"
-          });
-
-          return [deferredResult];
-        }
-      }
-    });
-
-    expect(prompts).toEqual([
-      {
-        text: "それで、さっきの確認は？",
-        deferredToolResults: [deferredResult]
-      }
-    ]);
-    expect(lifecycle.read("session-1")).toBeUndefined();
-  });
-
-  it("does not acknowledge deferred tool delivery when the Pi Agent turn fails", async () => {
-    let acknowledged: readonly string[] = [];
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createIdleEchoControl(),
-      stt: (() => {
-        const texts = ["ピコ", "結果は？"];
-
-        return {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-        };
-      })(),
-      tts: createSuccessfulTts("unused"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: (input) => {
-          if (input.text === "ピコ") {
-            return Promise.resolve({ text: "はい。" });
-          }
-
-          throw new Error("model unavailable");
-        }
-      },
-      deferredTools: {
-        collectDeliverableResults: () => [
-          {
-            jobId: "deferred-job-1",
-            kind: "camera_scene_description",
-            status: "completed",
-            capturedAt: "2026-06-18T00:00:02.000Z",
-            completedAt: "2026-06-18T00:00:03.000Z",
-            summary: "撮影時点では机の上に教材が見えました。"
-          }
-        ],
-        acknowledgeDelivered: (jobIds) => {
-          acknowledged = jobIds;
-        }
-      }
-    });
-
-    expect(result.failedTurns).toBe(1);
-    expect(acknowledged).toEqual([]);
-  });
-
-  it("keeps the completed turn when deferred delivery acknowledgement fails", async () => {
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createIdleEchoControl(),
-      stt: (() => {
-        const texts = ["ピコ", "結果は？"];
-
-        return {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-        };
-      })(),
-      tts: createSuccessfulTts("確認しました。"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => Promise.resolve({ text: "確認しました。" })
-      },
-      deferredTools: {
-        collectDeliverableResults: () => [
-          {
-            jobId: "deferred-job-1",
-            kind: "camera_scene_description",
-            status: "completed",
-            capturedAt: "2026-06-18T00:00:02.000Z",
-            completedAt: "2026-06-18T00:00:03.000Z",
-            summary: "撮影時点では机の上に教材が見えました。"
-          }
-        ],
-        acknowledgeDelivered: () => {
-          throw new Error("deferred acknowledgement store unavailable");
-        }
-      }
-    });
-
-    expect(result.completedTurns).toBe(1);
-    expect(result.failedTurns).toBe(0);
-  });
-
-  it("does not acknowledge deferred tool delivery when TTS synthesis fails", async () => {
-    let acknowledged: readonly string[] = [];
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createIdleEchoControl(),
-      stt: (() => {
-        const texts = ["ピコ", "結果は？"];
-
-        return {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-        };
-      })(),
-      tts: {
-        synthesize: () =>
-          Promise.resolve({
-            ok: false,
-            reason: "backend_error",
-            message: "aivis unavailable",
-            sentenceIndex: 0,
-            source: {
-              serviceId: "local-aivis",
-              provider: "aivis-speech",
-              speakerId: 888_753_760
-            }
-          })
-      },
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => Promise.resolve({ text: "確認しました。" })
-      },
-      deferredTools: {
-        collectDeliverableResults: () => [
-          {
-            jobId: "deferred-job-1",
-            kind: "camera_scene_description",
-            status: "completed",
-            capturedAt: "2026-06-18T00:00:02.000Z",
-            completedAt: "2026-06-18T00:00:03.000Z",
-            summary: "撮影時点では机の上に教材が見えました。"
-          }
-        ],
-        acknowledgeDelivered: (jobIds) => {
-          acknowledged = jobIds;
-        }
-      }
-    });
-
-    expect(result.failedTurns).toBe(1);
-    expect(acknowledged).toEqual([]);
-  });
-
-  it("does not acknowledge deferred tool delivery when TTS playback fails", async () => {
-    let acknowledged: readonly string[] = [];
-
-    await expect(
-      runVoiceResidentRuntime({
-        now: fixedNow(),
-        frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-        utteranceWindow: perFrameCompatibleUtteranceWindow(),
-        triggerPhrases: ["ピコ"],
-        sessionLifecycle: createSessionLifecycle({
-          ending: {
-            mode: "timed",
-            durationMs: 60_000
-          }
-        }),
-        echoControl: createIdleEchoControl(),
-        stt: (() => {
-          const texts = ["ピコ", "結果は？"];
-
-          return {
-            warmup: () => {
-              throw new Error("warmup is not part of resident runtime");
-            },
-            transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-          };
-        })(),
-        tts: createSuccessfulTts("確認しました。"),
-        playback: {
-          play: () => Promise.reject(new Error("speaker unavailable"))
-        },
-        piAgent: {
-          prompt: () => Promise.resolve({ text: "確認しました。" })
-        },
-        deferredTools: {
-          collectDeliverableResults: () => [
-            {
-              jobId: "deferred-job-1",
-              kind: "camera_scene_description",
-              status: "completed",
-              capturedAt: "2026-06-18T00:00:02.000Z",
-              completedAt: "2026-06-18T00:00:03.000Z",
-              summary: "撮影時点では机の上に教材が見えました。"
-            }
-          ],
-          acknowledgeDelivered: (jobIds) => {
-            acknowledged = jobIds;
-          }
-        }
-      })
-    ).rejects.toThrow("speaker unavailable");
-
-    expect(acknowledged).toEqual([]);
-  });
-
-  it("cancels deferred tool jobs when an active session closes", async () => {
-    const lifecycle = createSessionLifecycle({
-      ending: {
-        mode: "timed",
-        durationMs: 60_000
-      }
-    });
-    const cancelled: string[] = [];
-
-    await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: lifecycle,
-      echoControl: createIdleEchoControl(),
-      stt: (() => {
-        const texts = ["ピコ", "この会話は終わりです。"];
-
-        return {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-        };
-      })(),
-      tts: createSuccessfulTts("はい。"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => {
-          lifecycle.end("session-1");
-
-          return Promise.resolve({ text: "はい。" });
-        }
-      },
-      deferredTools: {
-        collectDeliverableResults: () => [],
-        cancelSession: (sessionId, reason) => {
-          cancelled.push(`${sessionId}:${reason}`);
-        }
-      }
-    });
-
-    expect(cancelled).toEqual(["session-1:session_closed"]);
-  });
-
-  it("keeps active session close cleanup running when deferred cancellation fails", async () => {
-    const lifecycle = createSessionLifecycle({
-      ending: {
-        mode: "timed",
-        durationMs: 60_000
-      }
-    });
-
-    await expect(
-      runVoiceResidentRuntime({
-        now: fixedNow(),
-        frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-        utteranceWindow: perFrameCompatibleUtteranceWindow(),
-        triggerPhrases: ["ピコ"],
-        sessionLifecycle: lifecycle,
-        echoControl: createIdleEchoControl(),
-        stt: (() => {
-          const texts = ["ピコ", "この会話は終わりです。"];
-
-          return {
-            warmup: () => {
-              throw new Error("warmup is not part of resident runtime");
-            },
-            transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-          };
-        })(),
-        tts: createSuccessfulTts("はい。"),
-        playback: {
-          play: () => Promise.resolve()
-        },
-        piAgent: {
-          prompt: () => {
-            lifecycle.end("session-1");
-
-            return Promise.resolve({ text: "はい。" });
-          }
-        },
-        deferredTools: {
-          collectDeliverableResults: () => [],
-          cancelSession: () => {
-            throw new Error("deferred cancellation store unavailable");
-          }
-        }
-      })
-    ).resolves.toMatchObject({
-      completedTurns: 1,
-      failedTurns: 0
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("resident hold-to-talk voice runtime", () => {
+  it("owns no microphone and makes no STT call while idle", async () => {
+    const driver = createDriver();
+
+    expect(driver.capture.starts()).toBe(0);
+    expect(driver.sttRequests).toEqual([]);
+    expect(driver.runtime.state()).toBe("idle");
+
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({
+      acceptedHolds: 0,
+      completedTurns: 0
     });
   });
 
-  it("drains deferred tool jobs during shutdown cleanup before returning", async () => {
-    const lifecycle = createSessionLifecycle({
-      ending: {
-        mode: "timed",
-        durationMs: 60_000
-      }
-    });
-    const events: string[] = [];
-    let resolveIdle: (() => void) | undefined;
+  it("captures only after press, keeps the 250 ms tail, and submits one Pi turn", async () => {
+    vi.useFakeTimers();
+    const driver = createDriver();
 
-    await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: lifecycle,
-      echoControl: createIdleEchoControl(),
-      stt: (() => {
-        const texts = ["ピコ", "終了前の会話です。"];
+    await expect(driver.press()).resolves.toBe("accepted");
+    expect(driver.capture.starts()).toBe(1);
+    driver.capture.emit(frame("first", [1, 0]));
+    await expect(driver.release()).resolves.toBe("accepted");
+    driver.capture.emit(frame("tail", [2, 0], "2026-07-17T00:00:00.010Z"));
 
-        return {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-        };
-      })(),
-      tts: createSuccessfulTts("はい。"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => Promise.resolve({ text: "はい。" })
-      },
-      deferredTools: {
-        collectDeliverableResults: () => [],
-        cancelSession: (sessionId, reason) => {
-          events.push(`cancel:${sessionId}:${reason}`);
-        },
-        waitForIdle: () =>
-          new Promise<void>((resolve) => {
-            events.push("wait:start");
-            resolveIdle = () => {
-              events.push("wait:done");
-              resolve();
-            };
-            queueMicrotask(() => resolveIdle?.());
-          })
-      }
-    });
+    await vi.advanceTimersByTimeAsync(249);
+    expect(driver.capture.stops()).toBe(0);
+    expect(driver.sttRequests).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
-    expect(events).toEqual(["cancel:session-1:session_closed", "wait:start", "wait:done"]);
-  });
-
-  it("measures Pi Agent response duration with monotonic time instead of wall-clock timestamps", async () => {
-    const logEvents: unknown[] = [];
-
-    await runVoiceResidentRuntime({
-      now: sequenceNow([
-        "2026-06-18T00:00:10.000Z",
-        "2026-06-18T00:00:10.000Z",
-        "2026-06-18T00:00:10.000Z",
-        "2026-06-18T00:00:10.000Z",
-        "2026-06-18T00:00:10.000Z",
-        "2026-06-18T00:00:10.000Z",
-        "2026-06-18T00:00:10.000Z",
-        "2026-06-18T00:00:08.000Z",
-        "2026-06-18T00:00:08.000Z",
-        "2026-06-18T00:00:08.000Z"
-      ]),
-      monotonicNow: sequenceNumber([1_000, 1_123]),
-      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createIdleEchoControl(),
-      stt: (() => {
-        const texts = ["ピコ", "今日はテストです"];
-
-        return {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-        };
-      })(),
-      tts: createSuccessfulTts("了解です。"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => Promise.resolve({ text: "了解です。" })
-      },
-      log: {
-        record: (event) => {
-          logEvents.push(event);
-        }
-      }
-    });
-
-    expect(logEvents).toContainEqual({
-      kind: "pi_agent_response",
-      occurredAt: "2026-06-18T00:00:08.000Z",
+    expect(driver.capture.stops()).toBe(1);
+    expect(driver.sttRequests).toHaveLength(1);
+    expect([...driver.sttRequests[0]!.audio]).toEqual([1, 0, 2, 0]);
+    expect(driver.piRequests).toHaveLength(1);
+    expect(driver.piRequests[0]).toMatchObject({
       sessionId: "session-1",
-      durationMs: 123
+      text: "職員の発話"
+    });
+    expect(driver.playedChunks).toHaveLength(1);
+
+    await driver.runtime.stop();
+  });
+
+  it("reuses the Pi parent conversation across separate holds", async () => {
+    vi.useFakeTimers();
+    const driver = createDriver();
+
+    await completeHold(driver, "first");
+    await completeHold(driver, "second");
+
+    expect(driver.piRequests.map((request) => request.sessionId)).toEqual([
+      "session-1",
+      "session-1"
+    ]);
+    expect(driver.piRequests).toHaveLength(2);
+
+    await driver.runtime.stop();
+  });
+
+  it("rejects a no-speech hold before STT and Pi", async () => {
+    vi.useFakeTimers();
+    const driver = createDriver({ speechDetected: false });
+
+    await driver.press();
+    driver.capture.emit(frame("quiet", [0, 0]));
+    await driver.release();
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(driver.sttRequests).toEqual([]);
+    expect(driver.piRequests).toEqual([]);
+
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({ emptyHolds: 1 });
+  });
+
+  it("ignores talk while processing and never queues it", async () => {
+    vi.useFakeTimers();
+    const piGate = createGate<{ readonly text: string }>();
+    const driver = createDriver({ piResponse: () => piGate.promise });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("processing"));
+
+    await expect(driver.press()).resolves.toBe("ignored_busy");
+    expect(driver.capture.starts()).toBe(1);
+    piGate.resolve({ text: "応答" });
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+    expect(driver.capture.starts()).toBe(1);
+
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({
+      ignoredBusyTalkPresses: 1
     });
   });
 
-  it("keeps active voice turns running when resident logging fails", async () => {
-    const prompts: string[] = [];
-    const spokenTexts: string[] = [];
-    let playbackCalls = 0;
+  it("cancels listening without STT, farewell, or parent-session disposal", async () => {
+    const driver = createDriver();
 
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createIdleEchoControl(),
-      stt: (() => {
-        const texts = ["ピコ", "今日はテストです"];
+    await driver.press();
+    driver.capture.emit(frame("partial", [1, 0]));
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
-        return {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
+    expect(driver.capture.stops()).toBe(1);
+    expect(driver.sttRequests).toEqual([]);
+    expect(driver.piRequests).toEqual([]);
+    expect(driver.disposedSessions).toEqual([]);
+
+    await driver.runtime.stop();
+  });
+
+  it("aborts the active Pi turn exactly once and preserves its parent session", async () => {
+    vi.useFakeTimers();
+    let aborts = 0;
+    const piResponse = (signal: AbortSignal | undefined): Promise<{ readonly text: string }> =>
+      new Promise((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => {
+            aborts += 1;
+            reject(new Error("Pi turn aborted"));
           },
-          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-        };
-      })(),
-      tts: {
-        synthesize: (request) => {
-          spokenTexts.push(request.text);
-          return createSuccessfulTts(request.text).synthesize(request);
-        }
-      },
-      playback: {
-        play: () => {
-          playbackCalls += 1;
-          return Promise.resolve();
-        }
-      },
-      piAgent: {
-        prompt: (input) => {
-          prompts.push(input.text);
-          return Promise.resolve({ text: "了解です。" });
-        }
-      },
-      log: {
-        record: () => {
-          throw new Error("log sink unavailable");
-        }
-      }
-    });
+          { once: true }
+        );
+      });
+    const driver = createDriver({ piResponse });
 
-    expect(result.completedTurns).toBe(1);
-    expect(result.failedTurns).toBe(0);
-    expect(prompts).toEqual(["今日はテストです"]);
-    expect(spokenTexts).toEqual(["了解です。"]);
-    expect(playbackCalls).toBe(1);
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("processing"));
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(aborts).toBe(1);
+    expect(driver.disposedSessions).toEqual([]);
+    expect(driver.playedChunks).toEqual([]);
+
+    await driver.runtime.stop();
   });
 
-  it("generates and speaks a wake acknowledgement through Pi Agent after a trigger starts a session", async () => {
-    const prompts: string[] = [];
-    const spokenTexts: string[] = [];
-    const logEvents: unknown[] = [];
+  it("stops playback once when cancelled while speaking", async () => {
+    vi.useFakeTimers();
+    const playbackGate = createGate<undefined>();
+    const driver = createDriver({ playbackCompletion: () => playbackGate.promise });
 
-    const result = await runVoiceResidentRuntime({
-      now: sequenceNow([
-        "2026-06-18T00:00:00.000Z",
-        "2026-06-18T00:00:00.000Z",
-        "2026-06-18T00:00:00.000Z",
-        "2026-06-18T00:00:00.000Z",
-        "2026-06-18T00:00:00.000Z",
-        "2026-06-18T00:00:00.180Z",
-        "2026-06-18T00:00:00.180Z",
-        "2026-06-18T00:00:00.180Z"
-      ]),
-      monotonicNow: sequenceNumber([2_000, 2_180]),
-      frames: [sampleNearEndFrame("mic-trigger")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createIdleEchoControl(),
-      stt: successfulStt("ピコ"),
-      tts: {
-        synthesize: (request) => {
-          spokenTexts.push(request.text);
-          return createSuccessfulTts(request.text).synthesize(request);
-        }
-      },
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: (input) => {
-          prompts.push(input.text);
-          return Promise.resolve({ text: "はい、聞いています。" });
-        }
-      },
-      wakeAcknowledgement: {
-        enabled: true
-      },
-      log: {
-        record: (event) => {
-          logEvents.push(event);
-        }
-      }
-    });
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    expect(driver.playbackStops()).toBe(1);
+    playbackGate.resolve(undefined);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
-    expect(result).toMatchObject({
-      startedSessions: 1,
-      completedTurns: 1,
-      failedTurns: 0
-    });
-    expect(prompts).toEqual([
-      'The user just woke you up by saying: "ピコ". Respond briefly in spoken Japanese to show you are listening. Do not answer a separate task yet.'
-    ]);
-    expect(spokenTexts).toEqual(["はい、聞いています。"]);
-    expect(logEvents).toEqual([
-      {
-        kind: "wake_ack_input",
-        occurredAt: "2026-06-18T00:00:00.000Z",
-        sessionId: "session-1"
-      },
-      {
-        kind: "wake_ack_response",
-        occurredAt: "2026-06-18T00:00:00.180Z",
-        sessionId: "session-1",
-        durationMs: 180
-      }
-    ]);
-    expect(JSON.stringify(logEvents)).not.toContain("The user just woke you up by saying");
-    expect(JSON.stringify(logEvents)).not.toContain("はい、聞いています。");
-    expect(JSON.stringify(logEvents)).not.toContain('"text"');
+    expect(driver.playbackStops()).toBe(1);
+
+    await driver.runtime.stop();
   });
 
-  it("keeps wake acknowledgement running when resident logging fails", async () => {
-    const prompts: string[] = [];
-    const spokenTexts: string[] = [];
-    let playbackCalls = 0;
+  it("suppresses a late STT result from a cancelled generation", async () => {
+    vi.useFakeTimers();
+    const sttGate = createGate<SttTranscriptionResult>();
+    const driver = createDriver({ sttResponse: () => sttGate.promise });
 
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [sampleNearEndFrame("mic-trigger")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createIdleEchoControl(),
-      stt: successfulStt("ピコ"),
-      tts: {
-        synthesize: (request) => {
-          spokenTexts.push(request.text);
-          return createSuccessfulTts(request.text).synthesize(request);
-        }
-      },
-      playback: {
-        play: () => {
-          playbackCalls += 1;
-          return Promise.resolve();
-        }
-      },
-      piAgent: {
-        prompt: (input) => {
-          prompts.push(input.text);
-          return Promise.resolve({ text: "はい、聞いています。" });
-        }
-      },
-      wakeAcknowledgement: {
-        enabled: true
-      },
-      log: {
-        record: () => {
-          throw new Error("log sink unavailable");
-        }
-      }
-    });
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("transcribing"));
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    expect(driver.runtime.state()).toBe("cancelling");
+    sttGate.resolve(successfulTranscript("遅い結果"));
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
-    expect(result.completedTurns).toBe(1);
-    expect(result.failedTurns).toBe(0);
-    expect(prompts).toEqual([
-      'The user just woke you up by saying: "ピコ". Respond briefly in spoken Japanese to show you are listening. Do not answer a separate task yet.'
-    ]);
-    expect(spokenTexts).toEqual(["はい、聞いています。"]);
-    expect(playbackCalls).toBe(1);
+    expect(driver.piRequests).toEqual([]);
+    expect(driver.playedChunks).toEqual([]);
+
+    await driver.runtime.stop();
   });
 
-  it("finalizes an active interaction during shutdown cleanup", async () => {
-    const lifecycle = createSessionLifecycle({
-      ending: {
-        mode: "timed",
-        durationMs: 60_000
-      }
-    });
-    const cancelled: string[] = [];
-    const disposedSessions: string[] = [];
-    let disposedAll = 0;
+  it("drains owned work on shutdown and rejects later controls", async () => {
+    const driver = createDriver();
 
-    await expect(
-      runVoiceResidentRuntime({
-        now: fixedNow(),
-        frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-        utteranceWindow: perFrameCompatibleUtteranceWindow(),
-        triggerPhrases: ["ピコ"],
-        sessionLifecycle: lifecycle,
-        echoControl: createIdleEchoControl(),
-        stt: (() => {
-          const texts = ["ピコ", "終了前の会話です。"];
+    await driver.press();
+    const firstStop = driver.runtime.stop();
+    const secondStop = driver.runtime.stop();
 
-          return {
-            warmup: () => {
-              throw new Error("warmup is not part of resident runtime");
-            },
-            transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-          };
-        })(),
-        tts: createSuccessfulTts("はい。"),
-        playback: {
-          play: () => Promise.resolve()
-        },
-        piAgent: {
-          prompt: () => Promise.resolve({ text: "はい。" }),
-          disposeSession: (sessionId) => {
-            disposedSessions.push(sessionId);
-          },
-          disposeAll: () => {
-            disposedAll += 1;
-          }
-        },
-        deferredTools: {
-          collectDeliverableResults: () => [],
-          cancelSession: (sessionId, reason) => {
-            cancelled.push(`${sessionId}:${reason}`);
-          },
-          waitForIdle: () => {
-            cancelled.push("waitForIdle");
-
-            return Promise.resolve();
-          }
-        }
-      })
-    ).resolves.toMatchObject({ completedTurns: 1 });
-
-    expect(cancelled).toEqual(["session-1:session_closed", "waitForIdle"]);
-    expect(disposedSessions).toEqual(["session-1"]);
-    expect(lifecycle.read("session-1")).toBeUndefined();
-    expect(disposedAll).toBe(1);
-  });
-
-  it("continues resource cleanup when per-session Pi disposal fails", async () => {
-    const events: string[] = [];
-    const lifecycle = createSessionLifecycle({
-      ending: { mode: "timed", durationMs: 60_000 }
-    });
-
-    await expect(
-      runVoiceResidentRuntime({
-        now: fixedNow(),
-        frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-        utteranceWindow: perFrameCompatibleUtteranceWindow(),
-        triggerPhrases: ["ピコ"],
-        sessionLifecycle: lifecycle,
-        echoControl: createCleanupTrackingEchoControl(events),
-        speechActivity: {
-          process: () => Promise.resolve({ speech: true, provider: "energy", rmsDb: -20 }),
-          close: () => {
-            events.push("speech:close");
-          }
-        },
-        stt: (() => {
-          const texts = ["ピコ", "終了前の会話です。"];
-
-          return {
-            warmup: () => {
-              throw new Error("warmup is not part of resident runtime");
-            },
-            transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-          };
-        })(),
-        tts: createSuccessfulTts("はい。"),
-        playback: {
-          play: () => Promise.resolve()
-        },
-        piAgent: {
-          prompt: () => Promise.resolve({ text: "はい。" }),
-          disposeSession: () => {
-            events.push("pi:disposeSession");
-            throw new Error("per-session disposal failed");
-          },
-          disposeAll: () => {
-            events.push("pi:disposeAll");
-          }
-        }
-      })
-    ).resolves.toMatchObject({ completedTurns: 1 });
-
-    expect(events).toEqual(["pi:disposeSession", "pi:disposeAll", "echo:flush", "speech:close"]);
-    expect(lifecycle.read("session-1")).toBeUndefined();
-  });
-
-  it("cancels deferred jobs when shutdown ends an interaction", async () => {
-    const cancelled: string[] = [];
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [sampleNearEndFrame("mic-trigger")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createIdleEchoControl(),
-      stt: successfulStt("ピコ"),
-      tts: createSuccessfulTts("unused"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => {
-          throw new Error("wake-only shutdown should not prompt Pi Agent");
-        }
-      },
-      deferredTools: {
-        collectDeliverableResults: () => [],
-        cancelSession: (sessionId, reason) => {
-          cancelled.push(`${sessionId}:${reason}`);
-        }
-      },
-      wakeAcknowledgement: {
-        enabled: false
-      }
-    });
-
-    expect(result.startedSessions).toBe(1);
-    expect(cancelled).toEqual(["session-1:session_closed"]);
-  });
-
-  it("does not send suppressed microphone frames to STT", async () => {
-    let sttCalls = 0;
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [sampleNearEndFrame("mic-1")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createSuppressingEchoControl(),
-      stt: {
-        warmup: () => {
-          throw new Error("warmup is not part of resident runtime");
-        },
-        transcribe: () => {
-          sttCalls += 1;
-          throw new Error("suppressed frames must not be transcribed");
-        }
-      },
-      tts: createSuccessfulTts("unused"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => {
-          throw new Error("suppressed frames must not reach Pi Agent");
-        }
-      }
-    });
-
-    expect(sttCalls).toBe(0);
-    expect(result.suppressedFrames).toBe(1);
-    expect(result.completedTurns).toBe(0);
-  });
-
-  it("does not transcribe microphone frames captured while pico audio is playing", async () => {
-    const sttTexts = ["ピコ", "用件です", "pico own speech"];
-    const transcribedFrameLengths: number[] = [];
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [
-        sampleNearEndFrameAt("wake", 0),
-        sampleNearEndFrameAt("staff-turn", 100),
-        sampleNearEndFrameAt("captured-during-playback", 500)
-      ],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createHalfDuplexEchoControl({
-        tailMuteMs: 700
-      }),
-      stt: {
-        warmup: () => {
-          throw new Error("warmup is not part of resident runtime");
-        },
-        transcribe: (request) => {
-          transcribedFrameLengths.push(request.audio.byteLength);
-          return Promise.resolve(successfulTranscript(sttTexts.shift() ?? ""));
-        }
-      },
-      tts: createSuccessfulTts("はい。"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => Promise.resolve({ text: "はい。" })
-      }
-    });
-
-    expect(result).toMatchObject({
-      processedFrames: 3,
-      startedSessions: 1,
-      completedTurns: 1,
-      suppressedFrames: 1
-    });
-    expect(transcribedFrameLengths).toHaveLength(2);
-  });
-
-  it("waits for Pi session disposal before removing an ended interaction", async () => {
-    const calls: string[] = [];
-    const lifecycle = createOrderingLifecycle(calls);
-
-    await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: lifecycle,
-      endedSessionIds: ["session-ended"],
-      echoControl: createIdleEchoControl(),
-      stt: successfulStt(""),
-      tts: createSuccessfulTts("unused"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => {
-          throw new Error("no turn is expected");
-        },
-        disposeSession: async (sessionId) => {
-          calls.push(`dispose:start:${sessionId}`);
-          await Promise.resolve();
-          calls.push(`dispose:end:${sessionId}`);
-        }
-      }
-    });
-
-    expect(calls).toEqual([
-      "read:session-ended",
-      "dispose:start:session-ended",
-      "dispose:end:session-ended",
-      "remove:session-ended"
-    ]);
-  });
-
-  it("generates and speaks a farewell before finalizing a timed-ended interaction", async () => {
-    const calls: string[] = [];
-    const lifecycle = createOrderingLifecycle(calls);
-    const prompts: string[] = [];
-    const spokenTexts: string[] = [];
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: lifecycle,
-      endedSessionIds: ["session-ended"],
-      echoControl: createIdleEchoControl(),
-      stt: successfulStt(""),
-      tts: {
-        synthesize: (request) => {
-          spokenTexts.push(request.text);
-          calls.push(`tts:${request.text}`);
-          return createSuccessfulTts(request.text).synthesize(request);
-        }
-      },
-      playback: {
-        play: () => {
-          calls.push("play");
-          return Promise.resolve();
-        }
-      },
-      piAgent: {
-        prompt: (input) => {
-          prompts.push(input.text);
-          calls.push(`prompt:${input.sessionId}`);
-          return Promise.resolve({ text: "また呼んでね。" });
-        },
-        disposeSession: (sessionId) => {
-          calls.push(`dispose:${sessionId}`);
-        }
-      },
-      farewell: {
-        enabled: true
-      }
-    });
-
-    expect(result.failedTurns).toBe(0);
-    expect(prompts).toEqual([
-      "The voice session is ending now. Respond with one brief spoken Japanese farewell for the staff. Do not introduce a new topic."
-    ]);
-    expect(spokenTexts).toEqual(["また呼んでね。"]);
-    expect(calls).toEqual([
-      "read:session-ended",
-      "prompt:session-ended",
-      "tts:また呼んでね。",
-      "play",
-      "dispose:session-ended",
-      "remove:session-ended"
-    ]);
-  });
-
-  it("still finalizes a timed-ended interaction when farewell generation fails", async () => {
-    const calls: string[] = [];
-    const lifecycle = createOrderingLifecycle(calls);
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: lifecycle,
-      endedSessionIds: ["session-ended"],
-      echoControl: createIdleEchoControl(),
-      stt: successfulStt(""),
-      tts: {
-        synthesize: () => {
-          throw new Error("farewell TTS must not run after prompt failure");
-        }
-      },
-      playback: {
-        play: () => {
-          throw new Error("farewell playback must not run after prompt failure");
-        }
-      },
-      piAgent: {
-        prompt: () => {
-          calls.push("prompt:failed");
-          throw new Error("LLM unavailable");
-        },
-        disposeSession: (sessionId) => {
-          calls.push(`dispose:${sessionId}`);
-        }
-      },
-      farewell: {
-        enabled: true
-      }
-    });
-
-    expect(result.failedTurns).toBe(1);
-    expect(calls).toEqual([
-      "read:session-ended",
-      "prompt:failed",
-      "dispose:session-ended",
-      "remove:session-ended"
-    ]);
-  });
-
-  it("suppresses per-session disposal failure and removes the ended interaction", async () => {
-    const calls: string[] = [];
-    const lifecycle = createOrderingLifecycle(calls);
-
-    await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: lifecycle,
-      endedSessionIds: ["session-ended"],
-      echoControl: createIdleEchoControl(),
-      stt: successfulStt(""),
-      tts: createSuccessfulTts("unused"),
-      playback: { play: () => Promise.resolve() },
-      piAgent: {
-        prompt: () => {
-          throw new Error("no turn is expected");
-        },
-        disposeSession: (sessionId) => {
-          calls.push(`dispose:${sessionId}`);
-          throw new Error("per-session disposal failed");
-        }
-      }
-    });
-
-    expect(calls).toEqual(["read:session-ended", "dispose:session-ended", "remove:session-ended"]);
-  });
-
-  it("records probe events without transcript payloads", async () => {
-    const audit = createStructuredAuditLog();
-
-    await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [sampleNearEndFrame("mic-1")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createPassingEchoControl([], []),
-      stt: successfulStt("ピコ"),
-      tts: createSuccessfulTts("はい。"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => Promise.resolve({ text: "はい。" })
-      },
-      probe: { audit }
-    });
-
-    expect(audit.entries().map((entry) => entry.name)).toContain("voice.runtime.stage");
-    expect(JSON.stringify(audit.entries())).not.toContain("ピコ");
-  });
-
-  it("records TTS request wall latency separately from synthesized audio duration", async () => {
-    const audit = createStructuredAuditLog();
-
-    await runVoiceResidentRuntime({
-      now: fixedNow(),
-      monotonicNow: sequenceNumber([10, 20, 100, 145]),
-      frames: [sampleNearEndFrame("mic-trigger"), sampleNearEndFrame("mic-turn")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      sessionLifecycle: createSessionLifecycle({
-        ending: {
-          mode: "timed",
-          durationMs: 60_000
-        }
-      }),
-      echoControl: createIdleEchoControl(),
-      stt: (() => {
-        const texts = ["ピコ", "今日はテストです"];
-
-        return {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-        };
-      })(),
-      tts: createSuccessfulTts("了解です。"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => Promise.resolve({ text: "了解です。" })
-      },
-      probe: { audit }
-    });
-
-    expect(
-      audit.entries().map((entry) => ({
-        stage: entry.attributes["pico.voice.stage"],
-        durationMs: entry.attributes["pico.voice.stage_duration_ms"]
-      }))
-    ).toContainEqual({
-      stage: "tts_request_wall",
-      durationMs: 45
-    });
-    expect(
-      audit.entries().map((entry) => ({
-        stage: entry.attributes["pico.voice.stage"],
-        durationMs: entry.attributes["pico.voice.stage_duration_ms"]
-      }))
-    ).toContainEqual({
-      stage: "tts_audio_duration",
-      durationMs: 120
-    });
-  });
-
-  it("does not start a session from low-confidence trigger transcripts", async () => {
-    const lifecycle = createSessionLifecycle({
-      ending: {
-        mode: "timed",
-        durationMs: 60_000
-      }
-    });
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [sampleNearEndFrame("mic-low-confidence")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      minTriggerConfidence: 0.7,
-      sessionLifecycle: lifecycle,
-      echoControl: createIdleEchoControl(),
-      stt: successfulStt("ピコ", 0.2),
-      tts: createSuccessfulTts("unused"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => {
-          throw new Error("low-confidence trigger must not reach Pi Agent");
-        }
-      }
-    });
-
-    expect(result.startedSessions).toBe(0);
-    expect(lifecycle.read("session-1")).toBeUndefined();
-  });
-
-  it("sends only post-activation utterances in push-to-talk mode", async () => {
-    const lifecycle = createSessionLifecycle({
-      ending: {
-        mode: "timed",
-        durationMs: 60_000
-      }
-    });
-    const prompts: string[] = [];
-    const spokenTexts: string[] = [];
-    const activations = createSequenceActivationSource([
-      undefined,
-      {
-        id: "activation-1",
-        occurredAt: "2026-06-18T00:00:00.500Z",
-        expiresAt: "2026-06-18T00:00:08.500Z",
-        trigger: {
-          kind: "button_trigger",
-          label: "push_to_talk",
-          source: "loopback_http"
-        }
-      }
-    ]);
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [sampleNearEndFrame("ambient-child-voice"), sampleNearEndFrame("button-turn")],
-      utteranceWindow: perFrameCompatibleUtteranceWindow(),
-      triggerPhrases: ["ピコ"],
-      activation: {
-        mode: "push_to_talk",
-        source: activations
-      },
-      sessionLifecycle: lifecycle,
-      echoControl: createIdleEchoControl(),
-      stt: (() => {
-        const texts = ["周りの声です", "今日の予定を確認して"];
-
-        return {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: () => Promise.resolve(successfulTranscript(texts.shift() ?? ""))
-        };
-      })(),
-      tts: {
-        synthesize: (request) => {
-          spokenTexts.push(request.text);
-          return createSuccessfulTts("予定を確認します。").synthesize(request);
-        }
-      },
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: (input) => {
-          prompts.push(input.text);
-          return Promise.resolve({ text: "予定を確認します。" });
-        }
-      },
-      wakeAcknowledgement: {
-        enabled: true
-      }
-    });
-
-    expect(result.startedSessions).toBe(1);
-    expect(result.completedTurns).toBe(1);
-    expect(prompts).toEqual(["今日の予定を確認して"]);
-    expect(spokenTexts).toEqual(["予定を確認します。"]);
-  });
-
-  it("drops speech buffered before a push-to-talk activation", async () => {
-    const lifecycle = createSessionLifecycle({
-      ending: {
-        mode: "timed",
-        durationMs: 60_000
-      }
-    });
-    const prompts: string[] = [];
-    const sttDurations: number[] = [];
-    const activations = createSequenceActivationSource([
-      undefined,
-      {
-        id: "activation-1",
-        occurredAt: "2026-06-18T00:00:00.010Z",
-        expiresAt: "2026-06-18T00:00:08.010Z",
-        trigger: {
-          kind: "button_trigger",
-          label: "push_to_talk",
-          source: "loopback_http"
-        }
-      }
-    ]);
-
-    await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [
-        speechFrame("speech-before-button", 0),
-        speechFrame("speech-after-button", 10),
-        silenceFrame("silence-after-button-1", 20),
-        silenceFrame("silence-after-button-2", 30)
-      ],
-      utteranceWindow: {
-        minSpeechMs: 10,
-        silenceMs: 20,
-        maxUtteranceMs: 1_000,
-        minRmsDb: -50
-      },
-      triggerPhrases: ["ピコ"],
-      activation: {
-        mode: "push_to_talk",
-        source: activations
-      },
-      sessionLifecycle: lifecycle,
-      echoControl: createIdleEchoControl(),
-      stt: {
-        warmup: () => {
-          throw new Error("warmup is not part of resident runtime");
-        },
-        transcribe: (request) => {
-          sttDurations.push((request.audio.byteLength / 2 / 16_000) * 1_000);
-          return Promise.resolve(successfulTranscript("ボタン後の発話です"));
-        }
-      },
-      tts: createSuccessfulTts("了解です。"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: (input) => {
-          prompts.push(input.text);
-          return Promise.resolve({ text: "了解です。" });
-        }
-      }
-    });
-
-    expect(sttDurations).toEqual([30]);
-    expect(prompts).toEqual(["ボタン後の発話です"]);
-  });
-
-  it("keeps push-to-talk activations unacknowledged until a turn is consumed", async () => {
-    const lifecycle = createSessionLifecycle({
-      ending: {
-        mode: "timed",
-        durationMs: 60_000
-      }
-    });
-    const acknowledgedActivations: string[] = [];
-    const activation = {
-      id: "activation-1",
-      occurredAt: "2026-06-18T00:00:00.000Z",
-      expiresAt: "2026-06-18T00:00:08.000Z",
-      trigger: {
-        kind: "button_trigger" as const,
-        label: "push_to_talk",
-        source: "loopback_http"
-      }
-    };
-
-    const result = await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [
-        silenceFrame("silence-after-button-1", 0),
-        silenceFrame("silence-after-button-2", 10)
-      ],
-      utteranceWindow: {
-        minSpeechMs: 10,
-        silenceMs: 20,
-        maxUtteranceMs: 1_000,
-        minRmsDb: -50
-      },
-      triggerPhrases: ["ピコ"],
-      activation: {
-        mode: "push_to_talk",
-        source: {
-          peek: () => activation,
-          acknowledge: (activationId) => {
-            acknowledgedActivations.push(activationId);
-          }
-        }
-      },
-      sessionLifecycle: lifecycle,
-      echoControl: createIdleEchoControl(),
-      stt: {
-        warmup: () => {
-          throw new Error("warmup is not part of resident runtime");
-        },
-        transcribe: () => {
-          throw new Error("silence must not reach STT");
-        }
-      },
-      tts: createSuccessfulTts("unused"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: () => {
-          throw new Error("silence must not reach Pi Agent");
-        }
-      }
-    });
-
-    expect(result.startedSessions).toBe(0);
-    expect(acknowledgedActivations).toEqual([]);
-  });
-
-  it("rearms a fresh push-to-talk activation after an expired pending activation", async () => {
-    const lifecycle = createSessionLifecycle({
-      ending: {
-        mode: "timed",
-        durationMs: 60_000
-      }
-    });
-    const prompts: string[] = [];
-    const acknowledgedActivations: string[] = [];
-    const activations = createSequenceActivationSource([
-      {
-        id: "activation-expired",
-        occurredAt: "2026-06-17T23:59:51.000Z",
-        expiresAt: "2026-06-17T23:59:59.000Z",
-        trigger: {
-          kind: "button_trigger",
-          label: "push_to_talk",
-          source: "loopback_http"
-        }
-      },
-      {
-        id: "activation-fresh",
-        occurredAt: "2026-06-18T00:00:00.000Z",
-        expiresAt: "2026-06-18T00:00:08.000Z",
-        trigger: {
-          kind: "button_trigger",
-          label: "push_to_talk",
-          source: "loopback_http"
-        }
-      }
-    ]);
-    const activationSource: VoiceResidentActivationSource = {
-      peek: activations.peek,
-      acknowledge: (activationId) => {
-        acknowledgedActivations.push(activationId);
-        activations.acknowledge(activationId);
-      }
-    };
-
-    await runVoiceResidentRuntime({
-      now: fixedNow(),
-      frames: [
-        silenceFrame("silence-with-expired-activation", 0),
-        speechFrame("speech-after-fresh-activation", 10),
-        silenceFrame("silence-after-fresh-activation-1", 20),
-        silenceFrame("silence-after-fresh-activation-2", 30)
-      ],
-      utteranceWindow: {
-        minSpeechMs: 10,
-        silenceMs: 20,
-        maxUtteranceMs: 1_000,
-        minRmsDb: -50
-      },
-      triggerPhrases: ["ピコ"],
-      activation: {
-        mode: "push_to_talk",
-        source: activationSource
-      },
-      sessionLifecycle: lifecycle,
-      echoControl: createIdleEchoControl(),
-      stt: {
-        warmup: () => {
-          throw new Error("warmup is not part of resident runtime");
-        },
-        transcribe: () => Promise.resolve(successfulTranscript("再度ボタン後の発話です"))
-      },
-      tts: createSuccessfulTts("了解です。"),
-      playback: {
-        play: () => Promise.resolve()
-      },
-      piAgent: {
-        prompt: (input) => {
-          prompts.push(input.text);
-          return Promise.resolve({ text: "了解です。" });
-        }
-      }
-    });
-
-    expect(prompts).toEqual(["再度ボタン後の発話です"]);
-    expect(acknowledgedActivations).toEqual(["activation-expired", "activation-fresh"]);
-  });
-
-  it("continues listening after STT failures", async () => {
-    let sttCalls = 0;
-
-    await expect(
-      runVoiceResidentRuntime({
-        now: fixedNow(),
-        frames: [
-          sampleNearEndFrame("mic-stt-fails"),
-          sampleNearEndFrame("mic-stt-trigger"),
-          sampleNearEndFrame("mic-stt-recovers")
-        ],
-        utteranceWindow: perFrameCompatibleUtteranceWindow(),
-        triggerPhrases: ["ピコ"],
-        sessionLifecycle: createSessionLifecycle({
-          ending: {
-            mode: "timed",
-            durationMs: 60_000
-          }
-        }),
-        echoControl: createIdleEchoControl(),
-        stt: {
-          warmup: () => {
-            throw new Error("warmup is not part of resident runtime");
-          },
-          transcribe: () => {
-            sttCalls += 1;
-
-            if (sttCalls === 1) {
-              return Promise.resolve({
-                ok: false,
-                reason: "backend_error",
-                message: "sidecar unavailable",
-                source: {
-                  sidecarId: "local-apple-speech",
-                  provider: "apple-speech",
-                  language: "ja-JP"
-                }
-              });
-            }
-
-            return Promise.resolve(successfulTranscript("ピコ"));
-          }
-        },
-        tts: createSuccessfulTts("はい。"),
-        playback: {
-          play: () => Promise.resolve()
-        },
-        piAgent: {
-          prompt: () => Promise.resolve({ text: "はい。" })
-        }
-      })
-    ).resolves.toMatchObject({
-      processedFrames: 3,
-      failedFrames: 1,
-      completedTurns: 1
-    });
-  });
-
-  it("continues listening after TTS failures", async () => {
-    await expect(
-      runVoiceResidentRuntime({
-        now: fixedNow(),
-        frames: [
-          sampleNearEndFrame("mic-tts-trigger"),
-          sampleNearEndFrame("mic-tts-fails"),
-          sampleNearEndFrame("mic-next")
-        ],
-        utteranceWindow: perFrameCompatibleUtteranceWindow(),
-        triggerPhrases: ["ピコ"],
-        sessionLifecycle: createSessionLifecycle({
-          ending: {
-            mode: "timed",
-            durationMs: 60_000
-          }
-        }),
-        echoControl: createIdleEchoControl(),
-        stt: successfulStt("ピコ"),
-        tts: {
-          synthesize: () =>
-            Promise.resolve({
-              ok: false,
-              reason: "backend_error",
-              message: "aivis unavailable",
-              sentenceIndex: 0,
-              source: {
-                serviceId: "local-aivis",
-                provider: "aivis-speech",
-                speakerId: 888_753_760
-              }
-            })
-        },
-        playback: {
-          play: () => Promise.resolve()
-        },
-        piAgent: {
-          prompt: () => Promise.resolve({ text: "はい。" })
-        }
-      })
-    ).resolves.toMatchObject({
-      processedFrames: 3,
-      failedTurns: 2
-    });
+    await expect(firstStop).resolves.toBeUndefined();
+    await expect(secondStop).resolves.toBeUndefined();
+    expect(driver.runtime.state()).toBe("stopped");
+    await expect(driver.press()).resolves.toBe("ignored_busy");
+    expect(driver.capture.stops()).toBe(1);
+    expect(driver.playbackCloses()).toBe(1);
   });
 });
 
-function createPassingEchoControl(
-  calls: string[],
-  farEndFrames: VoicePcmFrame[]
-): EchoControlProvider {
-  return {
-    describe: () => ({ provider: "web_rtc_aec3", mode: "aec" }),
-    checkHealth: () =>
-      Promise.resolve({
-        ok: true,
-        provider: "web_rtc_aec3",
-        mode: "aec",
-        engine: "webrtc-aec3"
-      }),
-    acceptFarEndReference: (frame) => {
-      calls.push(`far:${frame.id}`);
-      farEndFrames.push(frame);
+type Driver = ReturnType<typeof createDriver>;
+
+function createDriver(options: {
+  readonly speechDetected?: boolean;
+  readonly sttResponse?: (signal: AbortSignal | undefined) => Promise<SttTranscriptionResult>;
+  readonly piResponse?: (signal: AbortSignal | undefined) => Promise<{ readonly text: string }>;
+  readonly ttsResponse?: (signal: AbortSignal | undefined) => Promise<TtsSynthesisResult>;
+  readonly playbackCompletion?: (signal: AbortSignal | undefined) => Promise<void>;
+} = {}) {
+  const capture = createControlledCapture();
+  const sttRequests: Array<Parameters<SttClient["transcribe"]>[0]> = [];
+  const piRequests: Array<Parameters<PiAgentTurnClient["prompt"]>[0]> = [];
+  const playedChunks: Array<Parameters<VoicePlaybackSink["play"]>[0]> = [];
+  const disposedSessions: string[] = [];
+  let playbackStopCount = 0;
+  let playbackCloseCount = 0;
+  const stt: SttClient = {
+    warmup: () => Promise.resolve(successfulTranscript("warm")),
+    transcribe(request) {
+      sttRequests.push(request);
+      return options.sttResponse?.(request.signal) ??
+        Promise.resolve(successfulTranscript("職員の発話"));
+    }
+  };
+  const piAgent: PiAgentTurnClient = {
+    prompt(request) {
+      piRequests.push(request);
+      return options.piResponse?.(request.signal) ?? Promise.resolve({ text: "Picoの応答" });
+    },
+    disposeSession(sessionId) {
+      disposedSessions.push(sessionId);
+    },
+    disposeAll() {}
+  };
+  const tts: TtsClient = {
+    synthesize(request) {
+      return options.ttsResponse?.(request.signal) ?? Promise.resolve(successfulSynthesis());
+    }
+  };
+  const playback: VoicePlaybackSink = {
+    play(chunk, _startedAt, signal) {
+      playedChunks.push(chunk);
+      return options.playbackCompletion?.(signal) ?? Promise.resolve();
+    },
+    stop() {
+      playbackStopCount += 1;
       return Promise.resolve();
     },
-    processNearEnd: (frame) => {
-      calls.push(`near:${frame.id}`);
-      return Promise.resolve({
-        action: "pass",
-        reason: "aec_processed",
-        frame,
-        diagnostics: {
-          provider: "web_rtc_aec3",
-          residualEchoProbability: 0.1,
-          voiceActivity: true
-        }
-      });
-    },
-    flush: () => Promise.resolve()
+    close() {
+      playbackCloseCount += 1;
+      return Promise.resolve();
+    }
   };
-}
-
-function createSuppressingEchoControl(): EchoControlProvider {
-  return {
-    describe: () => ({ provider: "half_duplex", mode: "half_duplex" }),
-    checkHealth: () =>
-      Promise.resolve({
-        ok: true,
-        provider: "half_duplex",
-        mode: "half_duplex",
-        engine: "half-duplex-safety"
-      }),
-    acceptFarEndReference: () => Promise.resolve(),
-    processNearEnd: () =>
-      Promise.resolve({
-        action: "suppress",
-        reason: "far_end_tail_mute",
-        diagnostics: {
+  const runtime = createVoiceResidentRuntime({
+    audioCapture: capture.provider,
+    sessionLifecycle: createSessionLifecycle({
+      ending: { mode: "timed", durationMs: 60_000 }
+    }),
+    echoControl: {
+      describe: () => ({ provider: "half_duplex", mode: "half_duplex" }),
+      checkHealth: () =>
+        Promise.resolve({
+          ok: true,
           provider: "half_duplex",
-          residualEchoProbability: 1,
-          voiceActivity: false
-        }
+          mode: "half_duplex",
+          engine: "test"
+        }),
+      acceptFarEndReference: () => Promise.resolve(),
+      processNearEnd: (input) =>
+        Promise.resolve({
+          action: "pass",
+          reason: "no_far_end_tail",
+          frame: input,
+          diagnostics: {
+            provider: "half_duplex",
+            residualEchoProbability: 0,
+            voiceActivity: options.speechDetected ?? true
+          }
+        }),
+      flush: () => Promise.resolve()
+    },
+    speechActivity: {
+      process: () =>
+        Promise.resolve({
+          speech: options.speechDetected ?? true,
+          provider: "energy",
+          rmsDb: -20
+        })
+    },
+    stt,
+    tts,
+    playback,
+    piAgent,
+    now: () => "2026-07-17T00:00:00.000Z",
+    monotonicNow: () => 0
+  });
+
+  return {
+    runtime,
+    capture,
+    sttRequests,
+    piRequests,
+    playedChunks,
+    disposedSessions,
+    playbackStops: () => playbackStopCount,
+    playbackCloses: () => playbackCloseCount,
+    press: () =>
+      runtime.handleControl({
+        kind: "talk_pressed",
+        occurredAt: "2026-07-17T00:00:00.000Z"
       }),
-    flush: () => Promise.resolve()
+    release: () =>
+      runtime.handleControl({
+        kind: "talk_released",
+        occurredAt: "2026-07-17T00:00:00.000Z"
+      }),
+    cancel: () =>
+      runtime.handleControl({
+        kind: "cancel_pressed",
+        occurredAt: "2026-07-17T00:00:00.000Z"
+      })
   };
 }
 
-function createIdleEchoControl(): EchoControlProvider {
-  return createPassingEchoControl([], []);
+async function startReleasedHold(driver: Driver): Promise<void> {
+  await driver.press();
+  driver.capture.emit(frame("speech", [1, 0]));
+  await driver.release();
 }
 
-function createCleanupTrackingEchoControl(events: string[]): EchoControlProvider {
-  return {
-    ...createIdleEchoControl(),
-    flush: () => {
-      events.push("echo:flush");
+async function completeHold(driver: Driver, id: string): Promise<void> {
+  await driver.press();
+  driver.capture.emit(frame(id, [1, 0]));
+  await driver.release();
+  await vi.advanceTimersByTimeAsync(250);
+  await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+}
+
+function createControlledCapture(): {
+  readonly provider: ResidentAudioCapture;
+  readonly starts: () => number;
+  readonly stops: () => number;
+  readonly emit: (frame: VoicePcmFrame) => void;
+} {
+  let startCount = 0;
+  let stopCount = 0;
+  let active: ReturnType<typeof createFrameChannel> | undefined;
+  const provider: ResidentAudioCapture = {
+    start(signal): ResidentCaptureSession {
+      startCount += 1;
+      const channel = createFrameChannel();
+      active = channel;
+      let stopOperation: Promise<void> | undefined;
+      const stop = (): Promise<void> => {
+        if (stopOperation === undefined) {
+          stopCount += 1;
+          channel.end();
+          stopOperation = Promise.resolve();
+        }
+
+        return stopOperation;
+      };
+      signal.addEventListener("abort", () => {
+        stop().catch(() => undefined);
+      });
+
+      return { frames: channel.frames, stop };
+    },
+    close() {
+      active?.end();
       return Promise.resolve();
+    }
+  };
+
+  return {
+    provider,
+    starts: () => startCount,
+    stops: () => stopCount,
+    emit(value) {
+      if (active === undefined) {
+        throw new Error("capture is not active");
+      }
+
+      active.emit(value);
     }
   };
 }
 
-function createSuccessfulTts(text: string): TtsClient {
+function createFrameChannel(): {
+  readonly frames: AsyncIterable<VoicePcmFrame>;
+  readonly emit: (frame: VoicePcmFrame) => void;
+  readonly end: () => void;
+} {
+  const queued: VoicePcmFrame[] = [];
+  const waiters: Array<(result: IteratorResult<VoicePcmFrame>) => void> = [];
+  let ended = false;
+
   return {
-    synthesize: () =>
-      Promise.resolve({
-        ok: true,
-        chunks: [
-          {
-            sentenceIndex: 0,
-            text,
-            audio: new Uint8Array([1, 2, 3]),
-            encoding: "pcm16le",
-            sampleRateHz: 16_000,
-            channels: 1,
-            durationMs: 120,
-            source: {
-              serviceId: "local-aivis",
-              provider: "aivis-speech",
-              speakerId: 888_753_760
+    frames: {
+      [Symbol.asyncIterator]() {
+        return {
+          next() {
+            const value = queued.shift();
+
+            if (value !== undefined) {
+              return Promise.resolve({ value, done: false });
             }
+
+            if (ended) {
+              return Promise.resolve({ value: undefined, done: true });
+            }
+
+            return new Promise<IteratorResult<VoicePcmFrame>>((resolve) => {
+              waiters.push(resolve);
+            });
           }
-        ],
-        totalDurationMs: 120,
-        source: {
-          serviceId: "local-aivis",
-          provider: "aivis-speech",
-          speakerId: 888_753_760
-        }
-      })
-  };
-}
-
-function successfulStt(text: string, confidence = 0.9): SttClient {
-  return {
-    warmup: () => {
-      throw new Error("warmup is not part of resident runtime");
+        };
+      }
     },
-    transcribe: () => Promise.resolve(successfulTranscript(text, confidence))
+    emit(value) {
+      const waiter = waiters.shift();
+
+      if (waiter === undefined) {
+        queued.push(value);
+        return;
+      }
+
+      waiter({ value, done: false });
+    },
+    end() {
+      ended = true;
+
+      for (const waiter of waiters.splice(0)) {
+        waiter({ value: undefined, done: true });
+      }
+    }
   };
 }
 
-function successfulTranscript(text: string, confidence = 0.9) {
+function frame(id: string, audio: readonly number[], capturedAt = "2026-07-17T00:00:00.000Z") {
   return {
-    ok: true as const,
+    id,
+    direction: "near_end",
+    audio: new Uint8Array(audio),
+    encoding: "pcm16le",
+    sampleRateHz: 16_000,
+    channels: 1,
+    capturedAt,
+    durationMs: 10
+  } as const satisfies VoicePcmFrame;
+}
+
+function successfulTranscript(text: string): SttTranscriptionResult {
+  return {
+    ok: true,
     text,
     language: "ja-JP",
-    confidence,
-    durationMs: 100,
+    confidence: 1,
+    durationMs: 10,
     segments: [],
     source: {
-      sidecarId: "local-apple-speech",
-      provider: "apple-speech" as const,
+      sidecarId: "test-stt",
+      provider: "apple-speech",
       language: "ja-JP"
     }
   };
 }
 
-function sampleNearEndFrame(id: string): VoicePcmFrame {
-  return sampleNearEndFrameAt(id, 0);
-}
-
-function sampleNearEndFrameAt(id: string, offsetMs: number): VoicePcmFrame {
+function successfulSynthesis(): TtsSynthesisResult {
   return {
-    id,
-    direction: "near_end",
-    audio: new Uint8Array([4, 5, 6]),
-    encoding: "pcm16le",
-    sampleRateHz: 16_000,
-    channels: 1,
-    capturedAt: addTestMilliseconds("2026-06-18T00:00:00.000Z", offsetMs),
-    durationMs: 100
-  };
-}
-
-function* abortingFrames(abortController: AbortController): Iterable<VoicePcmFrame> {
-  yield speechFrame("speech-before-abort-1", 0);
-  yield speechFrame("speech-before-abort-2", 10);
-  abortController.abort();
-  yield speechFrame("speech-after-abort", 20);
-}
-
-function speechFrame(id: string, offsetMs: number): VoicePcmFrame {
-  return pcmFrame(id, offsetMs, 3_000);
-}
-
-function silenceFrame(id: string, offsetMs: number): VoicePcmFrame {
-  return pcmFrame(id, offsetMs, 0);
-}
-
-function pcmFrame(id: string, offsetMs: number, sample: number): VoicePcmFrame {
-  const sampleRateHz = 16_000;
-  const durationMs = 10;
-  const sampleCount = (sampleRateHz * durationMs) / 1_000;
-  const audio = new Uint8Array(sampleCount * 2);
-
-  for (let index = 0; index < audio.length; index += 2) {
-    audio[index] = sample & 0xff;
-    audio[index + 1] = (sample >> 8) & 0xff;
-  }
-
-  return {
-    id,
-    direction: "near_end",
-    audio,
-    encoding: "pcm16le",
-    sampleRateHz,
-    channels: 1,
-    capturedAt: addTestMilliseconds("2026-06-18T00:00:00.000Z", offsetMs),
-    durationMs
-  };
-}
-
-function createSequenceActivationSource(
-  values: readonly ReturnType<VoiceResidentActivationSource["peek"]>[]
-): VoiceResidentActivationSource {
-  const remaining = [...values];
-  let pending: ReturnType<VoiceResidentActivationSource["peek"]> | undefined;
-
-  return {
-    peek: () => {
-      if (pending !== undefined) {
-        return pending;
+    ok: true,
+    chunks: [
+      {
+        sentenceIndex: 0,
+        text: "Picoの応答",
+        audio: new Uint8Array([1, 0]),
+        encoding: "pcm16le",
+        sampleRateHz: 16_000,
+        channels: 1,
+        durationMs: 10,
+        source: {
+          serviceId: "test-tts",
+          provider: "aivis-speech",
+          speakerId: 1
+        }
       }
-
-      const activation = remaining.shift();
-
-      if (activation !== undefined) {
-        pending = activation;
-      }
-
-      return activation;
-    },
-    acknowledge: (activationId) => {
-      if (pending?.id === activationId) {
-        pending = undefined;
-      }
+    ],
+    totalDurationMs: 10,
+    source: {
+      serviceId: "test-tts",
+      provider: "aivis-speech",
+      speakerId: 1
     }
   };
 }
 
-function fixedNow(): () => string {
-  return () => "2026-06-18T00:00:00.000Z";
-}
-
-function sequenceNow(timestamps: readonly string[]): () => string {
-  let index = 0;
-
-  return () => timestamps[Math.min(index++, timestamps.length - 1)] ?? timestamps[0] ?? "";
-}
-
-function sequenceNumber(values: readonly number[]): () => number {
-  let index = 0;
-
-  return () => values[Math.min(index++, values.length - 1)] ?? values[0] ?? 0;
-}
-
-function testUtteranceWindow() {
-  return {
-    minSpeechMs: 20,
-    silenceMs: 20,
-    maxUtteranceMs: 1_000,
-    minRmsDb: -50
-  };
-}
-
-function perFrameCompatibleUtteranceWindow() {
-  return {
-    minSpeechMs: 1,
-    silenceMs: 1,
-    maxUtteranceMs: 100,
-    minRmsDb: -120
-  };
-}
-
-function addTestMilliseconds(timestamp: string, milliseconds: number): string {
-  return new Date(Date.parse(timestamp) + milliseconds).toISOString();
-}
-
-function createOrderingLifecycle(calls: string[]): SessionLifecycle {
-  let removed = false;
-
-  return {
-    start: () => {
-      throw new Error("start is not expected");
-    },
-    read: (id) => {
-      calls.push(`read:${id}`);
-
-      if (removed) {
-        return undefined;
-      }
-
-      return {
-        id,
-        state: "ended",
-        startedAt: "2026-06-18T00:00:00.000Z",
-        endedAt: "2026-06-18T00:01:00.000Z",
-        trigger: {
-          kind: "wake_name",
-          label: "ピコ",
-          source: "voice"
-        }
-      };
-    },
-    refreshActivity: () => {
-      throw new Error("refresh activity is not expected");
-    },
-    end: (id) => {
-      calls.push(`end:${id}`);
-
-      return {
-        id,
-        state: "ended",
-        startedAt: "2026-06-18T00:00:00.000Z",
-        endedAt: "2026-06-18T00:01:00.000Z",
-        trigger: {
-          kind: "wake_name",
-          label: "ピコ",
-          source: "voice"
-        }
-      };
-    },
-    remove: (id) => {
-      calls.push(`remove:${id}`);
-      removed = true;
-    }
-  };
-}
-
-function createPromiseGate(): { readonly promise: Promise<void>; readonly release: () => void } {
-  let release: () => void = () => undefined;
-  const promise = new Promise<void>((resolve) => {
-    release = resolve;
+function createGate<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+} {
+  let resolveGate: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((resolve) => {
+    resolveGate = resolve;
   });
 
-  return { promise, release };
+  return { promise, resolve: resolveGate };
 }
