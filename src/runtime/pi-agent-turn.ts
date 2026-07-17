@@ -101,7 +101,9 @@ export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAg
       let abortHandle: PromptAbortHandle | undefined;
 
       try {
-        const session = await getOrCreateTurnSession(options, sessions, input.sessionId);
+        throwIfSignalAborted(input.signal);
+        const pendingSession = getOrCreateTurnSession(options, sessions, input.sessionId);
+        const session = await waitForTurnSession(pendingSession, input.signal);
         unsubscribe = subscribeTextDeltas(session, output);
         abortHandle = installPromptAbort(session, input.signal);
         throwIfSignalAborted(input.signal);
@@ -254,6 +256,55 @@ async function getOrCreateTurnSession(
     }
     throw error;
   }
+}
+
+function waitForTurnSession(
+  pendingSession: Promise<PiAgentSdkSession>,
+  signal: AbortSignal | undefined
+): Promise<PiAgentSdkSession> {
+  if (signal === undefined) {
+    return pendingSession;
+  }
+
+  return new Promise<PiAgentSdkSession>((resolve, reject) => {
+    let settled = false;
+    const removeAbortListener = (): void => signal.removeEventListener("abort", abort);
+    const abort = (): void => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      removeAbortListener();
+      reject(new Error("pico resident Pi Agent turn aborted"));
+    };
+
+    pendingSession.then(
+      (session) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        removeAbortListener();
+        resolve(session);
+      },
+      (error: unknown) => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        removeAbortListener();
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    );
+    signal.addEventListener("abort", abort, { once: true });
+
+    if (signal.aborted) {
+      abort();
+    }
+  });
 }
 
 function getOrStartSessionDisposal(

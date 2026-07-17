@@ -1006,6 +1006,7 @@ describe("Pi Agent turn adapter", () => {
 
   it("rejects an aborted SDK prompt even if the SDK prompt resolves", async () => {
     let abortCalls = 0;
+    let markPromptStarted: (() => void) | undefined;
     let listener:
       | ((event: {
           readonly type: "message_update";
@@ -1015,6 +1016,9 @@ describe("Pi Agent turn adapter", () => {
     let releasePrompt: (() => void) | undefined;
     const promptGate = new Promise<void>((resolve) => {
       releasePrompt = resolve;
+    });
+    const promptStarted = new Promise<void>((resolve) => {
+      markPromptStarted = resolve;
     });
     const abortController = new AbortController();
     const client = createPiAgentTurnClient({
@@ -1034,6 +1038,7 @@ describe("Pi Agent turn adapter", () => {
               return () => undefined;
             },
             prompt: async () => {
+              markPromptStarted?.();
               listener?.({
                 type: "message_update",
                 assistantMessageEvent: {
@@ -1059,14 +1064,16 @@ describe("Pi Agent turn adapter", () => {
       text: "止まって",
       signal: abortController.signal
     });
+    await promptStarted;
     abortController.abort();
 
     await expect(prompt).rejects.toThrow("pico resident Pi Agent turn aborted");
     expect(abortCalls).toBe(1);
   });
 
-  it("does not start an SDK prompt when cancellation wins session initialization", async () => {
+  it("cancels immediately while preserving a reusable session initialization", async () => {
     let releaseSession: (() => void) | undefined;
+    let createdSessions = 0;
     let promptCalls = 0;
     let abortCalls = 0;
     const sessionGate = new Promise<void>((resolve) => {
@@ -1079,6 +1086,7 @@ describe("Pi Agent turn adapter", () => {
         reload: () => Promise.resolve()
       }),
       createAgentSession: async () => {
+        createdSessions += 1;
         await sessionGate;
 
         return {
@@ -1105,12 +1113,32 @@ describe("Pi Agent turn adapter", () => {
       text: "開始前に止める",
       signal: abortController.signal
     });
+    const outcome = prompt.then(
+      () => "resolved",
+      (error: unknown) => (error instanceof Error ? error.message : String(error))
+    );
 
     abortController.abort();
-    releaseSession?.();
+    let immediateOutcome: string;
 
-    await expect(prompt).rejects.toThrow("pico resident Pi Agent turn aborted");
+    try {
+      immediateOutcome = await Promise.race([
+        outcome,
+        new Promise<string>((resolve) => setTimeout(() => resolve("still pending"), 0))
+      ]);
+    } finally {
+      releaseSession?.();
+    }
+
+    expect(immediateOutcome).toBe("pico resident Pi Agent turn aborted");
+    await expect(outcome).resolves.toBe("pico resident Pi Agent turn aborted");
     expect(promptCalls).toBe(0);
-    expect(abortCalls).toBe(1);
+    expect(abortCalls).toBe(0);
+
+    await expect(client.prompt({ sessionId: "session-1", text: "再利用する" })).resolves.toEqual({
+      text: ""
+    });
+    expect(createdSessions).toBe(1);
+    expect(promptCalls).toBe(1);
   });
 });

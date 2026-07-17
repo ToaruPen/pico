@@ -350,6 +350,33 @@ describe("Apple Speech STT sidecar boundary", () => {
     }
   });
 
+  it("preserves timeout as the first abort cause", async () => {
+    vi.useFakeTimers();
+    let rejectRequest: ((reason: Error) => void) | undefined;
+    const delayedAbortFetch: typeof fetch = () =>
+      new Promise<Response>((_resolve, reject) => {
+        rejectRequest = reject;
+      });
+    const caller = new AbortController();
+    const client = createAppleSpeechSttClient(sidecar, delayedAbortFetch);
+
+    try {
+      const resultPromise = client.transcribe({ ...audioRequest, signal: caller.signal });
+
+      await vi.advanceTimersByTimeAsync(250);
+      caller.abort(new Error("operator cancelled after timeout"));
+      rejectRequest?.(new DOMException("aborted", "AbortError"));
+
+      await expect(resultPromise).resolves.toMatchObject({
+        ok: false,
+        reason: "timeout",
+        message: "pico STT Apple Speech sidecar request timed out"
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("aborts an active transcription without retrying or accepting a late result", async () => {
     let calls = 0;
     let abortObserved = false;
