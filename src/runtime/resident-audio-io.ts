@@ -80,6 +80,15 @@ type SpawnAudioProcess = (
   }
 ) => ChildProcessByStdio<Writable | null, Readable | null, null>;
 
+type OwnedPlayback = {
+  readonly abortController: AbortController;
+  child: ReturnType<SpawnAudioProcess> | undefined;
+  childCompletion: Promise<void> | undefined;
+  terminationRequested: boolean;
+  completion: Promise<void> | undefined;
+  stopOperation: Promise<void> | undefined;
+};
+
 export function createResidentAudioInputPlan(
   config: PicoConfig,
   platform: Platform = process.platform
@@ -258,16 +267,7 @@ export function createResidentPlaybackSink(
   platform: Platform = process.platform
 ): VoicePlaybackSink {
   const plan = createResidentAudioOutputPlan(config, platform);
-  let active:
-    | {
-        readonly abortController: AbortController;
-        child: ReturnType<SpawnAudioProcess> | undefined;
-        childCompletion: Promise<void> | undefined;
-        childKilled: boolean;
-        completion: Promise<void> | undefined;
-        stopOperation: Promise<void> | undefined;
-      }
-    | undefined;
+  let active: OwnedPlayback | undefined;
 
   const stopActive = (): Promise<void> => {
     const owned = active;
@@ -297,33 +297,26 @@ export function createResidentPlaybackSink(
       }
 
       const abortController = new AbortController();
-      const owned: {
-        readonly abortController: AbortController;
-        child: ReturnType<SpawnAudioProcess> | undefined;
-        childCompletion: Promise<void> | undefined;
-        childKilled: boolean;
-        completion: Promise<void> | undefined;
-        stopOperation: Promise<void> | undefined;
-      } = {
+      const owned: OwnedPlayback = {
         abortController,
         child: undefined,
         childCompletion: undefined,
-        childKilled: false,
+        terminationRequested: false,
         completion: undefined,
         stopOperation: undefined
       };
-      const killChild = (): void => {
-        if (owned.child === undefined || owned.childKilled) {
+      const requestTermination = (): void => {
+        if (owned.child === undefined || owned.terminationRequested) {
           return;
         }
 
-        owned.childKilled = true;
+        owned.terminationRequested = true;
         owned.child.kill("SIGTERM");
       };
       const onExternalAbort = (): void => abortController.abort(signal?.reason);
       const releaseOwnership = (): void => {
         signal?.removeEventListener("abort", onExternalAbort);
-        abortController.signal.removeEventListener("abort", killChild);
+        abortController.signal.removeEventListener("abort", requestTermination);
 
         if (active === owned) {
           active = undefined;
@@ -338,10 +331,10 @@ export function createResidentPlaybackSink(
         void childCompletion.finally(releaseOwnership).catch(() => undefined);
 
         if (abortController.signal.aborted) {
-          killChild();
+          requestTermination();
         }
       };
-      abortController.signal.addEventListener("abort", killChild, { once: true });
+      abortController.signal.addEventListener("abort", requestTermination, { once: true });
       signal?.addEventListener("abort", onExternalAbort, { once: true });
 
       if (signal?.aborted === true) {
