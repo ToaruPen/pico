@@ -91,11 +91,6 @@ function shouldMirrorResidentVoiceEvent(
   }
 
   const stage = event.attributes[voiceStageAttributeNames.stage];
-  const status = event.attributes[voiceStageAttributeNames.status];
-
-  if (status === "error") {
-    return true;
-  }
 
   return voiceRuntimeStagePolicy(stage)?.summary === true;
 }

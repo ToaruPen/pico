@@ -59,6 +59,36 @@ describe("resident voice audit log", () => {
     expect(writes).toEqual([]);
   });
 
+  it("applies the summary stage policy to error events", () => {
+    const writes: string[] = [];
+    const audit = createResidentVoiceAuditLog({
+      stdoutEnabled: true,
+      writeStdout: (line) => {
+        writes.push(line);
+      }
+    });
+
+    for (const stage of ["stt", "echo_control", "unknown_stage"]) {
+      audit.record({
+        category: "transport_event",
+        name: "voice.runtime.stage",
+        severity: "warn",
+        occurredAt: "2026-06-22T00:00:00.000Z",
+        summary: "Pico voice runtime stage failed.",
+        attributes: {
+          "pico.voice.stage": stage,
+          "pico.voice.stage_status": "error",
+          "pico.voice.stage_duration_ms": 123.4,
+          "pico.voice.error_code": "stage_failed"
+        }
+      });
+    }
+
+    expect(writes).toEqual([
+      "[pico voice] 2026-06-22T00:00:00.000Z stage=stt status=error duration_ms=123.4 error=stage_failed\n"
+    ]);
+  });
+
   it("mirrors high-volume frame stages only in verbose mode", () => {
     const writes: string[] = [];
     const audit = createResidentVoiceAuditLog({
