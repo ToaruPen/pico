@@ -350,6 +350,39 @@ describe("Apple Speech STT sidecar boundary", () => {
     }
   });
 
+  it("aborts an active transcription without retrying or accepting a late result", async () => {
+    let calls = 0;
+    let abortObserved = false;
+    const pendingFetch: typeof fetch = (_input, init) => {
+      calls += 1;
+
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          abortObserved = true;
+          reject(new DOMException("aborted", "AbortError"));
+        });
+      });
+    };
+    const controller = new AbortController();
+    const client = createAppleSpeechSttClient(sidecar, pendingFetch);
+    const transcription = client.transcribe({ ...audioRequest, signal: controller.signal });
+
+    controller.abort();
+
+    await expect(transcription).resolves.toEqual({
+      ok: false,
+      reason: "aborted",
+      message: "pico STT Apple Speech sidecar request was aborted",
+      source: {
+        sidecarId: "local-apple-speech",
+        provider: "apple-speech",
+        language: "ja-JP"
+      }
+    });
+    expect(abortObserved).toBe(true);
+    expect(calls).toBe(1);
+  });
+
   it("maps sidecar failure responses to explicit failure results", async () => {
     const failingFetch: typeof fetch = () =>
       Promise.resolve(

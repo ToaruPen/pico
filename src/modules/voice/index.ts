@@ -24,6 +24,7 @@ export type SttTranscriptionRequest = {
   readonly encoding: "pcm16le";
   readonly sampleRateHz: number;
   readonly channels: number;
+  readonly signal?: AbortSignal;
 };
 
 export type SttTranscriptSegment = {
@@ -45,7 +46,7 @@ export type SttTranscriptionSuccess = {
 
 export type SttTranscriptionFailure = {
   readonly ok: false;
-  readonly reason: "invalid_request" | "timeout" | "model_load" | "backend_error";
+  readonly reason: "invalid_request" | "timeout" | "model_load" | "backend_error" | "aborted";
   readonly message: string;
   readonly source: SttTranscriptionSource;
 };
@@ -437,9 +438,15 @@ async function transcribeWithAppleSpeechSidecar(
   }
 
   const abortController = new AbortController();
+  const abortFromRequest = (): void => abortController.abort(request.signal?.reason);
   const timeout = setTimeout(() => {
     abortController.abort();
   }, sidecar.timeoutMs);
+  request.signal?.addEventListener("abort", abortFromRequest, { once: true });
+
+  if (request.signal?.aborted) {
+    abortFromRequest();
+  }
 
   try {
     const response = await fetchImplementation(buildTranscriptionUrl(sidecar), {
@@ -453,24 +460,42 @@ async function transcribeWithAppleSpeechSidecar(
 
     return await mapAppleSpeechResponse(response, source);
   } catch (error) {
-    if (isAbortError(error)) {
-      return {
-        ok: false,
-        reason: "timeout",
-        message: "pico STT Apple Speech sidecar request timed out",
-        source
-      };
-    }
-
-    return {
-      ok: false,
-      reason: "backend_error",
-      message: sttRequestErrorMessage(error),
-      source
-    };
+    return appleSpeechRequestFailure(error, request.signal, source);
   } finally {
     clearTimeout(timeout);
+    request.signal?.removeEventListener("abort", abortFromRequest);
   }
+}
+
+function appleSpeechRequestFailure(
+  error: unknown,
+  requestSignal: AbortSignal | undefined,
+  source: SttTranscriptionSource
+): SttTranscriptionFailure {
+  if (isAbortError(error) && requestSignal?.aborted) {
+    return {
+      ok: false,
+      reason: "aborted",
+      message: "pico STT Apple Speech sidecar request was aborted",
+      source
+    };
+  }
+
+  if (isAbortError(error)) {
+    return {
+      ok: false,
+      reason: "timeout",
+      message: "pico STT Apple Speech sidecar request timed out",
+      source
+    };
+  }
+
+  return {
+    ok: false,
+    reason: "backend_error",
+    message: sttRequestErrorMessage(error),
+    source
+  };
 }
 
 async function mapAppleSpeechResponse(
