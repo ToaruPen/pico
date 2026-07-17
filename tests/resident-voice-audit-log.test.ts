@@ -22,43 +22,13 @@ describe("resident voice audit log", () => {
         "pico.voice.stage": "stt",
         "pico.voice.stage_status": "ok",
         "pico.voice.stage_duration_ms": 123.4,
-        "pico.voice.frame_count": 5,
-        "pico.voice.triggered": true
+        "pico.voice.frame_count": 5
       }
     });
 
     expect(audit.entries()).toEqual([event]);
     expect(writes).toEqual([
-      "[pico voice] 2026-06-22T00:00:00.000Z stage=stt status=ok duration_ms=123.4 frame_count=5 triggered=true\n"
-    ]);
-  });
-
-  it("mirrors startup warmup stage events in summary mode", () => {
-    const writes: string[] = [];
-    const audit = createResidentVoiceAuditLog({
-      stdoutEnabled: true,
-      writeStdout: (line) => {
-        writes.push(line);
-      }
-    });
-
-    audit.record({
-      category: "transport_event",
-      name: "voice.runtime.stage",
-      severity: "info",
-      occurredAt: "2026-06-22T00:00:00.000Z",
-      summary: "Pico voice runtime stage completed.",
-      attributes: {
-        "pico.voice.stage": "startup_warmup",
-        "pico.voice.stage_status": "ok",
-        "pico.voice.stage_duration_ms": 250,
-        "pico.voice.chunk_count": 1,
-        "pico.voice.utterance_duration_ms": 120
-      }
-    });
-
-    expect(writes).toEqual([
-      "[pico voice] 2026-06-22T00:00:00.000Z stage=startup_warmup status=ok duration_ms=250 utterance_ms=120 chunk_count=1\n"
+      "[pico voice] 2026-06-22T00:00:00.000Z stage=stt status=ok duration_ms=123.4 frame_count=5\n"
     ]);
   });
 
@@ -134,10 +104,9 @@ describe("resident voice audit log", () => {
       occurredAt: "2026-06-22T00:00:00.000Z",
       summary: "Pico voice runtime stage completed.",
       attributes: {
-        "pico.voice.stage": "trigger_match",
+        "pico.voice.stage": "echo_control",
         "pico.voice.stage_status": "skipped",
-        "pico.voice.stage_duration_ms": 0,
-        "pico.voice.triggered": false
+        "pico.voice.stage_duration_ms": 0
       }
     });
 

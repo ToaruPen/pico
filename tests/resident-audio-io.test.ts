@@ -5,12 +5,10 @@ import { PassThrough, type Readable, type Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 
 import { definePicoConfig } from "../src/config/index.js";
-import type { VoicePcmFrame } from "../src/modules/voice/echo-control.js";
 import {
   createResidentAudioInputPlan,
   createResidentAudioOutputPlan,
   createResidentAudioCapture,
-  createResidentPcmFrameSource,
   createResidentPlaybackSink,
   measurePcm16leAudioLevel,
   measureResidentAudioInputLevel
@@ -262,12 +260,9 @@ describe("resident audio I/O plans", () => {
     const process = createAudioProcess({ stdout: new PassThrough() });
     const spawn = vi.fn(() => process.child);
     const abortController = new AbortController();
-    const iterator: AsyncIterator<VoicePcmFrame> = createResidentPcmFrameSource(
-      config,
-      abortController.signal,
-      spawn,
-      "darwin"
-    )[Symbol.asyncIterator]();
+    const capture = createResidentAudioCapture(config, spawn, "darwin");
+    const session = capture.start(abortController.signal);
+    const iterator = session.frames[Symbol.asyncIterator]();
     const firstFrame = iterator.next();
     const secondFrame = iterator.next();
 
@@ -305,9 +300,10 @@ describe("resident audio I/O plans", () => {
     });
     expect(second.value.audio.byteLength).toBe(320);
 
-    abortController.abort();
+    const stopped = session.stop();
     process.stdout.end();
     process.emitClose(0, undefined);
+    await stopped;
     await iterator.return?.();
 
     expect(spawn).toHaveBeenCalledWith(
@@ -357,9 +353,8 @@ describe("resident audio I/O plans", () => {
     const process = createAudioProcess({ stdout: new PassThrough() });
     const spawn = vi.fn(() => process.child);
     const abortController = new AbortController();
-    const iterator: AsyncIterator<VoicePcmFrame> = createResidentPcmFrameSource(
+    const capture = createResidentAudioCapture(
       config,
-      abortController.signal,
       spawn,
       "darwin",
       sequenceNow([
@@ -367,7 +362,9 @@ describe("resident audio I/O plans", () => {
         "2026-06-18T00:00:05.000Z",
         "2026-06-18T00:00:10.000Z"
       ])
-    )[Symbol.asyncIterator]();
+    );
+    const session = capture.start(abortController.signal);
+    const iterator = session.frames[Symbol.asyncIterator]();
     try {
       const firstFrame = iterator.next();
       const secondFrame = iterator.next();
@@ -384,9 +381,10 @@ describe("resident audio I/O plans", () => {
       expect(first.value.capturedAt).toBe("2026-06-18T00:00:00.000Z");
       expect(second.value.capturedAt).toBe("2026-06-18T00:00:00.010Z");
     } finally {
-      abortController.abort();
+      const stopped = session.stop();
       process.stdout.end();
       process.emitClose(0, undefined);
+      await stopped;
       await iterator.return?.();
     }
   });
@@ -415,13 +413,14 @@ describe("resident audio I/O plans", () => {
     const process = createAudioProcess({ stdout: new PassThrough() });
     const spawn = vi.fn(() => process.child);
     const abortController = new AbortController();
-    const iterator: AsyncIterator<VoicePcmFrame> = createResidentPcmFrameSource(
+    const capture = createResidentAudioCapture(
       config,
-      abortController.signal,
       spawn,
       "darwin",
       () => "not-an-iso-timestamp"
-    )[Symbol.asyncIterator]();
+    );
+    const session = capture.start(abortController.signal);
+    const iterator = session.frames[Symbol.asyncIterator]();
     const firstFrame = iterator.next();
 
     process.stdout.write(Buffer.alloc(320, 7));
@@ -430,13 +429,14 @@ describe("resident audio I/O plans", () => {
       "pico resident voice capture clock returned an invalid ISO timestamp"
     );
 
-    abortController.abort();
+    const stopped = session.stop();
     process.stdout.end();
     process.emitClose(0, undefined);
+    await stopped;
     await iterator.return?.();
   });
 
-  it("fails before spawning when the input signal is already aborted", async () => {
+  it("fails before spawning when the input signal is already aborted", () => {
     const config = definePicoConfig({
       voice: {
         resident: {
@@ -458,11 +458,9 @@ describe("resident audio I/O plans", () => {
 
     abortController.abort();
 
-    const iterator = createResidentPcmFrameSource(config, abortController.signal, spawn, "darwin")[
-      Symbol.asyncIterator
-    ]();
+    const capture = createResidentAudioCapture(config, spawn, "darwin");
 
-    await expect(iterator.next()).rejects.toThrow(
+    expect(() => capture.start(abortController.signal)).toThrow(
       "pico resident voice avfoundation input was aborted before startup"
     );
     expect(spawn).not.toHaveBeenCalled();

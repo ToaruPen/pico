@@ -16,8 +16,7 @@ describe("voice stage probe", () => {
         durationMs: 12,
         attributes: {
           "pico.voice.frame_count": 1,
-          "pico.voice.sample_rate_hz": 16_000,
-          "pico.voice.triggered": true
+          "pico.voice.sample_rate_hz": 16_000
         }
       }
     );
@@ -34,8 +33,7 @@ describe("voice stage probe", () => {
           "pico.voice.stage_status": "ok",
           "pico.voice.stage_duration_ms": 12,
           "pico.voice.frame_count": 1,
-          "pico.voice.sample_rate_hz": 16_000,
-          "pico.voice.triggered": true
+          "pico.voice.sample_rate_hz": 16_000
         }
       })
     ]);

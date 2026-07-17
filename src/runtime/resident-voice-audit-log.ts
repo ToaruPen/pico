@@ -21,14 +21,10 @@ const voiceStageAttributeNames = {
   frameCount: "pico.voice.frame_count",
   utteranceDurationMs: "pico.voice.utterance_duration_ms",
   chunkCount: "pico.voice.chunk_count",
-  triggered: "pico.voice.triggered",
   errorCode: "pico.voice.error_code"
 } as const;
 const summaryVoiceStages = new Set([
-  "startup_warmup",
-  "utterance_window",
   "stt",
-  "trigger_match",
   "session_start",
   "pi_turn",
   "tts_request_wall",
@@ -90,7 +86,6 @@ function formatResidentVoiceAuditEventLine(
       event.attributes[voiceStageAttributeNames.utteranceDurationMs]
     ),
     optionalAttribute("chunk_count", event.attributes[voiceStageAttributeNames.chunkCount]),
-    optionalAttribute("triggered", event.attributes[voiceStageAttributeNames.triggered]),
     optionalAttribute("error", event.attributes[voiceStageAttributeNames.errorCode])
   ]
     .filter((part): part is string => part !== undefined)

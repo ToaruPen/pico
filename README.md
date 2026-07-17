@@ -172,7 +172,11 @@ Configure these sections in `config/pico.local.yaml` as needed:
   explicit `route: system_default` on macOS, and `alsa` plus `alsa` with explicit
   devices on Raspberry Pi / Linux. `smoke:resident-audio-input` records a short
   bounded sample and reports RMS/peak levels only; speak near the resident mic
-  during the capture to verify it clears `voice.resident.utteranceWindow.minRmsDb`.
+  during the capture to verify it clears `voice.resident.vad.minRmsDb` when the
+  energy gate is selected.
+- `voice.resident.control` for the authenticated loopback control server and
+  macOS keyboard bridge. `talkKey` and `cancelKey` are explicit startup-only
+  bindings; the example uses `F13` and `F14` without making them defaults.
 - `camera.tapo` for one Tapo RTSP JPEG frame.
 - `vision.ollama` for `qwen3.5:9b` through the protected local tunnel.
 - `camera.tapo` plus `vision.ollama` for camera-to-VLM scene smoke.
@@ -293,12 +297,11 @@ Pi-hosted ownership path. The direct resident harness remains available
 separately for bounded field validation.
 
 The development terminal uses concise voice probe logs by default and does not
-support verbose mode. It shows utterance windows, STT completion, trigger
-decisions, session start, Pi Agent turn and response-duration metadata, wake
-acknowledgement input/response events, TTS synthesis/playback, interaction
-ending, and errors. It does not log the wake prompt, staff input, or Pi Agent
-response text. Per-frame successful capture/echo-control events are suppressed
-because they are too high-volume for operator-facing logs. Use
+support verbose mode. It shows admitted STT completion, Pi Agent turn and
+response-duration metadata, TTS synthesis/playback, interaction ending, and
+errors. It does not log staff input or Pi Agent response text. Per-frame
+successful capture/echo-control events are suppressed because they are too
+high-volume for operator-facing logs. Use
 `PICO_VOICE_PROBE_STDOUT=verbose npm run resident:voice` only when debugging the
 frame pipeline directly from a plain terminal, not from `pico dev`.
 
@@ -324,24 +327,28 @@ permissions. Development and normal resident runs are separated:
 Process logs contain stage summaries, durations, and errors. Daily and session
 JSONL files contain metadata-only interaction events with `schemaVersion`,
 `runMode`, `runId`, event kind, timestamp, session ID, and duration where
-relevant. They contain no text field and do not store the wake prompt, staff
-input, or Pi Agent response. Raw audio is not stored continuously; use targeted
-field harnesses for short diagnostic audio artifacts.
+relevant. They contain no text field and do not store staff input or Pi Agent
+responses. Raw audio is never persisted by the resident
+runtime. The bounded hold-to-talk field harness reports aggregate timing,
+frame-count, CPU, and RSS metadata only.
 
-The resident voice process generates a short Pi Agent wake acknowledgement after
-trusted wake-name or greeting triggers. This confirms that pico is listening
-without treating the wake phrase itself as the user's task.
+Resident voice is explicit hold-to-talk. Pressing the configured talk control
+starts microphone capture, releasing it keeps a fixed 250 ms speech tail and
+then submits at most one Pi turn. A separate configured control cancels
+recording, STT, the active Pi turn, TTS, or playback without ending the Pi parent
+conversation. Talk presses while Pico is busy are ignored and never queued.
 
 Background music is not removed by the resident voice runtime. Echo control is
 for pico's own TTS playback reference, so loud music or lyric-heavy audio can
-still degrade STT accuracy, keep an utterance window open, or create false wake
-matches. Validate resident placement with the same background audio expected in
-the room.
+still degrade STT accuracy while the talk control is held. Explicit controls
+prevent that background audio from activating Pico while idle. Validate
+resident placement with the same background audio expected in the room.
 
 On the Mac mini resident host, the public production startup target is Pi Agent
 with the pico extension loaded. The direct LaunchAgent harness below is kept for
 low-level resident voice validation after `smoke:resident-audio-input` proves
-that the configured microphone clears `voice.resident.utteranceWindow.minRmsDb`:
+that the configured microphone clears `voice.resident.vad.minRmsDb` when the
+energy gate is selected:
 
 ```bash
 PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- install
@@ -361,7 +368,20 @@ process stdout/stderr in `processes/resident-voice.out.log` and
 process, event, and session logs under the same normal run mode. `stop` boots
 the KeepAlive service out of the user launchd domain while leaving the plist
 installed; use `install` to bootstrap it again or `uninstall` to remove the
-plist.
+plist. `install` also builds the project-owned macOS control bridge at its stable
+package-relative release path. The bridge requires macOS Input Monitoring
+permission and consumes the two configured controls globally.
+
+Run the bounded control-and-capture field check after stopping the resident
+service:
+
+```bash
+PICO_CONFIG_PATH=config/pico.local.yaml \
+  npm run field:resident-hold-to-talk -- --duration-ms 30000
+```
+
+Use the configured talk and cancel controls during the interval. The command
+does not invoke STT, Pi, TTS, or playback and emits aggregate metadata only.
 
 Normal abort and graceful shutdown are owned by Pi. If a hard kill or power loss
 leaves an orphaned helper, Pico does not maintain a TaskRun database or attempt

@@ -16,7 +16,6 @@ export function buildSystemPrompt(identity: PicoIdentity): string {
     "Voice response rules:",
     "- Reply in short spoken Japanese when the interaction is voice-based.",
     "- Do not use Markdown.",
-    "- Avoid bullet lists and visible line breaks.",
-    "- When asked for a wake acknowledgement, answer briefly to show you are listening and do not answer a separate task yet."
+    "- Avoid bullet lists and visible line breaks."
   ].join("\n");
 }

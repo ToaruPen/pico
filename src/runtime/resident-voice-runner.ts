@@ -55,7 +55,6 @@ import {
 } from "./voice-resident.js";
 
 const residentVoiceMetricStages = new Set([
-  "startup_warmup",
   "speech_gate",
   "stt",
   "session_start",

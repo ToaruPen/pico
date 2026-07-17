@@ -46,7 +46,6 @@ const voiceMetricAttributeKeys = new Set([
   "pico.voice.chunk_count",
   "pico.voice.frame_bytes",
   "pico.voice.vlm_frame_bytes",
-  "pico.voice.triggered",
   "pico.voice.queue_depth",
   "pico.voice.error_code"
 ]);

@@ -5,13 +5,10 @@ import type {
 } from "../modules/audit/index.js";
 
 export type VoiceRuntimeStage =
-  | "startup_warmup"
   | "mic_capture"
   | "echo_control"
   | "speech_gate"
-  | "utterance_window"
   | "stt"
-  | "trigger_match"
   | "session_start"
   | "pi_turn"
   | "tts_request_wall"
@@ -36,13 +33,10 @@ export type VoiceStageProbeInput = {
 };
 
 const voiceRuntimeStages = new Set<VoiceRuntimeStage>([
-  "startup_warmup",
   "mic_capture",
   "echo_control",
   "speech_gate",
-  "utterance_window",
   "stt",
-  "trigger_match",
   "session_start",
   "pi_turn",
   "tts_request_wall",
@@ -62,7 +56,6 @@ const voiceStageAttributeKeys = new Set([
   "pico.voice.speech_detected",
   "pico.voice.speech_probability",
   "pico.voice.rms_db",
-  "pico.voice.triggered",
   "pico.voice.chunk_count",
   "pico.voice.frame_bytes",
   "pico.voice.vlm_frame_bytes",

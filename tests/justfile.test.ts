@@ -28,8 +28,8 @@ describe("justfile", () => {
     expect(justfile).toContain("resident:voice:dev-terminal -- --terminal=kitty");
     expect(justfile).toContain("resident-voice-dev-terminal:");
     expect(justfile).toContain("npm run resident:voice:dev-terminal");
-    expect(justfile).toContain("field-resident-voice-deferred-rallies:");
-    expect(justfile).toContain("npm run field:resident-voice-deferred-rallies");
+    expect(justfile).toContain("field-resident-hold-to-talk:");
+    expect(justfile).toContain("npm run field:resident-hold-to-talk");
   });
 
   it("does not expose the removed SQLite memory worker or field harnesses", () => {
@@ -73,7 +73,8 @@ describe("justfile", () => {
   it("runs the Apple Speech gate from the standard check on Darwin", () => {
     const justfile = readFileSync("Justfile", "utf8");
     const checkRecipe = justfile.slice(justfile.indexOf("\ncheck:"), justfile.indexOf("\nci:"));
-    const appleSpeechGate = 'if [ "$(uname -s)" = "Darwin" ]; then just apple-speech-check; fi';
+    const appleSpeechGate =
+      'if [ "$(uname -s)" = "Darwin" ]; then just apple-speech-check macos-control-check; fi';
 
     expect(checkRecipe).toContain(appleSpeechGate);
     expect(checkRecipe.indexOf(appleSpeechGate)).toBeLessThan(checkRecipe.indexOf("npm run check"));

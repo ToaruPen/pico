@@ -59,11 +59,8 @@ dev-session:
 resident-voice-dev-terminal:
   npm run resident:voice:dev-terminal
 
-field-voice-echo-pickup:
-  npm run field:voice-echo-pickup
-
-field-resident-voice-deferred-rallies:
-  npm run field:resident-voice-deferred-rallies
+field-resident-hold-to-talk:
+  npm run field:resident-hold-to-talk
 
 ast:
   npm run ast:test

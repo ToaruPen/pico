@@ -163,28 +163,6 @@ export function createResidentAudioOutputPlan(
   };
 }
 
-export function createResidentPcmFrameSource(
-  config: PicoConfig,
-  signal: AbortSignal,
-  spawnAudioProcess: SpawnAudioProcess = spawn as SpawnAudioProcess,
-  platform: Platform = process.platform,
-  now: () => string = defaultNow
-): AsyncIterable<VoicePcmFrame> {
-  const capture = createResidentAudioCapture(config, spawnAudioProcess, platform, now);
-
-  return {
-    async *[Symbol.asyncIterator]() {
-      const session = capture.start(signal);
-
-      try {
-        yield* session.frames;
-      } finally {
-        session.stop().catch(() => undefined);
-      }
-    }
-  };
-}
-
 export function createResidentAudioCapture(
   config: PicoConfig,
   spawnAudioProcess: SpawnAudioProcess = spawn as SpawnAudioProcess,

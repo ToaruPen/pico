@@ -6,10 +6,7 @@ import {
 } from "../modules/voice/echo-control.js";
 import type { SttClient, TtsAudioChunk, TtsClient } from "../modules/voice/index.js";
 import type { DeferredToolDeliverableResult } from "./deferred-tool-coordinator.js";
-import type {
-  ResidentAudioCapture,
-  ResidentCaptureSession
-} from "./resident-audio-io.js";
+import type { ResidentAudioCapture, ResidentCaptureSession } from "./resident-audio-io.js";
 import {
   createResidentControlController,
   type ResidentControlController,
@@ -22,11 +19,7 @@ import type { SpeechActivityGate } from "./speech-activity-gate.js";
 import { recordVoiceStageProbe, type VoiceStageProbe } from "./voice-stage-probe.js";
 
 export type VoicePlaybackSink = {
-  readonly play: (
-    chunk: TtsAudioChunk,
-    startedAt: string,
-    signal?: AbortSignal
-  ) => Promise<void>;
+  readonly play: (chunk: TtsAudioChunk, startedAt: string, signal?: AbortSignal) => Promise<void>;
   readonly stop: () => Promise<void>;
   readonly close: () => Promise<void>;
 };
@@ -197,12 +190,18 @@ export function createVoiceResidentRuntime(
         setActiveSessionId: (sessionId) => {
           activeSessionId = sessionId;
         }
-      }).catch((error: unknown) => {
-        if (!generation.signal.aborted) {
-          counters.failedCaptures += 1;
-          failRuntime(error, generation.id);
-        }
-      });
+      })
+        .catch((error: unknown) => {
+          if (!generation.signal.aborted) {
+            counters.failedCaptures += 1;
+            failRuntime(error, generation.id);
+          }
+        })
+        .finally(() => {
+          if (activeTurn === turn) {
+            activeTurn = undefined;
+          }
+        });
     },
     onCancel(generation) {
       const turn = currentTurn(activeTurn, generation.id);
@@ -627,7 +626,11 @@ async function shutdownVoiceRuntime(
   ];
 
   if (turn !== undefined) {
-    operations.unshift(turn.capture.stop(), turn.frameCollection, turn.operation ?? Promise.resolve());
+    operations.unshift(
+      turn.capture.stop(),
+      turn.frameCollection,
+      turn.operation ?? Promise.resolve()
+    );
   }
 
   if (activeSessionId !== undefined) {
@@ -686,8 +689,7 @@ function isCurrentStage(
   expected: ResidentControlState,
   counters: RuntimeCounters
 ): boolean {
-  const current =
-    controller.generation()?.id === generationId && controller.state() === expected;
+  const current = controller.generation()?.id === generationId && controller.state() === expected;
 
   if (!current && controller.state() !== "cancelling" && controller.state() !== "stopped") {
     counters.lateResultsSuppressed += 1;
