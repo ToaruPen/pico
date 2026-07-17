@@ -29,7 +29,13 @@ import {
 export type VoiceFrameSource = AsyncIterable<VoicePcmFrame> | Iterable<VoicePcmFrame>;
 
 export type VoicePlaybackSink = {
-  readonly play: (chunk: TtsAudioChunk, startedAt: string) => Promise<void>;
+  readonly play: (
+    chunk: TtsAudioChunk,
+    startedAt: string,
+    signal?: AbortSignal
+  ) => Promise<void>;
+  readonly stop: () => Promise<void>;
+  readonly close: () => Promise<void>;
 };
 
 export type VoiceResidentActivationSource = {

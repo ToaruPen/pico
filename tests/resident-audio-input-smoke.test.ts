@@ -19,7 +19,7 @@ describe("resident audio input smoke", () => {
     expect(residentAudioInputSmokeExitCode(report)).toBe(0);
   });
 
-  it("passes when measured input RMS meets the utterance threshold", async () => {
+  it("passes when measured input RMS meets the speech-gate threshold", async () => {
     const config = residentAudioInputConfig();
     const report = await runResidentAudioInputSmoke(config, {
       measureInputLevel: () =>
@@ -54,7 +54,7 @@ describe("resident audio input smoke", () => {
     expect(residentAudioInputSmokeExitCode(report)).toBe(0);
   });
 
-  it("fails without leaking captured audio when input stays below the utterance threshold", async () => {
+  it("fails without leaking captured audio when input stays below the speech-gate threshold", async () => {
     const config = residentAudioInputConfig();
     const report = await runResidentAudioInputSmoke(config, {
       measureInputLevel: () =>
@@ -108,7 +108,8 @@ function residentAudioInputConfig() {
           provider: "afplay",
           route: "system_default"
         },
-        utteranceWindow: {
+        vad: {
+          provider: "energy",
           minRmsDb: -55
         }
       }

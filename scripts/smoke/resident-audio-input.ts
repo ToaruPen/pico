@@ -10,6 +10,7 @@ import {
 
 const defaultCaptureMs = 3_000;
 const defaultTimeoutMs = 10_000;
+const defaultMinimumRmsDatabase = -55;
 
 export type ResidentAudioInputSmokeReport =
   | {
@@ -72,7 +73,7 @@ async function executeResidentAudioInputSmoke(
     return skipped(skipReason);
   }
 
-  const minimumRmsDatabase = resolvedConfig.voice.resident.utteranceWindow.minRmsDb;
+  const minimumRmsDatabase = residentAudioMinimumRmsDatabase(resolvedConfig);
   const level = await (dependencies.measureInputLevel ?? measureResidentAudioInputLevel)(
     resolvedConfig,
     {
@@ -83,6 +84,12 @@ async function executeResidentAudioInputSmoke(
   );
 
   return evaluateResidentAudioInputLevel(level, minimumRmsDatabase);
+}
+
+function residentAudioMinimumRmsDatabase(config: PicoConfig): number {
+  return config.voice.resident.vad.provider === "energy"
+    ? config.voice.resident.vad.minRmsDb
+    : defaultMinimumRmsDatabase;
 }
 
 function residentAudioInputSkipReason(config: PicoConfig): string | undefined {

@@ -666,7 +666,6 @@ function defineVoiceResidentConfig(
   const control = readOptionalRecord(input.control, "pico config voice.resident.control");
 
   requireResidentVoiceAudio(enabled, audioInput, audioOutput);
-  requireResidentVoiceControl(enabled, control);
 
   return {
     enabled,
@@ -766,7 +765,7 @@ function requirePicoMacKey(value: unknown, label: string): PicoMacKey {
     throw new Error(`${label} is invalid`);
   }
 
-  return key;
+  return key as PicoMacKey;
 }
 
 function requireTcpPort(value: unknown, label: string): number {
@@ -870,15 +869,6 @@ function requireResidentVoiceAudio(
 
   if (audioOutput === undefined) {
     throw new Error("pico config voice.resident.audioOutput is required when resident is enabled");
-  }
-}
-
-function requireResidentVoiceControl(
-  enabled: boolean,
-  control: Record<string, unknown> | undefined
-): void {
-  if (enabled && control === undefined) {
-    throw new Error("pico config voice.resident.control is required when resident is enabled");
   }
 }
 

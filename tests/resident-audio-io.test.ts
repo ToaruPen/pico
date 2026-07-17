@@ -9,6 +9,7 @@ import type { VoicePcmFrame } from "../src/modules/voice/echo-control.js";
 import {
   createResidentAudioInputPlan,
   createResidentAudioOutputPlan,
+  createResidentAudioCapture,
   createResidentPcmFrameSource,
   createResidentPlaybackSink,
   measurePcm16leAudioLevel,
@@ -467,6 +468,48 @@ describe("resident audio I/O plans", () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
+  it("owns microphone capture only between explicit start and stop", async () => {
+    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const spawn = vi.fn(() => process.child);
+    const capture = createResidentAudioCapture(config, spawn, "darwin");
+
+    expect(spawn).not.toHaveBeenCalled();
+
+    const controller = new AbortController();
+    const session = capture.start(controller.signal);
+    const firstFrame = session.frames[Symbol.asyncIterator]().next();
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    process.stdout.write(Buffer.alloc(320, 7));
+    await expect(firstFrame).resolves.toMatchObject({ done: false });
+
+    const stopped = session.stop();
+    expect(process.kill).toHaveBeenCalledTimes(1);
+    expect(process.kill).toHaveBeenCalledWith("SIGTERM");
+    process.stdout.end();
+    process.emitClose(0, "SIGTERM");
+    await expect(stopped).resolves.toBeUndefined();
+    await expect(capture.close()).resolves.toBeUndefined();
+  });
+
+  it("rejects overlapping microphone capture sessions", async () => {
+    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const spawn = vi.fn(() => process.child);
+    const capture = createResidentAudioCapture(config, spawn, "darwin");
+    const first = capture.start(new AbortController().signal);
+
+    expect(() => capture.start(new AbortController().signal)).toThrow(
+      "pico resident voice capture is already active"
+    );
+
+    const stopped = first.stop();
+    process.stdout.end();
+    process.emitClose(0, "SIGTERM");
+    await stopped;
+  });
+
   it("plays ALSA PCM using the TTS chunk sample format", async () => {
     const config = definePicoConfig({
       voice: {
@@ -558,6 +601,48 @@ describe("resident audio I/O plans", () => {
     process.stdin.emit("error", new Error("pipe failed"));
 
     await expect(done).rejects.toThrow("pipe failed");
+  });
+
+  it("stops only the current owned playback process and is idempotent", async () => {
+    const config = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: { provider: "alsa", device: "hw:1,0" },
+          audioOutput: { provider: "alsa", device: "hw:0,0" }
+        }
+      }
+    });
+    const process = createAudioProcess({ stdin: new PassThrough() });
+    const spawn = vi.fn(() => process.child);
+    const playback = createResidentPlaybackSink(config, spawn, "linux");
+    const playing = playback.play(
+      {
+        sentenceIndex: 0,
+        text: "hello",
+        audio: new Uint8Array([1, 2]),
+        encoding: "pcm16le",
+        sampleRateHz: 24_000,
+        channels: 1,
+        durationMs: 1,
+        source: {
+          serviceId: "test-aivis",
+          provider: "aivis-speech",
+          speakerId: 1
+        }
+      },
+      "2026-07-17T00:00:00.000Z"
+    );
+
+    const firstStop = playback.stop();
+    const secondStop = playback.stop();
+    expect(process.kill).toHaveBeenCalledTimes(1);
+    process.emitExit(143);
+
+    await expect(firstStop).resolves.toBeUndefined();
+    await expect(secondStop).resolves.toBeUndefined();
+    await expect(playing).resolves.toBeUndefined();
+    await expect(playback.close()).resolves.toBeUndefined();
   });
 
   it("removes the afplay temporary directory after playback", async () => {
