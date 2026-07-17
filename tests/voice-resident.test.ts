@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createStructuredAuditLog } from "../src/modules/audit/index.js";
 import { createSessionLifecycle } from "../src/modules/session/index.js";
 import type { VoicePcmFrame } from "../src/modules/voice/echo-control.js";
 import type {
@@ -290,6 +291,42 @@ describe("resident hold-to-talk voice runtime", () => {
 
     expect(driver.playedChunks).toEqual([]);
     await driver.runtime.stop();
+  });
+
+  it("records a provider-cancelled TTS request as skipped", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    const driver = createDriver({
+      audit,
+      ttsResponse: () =>
+        Promise.resolve({
+          ok: false,
+          reason: "cancelled",
+          message: "request cancelled",
+          sentenceIndex: 0,
+          source: {
+            serviceId: "test-tts",
+            provider: "aivis-speech",
+            speakerId: 1
+          }
+        })
+    });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(
+      audit.entries().find((event) => event.attributes["pico.voice.stage"] === "tts_synthesize")
+    ).toMatchObject({
+      attributes: {
+        "pico.voice.stage": "tts_synthesize",
+        "pico.voice.stage_status": "skipped",
+        "pico.voice.error_code": "cancelled"
+      }
+    });
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({ failedTurns: 0 });
   });
 
   it("fails the runtime immediately when capture frames reject during a hold", async () => {
@@ -667,6 +704,7 @@ function createDriver(
     readonly processedFrameIds?: string[];
     readonly farewellEnabled?: boolean;
     readonly sessionDurationMs?: number;
+    readonly audit?: ReturnType<typeof createStructuredAuditLog>;
   } = {}
 ) {
   const capture = createControlledCapture();
@@ -786,6 +824,7 @@ function createDriver(
             }
           }
         }),
+    ...(options.audit === undefined ? {} : { probe: { audit: options.audit } }),
     now: () => "2026-07-17T00:00:00.000Z",
     monotonicNow: () => 0
   });

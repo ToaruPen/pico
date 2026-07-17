@@ -237,16 +237,11 @@ export async function runResidentHoldToTalkFieldValidation(
         turn.frameCount += 1;
       }
     };
-    const recordCaptureMetrics = (turn: ActiveCapture, completedAtMs: number): void => {
+    const recordCaptureMetrics = (turn: ActiveCapture): void => {
       totalFrameCount += turn.frameCount;
 
       if (turn.firstFrameAtMs !== undefined) {
         captureStartupLatencies.push(turn.firstFrameAtMs - turn.pressedAtMs);
-      }
-
-      if (turn.releasedAtMs !== undefined) {
-        holdDurations.push(turn.releasedAtMs - turn.pressedAtMs);
-        releaseTailDurations.push(completedAtMs - turn.releasedAtMs);
       }
     };
     const finishReleasedCapture = async (
@@ -255,7 +250,14 @@ export async function runResidentHoldToTalkFieldValidation(
     ): Promise<void> => {
       await turn.session.stop();
       await turn.collection;
-      recordCaptureMetrics(turn, performance.now());
+      const completedAtMs = performance.now();
+      recordCaptureMetrics(turn);
+
+      if (turn.releasedAtMs !== undefined) {
+        holdDurations.push(turn.releasedAtMs - turn.pressedAtMs);
+        releaseTailDurations.push(completedAtMs - turn.releasedAtMs);
+      }
+
       completedHolds += 1;
 
       if (turn.frameCount > 0) {
@@ -275,7 +277,7 @@ export async function runResidentHoldToTalkFieldValidation(
       await turn.session.stop();
       await turn.collection;
       const completedAtMs = performance.now();
-      recordCaptureMetrics(turn, completedAtMs);
+      recordCaptureMetrics(turn);
 
       if (turn.cancelledAtMs !== undefined) {
         cancellationDurations.push(completedAtMs - turn.cancelledAtMs);
@@ -292,6 +294,7 @@ export async function runResidentHoldToTalkFieldValidation(
       host: control.host,
       port: control.port,
       authTokenPath: control.authTokenPath,
+      shutdownTimeoutMs: config.voice.resident.shutdownGraceMs,
       handle: (event) => {
         const turn = active;
 

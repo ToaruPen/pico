@@ -48,7 +48,7 @@ export async function startMacOSControlBridge(
   let readyOutput = "";
   let readiness: "pending" | "ready" | "failed" = "pending";
   let stopping = false;
-  let exited = false;
+  let closed = false;
   let completionSettled = false;
   let processFailure: Error | undefined;
   let terminationOperation: Promise<void> | undefined;
@@ -87,7 +87,7 @@ export async function startMacOSControlBridge(
       return terminationOperation;
     }
 
-    if (exited) {
+    if (closed) {
       return completion;
     }
 
@@ -182,8 +182,8 @@ export async function startMacOSControlBridge(
       void terminateProcess().catch(() => undefined);
     }
   };
-  const onExit = (code: number | null, exitSignal: NodeJS.Signals | null): void => {
-    exited = true;
+  const onClose = (code: number | null, exitSignal: NodeJS.Signals | null): void => {
+    closed = true;
 
     if (readiness === "pending") {
       readiness = "failed";
@@ -221,13 +221,13 @@ export async function startMacOSControlBridge(
     child.stderr.off("data", onStandardError);
     child.stdout.off("data", onStandardOutput);
     child.off("error", onProcessError);
-    child.off("exit", onExit);
+    child.off("close", onClose);
   };
 
   child.stderr.on("data", onStandardError);
   child.stdout.on("data", onStandardOutput);
   child.once("error", onProcessError);
-  child.once("exit", onExit);
+  child.once("close", onClose);
   options.signal?.addEventListener("abort", onAbort, { once: true });
 
   if (options.signal?.aborted === true) {

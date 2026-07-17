@@ -687,11 +687,13 @@ async function requestTts(
     });
 
     if (!result.ok) {
-      if (result.reason !== "cancelled") {
+      const cancelled = result.reason === "cancelled";
+
+      if (!cancelled) {
         counters.failedTurns += 1;
       }
 
-      recordStage(options, "tts_synthesize", "error", startedAt, 0, {
+      recordStage(options, "tts_synthesize", cancelled ? "skipped" : "error", startedAt, 0, {
         "pico.voice.error_code": result.reason
       });
       return undefined;

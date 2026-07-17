@@ -17,6 +17,7 @@ vi.mock("../src/config/index.js", () => ({
     voice: {
       resident: {
         enabled: true,
+        shutdownGraceMs: 5_000,
         control: {
           provider: "loopback_http",
           host: "127.0.0.1",
@@ -150,6 +151,28 @@ describe("resident hold-to-talk field runtime", () => {
       completedHolds: 1,
       holdDuration: { samples: 1 },
       releaseTailDuration: { samples: 1 }
+    });
+  });
+
+  it("does not record release timing for a hold cancelled during tailing", async () => {
+    const validation = runResidentHoldToTalkFieldValidation({ durationMs: 1_000, help: false });
+    const handle = await waitForHandle();
+
+    expect(handle(control("talk_pressed"))).toBe("accepted");
+    expect(handle(control("talk_released"))).toBe("accepted");
+    expect(handle(control("cancel_pressed"))).toBe("accepted");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(handle(control("talk_pressed"))).toBe("accepted");
+    expect(handle(control("talk_released"))).toBe("accepted");
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(validation).resolves.toMatchObject({
+      cancelledHolds: 1,
+      completedHolds: 1,
+      holdDuration: { samples: 1 },
+      releaseTailDuration: { samples: 1 },
+      cancellationDuration: { samples: 1 }
     });
   });
 

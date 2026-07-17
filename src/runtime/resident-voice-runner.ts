@@ -172,6 +172,7 @@ export async function runResidentVoiceWithProviders(input: {
         host: control.host,
         port: control.port,
         authTokenPath: control.authTokenPath,
+        shutdownTimeoutMs: config.voice.resident.shutdownGraceMs,
         handle,
         signal
       });
