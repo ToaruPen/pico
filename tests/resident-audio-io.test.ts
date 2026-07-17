@@ -711,6 +711,65 @@ describe("resident audio I/O plans", () => {
     await expect(done).rejects.toThrow("pipe failed");
   });
 
+  it("retains playback ownership after a PCM stdin failure until the child exits", async () => {
+    const config = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: { provider: "alsa", device: "hw:1,0" },
+          audioOutput: { provider: "alsa", device: "hw:0,0" }
+        }
+      }
+    });
+    const firstProcess = createAudioProcess({ stdin: new PassThrough() });
+    const secondProcess = createAudioProcess({ stdin: new PassThrough() });
+    const spawn = vi
+      .fn()
+      .mockReturnValueOnce(firstProcess.child)
+      .mockReturnValueOnce(secondProcess.child);
+    const playback = createResidentPlaybackSink(config, spawn, "linux");
+    const chunk = {
+      sentenceIndex: 0,
+      text: "hello",
+      audio: new Uint8Array([1, 2, 3, 4]),
+      encoding: "pcm16le",
+      sampleRateHz: 24_000,
+      channels: 1,
+      durationMs: 1,
+      source: {
+        serviceId: "test-aivis",
+        provider: "aivis-speech",
+        speakerId: 1
+      }
+    } as const;
+    const first = playback.play(chunk, "2026-07-17T00:00:00.000Z");
+
+    firstProcess.stdin.emit("error", new Error("pipe failed"));
+    await expect(first).rejects.toThrow("pipe failed");
+
+    const stopped = playback.stop();
+    const second = playback.play(chunk, "2026-07-17T00:00:01.000Z");
+    const secondOutcome = second.then(
+      () => "resolved",
+      (error: unknown) => (error instanceof Error ? error.message : String(error))
+    );
+
+    try {
+      expect(firstProcess.kill).toHaveBeenCalledWith("SIGTERM");
+      await expect(
+        Promise.race([
+          secondOutcome,
+          new Promise<string>((resolve) => setImmediate(() => resolve("still pending")))
+        ])
+      ).resolves.toBe("pico resident voice playback is already active");
+      expect(spawn).toHaveBeenCalledTimes(1);
+    } finally {
+      firstProcess.emitExit(143);
+      secondProcess.emitExit(0);
+      await Promise.allSettled([stopped, second]);
+    }
+  });
+
   it("stops ALSA playback immediately when its signal is already aborted", async () => {
     const config = definePicoConfig({
       voice: {

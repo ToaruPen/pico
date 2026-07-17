@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { PicoResidentControlConfig } from "../src/config/index.js";
 import {
@@ -74,6 +74,34 @@ describe("managed macOS resident control bridge", () => {
     );
   });
 
+  it("keeps ownership until a readiness failure has terminated the child", async () => {
+    const process = new ControlledProcess();
+    const starting = startMacOSControlBridge({
+      control: controlConfig(),
+      platform: "darwin",
+      spawnProcess: () => process
+    });
+    const outcome = starting.then(
+      () => "resolved",
+      (error: unknown) => (error instanceof Error ? error.message : String(error))
+    );
+
+    process.stdout.write('{"event":"not-ready"}\n');
+
+    expect(process.signals).toEqual(["SIGTERM"]);
+    await expect(
+      Promise.race([
+        outcome,
+        new Promise<string>((resolve) => setImmediate(() => resolve("still pending")))
+      ])
+    ).resolves.toBe("still pending");
+
+    process.exit(0, "SIGTERM");
+    await expect(outcome).resolves.toBe(
+      "pico macOS control bridge emitted an invalid readiness line"
+    );
+  });
+
   it("reports an unexpected exit after readiness", async () => {
     const process = new ControlledProcess();
     const starting = startMacOSControlBridge({
@@ -90,6 +118,39 @@ describe("managed macOS resident control bridge", () => {
     await expect(bridge.completion).rejects.toThrow(
       "pico macOS control bridge exited unexpectedly (code 2): event tap was disabled"
     );
+  });
+
+  it("escalates close to SIGKILL and rejects when the child still does not exit", async () => {
+    vi.useFakeTimers();
+    const process = new ControlledProcess();
+    const starting = startMacOSControlBridge({
+      control: controlConfig(),
+      platform: "darwin",
+      spawnProcess: () => process
+    });
+    process.stdout.write('{"event":"ready"}\n');
+    const bridge = await starting;
+    const closing = bridge.close();
+    const closeFailure = expect(closing).rejects.toThrow(
+      "pico macOS control bridge did not stop after SIGKILL"
+    );
+    const completionFailure = expect(bridge.completion).rejects.toThrow(
+      "pico macOS control bridge did not stop after SIGKILL"
+    );
+    void closeFailure.catch(() => undefined);
+    void completionFailure.catch(() => undefined);
+
+    try {
+      expect(process.signals).toEqual(["SIGTERM"]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(process.signals).toEqual(["SIGTERM", "SIGKILL"]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await closeFailure;
+      await completionFailure;
+    } finally {
+      process.exit(0, "SIGKILL");
+      vi.useRealTimers();
+    }
   });
 
   it("terminates startup when abort races process creation", async () => {

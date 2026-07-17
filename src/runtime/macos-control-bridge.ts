@@ -30,6 +30,8 @@ export type StartMacOSControlBridgeOptions = {
 
 const maximumDiagnosticBytes = 8192;
 const maximumReadyLineBytes = 1024;
+const terminationGraceMs = 1_000;
+const terminationKillTimeoutMs = 1_000;
 
 export function resolveMacOSControlExecutablePath(): string {
   return fileURLToPath(
@@ -47,7 +49,10 @@ export async function startMacOSControlBridge(
   let readiness: "pending" | "ready" | "failed" = "pending";
   let stopping = false;
   let exited = false;
-  let terminationRequested = false;
+  let completionSettled = false;
+  let processFailure: Error | undefined;
+  let terminationOperation: Promise<void> | undefined;
+  let cleanupProcessListeners: () => void = () => undefined;
   let resolveReady: () => void = () => undefined;
   let rejectReady: (error: Error) => void = () => undefined;
   let resolveCompletion: () => void = () => undefined;
@@ -63,13 +68,50 @@ export async function startMacOSControlBridge(
   // Startup failures can make completion unobservable to the caller.
   void completion.catch(() => undefined);
 
-  const requestTermination = (): void => {
-    if (exited || terminationRequested) {
+  const settleCompletion = (error?: Error): void => {
+    if (completionSettled) {
       return;
     }
 
-    terminationRequested = true;
+    completionSettled = true;
+    cleanupProcessListeners();
+
+    if (error === undefined) {
+      resolveCompletion();
+    } else {
+      rejectCompletion(error);
+    }
+  };
+  const terminateProcess = (): Promise<void> => {
+    if (terminationOperation !== undefined) {
+      return terminationOperation;
+    }
+
+    if (exited) {
+      return completion;
+    }
+
+    stopping = true;
     child.kill("SIGTERM");
+    terminationOperation = (async () => {
+      if (await waitForBridgeSettlement(completion, terminationGraceMs)) {
+        return completion;
+      }
+
+      child.kill("SIGKILL");
+
+      if (await waitForBridgeSettlement(completion, terminationKillTimeoutMs)) {
+        return completion;
+      }
+
+      settleCompletion(
+        new Error("pico macOS control bridge did not stop after SIGKILL", {
+          ...(processFailure === undefined ? {} : { cause: processFailure })
+        })
+      );
+      return completion;
+    })();
+    return terminationOperation;
   };
   const failReadiness = (error: Error): void => {
     if (readiness !== "pending") {
@@ -77,9 +119,16 @@ export async function startMacOSControlBridge(
     }
 
     readiness = "failed";
-    stopping = true;
-    requestTermination();
-    rejectReady(error);
+    void terminateProcess().then(
+      () => rejectReady(error),
+      (terminationError: unknown) => {
+        const terminationMessage =
+          terminationError instanceof Error ? terminationError.message : String(terminationError);
+        rejectReady(
+          new Error(`${error.message}; ${terminationMessage}`, { cause: terminationError })
+        );
+      }
+    );
   };
   const onStandardError = (chunk: Buffer | string): void => {
     if (standardError.length >= maximumDiagnosticBytes) {
@@ -129,12 +178,12 @@ export async function startMacOSControlBridge(
     }
 
     if (!stopping) {
-      rejectCompletion(bridgeError);
+      processFailure = bridgeError;
+      void terminateProcess().catch(() => undefined);
     }
   };
   const onExit = (code: number | null, exitSignal: NodeJS.Signals | null): void => {
     exited = true;
-    options.signal?.removeEventListener("abort", onAbort);
 
     if (readiness === "pending") {
       readiness = "failed";
@@ -143,29 +192,22 @@ export async function startMacOSControlBridge(
           `pico macOS control bridge exited before ready (${formatExit(code, exitSignal)})${formatDiagnostics(standardError)}`
         )
       );
-      resolveCompletion();
+      settleCompletion();
       return;
     }
 
     if (stopping) {
-      resolveCompletion();
+      settleCompletion(processFailure);
       return;
     }
 
-    rejectCompletion(
+    settleCompletion(
       new Error(
         `pico macOS control bridge exited unexpectedly (${formatExit(code, exitSignal)})${formatDiagnostics(standardError)}`
       )
     );
   };
-  const close = (): Promise<void> => {
-    if (!stopping) {
-      stopping = true;
-      requestTermination();
-    }
-
-    return completion;
-  };
+  const close = (): Promise<void> => terminateProcess();
   const onAbort = (): void => {
     if (readiness === "pending") {
       failReadiness(new Error("pico macOS control bridge startup was aborted"));
@@ -173,6 +215,13 @@ export async function startMacOSControlBridge(
     }
 
     close().catch(() => undefined);
+  };
+  cleanupProcessListeners = () => {
+    options.signal?.removeEventListener("abort", onAbort);
+    child.stderr.off("data", onStandardError);
+    child.stdout.off("data", onStandardOutput);
+    child.off("error", onProcessError);
+    child.off("exit", onExit);
   };
 
   child.stderr.on("data", onStandardError);
@@ -197,6 +246,31 @@ export async function startMacOSControlBridge(
   }
 
   return { completion, close };
+}
+
+async function waitForBridgeSettlement(
+  completion: Promise<void>,
+  timeoutMs: number
+): Promise<boolean> {
+  let timeout: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<false>((resolve) => {
+    timeout = setTimeout(() => resolve(false), timeoutMs);
+    timeout.unref();
+  });
+
+  try {
+    return await Promise.race([
+      completion.then(
+        () => true,
+        () => true
+      ),
+      timedOut
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 function validateBridgeStartup(options: StartMacOSControlBridgeOptions): void {
