@@ -212,7 +212,7 @@ export async function runResidentHoldToTalkFieldValidation(
           return;
         }
 
-        turn.operation = finishReleasedCapture(turn, ownedController).catch((error: unknown) => {
+        turn.operation ??= settleCapture(turn, ownedController).catch((error: unknown) => {
           fail(error, generation.id);
         });
       },
@@ -223,8 +223,8 @@ export async function runResidentHoldToTalkFieldValidation(
           return;
         }
 
-        turn.cancelledAtMs = performance.now();
-        turn.operation = finishCancelledCapture(turn, ownedController).catch((error: unknown) => {
+        turn.cancelledAtMs ??= performance.now();
+        turn.operation ??= settleCapture(turn, ownedController).catch((error: unknown) => {
           fail(error, generation.id);
         });
       }
@@ -244,47 +244,38 @@ export async function runResidentHoldToTalkFieldValidation(
         captureStartupLatencies.push(turn.firstFrameAtMs - turn.pressedAtMs);
       }
     };
-    const finishReleasedCapture = async (
+    const settleCapture = async (
       turn: ActiveCapture,
       owner: ReturnType<typeof createResidentControlController>
     ): Promise<void> => {
       await turn.session.stop();
       await turn.collection;
       const completedAtMs = performance.now();
-      recordCaptureMetrics(turn);
+      const cancelledAtMs = turn.cancelledAtMs;
+      const settled =
+        cancelledAtMs === undefined
+          ? owner.finish(turn.generation.id, "transcribing")
+          : owner.completeCancellation(turn.generation.id);
 
-      if (turn.releasedAtMs !== undefined) {
-        holdDurations.push(turn.releasedAtMs - turn.pressedAtMs);
-        releaseTailDurations.push(completedAtMs - turn.releasedAtMs);
+      if (settled) {
+        recordCaptureMetrics(turn);
+
+        if (cancelledAtMs === undefined) {
+          if (turn.releasedAtMs !== undefined) {
+            holdDurations.push(turn.releasedAtMs - turn.pressedAtMs);
+            releaseTailDurations.push(completedAtMs - turn.releasedAtMs);
+          }
+
+          completedHolds += 1;
+
+          if (turn.frameCount > 0) {
+            completedHoldsWithFrames += 1;
+          }
+        } else {
+          cancellationDurations.push(completedAtMs - cancelledAtMs);
+          cancelledHolds += 1;
+        }
       }
-
-      completedHolds += 1;
-
-      if (turn.frameCount > 0) {
-        completedHoldsWithFrames += 1;
-      }
-
-      owner.finish(turn.generation.id, "transcribing");
-
-      if (active === turn) {
-        active = undefined;
-      }
-    };
-    const finishCancelledCapture = async (
-      turn: ActiveCapture,
-      owner: ReturnType<typeof createResidentControlController>
-    ): Promise<void> => {
-      await turn.session.stop();
-      await turn.collection;
-      const completedAtMs = performance.now();
-      recordCaptureMetrics(turn);
-
-      if (turn.cancelledAtMs !== undefined) {
-        cancellationDurations.push(completedAtMs - turn.cancelledAtMs);
-      }
-
-      cancelledHolds += 1;
-      owner.completeCancellation(turn.generation.id);
 
       if (active === turn) {
         active = undefined;
