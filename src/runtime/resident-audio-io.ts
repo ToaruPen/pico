@@ -262,7 +262,7 @@ export function createResidentPlaybackSink(
     | {
         readonly abortController: AbortController;
         child: ReturnType<SpawnAudioProcess> | undefined;
-        childExit: Promise<void> | undefined;
+        childCompletion: Promise<void> | undefined;
         childKilled: boolean;
         completion: Promise<void> | undefined;
         stopOperation: Promise<void> | undefined;
@@ -281,7 +281,7 @@ export function createResidentPlaybackSink(
     }
 
     owned.abortController.abort();
-    const completion = owned.childExit ?? owned.completion ?? Promise.resolve();
+    const completion = owned.childCompletion ?? owned.completion ?? Promise.resolve();
     owned.stopOperation = stopAudioProcess(
       () => owned.child,
       completion,
@@ -300,14 +300,14 @@ export function createResidentPlaybackSink(
       const owned: {
         readonly abortController: AbortController;
         child: ReturnType<SpawnAudioProcess> | undefined;
-        childExit: Promise<void> | undefined;
+        childCompletion: Promise<void> | undefined;
         childKilled: boolean;
         completion: Promise<void> | undefined;
         stopOperation: Promise<void> | undefined;
       } = {
         abortController,
         child: undefined,
-        childExit: undefined,
+        childCompletion: undefined,
         childKilled: false,
         completion: undefined,
         stopOperation: undefined
@@ -329,10 +329,13 @@ export function createResidentPlaybackSink(
           active = undefined;
         }
       };
-      const onChild = (child: ReturnType<SpawnAudioProcess>, childExit: Promise<void>): void => {
+      const onChild = (
+        child: ReturnType<SpawnAudioProcess>,
+        childCompletion: Promise<void>
+      ): void => {
         owned.child = child;
-        owned.childExit = childExit;
-        void childExit.finally(releaseOwnership).catch(() => undefined);
+        owned.childCompletion = childCompletion;
+        void childCompletion.finally(releaseOwnership).catch(() => undefined);
 
         if (abortController.signal.aborted) {
           killChild();
@@ -355,7 +358,7 @@ export function createResidentPlaybackSink(
       try {
         await completion;
       } finally {
-        if (owned.childExit === undefined) {
+        if (owned.childCompletion === undefined) {
           releaseOwnership();
         }
       }
@@ -365,7 +368,10 @@ export function createResidentPlaybackSink(
   };
 }
 
-type PlaybackChildOwner = (child: ReturnType<SpawnAudioProcess>, childExit: Promise<void>) => void;
+type PlaybackChildOwner = (
+  child: ReturnType<SpawnAudioProcess>,
+  childCompletion: Promise<void>
+) => void;
 
 function settlePlaybackError(signal: AbortSignal, error: Error): Error | undefined {
   if (signal.aborted) {
@@ -742,9 +748,9 @@ function playRawPcm(
   onChild: PlaybackChildOwner
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    let resolveChildExit: () => void = () => undefined;
-    const childExit = new Promise<void>((resolveExit) => {
-      resolveChildExit = resolveExit;
+    let resolveChildCompletion: () => void = () => undefined;
+    const childCompletion = new Promise<void>((resolveCompletion) => {
+      resolveChildCompletion = resolveCompletion;
     });
     let settled = false;
     const settle = (error: Error | undefined): void => {
@@ -764,12 +770,11 @@ function playRawPcm(
     const child = spawnAudioProcess(plan.command, createAlsaPlaybackArguments(plan, chunk), {
       stdio: ["pipe", "ignore", "inherit"]
     });
-    onChild(child, childExit);
+    onChild(child, childCompletion);
     const stdin = child.stdin;
     child.once("error", (error) => settle(settlePlaybackError(signal, error)));
+    child.once("close", resolveChildCompletion);
     child.once("exit", (code) => {
-      resolveChildExit();
-
       if (code === 0 || signal.aborted) {
         settle(undefined);
         return;
@@ -845,14 +850,15 @@ function playFile(
   onChild: PlaybackChildOwner
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    let resolveChildExit: () => void = () => undefined;
-    const childExit = new Promise<void>((resolveExit) => {
-      resolveChildExit = resolveExit;
+    let resolveChildCompletion: () => void = () => undefined;
+    const childCompletion = new Promise<void>((resolveCompletion) => {
+      resolveChildCompletion = resolveCompletion;
     });
     const child = spawnAudioProcess(command, arguments_, {
       stdio: ["ignore", "pipe", "inherit"]
     });
-    onChild(child, childExit);
+    onChild(child, childCompletion);
+    child.once("close", resolveChildCompletion);
 
     child.once("error", (error) => {
       const resolvedError = settlePlaybackError(signal, error);
@@ -865,8 +871,6 @@ function playFile(
       reject(resolvedError);
     });
     child.once("exit", (code) => {
-      resolveChildExit();
-
       if (code === 0 || signal.aborted) {
         resolve();
         return;

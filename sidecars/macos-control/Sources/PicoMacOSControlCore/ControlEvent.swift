@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 
 public enum SemanticControlEvent: String, Codable, Sendable {
@@ -31,6 +32,26 @@ public struct ControlEventChannel: Sendable {
   public func finish() {
     continuation.finish()
   }
+}
+
+public func finishAndDrainControlEvents(
+  channel: ControlEventChannel,
+  sender: Task<Void, Never>,
+  timeout: DispatchTimeInterval = .seconds(1)
+) -> Bool {
+  channel.finish()
+  let completion = DispatchSemaphore(value: 0)
+  Task {
+    await sender.value
+    completion.signal()
+  }
+  let drained = completion.wait(timeout: .now() + timeout) == .success
+
+  if !drained {
+    sender.cancel()
+  }
+
+  return drained
 }
 
 public struct KeyboardEventDecision: Equatable, Sendable {

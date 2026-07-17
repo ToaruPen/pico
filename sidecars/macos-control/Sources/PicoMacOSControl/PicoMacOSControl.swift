@@ -60,14 +60,12 @@ enum PicoMacOSControlMain {
         userInfo: contextPointer
       )
     else {
-      eventChannel.finish()
-      sender.cancel()
+      _ = finishAndDrainControlEvents(channel: eventChannel, sender: sender)
       throw BridgeError.eventTapUnavailable
     }
     guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
       CFMachPortInvalidate(tap)
-      eventChannel.finish()
-      sender.cancel()
+      _ = finishAndDrainControlEvents(channel: eventChannel, sender: sender)
       throw BridgeError.runLoopSourceUnavailable
     }
 
@@ -77,11 +75,10 @@ enum PicoMacOSControlMain {
     FileHandle.standardOutput.write(Data("{\"event\":\"ready\"}\n".utf8))
     CFRunLoopRun()
 
-    signalSource.cancel()
-    eventChannel.finish()
-    sender.cancel()
     CFRunLoopRemoveSource(runLoop, source, .commonModes)
     CFMachPortInvalidate(tap)
+    signalSource.cancel()
+    _ = finishAndDrainControlEvents(channel: eventChannel, sender: sender)
 
     if let failure = reporter.failureReason() {
       throw BridgeError.runtimeFailure(failure)

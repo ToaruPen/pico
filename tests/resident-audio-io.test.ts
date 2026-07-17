@@ -770,6 +770,54 @@ describe("resident audio I/O plans", () => {
     }
   });
 
+  it("releases playback ownership after a spawn failure closes the child", async () => {
+    const config = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: { provider: "alsa", device: "hw:1,0" },
+          audioOutput: { provider: "alsa", device: "hw:0,0" }
+        }
+      }
+    });
+    const failedProcess = createAudioProcess({ stdin: new PassThrough() });
+    const nextProcess = createAudioProcess({ stdin: new PassThrough() });
+    const spawn = vi
+      .fn()
+      .mockReturnValueOnce(failedProcess.child)
+      .mockReturnValueOnce(nextProcess.child);
+    const playback = createResidentPlaybackSink(config, spawn, "linux");
+    const chunk = {
+      sentenceIndex: 0,
+      text: "hello",
+      audio: new Uint8Array([1, 2]),
+      encoding: "pcm16le",
+      sampleRateHz: 24_000,
+      channels: 1,
+      durationMs: 1,
+      source: {
+        serviceId: "test-aivis",
+        provider: "aivis-speech",
+        speakerId: 1
+      }
+    } as const;
+    const failed = playback.play(chunk, "2026-07-17T00:00:00.000Z");
+
+    failedProcess.emitError(new Error("spawn aplay EACCES"));
+    await expect(failed).rejects.toThrow("spawn aplay EACCES");
+    failedProcess.emitClose(-13, undefined);
+    await Promise.resolve();
+
+    const next = playback.play(chunk, "2026-07-17T00:00:01.000Z");
+
+    try {
+      expect(spawn).toHaveBeenCalledTimes(2);
+    } finally {
+      nextProcess.emitExit(0);
+      await Promise.allSettled([next]);
+    }
+  });
+
   it("stops ALSA playback immediately when its signal is already aborted", async () => {
     const config = definePicoConfig({
       voice: {
@@ -957,6 +1005,7 @@ function createAudioProcess(streams: {
   readonly stdin: PassThrough;
   readonly kill: ReturnType<typeof vi.fn>;
   readonly emitClose: (code: number, signal: NodeJS.Signals | undefined) => void;
+  readonly emitError: (error: Error) => void;
   readonly emitExit: (code: number) => void;
 } {
   const stdout = streams.stdout ?? new PassThrough();
@@ -986,8 +1035,12 @@ function createAudioProcess(streams: {
     emitClose(code, signal) {
       listeners.close?.(code, signal);
     },
+    emitError(error) {
+      listeners.error?.(error);
+    },
     emitExit(code) {
       listeners.exit?.(code);
+      listeners.close?.(code, undefined);
     }
   };
 }
