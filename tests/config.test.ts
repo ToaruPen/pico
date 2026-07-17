@@ -138,18 +138,91 @@ describe("pico YAML config", () => {
     ).toThrow("pico config voice.resident.audioOutput is required when resident is enabled");
   });
 
+  it("parses configurable resident hold-to-talk controls", () => {
+    expect(
+      definePicoConfig({
+        voice: {
+          resident: {
+            control: {
+              provider: "loopback_http",
+              host: "127.0.0.1",
+              port: 8781,
+              authTokenPath: "~/.pico/resident-voice/control-token",
+              keyboard: {
+                provider: "macos",
+                talkKey: "F13",
+                cancelKey: "F14"
+              }
+            }
+          }
+        }
+      }).voice.resident.control
+    ).toEqual({
+      provider: "loopback_http",
+      host: "127.0.0.1",
+      port: 8781,
+      authTokenPath: "~/.pico/resident-voice/control-token",
+      keyboard: {
+        provider: "macos",
+        talkKey: "F13",
+        cancelKey: "F14"
+      }
+    });
+  });
+
+  it("rejects invalid resident hold-to-talk controls", () => {
+    const resident = (control: unknown) => ({ voice: { resident: { control } } });
+
+    expect(() =>
+      definePicoConfig(
+        resident({
+          provider: "loopback_http",
+          host: "0.0.0.0",
+          port: 8781,
+          authTokenPath: "token",
+          keyboard: { provider: "macos", talkKey: "F13", cancelKey: "F14" }
+        })
+      )
+    ).toThrow("pico config voice.resident.control.host must be 127.0.0.1 or ::1");
+    expect(() =>
+      definePicoConfig(
+        resident({
+          provider: "loopback_http",
+          host: "127.0.0.1",
+          port: 8781,
+          authTokenPath: "token",
+          keyboard: { provider: "macos", talkKey: "F13", cancelKey: "F13" }
+        })
+      )
+    ).toThrow("pico config voice.resident.control keyboard keys must be different");
+    expect(() =>
+      definePicoConfig(
+        resident({
+          provider: "loopback_http",
+          host: "127.0.0.1",
+          port: 8781,
+          authTokenPath: "token",
+          keyboard: { provider: "macos", talkKey: "Shift", cancelKey: "F14" }
+        })
+      )
+    ).toThrow("pico config voice.resident.control.keyboard.talkKey is invalid");
+    expect(() =>
+      definePicoConfig(
+        resident({
+          provider: "loopback_http",
+          host: "127.0.0.1",
+          port: 8781,
+          authTokenPath: "token",
+          keyboard: { provider: "macos", talkKey: "F21", cancelKey: "F14" }
+        })
+      )
+    ).toThrow("pico config voice.resident.control.keyboard.talkKey is invalid");
+  });
+
   it("loads configured camera, vision, voice, audit, and person detection providers from YAML", () => {
     const path = temporaryConfigFile(`
 session:
   enabled: true
-  startTriggers:
-    wakeNames:
-      - ピコ
-      - pico
-    greetings:
-      - おはよう
-      - こんにちは
-    candidateTimeoutMs: 12000
   ending:
     mode: timed
     durationMs: 90000
@@ -208,27 +281,22 @@ voice:
       provider: afplay
       route: system_default
     singleInstanceLockPath: tmp/pico-custom-resident.lock
-    minTriggerConfidence: 0.72
     shutdownGraceMs: 3000
-    activation:
-      mode: push_to_talk
+    control:
       provider: loopback_http
       host: 127.0.0.1
       port: 8781
-      authTokenPath: tmp/pico-activation-token
-      debounceMs: 800
-      activationWindowMs: 8000
+      authTokenPath: tmp/pico-control-token
+      keyboard:
+        provider: macos
+        talkKey: F13
+        cancelKey: F14
     vad:
       provider: ten_vad
       jsPath: vendors/ten-vad/ten_vad.js
       wasmPath: vendors/ten-vad/ten_vad.wasm
       hopSize: 160
       threshold: 0.5
-    utteranceWindow:
-      minSpeechMs: 300
-      silenceMs: 700
-      maxUtteranceMs: 5000
-      minRmsDb: -55
   probes:
     enabled: true
   echoControl:
@@ -270,11 +338,6 @@ audit:
     expect(loadPicoConfig({ path })).toMatchObject({
       session: {
         enabled: true,
-        startTriggers: {
-          wakeNames: ["ピコ", "pico"],
-          greetings: ["おはよう", "こんにちは"],
-          candidateTimeoutMs: 12_000
-        },
         ending: {
           mode: "timed",
           durationMs: 90_000
@@ -341,16 +404,17 @@ audit:
             route: "system_default"
           },
           singleInstanceLockPath: join(dirname(path), "tmp/pico-custom-resident.lock"),
-          minTriggerConfidence: 0.72,
           shutdownGraceMs: 3000,
-          activation: {
-            mode: "push_to_talk",
+          control: {
             provider: "loopback_http",
             host: "127.0.0.1",
             port: 8781,
-            authTokenPath: join(dirname(path), "tmp/pico-activation-token"),
-            debounceMs: 800,
-            activationWindowMs: 8000
+            authTokenPath: join(dirname(path), "tmp/pico-control-token"),
+            keyboard: {
+              provider: "macos",
+              talkKey: "F13",
+              cancelKey: "F14"
+            }
           },
           vad: {
             provider: "ten_vad",
@@ -358,12 +422,6 @@ audit:
             wasmPath: join(dirname(path), "vendors/ten-vad/ten_vad.wasm"),
             hopSize: 160,
             threshold: 0.5
-          },
-          utteranceWindow: {
-            minSpeechMs: 300,
-            silenceMs: 700,
-            maxUtteranceMs: 5_000,
-            minRmsDb: -55
           }
         },
         probes: {
@@ -416,11 +474,6 @@ audit:
     expect(definePicoConfig({})).toMatchObject({
       session: {
         enabled: true,
-        startTriggers: {
-          wakeNames: [],
-          greetings: [],
-          candidateTimeoutMs: 10_000
-        },
         ending: {
           mode: "timed",
           durationMs: 60_000
@@ -435,11 +488,7 @@ audit:
         resident: {
           enabled: false,
           singleInstanceLockPath: "tmp/pico-voice-resident.lock",
-          minTriggerConfidence: 0.5,
           shutdownGraceMs: 5_000,
-          activation: {
-            mode: "wake_word"
-          },
           vad: {
             provider: "energy",
             minRmsDb: -55
@@ -611,7 +660,7 @@ audit:
     ).toThrow("pico config voice.stt.mlxWhisper was removed; migrate to voice.stt.appleSpeech");
   });
 
-  it("rejects unbounded resident utterance window settings", () => {
+  it("rejects removed resident activation and utterance settings", () => {
     expect(() =>
       definePicoConfig({
         voice: {
@@ -622,61 +671,46 @@ audit:
           }
         }
       })
-    ).toThrow(
-      "pico config voice.resident.utteranceWindow.maxUtteranceMs must be a positive integer <= 60000"
-    );
-  });
-
-  it("rejects remote push-to-talk activation bind hosts", () => {
+    ).toThrow("pico config voice.resident has unknown field utteranceWindow");
     expect(() =>
       definePicoConfig({
         voice: {
           resident: {
             activation: {
-              provider: "loopback_http",
-              host: "127.0.0.1",
-              port: 8781,
-              authTokenPath: "/tmp/pico-activation-token"
+              mode: "wake_word"
             }
           }
         }
       })
-    ).toThrow(
-      "pico config voice.resident.activation.mode is required when activation is configured"
-    );
-
+    ).toThrow("pico config voice.resident has unknown field activation");
     expect(() =>
       definePicoConfig({
         voice: {
           resident: {
-            activation: {
-              mode: "push_to_talk",
-              provider: "loopback_http",
-              host: "0.0.0.0",
-              port: 8781,
-              authTokenPath: "/tmp/pico-activation-token"
-            }
+            minTriggerConfidence: 0.5
           }
         }
       })
-    ).toThrow("pico config voice.resident.activation.host must be 127.0.0.1 or ::1");
+    ).toThrow("pico config voice.resident has unknown field minTriggerConfidence");
   });
 
-  it("expands push-to-talk activation token paths under the user home directory", () => {
+  it("expands resident control token paths under the user home directory", () => {
     const path = temporaryConfigFile(`
 voice:
   resident:
-    activation:
-      mode: push_to_talk
+    control:
       provider: loopback_http
       host: 127.0.0.1
       port: 8781
-      authTokenPath: ~/.pico/resident-voice/activation-token
+      authTokenPath: ~/.pico/resident-voice/control-token
+      keyboard:
+        provider: macos
+        talkKey: F13
+        cancelKey: F14
 `);
 
-    expect(loadPicoConfig({ path }).voice.resident.activation).toMatchObject({
-      mode: "push_to_talk",
-      authTokenPath: join(homedir(), ".pico/resident-voice/activation-token")
+    expect(loadPicoConfig({ path }).voice.resident.control).toMatchObject({
+      authTokenPath: join(homedir(), ".pico/resident-voice/control-token")
     });
   });
 

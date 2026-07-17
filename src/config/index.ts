@@ -41,11 +41,6 @@ export type PicoAgentModelConfig = {
 
 export type PicoSessionConfig = {
   readonly enabled: boolean;
-  readonly startTriggers: {
-    readonly wakeNames: readonly string[];
-    readonly greetings: readonly string[];
-    readonly candidateTimeoutMs: number;
-  };
   readonly ending: {
     readonly mode: "timed";
     readonly durationMs: number;
@@ -134,26 +129,55 @@ export type PicoVoiceResidentConfig = {
   readonly audioInput?: PicoResidentAudioInputConfig;
   readonly audioOutput?: PicoResidentAudioOutputConfig;
   readonly singleInstanceLockPath: string;
-  readonly minTriggerConfidence: number;
   readonly shutdownGraceMs: number;
-  readonly activation: PicoVoiceResidentActivationConfig;
+  readonly control?: PicoResidentControlConfig;
   readonly vad: PicoVoiceResidentVadConfig;
-  readonly utteranceWindow: PicoVoiceUtteranceWindowConfig;
 };
 
-export type PicoVoiceResidentActivationConfig =
-  | {
-      readonly mode: "wake_word";
-    }
-  | {
-      readonly mode: "push_to_talk";
-      readonly provider: "loopback_http";
-      readonly host: "127.0.0.1" | "::1";
-      readonly port: number;
-      readonly authTokenPath: string;
-      readonly debounceMs: number;
-      readonly activationWindowMs: number;
-    };
+export type PicoResidentControlConfig = {
+  readonly provider: "loopback_http";
+  readonly host: "127.0.0.1" | "::1";
+  readonly port: number;
+  readonly authTokenPath: string;
+  readonly keyboard: {
+    readonly provider: "macos";
+    readonly talkKey: PicoMacKey;
+    readonly cancelKey: PicoMacKey;
+  };
+};
+
+const picoMacKeys = [
+  ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+  ...Array.from({ length: 10 }, (_, index) => String(index)),
+  ...Array.from({ length: 20 }, (_, index) => `F${String(index + 1)}`),
+  "Space",
+  "Tab",
+  "Return",
+  "Escape",
+  "Backspace",
+  "Delete",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+  "LeftArrow",
+  "RightArrow",
+  "UpArrow",
+  "DownArrow",
+  "Minus",
+  "Equal",
+  "LeftBracket",
+  "RightBracket",
+  "Backslash",
+  "Semicolon",
+  "Quote",
+  "Comma",
+  "Period",
+  "Slash",
+  "Grave"
+] as const;
+
+export type PicoMacKey = (typeof picoMacKeys)[number];
 
 export type PicoVoiceResidentVadConfig =
   | {
@@ -167,13 +191,6 @@ export type PicoVoiceResidentVadConfig =
       readonly hopSize: 160 | 256;
       readonly threshold: number;
     };
-
-export type PicoVoiceUtteranceWindowConfig = {
-  readonly minSpeechMs: number;
-  readonly silenceMs: number;
-  readonly maxUtteranceMs: number;
-  readonly minRmsDb: number;
-};
 
 export type PicoResidentAudioInputConfig =
   | {
@@ -265,7 +282,6 @@ export type LoadPicoConfigOptions = {
 
 const defaultConfigPath = "config/pico.local.yaml";
 const maxNodeTimeoutMs = 2_147_483_647;
-const maxVoiceUtteranceWindowMs = 60_000;
 const maxTcpPort = 65_535;
 const maxOllamaImageEdgePixels = 4096;
 const picoThinkingLevels = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -274,11 +290,6 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
   pico: {},
   session: {
     enabled: true,
-    startTriggers: {
-      wakeNames: [],
-      greetings: [],
-      candidateTimeoutMs: 10_000
-    },
     ending: {
       mode: "timed",
       durationMs: 60_000
@@ -303,19 +314,9 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
     resident: {
       enabled: false,
       singleInstanceLockPath: "tmp/pico-voice-resident.lock",
-      minTriggerConfidence: 0.5,
       shutdownGraceMs: 5_000,
-      activation: {
-        mode: "wake_word"
-      },
       vad: {
         provider: "energy",
-        minRmsDb: -55
-      },
-      utteranceWindow: {
-        minSpeechMs: 300,
-        silenceMs: 700,
-        maxUtteranceMs: 5_000,
         minRmsDb: -55
       }
     },
@@ -421,40 +422,18 @@ function definePicoSection(root: Record<string, unknown>): PicoConfig["pico"] {
 function defineSessionSection(root: Record<string, unknown>): PicoConfig["session"] {
   const session = readOptionalRecord(root.session, "pico config session");
 
+  if (session !== undefined) {
+    requireKnownConfigFields(session, "pico config session", ["enabled", "ending"]);
+  }
+
   return {
     enabled: defineSessionEnabled(session),
-    startTriggers: defineSessionStartTriggers(session),
     ending: defineSessionEnding(readOptionalRecord(session?.ending, "pico config session.ending"))
   };
 }
 
 function defineSessionEnabled(input: Record<string, unknown> | undefined): boolean {
   return readOptionalBoolean(input?.enabled, "pico config session.enabled") ?? true;
-}
-
-function defineSessionStartTriggers(
-  input: Record<string, unknown> | undefined
-): PicoSessionConfig["startTriggers"] {
-  const startTriggers = readOptionalRecord(
-    input?.startTriggers,
-    "pico config session.startTriggers"
-  );
-
-  return {
-    wakeNames: readOptionalStringList(
-      startTriggers?.wakeNames,
-      "pico config session.startTriggers.wakeNames"
-    ),
-    greetings: readOptionalStringList(
-      startTriggers?.greetings,
-      "pico config session.startTriggers.greetings"
-    ),
-    candidateTimeoutMs:
-      readOptionalPositiveInteger(
-        startTriggers?.candidateTimeoutMs,
-        "pico config session.startTriggers.candidateTimeoutMs"
-      ) ?? 10_000
-  };
 }
 
 function defineSessionEnding(
@@ -621,15 +600,20 @@ function defineVoiceResidentConfig(
     input.audioOutput,
     "pico config voice.resident.audioOutput"
   );
-  const utteranceWindow = readOptionalRecord(
-    input.utteranceWindow,
-    "pico config voice.resident.utteranceWindow"
-  );
-  const definedUtteranceWindow = defineVoiceUtteranceWindowConfig(utteranceWindow);
+  requireKnownConfigFields(input, "pico config voice.resident", [
+    "enabled",
+    "audioInput",
+    "audioOutput",
+    "singleInstanceLockPath",
+    "shutdownGraceMs",
+    "control",
+    "vad"
+  ]);
   const vad = readOptionalRecord(input.vad, "pico config voice.resident.vad");
-  const activation = readOptionalRecord(input.activation, "pico config voice.resident.activation");
+  const control = readOptionalRecord(input.control, "pico config voice.resident.control");
 
   requireResidentVoiceAudio(enabled, audioInput, audioOutput);
+  requireResidentVoiceControl(enabled, control);
 
   return {
     enabled,
@@ -640,84 +624,96 @@ function defineVoiceResidentConfig(
         input.singleInstanceLockPath,
         "pico config voice.resident.singleInstanceLockPath"
       ) ?? "tmp/pico-voice-resident.lock",
-    minTriggerConfidence:
-      readOptionalConfidenceThreshold(
-        input.minTriggerConfidence,
-        "pico config voice.resident.minTriggerConfidence"
-      ) ?? 0.5,
     shutdownGraceMs:
       readOptionalBoundedPositiveInteger(
         input.shutdownGraceMs,
         "pico config voice.resident.shutdownGraceMs",
         maxNodeTimeoutMs
       ) ?? 5_000,
-    activation: defineVoiceResidentActivationConfig(activation),
-    vad: defineVoiceResidentVadConfig(vad, definedUtteranceWindow),
-    utteranceWindow: definedUtteranceWindow
+    ...(control === undefined ? {} : { control: defineResidentControlConfig(control) }),
+    vad: defineVoiceResidentVadConfig(vad)
   };
 }
 
-function defineVoiceResidentActivationConfig(
-  input: Record<string, unknown> | undefined
-): PicoVoiceResidentActivationConfig {
-  if (input === undefined) {
-    return emptyPicoConfig.voice.resident.activation;
-  }
-
-  const mode = readOptionalString(input.mode, "pico config voice.resident.activation.mode");
-
-  if (mode === undefined) {
-    throw new Error(
-      "pico config voice.resident.activation.mode is required when activation is configured"
-    );
-  }
-
-  if (mode === "wake_word") {
-    return { mode };
-  }
-
-  if (mode !== "push_to_talk") {
-    throw new Error("pico config voice.resident.activation.mode must be wake_word or push_to_talk");
-  }
-
-  const provider = requireString(input.provider, "pico config voice.resident.activation.provider");
+function defineResidentControlConfig(input: Record<string, unknown>): PicoResidentControlConfig {
+  requireKnownConfigFields(input, "pico config voice.resident.control", [
+    "provider",
+    "host",
+    "port",
+    "authTokenPath",
+    "keyboard"
+  ]);
+  const provider = requireString(input.provider, "pico config voice.resident.control.provider");
 
   if (provider !== "loopback_http") {
-    throw new Error("pico config voice.resident.activation.provider must be loopback_http");
+    throw new Error("pico config voice.resident.control.provider must be loopback_http");
+  }
+
+  const keyboard = requireRecord(
+    input.keyboard,
+    "pico config voice.resident.control.keyboard"
+  );
+  requireKnownConfigFields(keyboard, "pico config voice.resident.control.keyboard", [
+    "provider",
+    "talkKey",
+    "cancelKey"
+  ]);
+  const keyboardProvider = requireString(
+    keyboard.provider,
+    "pico config voice.resident.control.keyboard.provider"
+  );
+
+  if (keyboardProvider !== "macos") {
+    throw new Error("pico config voice.resident.control.keyboard.provider must be macos");
+  }
+
+  const talkKey = requirePicoMacKey(
+    keyboard.talkKey,
+    "pico config voice.resident.control.keyboard.talkKey"
+  );
+  const cancelKey = requirePicoMacKey(
+    keyboard.cancelKey,
+    "pico config voice.resident.control.keyboard.cancelKey"
+  );
+
+  if (talkKey === cancelKey) {
+    throw new Error("pico config voice.resident.control keyboard keys must be different");
   }
 
   return {
-    mode,
     provider,
-    host: requireLoopbackActivationHost(input.host),
-    port: requireTcpPort(input.port, "pico config voice.resident.activation.port"),
+    host: requireLoopbackControlHost(input.host),
+    port: requireTcpPort(input.port, "pico config voice.resident.control.port"),
     authTokenPath: requireString(
       input.authTokenPath,
-      "pico config voice.resident.activation.authTokenPath"
+      "pico config voice.resident.control.authTokenPath"
     ),
-    debounceMs:
-      readOptionalBoundedPositiveInteger(
-        input.debounceMs,
-        "pico config voice.resident.activation.debounceMs",
-        maxNodeTimeoutMs
-      ) ?? 800,
-    activationWindowMs:
-      readOptionalBoundedPositiveInteger(
-        input.activationWindowMs,
-        "pico config voice.resident.activation.activationWindowMs",
-        maxNodeTimeoutMs
-      ) ?? 8_000
+    keyboard: {
+      provider: keyboardProvider,
+      talkKey,
+      cancelKey
+    }
   };
 }
 
-function requireLoopbackActivationHost(value: unknown): "127.0.0.1" | "::1" {
-  const host = requireString(value, "pico config voice.resident.activation.host");
+function requireLoopbackControlHost(value: unknown): "127.0.0.1" | "::1" {
+  const host = requireString(value, "pico config voice.resident.control.host");
 
   if (host !== "127.0.0.1" && host !== "::1") {
-    throw new Error("pico config voice.resident.activation.host must be 127.0.0.1 or ::1");
+    throw new Error("pico config voice.resident.control.host must be 127.0.0.1 or ::1");
   }
 
   return host;
+}
+
+function requirePicoMacKey(value: unknown, label: string): PicoMacKey {
+  const key = requireString(value, label);
+
+  if (!new Set<string>(picoMacKeys).has(key)) {
+    throw new Error(`${label} is invalid`);
+  }
+
+  return key as PicoMacKey;
 }
 
 function requireTcpPort(value: unknown, label: string): number {
@@ -731,13 +727,12 @@ function requireTcpPort(value: unknown, label: string): number {
 }
 
 function defineVoiceResidentVadConfig(
-  input: Record<string, unknown> | undefined,
-  utteranceWindow: PicoVoiceUtteranceWindowConfig
+  input: Record<string, unknown> | undefined
 ): PicoVoiceResidentVadConfig {
   if (input === undefined) {
     return {
       provider: "energy",
-      minRmsDb: utteranceWindow.minRmsDb
+      minRmsDb: -55
     };
   }
 
@@ -748,8 +743,7 @@ function defineVoiceResidentVadConfig(
     return {
       provider,
       minRmsDb:
-        readOptionalRmsDatabase(input.minRmsDb, "pico config voice.resident.vad.minRmsDb") ??
-        utteranceWindow.minRmsDb
+        readOptionalRmsDatabase(input.minRmsDb, "pico config voice.resident.vad.minRmsDb") ?? -55
     };
   }
 
@@ -808,50 +802,6 @@ function requireAppleSpeechFrameContract(voice: PicoConfig["voice"]): void {
   }
 }
 
-function defineVoiceUtteranceWindowConfig(
-  input: Record<string, unknown> | undefined
-): PicoVoiceUtteranceWindowConfig {
-  const defaults = emptyPicoConfig.voice.resident.utteranceWindow;
-
-  if (input === undefined) {
-    return defaults;
-  }
-
-  const config: PicoVoiceUtteranceWindowConfig = {
-    minSpeechMs:
-      readOptionalBoundedPositiveInteger(
-        input.minSpeechMs,
-        "pico config voice.resident.utteranceWindow.minSpeechMs",
-        maxVoiceUtteranceWindowMs
-      ) ?? defaults.minSpeechMs,
-    silenceMs:
-      readOptionalBoundedPositiveInteger(
-        input.silenceMs,
-        "pico config voice.resident.utteranceWindow.silenceMs",
-        maxVoiceUtteranceWindowMs
-      ) ?? defaults.silenceMs,
-    maxUtteranceMs:
-      readOptionalBoundedPositiveInteger(
-        input.maxUtteranceMs,
-        "pico config voice.resident.utteranceWindow.maxUtteranceMs",
-        maxVoiceUtteranceWindowMs
-      ) ?? defaults.maxUtteranceMs,
-    minRmsDb:
-      readOptionalRmsDatabase(
-        input.minRmsDb,
-        "pico config voice.resident.utteranceWindow.minRmsDb"
-      ) ?? defaults.minRmsDb
-  };
-
-  if (config.maxUtteranceMs < config.minSpeechMs) {
-    throw new Error(
-      "pico config voice.resident.utteranceWindow.maxUtteranceMs must be >= minSpeechMs"
-    );
-  }
-
-  return config;
-}
-
 function requireResidentVoiceAudio(
   enabled: boolean,
   audioInput: Record<string, unknown> | undefined,
@@ -867,6 +817,15 @@ function requireResidentVoiceAudio(
 
   if (audioOutput === undefined) {
     throw new Error("pico config voice.resident.audioOutput is required when resident is enabled");
+  }
+}
+
+function requireResidentVoiceControl(
+  enabled: boolean,
+  control: Record<string, unknown> | undefined
+): void {
+  if (enabled && control === undefined) {
+    throw new Error("pico config voice.resident.control is required when resident is enabled");
   }
 }
 
@@ -1416,16 +1375,17 @@ function resolveConfigRelativePaths(config: PicoConfig, baseDirectory: string): 
           baseDirectory,
           config.voice.resident.singleInstanceLockPath
         ),
-        activation:
-          config.voice.resident.activation.mode === "push_to_talk"
-            ? {
-                ...config.voice.resident.activation,
+        ...(config.voice.resident.control === undefined
+          ? {}
+          : {
+              control: {
+                ...config.voice.resident.control,
                 authTokenPath: resolveConfigHomeOrRelativePath(
                   baseDirectory,
-                  config.voice.resident.activation.authTokenPath
+                  config.voice.resident.control.authTokenPath
                 )
               }
-            : config.voice.resident.activation,
+            }),
         vad:
           config.voice.resident.vad.provider === "ten_vad"
             ? {
