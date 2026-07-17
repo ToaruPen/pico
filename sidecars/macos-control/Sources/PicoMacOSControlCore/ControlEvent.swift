@@ -12,7 +12,7 @@ public struct ControlEventChannel: Sendable {
 
   public init() {
     let (events, continuation) = AsyncStream<SemanticControlEvent>.makeStream(
-      bufferingPolicy: .bufferingOldest(1))
+      bufferingPolicy: .unbounded)
     self.events = events
     self.continuation = continuation
   }

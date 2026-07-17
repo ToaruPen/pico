@@ -7,6 +7,7 @@ const fieldTestState = vi.hoisted(() => ({
   failNextCapture: false,
   starts: 0,
   captureCloses: 0,
+  captureFrameCounts: [] as number[],
   serverFailure: undefined as Error | undefined,
   bridgeStartup: undefined as Promise<void> | undefined
 }));
@@ -66,6 +67,7 @@ vi.mock("../src/runtime/resident-audio-io.js", () => ({
       });
       const fail = fieldTestState.failNextCapture;
       fieldTestState.failNextCapture = false;
+      const frameCount = fieldTestState.captureFrameCounts.shift() ?? 1;
 
       return {
         frames: {
@@ -74,7 +76,10 @@ vi.mock("../src/runtime/resident-audio-io.js", () => ({
               throw new Error("field capture failed");
             }
 
-            yield {};
+            for (let index = 0; index < frameCount; index += 1) {
+              yield {};
+            }
+
             await stopped;
           }
         },
@@ -100,6 +105,7 @@ describe("resident hold-to-talk field runtime", () => {
     fieldTestState.failNextCapture = false;
     fieldTestState.starts = 0;
     fieldTestState.captureCloses = 0;
+    fieldTestState.captureFrameCounts = [];
     fieldTestState.serverFailure = undefined;
     fieldTestState.bridgeStartup = undefined;
   });
@@ -182,6 +188,27 @@ describe("resident hold-to-talk field runtime", () => {
     void rejection.catch(() => undefined);
 
     await vi.advanceTimersByTimeAsync(1_000);
+    await rejection;
+  });
+
+  it("requires frames from a completed hold instead of a cancelled hold", async () => {
+    fieldTestState.captureFrameCounts = [0, 1];
+    const validation = runResidentHoldToTalkFieldValidation({ durationMs: 1_000, help: false });
+    const rejection = expect(validation).rejects.toThrow(
+      "pico hold-to-talk field validation observed no completed audio capture"
+    );
+    void rejection.catch(() => undefined);
+    const handle = await waitForHandle();
+
+    expect(handle(control("talk_pressed"))).toBe("accepted");
+    expect(handle(control("talk_released"))).toBe("accepted");
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(handle(control("talk_pressed"))).toBe("accepted");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(handle(control("cancel_pressed"))).toBe("accepted");
+    await vi.advanceTimersByTimeAsync(750);
+
     await rejection;
   });
 

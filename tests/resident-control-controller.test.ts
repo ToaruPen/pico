@@ -101,6 +101,33 @@ describe("resident hold-to-talk control controller", () => {
     expect(controller.state()).toBe("error");
   });
 
+  it("terminalizes without recursive notification when a transition observer throws", () => {
+    const scheduler = createScheduler();
+    const observed: ResidentControlState[] = [];
+    const controller = createResidentControlController({
+      scheduler,
+      onTransition: ({ to }) => {
+        observed.push(to);
+
+        if (to === "tailing") {
+          throw new Error("transition observer failed");
+        }
+      }
+    });
+
+    controller.handle(event("talk_pressed"));
+    const generation = controller.generation();
+
+    expect(() => controller.handle(event("talk_released"))).toThrow("transition observer failed");
+    expect(controller.state()).toBe("error");
+    expect(generation?.signal.aborted).toBe(true);
+    expect(scheduler.delays()).toEqual([]);
+    expect(observed).toEqual(["listening", "tailing"]);
+
+    scheduler.advance(250);
+    expect(controller.state()).toBe("error");
+  });
+
   it("suppresses completions from an invalid generation", () => {
     const controller = createResidentControlController();
 

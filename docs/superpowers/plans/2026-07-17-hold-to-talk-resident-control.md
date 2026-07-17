@@ -419,7 +419,7 @@ Commit: `feat(voice): run one turn per hold-to-talk activation`
 - Create: `sidecars/macos-control/Tests/PicoMacOSControlCoreTests/ControlEventTests.swift`
 - Create: `sidecars/macos-control/Tests/PicoMacOSControlCoreTests/ControlTransportTests.swift`
 - Create: `scripts/ci/run-macos-control-gates.sh`
-- Modify: `justfile`
+- Modify: `Justfile`
 
 - [ ] **Step 1: Record the bounded native API spike result in the approved design**
 
@@ -462,7 +462,8 @@ Commit: `feat(macos): add global resident control bridge`
 - Modify: `tests/resident-voice-runner.test.ts`
 - Create: `src/runtime/macos-control-bridge.ts`
 - Create: `tests/macos-control-bridge.test.ts`
-- Modify: `src/runtime/resident-voice-service.ts`
+- Modify: `src/runtime/resident-launchd.ts`
+- Modify: `tests/resident-launchd.test.ts`
 
 - [ ] **Step 1: Add failing runner and bridge lifecycle tests**
 
@@ -473,7 +474,7 @@ bridge → close server`, and no provider fallback.
 
 - [ ] **Step 2: Run focused tests and confirm Red**
 
-Run: `npx vitest run tests/macos-control-bridge.test.ts tests/resident-voice-runner.test.ts tests/resident-voice-service.test.ts`
+Run: `npx vitest run tests/macos-control-bridge.test.ts tests/resident-voice-runner.test.ts tests/resident-launchd.test.ts`
 
 - [ ] **Step 3: Implement managed bridge ownership**
 
@@ -491,7 +492,7 @@ phrases, wake acknowledgement, and utterance-window arguments.
 
 - [ ] **Step 5: Run focused tests and commit**
 
-Run: `npx vitest run tests/macos-control-bridge.test.ts tests/resident-voice-runner.test.ts tests/resident-voice-service.test.ts`
+Run: `npx vitest run tests/macos-control-bridge.test.ts tests/resident-voice-runner.test.ts tests/resident-launchd.test.ts`
 
 Expected: PASS.
 
@@ -510,7 +511,7 @@ Commit: `feat(voice): manage hold-to-talk production runtime`
 - Create: `scripts/field/resident-hold-to-talk.ts`
 - Create: `docs/superpowers/research/2026-07-17-hold-to-talk-field-validation.md`
 - Modify: `package.json`
-- Modify: `justfile`
+- Modify: `Justfile`
 - Modify: relevant runtime/spec references found by structural search
 
 - [ ] **Step 1: Add a failing field-contract test if reusable logic is extracted**
@@ -539,7 +540,7 @@ claims.
 Run:
 
 ```sh
-rg -n "wake_word|wakeNames|greetings|minTriggerConfidence|activationWindowMs|utteranceWindow|ResidentActivation|resident-activation|triggerPhrases" src tests config scripts package.json justfile
+rg -n "wake_word|wakeNames|greetings|minTriggerConfidence|activationWindowMs|utteranceWindow|ResidentActivation|resident-activation|triggerPhrases" src tests config scripts package.json Justfile
 ```
 
 Expected: no production or test matches; any retained historical documentation

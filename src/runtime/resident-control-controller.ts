@@ -66,14 +66,25 @@ export function createResidentControlController(
   let releaseTimer: { readonly cancel: () => void } | undefined;
   let nextGenerationId = 1;
 
-  const transition = (next: ResidentControlState): void => {
-    const from = currentState;
-    currentState = next;
-    options.onTransition?.({ from, to: next });
-  };
   const clearReleaseTimer = (): void => {
     releaseTimer?.cancel();
     releaseTimer = undefined;
+  };
+  const enterError = (error: unknown): void => {
+    clearReleaseTimer();
+    currentGeneration?.abortController.abort(error);
+    currentState = "error";
+  };
+  const transition = (next: ResidentControlState): void => {
+    const from = currentState;
+    currentState = next;
+
+    try {
+      options.onTransition?.({ from, to: next });
+    } catch (error) {
+      enterError(error);
+      throw error;
+    }
   };
   const clearGeneration = (): void => {
     clearReleaseTimer();
@@ -106,8 +117,7 @@ export function createResidentControlController(
     try {
       options.onListen?.(generation);
     } catch (error) {
-      abortController.abort(error);
-      transition("error");
+      enterError(error);
       throw error;
     }
 
@@ -136,8 +146,7 @@ export function createResidentControlController(
       try {
         options.onTailReady?.(generation);
       } catch (error) {
-        currentGeneration?.abortController.abort(error);
-        transition("error");
+        enterError(error);
       }
     });
 
@@ -165,7 +174,7 @@ export function createResidentControlController(
     try {
       options.onCancel?.(generation, cancelledState);
     } catch (error) {
-      transition("error");
+      enterError(error);
       throw error;
     }
 

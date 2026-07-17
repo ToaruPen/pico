@@ -4,14 +4,19 @@ import Testing
 
 @Suite("macOS semantic key mapping")
 struct ControlEventTests {
-  @Test("bounds pending semantic events and reports overflow")
-  func boundsPendingEvents() {
+  @Test("preserves pending semantic events in arrival order")
+  func preservesPendingEvents() async {
     let channel = ControlEventChannel()
 
     #expect(channel.send(.talkPressed))
-    #expect(!channel.send(.talkReleased))
+    #expect(channel.send(.talkReleased))
     channel.finish()
     #expect(!channel.send(.cancelPressed))
+
+    var events = channel.events.makeAsyncIterator()
+    #expect(await events.next() == .talkPressed)
+    #expect(await events.next() == .talkReleased)
+    #expect(await events.next() == nil)
   }
 
   @Test("maps one talk hold and suppresses repeats")

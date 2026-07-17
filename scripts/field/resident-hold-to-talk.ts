@@ -175,6 +175,7 @@ export async function runResidentHoldToTalkFieldValidation(
     const releaseTailDurations: number[] = [];
     const cancellationDurations: number[] = [];
     let completedHolds = 0;
+    let completedHoldsWithFrames = 0;
     let cancelledHolds = 0;
     let totalFrameCount = 0;
     let rejectFailure: (error: Error) => void = () => undefined;
@@ -256,6 +257,11 @@ export async function runResidentHoldToTalkFieldValidation(
       await turn.collection;
       recordCaptureMetrics(turn, performance.now());
       completedHolds += 1;
+
+      if (turn.frameCount > 0) {
+        completedHoldsWithFrames += 1;
+      }
+
       owner.finish(turn.generation.id, "transcribing");
 
       if (active === turn) {
@@ -319,7 +325,7 @@ export async function runResidentHoldToTalkFieldValidation(
       })
     ]);
 
-    requireCompletedAudioCapture(completedHolds, totalFrameCount);
+    requireCompletedAudioCapture(completedHoldsWithFrames);
 
     const elapsedMs = performance.now() - startedAtMs;
     const cpu = process.cpuUsage(startedCpu);
@@ -353,8 +359,8 @@ export async function runResidentHoldToTalkFieldValidation(
   }
 }
 
-function requireCompletedAudioCapture(completedHolds: number, frameCount: number): void {
-  if (completedHolds === 0 || frameCount === 0) {
+function requireCompletedAudioCapture(completedHoldsWithFrames: number): void {
+  if (completedHoldsWithFrames === 0) {
     throw new Error("pico hold-to-talk field validation observed no completed audio capture");
   }
 }
