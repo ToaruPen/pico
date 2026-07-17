@@ -245,6 +245,12 @@ provider errors and emit `skipped/cancelled` for normal cancellation.
 Run the full current suite, then update the field validation record with the exact test count and
 validated commit SHA. Do not mark the unperformed physical keyboard/microphone path as passing.
 
+- [x] **Step 8: Settle a tail-completion cancellation once**
+
+Add a delayed capture-stop regression test for tail expiry followed by cancel. Keep one shared
+terminal operation per capture, claim the matching controller terminal state before metrics, and
+record exactly one released or cancelled outcome.
+
 ## Task 10: Verify and converge PR #99
 
 **Files:**
