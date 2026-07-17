@@ -147,9 +147,62 @@ export type PicoResidentControlConfig = {
 };
 
 const picoMacKeys = [
-  ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-  ...Array.from({ length: 10 }, (_, index) => String(index)),
-  ...Array.from({ length: 20 }, (_, index) => `F${String(index + 1)}`),
+  "A",
+  "B",
+  "C",
+  "D",
+  "E",
+  "F",
+  "G",
+  "H",
+  "I",
+  "J",
+  "K",
+  "L",
+  "M",
+  "N",
+  "O",
+  "P",
+  "Q",
+  "R",
+  "S",
+  "T",
+  "U",
+  "V",
+  "W",
+  "X",
+  "Y",
+  "Z",
+  "0",
+  "1",
+  "2",
+  "3",
+  "4",
+  "5",
+  "6",
+  "7",
+  "8",
+  "9",
+  "F1",
+  "F2",
+  "F3",
+  "F4",
+  "F5",
+  "F6",
+  "F7",
+  "F8",
+  "F9",
+  "F10",
+  "F11",
+  "F12",
+  "F13",
+  "F14",
+  "F15",
+  "F16",
+  "F17",
+  "F18",
+  "F19",
+  "F20",
   "Space",
   "Tab",
   "Return",
@@ -713,7 +766,7 @@ function requirePicoMacKey(value: unknown, label: string): PicoMacKey {
     throw new Error(`${label} is invalid`);
   }
 
-  return key as PicoMacKey;
+  return key;
 }
 
 function requireTcpPort(value: unknown, label: string): number {
@@ -1664,28 +1717,6 @@ function readOptionalString(value: unknown, label = "pico config value"): string
   const trimmed = value.trim();
 
   return trimmed === "" ? undefined : trimmed;
-}
-
-function readOptionalStringList(value: unknown, label: string): readonly string[] {
-  if (value === undefined || value === null) {
-    return [];
-  }
-
-  if (!Array.isArray(value)) {
-    throw new Error(`${label} must be a list of strings`);
-  }
-
-  return value
-    .map((item, index) => {
-      const parsed = readOptionalString(item, `${label}.${index}`);
-
-      if (parsed === undefined) {
-        throw new Error(`${label} must be a list of non-empty strings`);
-      }
-
-      return parsed;
-    })
-    .filter((item, index, items) => items.indexOf(item) === index);
 }
 
 function readOptionalBoolean(value: unknown, label: string): boolean | undefined {
