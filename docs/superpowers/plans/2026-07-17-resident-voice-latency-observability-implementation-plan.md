@@ -161,6 +161,7 @@ Expected: PASS.
 - Modify: `src/runtime/voice-stage-probe.ts`
 - Modify: `src/runtime/resident-voice-audit-log.ts`
 - Modify: `src/runtime/resident-voice-runner.ts`
+- Test: `tests/resident-voice-audit-log.test.ts`
 - Test: `tests/voice-stage-probe.test.ts`
 
 - [x] **Step 1: Add a failing exhaustive policy test**
@@ -222,10 +223,10 @@ Expected: PASS.
 
 Apply only behavior-preserving cleanup within the changed files, then rerun focused tests and `just check`.
 
-- [ ] **Step 4: Commit and push**
+- [x] **Step 4: Commit and push**
 
 ```bash
-git add docs/superpowers/plans/2026-07-17-resident-voice-latency-observability-implementation-plan.md docs/superpowers/specs/2026-07-17-hold-to-talk-resident-control-design.md src/runtime/voice-resident.ts src/runtime/voice-stage-probe.ts src/runtime/resident-voice-audit-log.ts src/runtime/resident-voice-runner.ts tests/voice-resident.test.ts tests/voice-stage-probe.test.ts tests/resident-voice-measurements.test.ts
+git add docs/superpowers/plans/2026-07-17-resident-voice-latency-observability-implementation-plan.md docs/superpowers/specs/2026-06-18-voice-resident-runtime-design.md docs/superpowers/specs/2026-07-17-hold-to-talk-resident-control-design.md src/runtime/voice-resident.ts src/runtime/voice-stage-probe.ts src/runtime/resident-voice-audit-log.ts src/runtime/resident-voice-runner.ts tests/voice-resident.test.ts tests/voice-stage-probe.test.ts tests/resident-voice-audit-log.test.ts tests/resident-voice-measurements.test.ts
 git commit -m "fix(voice): measure resident latency by wall clock"
 git push origin codex/resident-latency-observability
 ```
