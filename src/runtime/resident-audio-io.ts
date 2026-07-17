@@ -10,6 +10,8 @@ import type { TtsAudioChunk } from "../modules/voice/index.js";
 import type { VoicePlaybackSink } from "./voice-resident.js";
 
 type Platform = NodeJS.Platform;
+const audioProcessTerminationGraceMs = 1_000;
+const audioProcessKillGraceMs = 1_000;
 
 export type Pcm16leAudioLevel = {
   readonly sampleCount: number;
@@ -278,7 +280,12 @@ export function createResidentPlaybackSink(
     }
 
     owned.abortController.abort();
-    owned.stopOperation = owned.completion ?? Promise.resolve();
+    const completion = owned.completion ?? Promise.resolve();
+    owned.stopOperation = stopAudioProcess(
+      () => owned.child,
+      completion,
+      `pico resident voice ${plan.provider} output`
+    );
     return owned.stopOperation;
   };
 
@@ -563,6 +570,7 @@ function createResidentCaptureSession(
         stopping &&
         (code === 0 ||
           signalName === "SIGTERM" ||
+          signalName === "SIGKILL" ||
           (plan.provider === "avfoundation" && code === 255));
 
       if (code !== 0 && !expectedStopExit) {
@@ -590,7 +598,16 @@ function createResidentCaptureSession(
       child.kill("SIGTERM");
     }
 
-    stopOperation = closedOperation;
+    stopOperation = stopAudioProcess(
+      () => child,
+      closedOperation,
+      `pico resident voice ${plan.provider} input`
+    ).catch((error: unknown) => {
+      const stopError = error instanceof Error ? error : new Error(String(error));
+      childFailure = stopError;
+      stdout.destroy(stopError);
+      throw stopError;
+    });
     return stopOperation;
   };
   const stopFromSignal = (): void => {
@@ -623,6 +640,40 @@ function createResidentCaptureSession(
     },
     stop
   };
+}
+
+async function stopAudioProcess(
+  child: () => Pick<ReturnType<SpawnAudioProcess>, "kill"> | undefined,
+  completion: Promise<void>,
+  label: string
+): Promise<void> {
+  if (await settlesWithin(completion, audioProcessTerminationGraceMs)) {
+    return;
+  }
+
+  child()?.kill("SIGKILL");
+
+  if (await settlesWithin(completion, audioProcessKillGraceMs)) {
+    return;
+  }
+
+  throw new Error(`${label} did not stop after SIGKILL`);
+}
+
+async function settlesWithin(operation: Promise<void>, timeoutMs: number): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<false>((resolve) => {
+    timeout = setTimeout(() => resolve(false), timeoutMs);
+    timeout.unref();
+  });
+
+  try {
+    return await Promise.race([operation.then(() => true), timedOut]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 async function* readOwnedPcmFrames(

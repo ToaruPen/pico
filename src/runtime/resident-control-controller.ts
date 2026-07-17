@@ -161,7 +161,13 @@ export function createResidentControlController(
     currentGeneration.abortController.abort(
       new Error(`pico resident turn cancelled during ${cancelledState}`)
     );
-    options.onCancel?.(generation, cancelledState);
+
+    try {
+      options.onCancel?.(generation, cancelledState);
+    } catch (error) {
+      transition("error");
+      throw error;
+    }
 
     return "accepted";
   };

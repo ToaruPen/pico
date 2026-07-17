@@ -503,7 +503,7 @@ Required counters include:
   confidence, debounce, activation-window, or utterance-window path.
 - Idle owns no microphone process and produces zero STT calls.
 - One accepted press/release produces no more than one Pi user message.
-- The audio sent to STT contains no pre-press frames and includes the configured
+- The audio sent to STT contains no pre-press frames and includes the fixed
   250 ms release tail.
 - Talk presses while busy are ignored and cannot execute later.
 - Cancel converges from every active turn state without farewell or

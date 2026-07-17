@@ -164,6 +164,7 @@ export function createVoiceResidentRuntime(
     resolveCompletion = resolve;
     rejectCompletion = reject;
   });
+  void completion.catch(() => undefined);
   const failRuntime = (error: unknown, generationId?: number): void => {
     if (runtimeSettled) {
       return;
@@ -178,7 +179,7 @@ export function createVoiceResidentRuntime(
     onListen(generation) {
       const capture = options.audioCapture.start(generation.signal);
       const frames: VoicePcmFrame[] = [];
-      const frameCollection = collectCaptureFrames(capture.frames, frames);
+      const frameCollection = collectCaptureFrames(capture.frames, frames, generation.signal);
       void frameCollection.catch((error: unknown) => {
         if (!generation.signal.aborted) {
           counters.failedCaptures += 1;
@@ -382,9 +383,11 @@ function acceptInteractionEndingCancel(
 
 async function collectCaptureFrames(
   source: AsyncIterable<VoicePcmFrame>,
-  target: VoicePcmFrame[]
+  target: VoicePcmFrame[],
+  signal: AbortSignal
 ): Promise<void> {
   for await (const frame of source) {
+    signal.throwIfAborted();
     target.push(defineVoicePcmFrame(frame));
   }
 }
@@ -411,7 +414,7 @@ async function processCompletedHold(
     return;
   }
 
-  const admitted = await admitCapturedSpeech(turn.frames, options);
+  const admitted = await admitCapturedSpeech(turn.frames, options, turn.generation.signal);
 
   if (!admitted.speech || admitted.audio.byteLength === 0) {
     counters.emptyHolds += 1;
@@ -425,7 +428,13 @@ async function processCompletedHold(
     return;
   }
 
-  if (transcript === undefined || isEmptyTranscript(transcript)) {
+  if (transcript === undefined) {
+    counters.failedTurns += 1;
+    finishCurrentTurn(controller, turn.generation.id, "transcribing", counters);
+    return;
+  }
+
+  if (isEmptyTranscript(transcript)) {
     counters.emptyHolds += 1;
     finishCurrentTurn(controller, turn.generation.id, "transcribing", counters);
     return;
@@ -523,7 +532,8 @@ async function processCompletedHold(
 // eslint-disable-next-line complexity
 async function admitCapturedSpeech(
   frames: readonly VoicePcmFrame[],
-  options: VoiceResidentRuntimeOptions
+  options: VoiceResidentRuntimeOptions,
+  signal: AbortSignal
 ): Promise<{
   readonly audio: Uint8Array;
   readonly speech: boolean;
@@ -534,7 +544,9 @@ async function admitCapturedSpeech(
   let speech = false;
 
   for (const frame of frames) {
+    signal.throwIfAborted();
     const echo = await options.echoControl.processNearEnd(frame);
+    signal.throwIfAborted();
 
     if (echo.action === "suppress") {
       continue;
@@ -542,6 +554,7 @@ async function admitCapturedSpeech(
 
     admitted.push(echo.frame.audio);
     const activity = await options.speechActivity?.process(echo.frame);
+    signal.throwIfAborted();
     speech ||= activity?.speech ?? echo.diagnostics.voiceActivity;
   }
 

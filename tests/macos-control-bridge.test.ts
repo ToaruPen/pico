@@ -92,6 +92,28 @@ describe("managed macOS resident control bridge", () => {
     );
   });
 
+  it("terminates startup when abort races process creation", async () => {
+    const process = new ControlledProcess();
+    const abortController = new AbortController();
+    const starting = startMacOSControlBridge({
+      control: controlConfig(),
+      platform: "darwin",
+      signal: abortController.signal,
+      spawnProcess: () => {
+        abortController.abort();
+        return process;
+      }
+    });
+    void starting.catch(() => undefined);
+
+    try {
+      expect(process.signals).toEqual(["SIGTERM"]);
+    } finally {
+      process.exit(0, "SIGTERM");
+      await starting.catch(() => undefined);
+    }
+  });
+
   it("rejects unsupported platforms before spawning", async () => {
     let launches = 0;
 

@@ -6,6 +6,8 @@ const fieldTestState = vi.hoisted(() => ({
     | undefined,
   failNextCapture: false,
   starts: 0,
+  captureCloses: 0,
+  serverFailure: undefined as Error | undefined,
   bridgeStartup: undefined as Promise<void> | undefined
 }));
 
@@ -15,10 +17,15 @@ vi.mock("../src/config/index.js", () => ({
       resident: {
         enabled: true,
         control: {
+          provider: "loopback_http",
           host: "127.0.0.1",
           port: 8781,
           authTokenPath: "/tmp/pico-field-test-token",
-          macos: { talkKey: "F13", cancelKey: "F14" }
+          keyboard: {
+            provider: "macos",
+            talkKey: "F13",
+            cancelKey: "F14"
+          }
         }
       }
     }
@@ -40,6 +47,11 @@ vi.mock("../src/runtime/resident-control.js", () => ({
     readonly handle: typeof fieldTestState.handle;
   }) => {
     fieldTestState.handle = options.handle;
+
+    if (fieldTestState.serverFailure !== undefined) {
+      return Promise.reject(fieldTestState.serverFailure);
+    }
+
     return Promise.resolve({ close: () => Promise.resolve() });
   }
 }));
@@ -72,7 +84,10 @@ vi.mock("../src/runtime/resident-audio-io.js", () => ({
         }
       };
     },
-    close: () => Promise.resolve()
+    close: () => {
+      fieldTestState.captureCloses += 1;
+      return Promise.resolve();
+    }
   })
 }));
 
@@ -84,6 +99,8 @@ describe("resident hold-to-talk field runtime", () => {
     fieldTestState.handle = undefined;
     fieldTestState.failNextCapture = false;
     fieldTestState.starts = 0;
+    fieldTestState.captureCloses = 0;
+    fieldTestState.serverFailure = undefined;
     fieldTestState.bridgeStartup = undefined;
   });
 
@@ -117,12 +134,16 @@ describe("resident hold-to-talk field runtime", () => {
     expect(handle(control("talk_pressed"))).toBe("accepted");
     expect(handle(control("cancel_pressed"))).toBe("accepted");
     expect(handle(control("talk_released"))).toBe("ignored_stale");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(handle(control("talk_pressed"))).toBe("accepted");
+    expect(handle(control("talk_released"))).toBe("accepted");
     await vi.advanceTimersByTimeAsync(1_000);
 
     await expect(validation).resolves.toMatchObject({
       cancelledHolds: 1,
-      holdDuration: { samples: 0 },
-      releaseTailDuration: { samples: 0 }
+      completedHolds: 1,
+      holdDuration: { samples: 1 },
+      releaseTailDuration: { samples: 1 }
     });
   });
 
@@ -150,6 +171,27 @@ describe("resident hold-to-talk field runtime", () => {
     await vi.advanceTimersByTimeAsync(1);
     finishBridgeStartup();
     await rejection;
+  });
+
+  it("rejects a timeout with no completed audio capture", async () => {
+    const validation = runResidentHoldToTalkFieldValidation({ durationMs: 1_000, help: false });
+    await waitForHandle();
+    const rejection = expect(validation).rejects.toThrow(
+      "pico hold-to-talk field validation observed no completed audio capture"
+    );
+    void rejection.catch(() => undefined);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await rejection;
+  });
+
+  it("closes audio capture when the control server fails to start", async () => {
+    fieldTestState.serverFailure = new Error("control server failed");
+
+    await expect(
+      runResidentHoldToTalkFieldValidation({ durationMs: 1_000, help: false })
+    ).rejects.toThrow("control server failed");
+    expect(fieldTestState.captureCloses).toBe(1);
   });
 });
 

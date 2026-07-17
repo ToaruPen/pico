@@ -491,6 +491,66 @@ describe("resident audio I/O plans", () => {
     await expect(capture.close()).resolves.toBeUndefined();
   });
 
+  it("escalates a stalled capture process from SIGTERM to SIGKILL", async () => {
+    vi.useFakeTimers();
+    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const capture = createResidentAudioCapture(
+      config,
+      vi.fn(() => process.child),
+      "darwin"
+    );
+    const session = capture.start(new AbortController().signal);
+    const stopped = session.stop();
+
+    try {
+      expect(process.kill).toHaveBeenCalledWith("SIGTERM");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(process.kill).toHaveBeenLastCalledWith("SIGKILL");
+    } finally {
+      process.stdout.end();
+      process.emitClose(0, "SIGKILL");
+      await stopped;
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects capture stop when the process remains unsettled after SIGKILL", async () => {
+    vi.useFakeTimers();
+    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const capture = createResidentAudioCapture(
+      config,
+      vi.fn(() => process.child),
+      "darwin"
+    );
+    const session = capture.start(new AbortController().signal);
+    const collection = (async (): Promise<void> => {
+      for await (const frame of session.frames) {
+        void frame;
+      }
+    })();
+    const stopped = session.stop();
+    const stopFailure = expect(stopped).rejects.toThrow(
+      "pico resident voice avfoundation input did not stop after SIGKILL"
+    );
+    const collectionFailure = expect(collection).rejects.toThrow(
+      "pico resident voice avfoundation input did not stop after SIGKILL"
+    );
+    void stopFailure.catch(() => undefined);
+    void collectionFailure.catch(() => undefined);
+
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      await stopFailure;
+      await collectionFailure;
+    } finally {
+      process.emitClose(0, "SIGKILL");
+      await capture.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("retains an unexpected capture failure that races an explicit stop", async () => {
     const config = avfoundationResidentAudioConfig({ frameMs: 10 });
     const process = createAudioProcess({ stdout: new PassThrough() });
@@ -731,6 +791,54 @@ describe("resident audio I/O plans", () => {
     await expect(secondStop).resolves.toBeUndefined();
     await expect(playing).resolves.toBeUndefined();
     await expect(playback.close()).resolves.toBeUndefined();
+  });
+
+  it("escalates a stalled playback process from SIGTERM to SIGKILL", async () => {
+    vi.useFakeTimers();
+    const config = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: { provider: "alsa", device: "hw:1,0" },
+          audioOutput: { provider: "alsa", device: "hw:0,0" }
+        }
+      }
+    });
+    const process = createAudioProcess({ stdin: new PassThrough() });
+    const playback = createResidentPlaybackSink(
+      config,
+      vi.fn(() => process.child),
+      "linux"
+    );
+    const playing = playback.play(
+      {
+        sentenceIndex: 0,
+        text: "hello",
+        audio: new Uint8Array([1, 2]),
+        encoding: "pcm16le",
+        sampleRateHz: 24_000,
+        channels: 1,
+        durationMs: 1,
+        source: {
+          serviceId: "test-aivis",
+          provider: "aivis-speech",
+          speakerId: 1
+        }
+      },
+      "2026-07-17T00:00:00.000Z"
+    );
+    const stopped = playback.stop();
+
+    try {
+      expect(process.kill).toHaveBeenCalledWith("SIGTERM");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(process.kill).toHaveBeenLastCalledWith("SIGKILL");
+    } finally {
+      process.emitExit(137);
+      await stopped;
+      await playing;
+      vi.useRealTimers();
+    }
   });
 
   it("removes the afplay temporary directory after playback", async () => {

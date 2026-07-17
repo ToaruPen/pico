@@ -150,154 +150,161 @@ export async function runResidentHoldToTalkFieldValidation(
 
   const startedAtMs = performance.now();
   const startedCpu = process.cpuUsage();
-  const stopController = new AbortController();
-  const unregisterSignals = registerStopSignals(stopController);
-  const durationTimer = setTimeout(() => stopController.abort(), arguments_.durationMs);
-  const capture = createResidentAudioCapture(config);
-  const outcomes: Record<ResidentControlResult, number> = {
-    accepted: 0,
-    ignored_busy: 0,
-    ignored_stale: 0,
-    noop: 0
-  };
-  const captureStartupLatencies: number[] = [];
-  const holdDurations: number[] = [];
-  const releaseTailDurations: number[] = [];
-  const cancellationDurations: number[] = [];
-  let completedHolds = 0;
-  let cancelledHolds = 0;
-  let totalFrameCount = 0;
-  let active: ActiveCapture | undefined;
-  let rejectFailure: (error: Error) => void = () => undefined;
-  const failure = new Promise<never>((_resolve, reject) => {
-    rejectFailure = reject;
-  });
-  void failure.catch(() => undefined);
-  const fail = (error: unknown, generationId?: number): void => {
-    controller.fail(generationId);
-    rejectFailure(error instanceof Error ? error : new Error(String(error)));
-  };
-  const controller = createResidentControlController({
-    onListen(generation) {
-      const session = capture.start(generation.signal);
-      const turn: ActiveCapture = {
-        generation,
-        session,
-        pressedAtMs: performance.now(),
-        collection: Promise.resolve(),
-        frameCount: 0,
-        firstFrameAtMs: undefined,
-        releasedAtMs: undefined,
-        cancelledAtMs: undefined,
-        operation: undefined
-      };
-      turn.collection = collectFrames(turn);
-      void turn.collection.catch((error: unknown) => fail(error, generation.id));
-      active = turn;
-    },
-    onTailReady(generation) {
-      const turn = active;
-
-      if (turn === undefined || turn.generation.id !== generation.id) {
-        return;
-      }
-
-      turn.operation = finishReleasedCapture(turn, controller).catch((error: unknown) => {
-        fail(error, generation.id);
-      });
-    },
-    onCancel(generation) {
-      const turn = active;
-
-      if (turn === undefined || turn.generation.id !== generation.id) {
-        return;
-      }
-
-      turn.cancelledAtMs = performance.now();
-      turn.operation = finishCancelledCapture(turn, controller).catch((error: unknown) => {
-        fail(error, generation.id);
-      });
-    }
-  });
-  const collectFrames = async (turn: ActiveCapture): Promise<void> => {
-    for await (const frame of turn.session.frames) {
-      void frame;
-      turn.firstFrameAtMs ??= performance.now();
-      turn.frameCount += 1;
-    }
-  };
-  const recordCaptureMetrics = (turn: ActiveCapture, completedAtMs: number): void => {
-    totalFrameCount += turn.frameCount;
-
-    if (turn.firstFrameAtMs !== undefined) {
-      captureStartupLatencies.push(turn.firstFrameAtMs - turn.pressedAtMs);
-    }
-
-    if (turn.releasedAtMs !== undefined) {
-      holdDurations.push(turn.releasedAtMs - turn.pressedAtMs);
-      releaseTailDurations.push(completedAtMs - turn.releasedAtMs);
-    }
-  };
-  const finishReleasedCapture = async (
-    turn: ActiveCapture,
-    owner: ReturnType<typeof createResidentControlController>
-  ): Promise<void> => {
-    await turn.session.stop();
-    await turn.collection;
-    recordCaptureMetrics(turn, performance.now());
-    completedHolds += 1;
-    owner.finish(turn.generation.id, "transcribing");
-
-    if (active === turn) {
-      active = undefined;
-    }
-  };
-  const finishCancelledCapture = async (
-    turn: ActiveCapture,
-    owner: ReturnType<typeof createResidentControlController>
-  ): Promise<void> => {
-    await turn.session.stop();
-    await turn.collection;
-    const completedAtMs = performance.now();
-    recordCaptureMetrics(turn, completedAtMs);
-
-    if (turn.cancelledAtMs !== undefined) {
-      cancellationDurations.push(completedAtMs - turn.cancelledAtMs);
-    }
-
-    cancelledHolds += 1;
-    owner.completeCancellation(turn.generation.id);
-
-    if (active === turn) {
-      active = undefined;
-    }
-  };
-  const server = await createLoopbackHttpResidentControlServer({
-    host: control.host,
-    port: control.port,
-    authTokenPath: control.authTokenPath,
-    handle: (event) => {
-      const turn = active;
-
-      try {
-        const outcome = controller.handle(event);
-
-        if (event.kind === "talk_released" && outcome === "accepted" && turn !== undefined) {
-          turn.releasedAtMs ??= performance.now();
-        }
-
-        outcomes[outcome] += 1;
-        return outcome;
-      } catch (error) {
-        fail(error, controller.generation()?.id);
-        throw error;
-      }
-    },
-    signal: stopController.signal
-  });
+  let durationTimer: ReturnType<typeof setTimeout> | undefined;
+  let unregisterSignals: (() => void) | undefined;
+  let capture: ReturnType<typeof createResidentAudioCapture> | undefined;
+  let controller: ReturnType<typeof createResidentControlController> | undefined;
+  let server: Awaited<ReturnType<typeof createLoopbackHttpResidentControlServer>> | undefined;
   let bridge: Awaited<ReturnType<typeof startMacOSControlBridge>> | undefined;
+  let active: ActiveCapture | undefined;
 
   try {
+    const stopController = new AbortController();
+    unregisterSignals = registerStopSignals(stopController);
+    durationTimer = setTimeout(() => stopController.abort(), arguments_.durationMs);
+    const ownedCapture = createResidentAudioCapture(config);
+    capture = ownedCapture;
+    const outcomes: Record<ResidentControlResult, number> = {
+      accepted: 0,
+      ignored_busy: 0,
+      ignored_stale: 0,
+      noop: 0
+    };
+    const captureStartupLatencies: number[] = [];
+    const holdDurations: number[] = [];
+    const releaseTailDurations: number[] = [];
+    const cancellationDurations: number[] = [];
+    let completedHolds = 0;
+    let cancelledHolds = 0;
+    let totalFrameCount = 0;
+    let rejectFailure: (error: Error) => void = () => undefined;
+    const failure = new Promise<never>((_resolve, reject) => {
+      rejectFailure = reject;
+    });
+    void failure.catch(() => undefined);
+    const fail = (error: unknown, generationId?: number): void => {
+      controller?.fail(generationId);
+      rejectFailure(error instanceof Error ? error : new Error(String(error)));
+    };
+    const ownedController = createResidentControlController({
+      onListen(generation) {
+        const session = ownedCapture.start(generation.signal);
+        const turn: ActiveCapture = {
+          generation,
+          session,
+          pressedAtMs: performance.now(),
+          collection: Promise.resolve(),
+          frameCount: 0,
+          firstFrameAtMs: undefined,
+          releasedAtMs: undefined,
+          cancelledAtMs: undefined,
+          operation: undefined
+        };
+        turn.collection = collectFrames(turn);
+        void turn.collection.catch((error: unknown) => fail(error, generation.id));
+        active = turn;
+      },
+      onTailReady(generation) {
+        const turn = active;
+
+        if (turn === undefined || turn.generation.id !== generation.id) {
+          return;
+        }
+
+        turn.operation = finishReleasedCapture(turn, ownedController).catch((error: unknown) => {
+          fail(error, generation.id);
+        });
+      },
+      onCancel(generation) {
+        const turn = active;
+
+        if (turn === undefined || turn.generation.id !== generation.id) {
+          return;
+        }
+
+        turn.cancelledAtMs = performance.now();
+        turn.operation = finishCancelledCapture(turn, ownedController).catch((error: unknown) => {
+          fail(error, generation.id);
+        });
+      }
+    });
+    controller = ownedController;
+    const collectFrames = async (turn: ActiveCapture): Promise<void> => {
+      for await (const frame of turn.session.frames) {
+        void frame;
+        turn.firstFrameAtMs ??= performance.now();
+        turn.frameCount += 1;
+      }
+    };
+    const recordCaptureMetrics = (turn: ActiveCapture, completedAtMs: number): void => {
+      totalFrameCount += turn.frameCount;
+
+      if (turn.firstFrameAtMs !== undefined) {
+        captureStartupLatencies.push(turn.firstFrameAtMs - turn.pressedAtMs);
+      }
+
+      if (turn.releasedAtMs !== undefined) {
+        holdDurations.push(turn.releasedAtMs - turn.pressedAtMs);
+        releaseTailDurations.push(completedAtMs - turn.releasedAtMs);
+      }
+    };
+    const finishReleasedCapture = async (
+      turn: ActiveCapture,
+      owner: ReturnType<typeof createResidentControlController>
+    ): Promise<void> => {
+      await turn.session.stop();
+      await turn.collection;
+      recordCaptureMetrics(turn, performance.now());
+      completedHolds += 1;
+      owner.finish(turn.generation.id, "transcribing");
+
+      if (active === turn) {
+        active = undefined;
+      }
+    };
+    const finishCancelledCapture = async (
+      turn: ActiveCapture,
+      owner: ReturnType<typeof createResidentControlController>
+    ): Promise<void> => {
+      await turn.session.stop();
+      await turn.collection;
+      const completedAtMs = performance.now();
+      recordCaptureMetrics(turn, completedAtMs);
+
+      if (turn.cancelledAtMs !== undefined) {
+        cancellationDurations.push(completedAtMs - turn.cancelledAtMs);
+      }
+
+      cancelledHolds += 1;
+      owner.completeCancellation(turn.generation.id);
+
+      if (active === turn) {
+        active = undefined;
+      }
+    };
+    server = await createLoopbackHttpResidentControlServer({
+      host: control.host,
+      port: control.port,
+      authTokenPath: control.authTokenPath,
+      handle: (event) => {
+        const turn = active;
+
+        try {
+          const outcome = ownedController.handle(event);
+
+          if (event.kind === "talk_released" && outcome === "accepted" && turn !== undefined) {
+            turn.releasedAtMs ??= performance.now();
+          }
+
+          outcomes[outcome] += 1;
+          return outcome;
+        } catch (error) {
+          fail(error, ownedController.generation()?.id);
+          throw error;
+        }
+      },
+      signal: stopController.signal
+    });
     bridge = await startMacOSControlBridge({ control, signal: stopController.signal });
     process.stderr.write(
       `[pico field] ready; use the configured controls for ${String(arguments_.durationMs)} ms\n`
@@ -311,37 +318,72 @@ export async function runResidentHoldToTalkFieldValidation(
         }
       })
     ]);
+
+    requireCompletedAudioCapture(completedHolds, totalFrameCount);
+
+    const elapsedMs = performance.now() - startedAtMs;
+    const cpu = process.cpuUsage(startedCpu);
+
+    return {
+      status: "passed",
+      durationMs: Math.round(elapsedMs),
+      outcomes: Object.freeze({ ...outcomes }),
+      completedHolds,
+      cancelledHolds,
+      frameCount: totalFrameCount,
+      captureStartupLatency: summarizeBoundedMetric(captureStartupLatencies),
+      holdDuration: summarizeBoundedMetric(holdDurations),
+      releaseTailDuration: summarizeBoundedMetric(releaseTailDurations),
+      cancellationDuration: summarizeBoundedMetric(cancellationDurations),
+      idleSttCalls: 0,
+      cpuUserMicros: cpu.user,
+      cpuSystemMicros: cpu.system,
+      rssBytes: process.memoryUsage().rss
+    };
   } finally {
-    clearTimeout(durationTimer);
-    unregisterSignals();
-    controller.stop();
-    await active?.session.stop();
-    await active?.collection.catch(() => undefined);
-    await active?.operation?.catch(() => undefined);
-    await bridge?.close().catch(() => undefined);
-    await server.close();
-    await capture.close();
+    await closeFieldValidationResources({
+      durationTimer,
+      unregisterSignals,
+      controller,
+      active,
+      bridge,
+      server,
+      capture
+    });
+  }
+}
+
+function requireCompletedAudioCapture(completedHolds: number, frameCount: number): void {
+  if (completedHolds === 0 || frameCount === 0) {
+    throw new Error("pico hold-to-talk field validation observed no completed audio capture");
+  }
+}
+
+async function closeFieldValidationResources(input: {
+  readonly durationTimer: ReturnType<typeof setTimeout> | undefined;
+  readonly unregisterSignals: (() => void) | undefined;
+  readonly controller: ReturnType<typeof createResidentControlController> | undefined;
+  readonly active: ActiveCapture | undefined;
+  readonly bridge: Awaited<ReturnType<typeof startMacOSControlBridge>> | undefined;
+  readonly server: Awaited<ReturnType<typeof createLoopbackHttpResidentControlServer>> | undefined;
+  readonly capture: ReturnType<typeof createResidentAudioCapture> | undefined;
+}): Promise<void> {
+  if (input.durationTimer !== undefined) {
+    clearTimeout(input.durationTimer);
   }
 
-  const elapsedMs = performance.now() - startedAtMs;
-  const cpu = process.cpuUsage(startedCpu);
+  input.unregisterSignals?.();
+  input.controller?.stop();
+  await closeActiveCapture(input.active);
+  await input.bridge?.close().catch(() => undefined);
+  await input.server?.close();
+  await input.capture?.close();
+}
 
-  return {
-    status: "passed",
-    durationMs: Math.round(elapsedMs),
-    outcomes: Object.freeze({ ...outcomes }),
-    completedHolds,
-    cancelledHolds,
-    frameCount: totalFrameCount,
-    captureStartupLatency: summarizeBoundedMetric(captureStartupLatencies),
-    holdDuration: summarizeBoundedMetric(holdDurations),
-    releaseTailDuration: summarizeBoundedMetric(releaseTailDurations),
-    cancellationDuration: summarizeBoundedMetric(cancellationDurations),
-    idleSttCalls: 0,
-    cpuUserMicros: cpu.user,
-    cpuSystemMicros: cpu.system,
-    rssBytes: process.memoryUsage().rss
-  };
+async function closeActiveCapture(active: ActiveCapture | undefined): Promise<void> {
+  await active?.session.stop();
+  await active?.collection.catch(() => undefined);
+  await active?.operation?.catch(() => undefined);
 }
 
 function registerStopSignals(controller: AbortController): () => void {

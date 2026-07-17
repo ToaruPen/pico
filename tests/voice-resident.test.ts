@@ -106,6 +106,34 @@ describe("resident hold-to-talk voice runtime", () => {
     await expect(driver.runtime.completion).resolves.toMatchObject({ emptyHolds: 1 });
   });
 
+  it("records an STT provider failure separately from an empty hold", async () => {
+    vi.useFakeTimers();
+    const driver = createDriver({
+      sttResponse: () =>
+        Promise.resolve({
+          ok: false,
+          reason: "backend_error",
+          message: "speech backend unavailable",
+          source: {
+            sidecarId: "test-stt",
+            provider: "apple-speech",
+            language: "ja-JP"
+          }
+        })
+    });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(driver.piRequests).toEqual([]);
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({
+      emptyHolds: 0,
+      failedTurns: 1
+    });
+  });
+
   it("ignores talk while processing and never queues it", async () => {
     vi.useFakeTimers();
     const piGate = createGate<{ readonly text: string }>();
@@ -226,6 +254,28 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
+  it("stops admitting buffered frames after cancellation", async () => {
+    vi.useFakeTimers();
+    const nearEndGate = createGate<undefined>();
+    const processedFrameIds: string[] = [];
+    const driver = createDriver({ nearEndGate: nearEndGate.promise, processedFrameIds });
+
+    await driver.press();
+    driver.capture.emit(frame("first", [1, 0]));
+    driver.capture.emit(frame("second", [2, 0]));
+    await driver.release();
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(processedFrameIds).toEqual(["first"]));
+
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    nearEndGate.resolve(undefined);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(processedFrameIds).toEqual(["first"]);
+    expect(driver.sttRequests).toEqual([]);
+    await driver.runtime.stop();
+  });
+
   it("suppresses a late synthesis result after cancellation", async () => {
     vi.useFakeTimers();
     const ttsGate = createGate<TtsSynthesisResult>();
@@ -251,6 +301,27 @@ describe("resident hold-to-talk voice runtime", () => {
     await expect(driver.runtime.completion).rejects.toThrow("capture stream failed");
     expect(driver.runtime.state()).toBe("error");
     await expect(driver.runtime.stop()).rejects.toThrow("capture stream failed");
+  });
+
+  it("observes a runtime failure before a completion consumer attaches", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    const driver = createDriver();
+
+    try {
+      await driver.press();
+      driver.capture.fail(new Error("early capture failure"));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(unhandled).toEqual([]);
+      await expect(driver.runtime.completion).rejects.toThrow("early capture failure");
+      await expect(driver.runtime.stop()).rejects.toThrow("early capture failure");
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 
   it("clears playback and echo state after playback fails", async () => {
@@ -592,6 +663,8 @@ function createDriver(
     readonly playbackCompletion?: (signal: AbortSignal | undefined) => Promise<void>;
     readonly playbackStopError?: Error;
     readonly lifecycleEvents?: string[];
+    readonly nearEndGate?: Promise<void>;
+    readonly processedFrameIds?: string[];
     readonly farewellEnabled?: boolean;
     readonly sessionDurationMs?: number;
   } = {}
@@ -666,8 +739,11 @@ function createDriver(
         echoFarEndReferenceCount += 1;
         return Promise.resolve();
       },
-      processNearEnd: (input) =>
-        Promise.resolve({
+      processNearEnd: async (input) => {
+        options.processedFrameIds?.push(input.id);
+        await options.nearEndGate;
+
+        return {
           action: "pass",
           reason: "no_far_end_tail",
           frame: input,
@@ -676,7 +752,8 @@ function createDriver(
             residualEchoProbability: 0,
             voiceActivity: options.speechDetected ?? true
           }
-        }),
+        };
+      },
       flush: () => {
         echoFlushCount += 1;
         return Promise.resolve();

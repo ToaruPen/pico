@@ -400,7 +400,7 @@ stages to control/capture/turn stages without recording keys or text.
 
 - [ ] **Step 5: Run focused tests and commit**
 
-Run: `npx vitest run tests/voice-resident.test.ts tests/pi-host-turn.test.ts tests/voice-stage-probe.test.ts`
+Run: `npx vitest run tests/voice-resident.test.ts tests/pi-agent-turn.test.ts tests/voice-stage-probe.test.ts`
 
 Expected: PASS.
 

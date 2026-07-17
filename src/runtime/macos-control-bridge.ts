@@ -181,6 +181,10 @@ export async function startMacOSControlBridge(
   child.once("exit", onExit);
   options.signal?.addEventListener("abort", onAbort, { once: true });
 
+  if (options.signal?.aborted === true) {
+    onAbort();
+  }
+
   const timeout = setTimeout(() => {
     failReadiness(new Error("pico macOS control bridge did not become ready before timeout"));
   }, options.readyTimeoutMs ?? 5_000);

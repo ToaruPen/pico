@@ -88,6 +88,19 @@ describe("resident hold-to-talk control controller", () => {
     expect(controller.state()).toBe("idle");
   });
 
+  it("moves to error when cancellation setup throws", () => {
+    const controller = createResidentControlController({
+      onCancel: () => {
+        throw new Error("cancellation setup failed");
+      }
+    });
+
+    controller.handle(event("talk_pressed"));
+
+    expect(() => controller.handle(event("cancel_pressed"))).toThrow("cancellation setup failed");
+    expect(controller.state()).toBe("error");
+  });
+
   it("suppresses completions from an invalid generation", () => {
     const controller = createResidentControlController();
 
