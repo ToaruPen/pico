@@ -53,17 +53,7 @@ import {
   type PiAgentTurnClient,
   type VoiceResidentRuntime
 } from "./voice-resident.js";
-
-const residentVoiceMetricStages = new Set([
-  "speech_gate",
-  "stt",
-  "session_start",
-  "pi_turn",
-  "tts_request_wall",
-  "tts_playback",
-  "camera_capture",
-  "vlm_scene_description"
-]);
+import { voiceRuntimeStagePolicy } from "./voice-stage-probe.js";
 
 export async function runDirectResidentVoiceHarness(
   createPiAgent: (options: PiAgentTurnClientOptions) => PiAgentTurnClient
@@ -371,11 +361,7 @@ function writeResidentVoiceMetricEvent(
 ): void {
   const stage = event.attributes["pico.voice.stage"];
 
-  if (
-    event.name === "voice.runtime.stage" &&
-    typeof stage === "string" &&
-    residentVoiceMetricStages.has(stage)
-  ) {
+  if (event.name === "voice.runtime.stage" && voiceRuntimeStagePolicy(stage)?.persisted === true) {
     writeAuditEvent(event);
   }
 }

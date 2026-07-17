@@ -4,17 +4,24 @@ import type {
   StructuredAuditLog
 } from "../modules/audit/index.js";
 
-export type VoiceRuntimeStage =
-  | "mic_capture"
-  | "echo_control"
-  | "speech_gate"
-  | "stt"
-  | "session_start"
-  | "pi_turn"
-  | "tts_request_wall"
-  | "tts_playback"
-  | "camera_capture"
-  | "vlm_scene_description";
+export const voiceRuntimeStagePolicies = Object.freeze({
+  mic_capture: { persisted: false, summary: false },
+  echo_control: { persisted: false, summary: false },
+  speech_gate: { persisted: true, summary: false },
+  stt: { persisted: true, summary: true },
+  session_start: { persisted: true, summary: true },
+  pi_turn: { persisted: true, summary: true },
+  tts_request_wall: { persisted: true, summary: true },
+  tts_playback: { persisted: true, summary: true },
+  camera_capture: { persisted: true, summary: true },
+  vlm_scene_description: { persisted: true, summary: true }
+} as const);
+
+export type VoiceRuntimeStage = keyof typeof voiceRuntimeStagePolicies;
+export type VoiceRuntimeStagePolicy = (typeof voiceRuntimeStagePolicies)[VoiceRuntimeStage];
+export const voiceRuntimeStages = Object.freeze(
+  Object.keys(voiceRuntimeStagePolicies) as VoiceRuntimeStage[]
+);
 
 export type VoiceStageStatus = "ok" | "error" | "skipped" | "suppressed";
 
@@ -30,18 +37,6 @@ export type VoiceStageProbeInput = {
   readonly attributes?: Readonly<Record<string, AuditAttributeValue>>;
 };
 
-const voiceRuntimeStages = new Set<VoiceRuntimeStage>([
-  "mic_capture",
-  "echo_control",
-  "speech_gate",
-  "stt",
-  "session_start",
-  "pi_turn",
-  "tts_request_wall",
-  "tts_playback",
-  "camera_capture",
-  "vlm_scene_description"
-]);
 const voiceStageStatuses = new Set<VoiceStageStatus>(["ok", "error", "skipped", "suppressed"]);
 const voiceStageAttributeKeys = new Set([
   "pico.voice.frame_count",
@@ -93,12 +88,20 @@ export function recordVoiceStageProbe(
   }
 }
 
+export function voiceRuntimeStagePolicy(value: unknown): VoiceRuntimeStagePolicy | undefined {
+  return isVoiceRuntimeStage(value) ? voiceRuntimeStagePolicies[value] : undefined;
+}
+
 function requireVoiceRuntimeStage(value: unknown): VoiceRuntimeStage {
-  if (typeof value === "string" && voiceRuntimeStages.has(value as VoiceRuntimeStage)) {
-    return value as VoiceRuntimeStage;
+  if (isVoiceRuntimeStage(value)) {
+    return value;
   }
 
   throw new Error("pico voice runtime stage is invalid");
+}
+
+function isVoiceRuntimeStage(value: unknown): value is VoiceRuntimeStage {
+  return typeof value === "string" && Object.hasOwn(voiceRuntimeStagePolicies, value);
 }
 
 function requireVoiceStageStatus(value: unknown): VoiceStageStatus {

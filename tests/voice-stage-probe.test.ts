@@ -1,9 +1,42 @@
 import { describe, expect, it } from "vitest";
 
 import { createStructuredAuditLog } from "../src/modules/audit/index.js";
-import { recordVoiceStageProbe } from "../src/runtime/voice-stage-probe.js";
+import {
+  recordVoiceStageProbe,
+  voiceRuntimeStagePolicies,
+  voiceRuntimeStages
+} from "../src/runtime/voice-stage-probe.js";
 
 describe("voice stage probe", () => {
+  it("assigns one persistence and summary policy to every accepted stage", () => {
+    expect(voiceRuntimeStages).toEqual([
+      "mic_capture",
+      "echo_control",
+      "speech_gate",
+      "stt",
+      "session_start",
+      "pi_turn",
+      "tts_request_wall",
+      "tts_playback",
+      "camera_capture",
+      "vlm_scene_description"
+    ]);
+    expect(new Set(voiceRuntimeStages).size).toBe(voiceRuntimeStages.length);
+    expect(voiceRuntimeStagePolicies).toEqual({
+      mic_capture: { persisted: false, summary: false },
+      echo_control: { persisted: false, summary: false },
+      speech_gate: { persisted: true, summary: false },
+      stt: { persisted: true, summary: true },
+      session_start: { persisted: true, summary: true },
+      pi_turn: { persisted: true, summary: true },
+      tts_request_wall: { persisted: true, summary: true },
+      tts_playback: { persisted: true, summary: true },
+      camera_capture: { persisted: true, summary: true },
+      vlm_scene_description: { persisted: true, summary: true }
+    });
+    expect(Object.keys(voiceRuntimeStagePolicies)).toEqual(voiceRuntimeStages);
+  });
+
   it("records bounded voice runtime stage events", () => {
     const audit = createStructuredAuditLog();
 

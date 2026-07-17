@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Specify the corrected probe contract
+## Task 1: Specify the corrected probe contract
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-07-17-hold-to-talk-resident-control-design.md`
@@ -23,7 +23,7 @@ Add a section stating that `pico.voice.stage_duration_ms` is monotonic wall-cloc
 
 Confirm that the section records no transcript, prompt, completion, endpoint, model name, key name, or session ID.
 
-### Task 2: Prove the current STT and TTS measurements are wrong
+## Task 2: Prove the current STT and TTS measurements are wrong
 
 **Files:**
 - Modify: `tests/voice-resident.test.ts`
@@ -83,7 +83,7 @@ npx vitest run tests/voice-resident.test.ts -t "records TTS request and playback
 
 Expected: FAIL because the runtime currently emits `tts_synthesize` with audio duration and emits no playback event.
 
-### Task 3: Implement monotonic wall-clock stage measurement
+## Task 3: Implement monotonic wall-clock stage measurement
 
 **Files:**
 - Modify: `src/runtime/voice-resident.ts`
@@ -111,7 +111,7 @@ npx vitest run tests/voice-resident.test.ts
 
 Expected: PASS.
 
-### Task 4: Remove misleading TTS stage names
+## Task 4: Remove misleading TTS stage names
 
 **Files:**
 - Modify: `src/runtime/voice-stage-probe.ts`
@@ -154,7 +154,46 @@ npx vitest run tests/voice-stage-probe.test.ts tests/resident-voice-audit-log.te
 
 Expected: PASS.
 
-### Task 5: Verify and converge PR #99
+## Task 5: Centralize stage persistence and summary policy
+
+**Files:**
+- Modify: `docs/superpowers/specs/2026-06-18-voice-resident-runtime-design.md`
+- Modify: `src/runtime/voice-stage-probe.ts`
+- Modify: `src/runtime/resident-voice-audit-log.ts`
+- Modify: `src/runtime/resident-voice-runner.ts`
+- Test: `tests/voice-stage-probe.test.ts`
+
+- [x] **Step 1: Add a failing exhaustive policy test**
+
+Assert that every accepted stage has exactly one `persisted` and `summary` policy, with no duplicate
+stage values and no policy-less accepted stage.
+
+- [x] **Step 2: Run the policy test and verify RED**
+
+Run:
+
+```bash
+npx vitest run tests/voice-stage-probe.test.ts -t "assigns one persistence and summary policy"
+```
+
+Expected: FAIL because the accepted enum, metrics filter, and summary filter are separate sets.
+
+- [x] **Step 3: Derive all three consumers from one registry**
+
+Define the accepted stage type and stage list from one policy registry. Use that same registry for
+probe validation, metrics JSONL filtering, and summary stdout filtering.
+
+- [x] **Step 4: Verify registry consumers**
+
+Run:
+
+```bash
+npx vitest run tests/voice-stage-probe.test.ts tests/resident-voice-audit-log.test.ts tests/resident-voice-runner.test.ts tests/resident-voice-measurements.test.ts
+```
+
+Expected: PASS.
+
+## Task 6: Verify and converge the stacked latency PR
 
 **Files:**
 - Modify only when required by deterministic formatting or review findings.
@@ -188,9 +227,10 @@ Apply only behavior-preserving cleanup within the changed files, then rerun focu
 ```bash
 git add docs/superpowers/plans/2026-07-17-resident-voice-latency-observability-implementation-plan.md docs/superpowers/specs/2026-07-17-hold-to-talk-resident-control-design.md src/runtime/voice-resident.ts src/runtime/voice-stage-probe.ts src/runtime/resident-voice-audit-log.ts src/runtime/resident-voice-runner.ts tests/voice-resident.test.ts tests/voice-stage-probe.test.ts tests/resident-voice-measurements.test.ts
 git commit -m "fix(voice): measure resident latency by wall clock"
-git push origin feat/hold-to-talk-resident-control
+git push origin codex/resident-latency-observability
 ```
 
-- [ ] **Step 5: Re-converge PR #99**
+- [ ] **Step 5: Converge the stacked draft PR**
 
-Wait for GitHub checks, address only actionable review or CI findings, and leave the PR ready for the next user decision.
+Open the draft PR against `feat/hold-to-talk-resident-control`, wait for GitHub checks, address only
+actionable review or CI findings, and leave both PRs ready for the next user decision.

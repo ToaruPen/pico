@@ -116,13 +116,21 @@ stage は固定 enum とする。
 
 - `mic_capture`
 - `echo_control`
-- `utterance_window`
+- `speech_gate`
 - `stt`
-- `trigger_match`
 - `session_start`
 - `pi_turn`
 - `tts_request_wall`
 - `tts_playback`
+- `camera_capture`
+- `vlm_scene_description`
+
+固定 enum と出力方針は単一の stage policy registry で所有する。metrics JSONL に永続化する
+stage は `speech_gate`、`stt`、`session_start`、`pi_turn`、`tts_request_wall`、
+`tts_playback`、`camera_capture`、`vlm_scene_description` とする。このうち summary stdout
+へ出すのは `speech_gate` を除く7 stage とする。高頻度の `mic_capture` と
+`echo_control` は固定 enum と verbose probe には残すが、metrics JSONL と summary stdout
+には出さない。
 
 TTS の wall-clock stage は `tts_request_wall` と `tts_playback` とする。
 音声長は `pico.voice.utterance_duration_ms` 属性に分離し、stage にはしない。
@@ -138,8 +146,14 @@ event name は `voice.runtime.stage` に統一する。
 - `pico.voice.utterance_duration_ms`
 - `pico.voice.sample_rate_hz`
 - `pico.voice.channels`
-- `pico.voice.triggered`
+- `pico.voice.suppressed_frame_count`
+- `pico.voice.speech_detected`
+- `pico.voice.speech_probability`
+- `pico.voice.rms_db`
 - `pico.voice.chunk_count`
+- `pico.voice.frame_bytes`
+- `pico.voice.vlm_frame_bytes`
+- `pico.voice.queue_depth`
 - `pico.voice.error_code`
 
 high-cardinality な `sessionId`、`frameId`、endpoint、model full name、
