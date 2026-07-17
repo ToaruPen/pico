@@ -1,10 +1,5 @@
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
-import {
-  createServer,
-  type IncomingMessage,
-  type Server,
-  type ServerResponse
-} from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
 export type ResidentControlEvent =
@@ -12,11 +7,7 @@ export type ResidentControlEvent =
   | { readonly kind: "talk_released"; readonly occurredAt: string }
   | { readonly kind: "cancel_pressed"; readonly occurredAt: string };
 
-export type ResidentControlResult =
-  | "accepted"
-  | "ignored_busy"
-  | "ignored_stale"
-  | "noop";
+export type ResidentControlResult = "accepted" | "ignored_busy" | "ignored_stale" | "noop";
 
 export type ResidentControlHandler = (
   event: ResidentControlEvent
@@ -37,6 +28,7 @@ export type LoopbackHttpResidentControlServerOptions = {
 };
 
 const controlPath = "/v1/resident-control/events";
+const healthPath = "/v1/resident-control/health";
 const maximumRequestBytes = 4096;
 const controlKinds = new Set(["talk_pressed", "talk_released", "cancel_pressed"]);
 const defaultNow = (): string => new Date().toISOString();
@@ -90,18 +82,14 @@ async function handleControlRequest(
   now: () => string,
   handle: ResidentControlHandler
 ): Promise<void> {
-  if (request.url !== controlPath) {
-    writeJson(response, 404, { status: "not_found" });
+  const route = authorizeControlRoute(request, response, token);
+
+  if (route === undefined) {
     return;
   }
 
-  if (request.method !== "POST") {
-    writeJson(response, 405, { status: "method_not_allowed" });
-    return;
-  }
-
-  if (request.headers.authorization !== `Bearer ${token}`) {
-    writeJson(response, 401, { status: "unauthorized" });
+  if (route === "health") {
+    writeJson(response, 200, { status: "ok" });
     return;
   }
 
@@ -114,6 +102,32 @@ async function handleControlRequest(
 
   const result = await handle({ kind, occurredAt: now() });
   writeJson(response, result === "accepted" ? 202 : 200, { status: result });
+}
+
+function authorizeControlRoute(
+  request: IncomingMessage,
+  response: ServerResponse,
+  token: string
+): "events" | "health" | undefined {
+  if (request.url !== controlPath && request.url !== healthPath) {
+    writeJson(response, 404, { status: "not_found" });
+    return undefined;
+  }
+
+  const route = request.url === healthPath ? "health" : "events";
+  const expectedMethod = route === "health" ? "GET" : "POST";
+
+  if (request.method !== expectedMethod) {
+    writeJson(response, 405, { status: "method_not_allowed" });
+    return undefined;
+  }
+
+  if (request.headers.authorization !== `Bearer ${token}`) {
+    writeJson(response, 401, { status: "unauthorized" });
+    return undefined;
+  }
+
+  return route;
 }
 
 async function readControlKind(

@@ -1,6 +1,10 @@
 import { homedir } from "node:os";
 
-import { loadPicoConfigFromEnvironment, type PicoConfig } from "../config/index.js";
+import {
+  loadPicoConfigFromEnvironment,
+  type PicoConfig,
+  type PicoResidentControlConfig
+} from "../config/index.js";
 import type { AuditEvent } from "../modules/audit/index.js";
 import { createSessionLifecycle } from "../modules/session/index.js";
 import {
@@ -18,11 +22,13 @@ import {
 } from "../modules/voice/index.js";
 import { createDeferredToolCoordinator } from "./deferred-tool-coordinator.js";
 import type { PiAgentTurnClientOptions } from "./pi-agent-turn.js";
+import { startMacOSControlBridge, type MacOSControlBridge } from "./macos-control-bridge.js";
+import { createResidentAudioCapture, createResidentPlaybackSink } from "./resident-audio-io.js";
 import {
-  createLoopbackHttpResidentActivationServer,
-  createResidentActivationQueue
-} from "./resident-activation.js";
-import { createResidentPcmFrameSource, createResidentPlaybackSink } from "./resident-audio-io.js";
+  createLoopbackHttpResidentControlServer,
+  type ResidentControlHandler,
+  type ResidentControlServer
+} from "./resident-control.js";
 import {
   acquireResidentSingleInstanceLock,
   registerResidentSingleInstanceLockShutdownCleanup
@@ -38,23 +44,20 @@ import {
   type ResidentVoiceLogRunMode,
   requireResidentVoiceRunId
 } from "./resident-voice-log-files.js";
-import { warmResidentVoiceStartupProviders } from "./resident-voice-startup-warmup.js";
 import {
   createEnergySpeechActivityGate,
   createTenWasmSpeechActivityGate
 } from "./speech-activity-gate.js";
 import {
+  createVoiceResidentRuntime,
   type PiAgentTurnClient,
-  runVoiceResidentRuntime,
-  type VoiceResidentActivation
+  type VoiceResidentRuntime
 } from "./voice-resident.js";
 
 const residentVoiceMetricStages = new Set([
   "startup_warmup",
   "speech_gate",
-  "utterance_window",
   "stt",
-  "trigger_match",
   "session_start",
   "pi_turn",
   "tts_request_wall",
@@ -150,61 +153,132 @@ export async function runResidentVoiceWithProviders(input: {
   const deferredTools = createDeferredToolCoordinator();
   const stt = createConfiguredStt(config);
   const tts = createConfiguredTts(config);
-
-  await warmResidentVoiceStartupProviders({
-    clients: {
-      stt,
-      tts
+  const control = requireResidentControlConfig(config);
+  const audioCapture = createResidentAudioCapture(config);
+  const echoControl = createConfiguredEchoControl(config);
+  const playback = createResidentPlaybackSink(config);
+  const piAgent = resolveResidentPiAgent(input.piAgent, input.createPiAgent, {
+    cwd: process.cwd(),
+    deferredTools: {
+      coordinator: deferredTools
     },
-    ...(audit === undefined ? {} : { probe: { audit } }),
-    signal
+    ...(audit === undefined ? {} : { voiceProbe: { audit } })
   });
+  const speechActivity = await createConfiguredSpeechActivityGate(config);
 
-  const activation = await createConfiguredActivation(config, signal, writeProcessLine);
+  await runResidentControlLifecycle({
+    signal,
+    startServer: async (handle) => {
+      const server = await createLoopbackHttpResidentControlServer({
+        host: control.host,
+        port: control.port,
+        authTokenPath: control.authTokenPath,
+        handle,
+        signal
+      });
+      writeProcessLine(`[pico] resident control: ${server.url}\n`);
+
+      return server;
+    },
+    createRuntime: () =>
+      createVoiceResidentRuntime({
+        audioCapture,
+        sessionLifecycle,
+        echoControl,
+        speechActivity,
+        stt,
+        tts,
+        playback,
+        piAgent,
+        deferredTools,
+        log: createResidentVoiceRuntimeLogSink(logRunMode, fileLog, stdoutProbeMode),
+        ...(audit === undefined ? {} : { probe: { audit } }),
+        signal
+      }),
+    startBridge: () => startMacOSControlBridge({ control, signal })
+  });
+}
+
+export type ResidentControlLifecycleOptions = {
+  readonly signal: AbortSignal;
+  readonly startServer: (handle: ResidentControlHandler) => Promise<ResidentControlServer>;
+  readonly createRuntime: () => VoiceResidentRuntime;
+  readonly startBridge: () => Promise<MacOSControlBridge>;
+};
+
+export async function runResidentControlLifecycle(
+  options: ResidentControlLifecycleOptions
+): Promise<void> {
+  let runtime: VoiceResidentRuntime | undefined;
+  let bridge: MacOSControlBridge | undefined;
+  const server = await options.startServer((event) =>
+    runtime === undefined ? "ignored_busy" : runtime.handleControl(event)
+  );
+  let lifecycleFailed = false;
+  let lifecycleFailure: unknown;
 
   try {
-    const frames = createResidentPcmFrameSource(config, signal);
-    const echoControl = createConfiguredEchoControl(config);
-    const playback = createResidentPlaybackSink(config);
-    const piAgent = resolveResidentPiAgent(input.piAgent, input.createPiAgent, {
-      cwd: process.cwd(),
-      deferredTools: {
-        coordinator: deferredTools
-      },
-      ...(audit === undefined ? {} : { voiceProbe: { audit } })
-    });
-    const speechActivity = await createConfiguredSpeechActivityGate(config);
+    runtime = options.createRuntime();
+    bridge = await options.startBridge();
 
-    await runVoiceResidentRuntime({
-      frames,
-      triggerPhrases: [
-        ...config.session.startTriggers.wakeNames,
-        ...config.session.startTriggers.greetings
-      ],
-      sessionLifecycle,
-      echoControl,
-      speechActivity,
-      stt,
-      tts,
-      playback,
-      piAgent,
-      deferredTools,
-      wakeAcknowledgement: {
-        enabled: config.voice.resident.activation.mode === "wake_word"
-      },
-      farewell: {
-        enabled: true
-      },
-      log: createResidentVoiceRuntimeLogSink(logRunMode, fileLog, stdoutProbeMode),
-      minTriggerConfidence: config.voice.resident.minTriggerConfidence,
-      activation: activation.runtime,
-      utteranceWindow: config.voice.resident.utteranceWindow,
-      ...(audit === undefined ? {} : { probe: { audit } }),
-      signal
-    });
-  } finally {
-    await activation.close();
+    await Promise.race([
+      waitForAbort(options.signal),
+      rejectUnexpectedCompletion(
+        runtime.completion,
+        options.signal,
+        "pico resident voice runtime exited unexpectedly"
+      ),
+      rejectUnexpectedCompletion(
+        bridge.completion,
+        options.signal,
+        "pico macOS control bridge exited unexpectedly"
+      )
+    ]);
+  } catch (error) {
+    lifecycleFailed = true;
+    lifecycleFailure = error;
   }
+
+  const cleanupFailure = await closeResidentControlOwners(runtime, bridge, server);
+
+  if (lifecycleFailed) {
+    throw lifecycleFailure;
+  }
+
+  if (cleanupFailure.failed) {
+    throw cleanupFailure.error;
+  }
+}
+
+type ResidentControlCleanupResult =
+  | { readonly failed: false }
+  | { readonly failed: true; readonly error: unknown };
+
+async function closeResidentControlOwners(
+  runtime: VoiceResidentRuntime | undefined,
+  bridge: MacOSControlBridge | undefined,
+  server: ResidentControlServer
+): Promise<ResidentControlCleanupResult> {
+  let result: ResidentControlCleanupResult = { failed: false };
+  const close = async (operation: (() => Promise<void>) | undefined): Promise<void> => {
+    if (operation === undefined) {
+      return;
+    }
+
+    try {
+      await operation();
+    } catch (error) {
+      if (!result.failed) {
+        result = { failed: true, error };
+      }
+    }
+  };
+
+  await close(runtime === undefined ? undefined : () => runtime.stop());
+  await close(bridge === undefined ? undefined : () => bridge.close());
+  await close(() => server.close());
+
+  return result;
 }
 
 function resolveResidentPiAgent(
@@ -225,6 +299,18 @@ export function requireResidentVoiceEnabled(config: PicoConfig): void {
   if (!config.voice.resident.enabled) {
     throw new Error("pico resident voice runtime requires voice.resident.enabled=true");
   }
+
+  requireResidentControlConfig(config);
+}
+
+function requireResidentControlConfig(config: PicoConfig): PicoResidentControlConfig {
+  const control = config.voice.resident.control;
+
+  if (control === undefined) {
+    throw new Error("pico resident voice runtime requires voice.resident.control config");
+  }
+
+  return control;
 }
 
 function createResidentVoiceRuntimeLogSink(
@@ -281,51 +367,6 @@ function readResidentVoiceRunId(value: string | undefined): string | undefined {
   }
 }
 
-async function createConfiguredActivation(
-  config: PicoConfig,
-  signal: AbortSignal,
-  writeProcessLine: (line: string) => void
-): Promise<{
-  readonly runtime: VoiceResidentActivation;
-  readonly close: () => Promise<void>;
-}> {
-  const activation = config.voice.resident.activation;
-
-  if (activation.mode === "wake_word") {
-    return {
-      runtime: activation,
-      close: () => Promise.resolve()
-    };
-  }
-
-  const queue = createResidentActivationQueue({
-    debounceMs: activation.debounceMs,
-    activationWindowMs: activation.activationWindowMs
-  });
-  const server = await createLoopbackHttpResidentActivationServer({
-    host: activation.host,
-    port: activation.port,
-    authTokenPath: activation.authTokenPath,
-    queue,
-    signal
-  });
-
-  try {
-    writeProcessLine(`[pico] resident push-to-talk activation: ${server.url}\n`);
-
-    return {
-      runtime: {
-        mode: "push_to_talk",
-        source: queue
-      },
-      close: () => server.close()
-    };
-  } catch (error) {
-    await server.close();
-    throw error;
-  }
-}
-
 function writeResidentVoiceMetricEvent(
   writeAuditEvent: (event: AuditEvent) => void,
   event: AuditEvent
@@ -338,6 +379,28 @@ function writeResidentVoiceMetricEvent(
     residentVoiceMetricStages.has(stage)
   ) {
     writeAuditEvent(event);
+  }
+}
+
+function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+}
+
+async function rejectUnexpectedCompletion<T>(
+  completion: Promise<T>,
+  signal: AbortSignal,
+  message: string
+): Promise<void> {
+  await completion;
+
+  if (!signal.aborted) {
+    throw new Error(message);
   }
 }
 

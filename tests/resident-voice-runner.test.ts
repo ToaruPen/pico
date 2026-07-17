@@ -1,9 +1,11 @@
-import { readFile } from "node:fs/promises";
-
-import * as ts from "typescript";
 import { describe, expect, it } from "vitest";
 
-import { waitForDirectResidentVoiceRuntime } from "../src/runtime/resident-voice-runner.js";
+import type { ResidentControlHandler } from "../src/runtime/resident-control.js";
+import {
+  requireResidentVoiceEnabled,
+  runResidentControlLifecycle,
+  waitForDirectResidentVoiceRuntime
+} from "../src/runtime/resident-voice-runner.js";
 
 describe("resident voice runner ownership", () => {
   it("keeps the direct harness lock until a timed-out runtime actually settles", async () => {
@@ -102,81 +104,112 @@ describe("resident voice runner ownership", () => {
     expect(events).toEqual(["release"]);
   });
 
-  it("hands off to the runtime without assembling a memory worker", async () => {
-    const source = await readFile(
-      new URL("../src/runtime/resident-voice-runner.ts", import.meta.url),
-      "utf8"
-    );
-    const callNames = [
-      "warmResidentVoiceStartupProviders",
-      "createConfiguredActivation",
-      "createConfiguredSpeechActivityGate",
-      "runVoiceResidentRuntime"
-    ] as const;
-    const orderedPositions = findFunctionCallPositions(
-      source,
-      "runResidentVoiceWithProviders",
-      callNames
-    );
+  it("starts the server, runtime, and bridge in order and shuts them down in reverse", async () => {
+    const abortController = new AbortController();
+    const events: string[] = [];
+    let serverHandler: ResidentControlHandler | undefined;
+    const lifecycle = runResidentControlLifecycle({
+      signal: abortController.signal,
+      startServer: (handle) => {
+        events.push("server:start");
+        serverHandler = handle;
+        return Promise.resolve({
+          url: "http://127.0.0.1:43127",
+          close: () => {
+            events.push("server:close");
+            return Promise.resolve();
+          }
+        });
+      },
+      createRuntime: () => {
+        events.push("runtime:start");
+        return {
+          handleControl: () => Promise.resolve("accepted"),
+          state: () => "idle",
+          completion: new Promise(() => undefined),
+          stop: () => {
+            events.push("runtime:stop");
+            return Promise.resolve();
+          }
+        };
+      },
+      startBridge: () => {
+        events.push("bridge:start");
+        return Promise.resolve({
+          completion: new Promise(() => undefined),
+          close: () => {
+            events.push("bridge:close");
+            return Promise.resolve();
+          }
+        });
+      }
+    });
 
-    expect(orderedPositions).toEqual([...orderedPositions].sort((left, right) => left - right));
-    expect(source).not.toContain("createResidentMemoryWorker");
-    expect(source).not.toContain("memoryWorker");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(events).toEqual(["server:start", "runtime:start", "bridge:start"]);
+    await expect(
+      serverHandler?.({ kind: "talk_pressed", occurredAt: "2026-07-17T00:00:00.000Z" })
+    ).resolves.toBe("accepted");
+
+    abortController.abort();
+    await expect(lifecycle).resolves.toBeUndefined();
+    expect(events).toEqual([
+      "server:start",
+      "runtime:start",
+      "bridge:start",
+      "runtime:stop",
+      "bridge:close",
+      "server:close"
+    ]);
+  });
+
+  it("fails closed and cleans up when the managed bridge exits", async () => {
+    const events: string[] = [];
+    let rejectBridge: (error: Error) => void = () => undefined;
+    const bridgeCompletion = new Promise<void>((_resolve, reject) => {
+      rejectBridge = reject;
+    });
+    const lifecycle = runResidentControlLifecycle({
+      signal: new AbortController().signal,
+      startServer: () =>
+        Promise.resolve({
+          url: "http://127.0.0.1:43127",
+          close: () => {
+            events.push("server:close");
+            return Promise.resolve();
+          }
+        }),
+      createRuntime: () => ({
+        handleControl: () => Promise.resolve("accepted"),
+        state: () => "idle",
+        completion: new Promise(() => undefined),
+        stop: () => {
+          events.push("runtime:stop");
+          return Promise.resolve();
+        }
+      }),
+      startBridge: () =>
+        Promise.resolve({
+          completion: bridgeCompletion,
+          close: () => {
+            events.push("bridge:close");
+            return Promise.reject(new Error("bridge close also failed"));
+          }
+        })
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    rejectBridge(new Error("event tap stopped"));
+
+    await expect(lifecycle).rejects.toThrow("event tap stopped");
+    expect(events).toEqual(["runtime:stop", "bridge:close", "server:close"]);
+  });
+
+  it("requires the immutable control contract when resident voice is enabled", () => {
+    expect(() =>
+      requireResidentVoiceEnabled({
+        voice: { resident: { enabled: true } }
+      } as never)
+    ).toThrow("pico resident voice runtime requires voice.resident.control config");
   });
 });
-
-function findFunctionCallPositions(
-  source: string,
-  functionName: string,
-  callNames: readonly string[]
-): readonly number[] {
-  const sourceFile = ts.createSourceFile(
-    "resident-voice-runner.ts",
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS
-  );
-  let target: ts.FunctionDeclaration | undefined;
-
-  sourceFile.forEachChild((node) => {
-    if (ts.isFunctionDeclaration(node) && node.name?.text === functionName) {
-      target = node;
-    }
-  });
-
-  if (target?.body === undefined) {
-    throw new Error(`${functionName} function body was not found`);
-  }
-
-  const positions = new Map<string, number[]>();
-  const names = new Set(callNames);
-  const visit = (node: ts.Node): void => {
-    if (ts.isFunctionLike(node)) {
-      return;
-    }
-
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
-      const callName = node.expression.text;
-
-      if (names.has(callName)) {
-        positions.set(callName, [...(positions.get(callName) ?? []), node.getStart(sourceFile)]);
-      }
-    }
-
-    node.forEachChild(visit);
-  };
-
-  target.body.forEachChild(visit);
-
-  return callNames.map((callName) => {
-    const matches = positions.get(callName) ?? [];
-    const position = matches[0];
-
-    if (matches.length !== 1 || position === undefined) {
-      throw new Error(`${callName} call count: expected 1, received ${matches.length}`);
-    }
-
-    return position;
-  });
-}

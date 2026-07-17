@@ -17,6 +17,7 @@ export type ResidentLaunchdService = {
   readonly logDirectory: string;
   readonly standardOutputPath: string;
   readonly standardErrorPath: string;
+  readonly macOSControlPackagePath: string;
   readonly plist: string;
 };
 
@@ -45,7 +46,7 @@ export type ResidentLaunchctlCommandPlan = {
 export type ResidentLaunchdOperationStep =
   | {
       readonly kind: "command";
-      readonly command: "launchctl";
+      readonly command: string;
       readonly args: readonly string[];
       readonly allowedExitCodes?: readonly number[];
     }
@@ -125,6 +126,7 @@ export function defineResidentLaunchdService(
   const logDirectory = join(picoDirectory, ...defaults.logDirectory);
   const standardOutputPath = join(logDirectory, `${defaults.logName}.out.log`);
   const standardErrorPath = join(logDirectory, `${defaults.logName}.err.log`);
+  const macOSControlPackagePath = join(repoRoot, "sidecars", "macos-control");
 
   const service = {
     configPath,
@@ -133,7 +135,8 @@ export function defineResidentLaunchdService(
     picoDirectory,
     logDirectory,
     standardOutputPath,
-    standardErrorPath
+    standardErrorPath,
+    macOSControlPackagePath
   };
 
   return {
@@ -191,6 +194,20 @@ export function createResidentLaunchdOperationPlan(
 ): readonly ResidentLaunchdOperationStep[] {
   if (operation === "install") {
     return [
+      {
+        kind: "command",
+        command: "swift",
+        args: [
+          "build",
+          "-c",
+          "release",
+          "--package-path",
+          service.macOSControlPackagePath,
+          "-Xswiftc",
+          "-warnings-as-errors"
+        ],
+        allowedExitCodes: [0]
+      },
       { kind: "mkdir", path: service.picoDirectory, mode: 0o700 },
       { kind: "mkdir", path: service.logDirectory, mode: 0o700 },
       { kind: "mkdir", path: dirname(service.plistPath) },

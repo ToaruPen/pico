@@ -75,6 +75,9 @@ apple-speech-check:
 macos-control-check:
   bash scripts/ci/run-macos-control-gates.sh
 
+macos-control-build:
+  swift build -c release --package-path sidecars/macos-control -Xswiftc -warnings-as-errors
+
 check:
   if [ "$(uname -s)" = "Darwin" ]; then just apple-speech-check macos-control-check; fi
   npm run check

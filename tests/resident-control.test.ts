@@ -17,6 +17,19 @@ afterEach(async () => {
 });
 
 describe("resident semantic control transport", () => {
+  it("exposes an authenticated readiness endpoint for the managed key bridge", async () => {
+    const server = await startControlServer({ handle: () => "accepted" });
+
+    const unauthorized = await fetch(`${server.url}/v1/resident-control/health`);
+    const ready = await fetch(`${server.url}/v1/resident-control/health`, {
+      headers: { authorization: "Bearer secret-token" }
+    });
+
+    expect(unauthorized.status).toBe(401);
+    expect(ready.status).toBe(200);
+    await expect(ready.json()).resolves.toEqual({ status: "ok" });
+  });
+
   it("delivers only authenticated semantic events directly to the handler", async () => {
     const received: ResidentControlEvent[] = [];
     const server = await startControlServer({
@@ -32,9 +45,7 @@ describe("resident semantic control transport", () => {
     expect(noToken.status).toBe(401);
     expect(accepted.status).toBe(202);
     await expect(accepted.json()).resolves.toEqual({ status: "accepted" });
-    expect(received).toEqual([
-      { kind: "talk_pressed", occurredAt: "2026-07-17T00:00:00.000Z" }
-    ]);
+    expect(received).toEqual([{ kind: "talk_pressed", occurredAt: "2026-07-17T00:00:00.000Z" }]);
   });
 
   it.each([
@@ -134,11 +145,9 @@ describe("resident semantic control transport", () => {
 });
 
 async function startControlServer(input: {
-  readonly handle: (event: ResidentControlEvent) =>
-    | "accepted"
-    | "ignored_busy"
-    | "ignored_stale"
-    | "noop";
+  readonly handle: (
+    event: ResidentControlEvent
+  ) => "accepted" | "ignored_busy" | "ignored_stale" | "noop";
 }): Promise<ResidentControlServer> {
   const directory = mkdtempSync(join(tmpdir(), "pico-control-test-"));
   const authTokenPath = join(directory, "control-token");
