@@ -72,8 +72,11 @@ ast:
 apple-speech-check:
   bash scripts/ci/run-apple-speech-gates.sh
 
+macos-control-check:
+  bash scripts/ci/run-macos-control-gates.sh
+
 check:
-  if [ "$(uname -s)" = "Darwin" ]; then just apple-speech-check; fi
+  if [ "$(uname -s)" = "Darwin" ]; then just apple-speech-check macos-control-check; fi
   npm run check
 
 ci:
