@@ -141,7 +141,11 @@ export function createResidentControlController(
         return;
       }
 
-      transition("transcribing");
+      try {
+        transition("transcribing");
+      } catch {
+        return;
+      }
 
       try {
         options.onTailReady?.(generation);

@@ -350,11 +350,21 @@ The transport:
 - returns whether an event was accepted, ignored as busy, ignored as stale, or
   treated as an idempotent no-op;
 - closes on Pico shutdown;
-- stores no unbounded event queue.
+- stores no event queue of its own. The separate Swift bridge sender owns the
+  lossless pending-event channel defined by the later lifecycle convergence
+  design.
 
 The keyboard bridge reads the same resolved startup configuration and posts
 semantic events. Physical key identity is never part of session, transcript,
 audit, or metric state.
+
+For this first slice, the active macOS login user and physical keyboard access
+are trusted. The bearer authenticates possession of the protected bridge token;
+it is not source attestation or proof of a particular staff member. Synthetic
+or remote event separation within the same login user is outside this threat
+boundary. As decided above, stuck or missing key release is not given a product-
+level maximum hold duration; cancel and runtime shutdown remain the terminal
+operator boundaries.
 
 ## Failure Behavior
 

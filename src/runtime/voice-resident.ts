@@ -157,6 +157,8 @@ export function createVoiceResidentRuntime(
   let interactionEnding: Promise<void> = Promise.resolve();
   const shutdownCancelledSessionIds = new Set<string>();
   let stopOperation: Promise<void> | undefined;
+  let shutdownStarted = false;
+  let runtimeFailure: Error | undefined;
   let runtimeSettled = false;
   let resolveCompletion: (result: VoiceResidentRuntimeResult) => void = () => undefined;
   let rejectCompletion: (error: Error) => void = () => undefined;
@@ -166,13 +168,19 @@ export function createVoiceResidentRuntime(
   });
   void completion.catch(() => undefined);
   const failRuntime = (error: unknown, generationId?: number): void => {
-    if (runtimeSettled) {
+    if (runtimeSettled || runtimeFailure !== undefined) {
+      return;
+    }
+
+    runtimeFailure = asError(error);
+    controller.fail(generationId);
+
+    if (shutdownStarted) {
       return;
     }
 
     runtimeSettled = true;
-    controller.fail(generationId);
-    rejectCompletion(error instanceof Error ? error : new Error(String(error)));
+    rejectCompletion(runtimeFailure);
   };
   const controller: ResidentControlController = createResidentControlController({
     ...(options.scheduler === undefined ? {} : { scheduler: options.scheduler }),
@@ -304,6 +312,7 @@ export function createVoiceResidentRuntime(
       return stopOperation;
     }
 
+    shutdownStarted = true;
     options.signal?.removeEventListener("abort", stopFromSignal);
     cancelInteractionEnding(true);
     const turn = activeTurn;
@@ -318,10 +327,19 @@ export function createVoiceResidentRuntime(
       shutdownCancelledSessionIds
     );
 
+    if (runtimeFailure === undefined && shutdownFailure !== undefined) {
+      runtimeFailure = asError(shutdownFailure);
+    }
+
     const endingAtShutdown = interactionEnding;
     unsubscribeSessionEnding();
     controller.stop();
-    stopOperation = shutdownVoiceRuntime(turn, options, endingAtShutdown, shutdownFailure).then(
+    stopOperation = shutdownVoiceRuntime(
+      turn,
+      options,
+      endingAtShutdown,
+      () => runtimeFailure
+    ).then(
       () => {
         activeTurn = undefined;
 
@@ -329,6 +347,17 @@ export function createVoiceResidentRuntime(
           runtimeSettled = true;
           resolveCompletion(Object.freeze({ ...counters }));
         }
+      },
+      (error: unknown) => {
+        const failure = runtimeFailure ?? asError(error);
+        runtimeFailure = failure;
+
+        if (!runtimeSettled) {
+          runtimeSettled = true;
+          rejectCompletion(failure);
+        }
+
+        throw failure;
       }
     );
 
@@ -1070,12 +1099,17 @@ async function shutdownVoiceRuntime(
   turn: ActiveTurn | undefined,
   options: VoiceResidentRuntimeOptions,
   interactionEnding: Promise<void>,
-  precedingFailure: unknown
+  precedingFailure: () => Error | undefined
 ): Promise<void> {
   const turnResults = await Promise.allSettled(
     turn === undefined
       ? []
-      : [turn.capture.stop(), turn.frameCollection, turn.operation ?? Promise.resolve()]
+      : [
+          turn.capture.stop(),
+          turn.frameCollection,
+          turn.operation ?? Promise.resolve(),
+          turn.cancellation ?? Promise.resolve()
+        ]
   );
   const endingResults = await Promise.allSettled([interactionEnding]);
   const ownerResults = await Promise.allSettled([
@@ -1095,9 +1129,10 @@ async function shutdownVoiceRuntime(
   }
 
   const rejected = findRejected([...turnResults, ...endingResults, ...ownerResults]);
+  const failure = precedingFailure();
 
-  if (precedingFailure !== undefined) {
-    throw asError(precedingFailure);
+  if (failure !== undefined) {
+    throw failure;
   }
 
   if (rejected !== undefined) {

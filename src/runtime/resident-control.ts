@@ -53,10 +53,14 @@ export async function createLoopbackHttpResidentControlServer(
       response.destroy();
     });
   });
+  let listenOperation: Promise<void> | undefined;
   let closeOperation: Promise<void> | undefined;
   const close = (): Promise<void> => {
     options.signal?.removeEventListener("abort", closeOnAbort);
-    closeOperation ??= closeServer(server, shutdownTimeoutMs);
+    closeOperation ??= (async () => {
+      await listenOperation?.catch(() => undefined);
+      await closeServer(server, shutdownTimeoutMs);
+    })();
     return closeOperation;
   };
   const closeOnAbort = (): void => {
@@ -67,7 +71,8 @@ export async function createLoopbackHttpResidentControlServer(
 
   try {
     throwIfControlStartupAborted(options.signal);
-    await listen(server, options.port, options.host);
+    listenOperation = listen(server, options.port, options.host);
+    await listenOperation;
     throwIfControlStartupAborted(options.signal);
 
     return {

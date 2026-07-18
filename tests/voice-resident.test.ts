@@ -873,6 +873,95 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(driver.capture.stops()).toBe(1);
     expect(driver.playbackCloses()).toBe(1);
   });
+
+  it("settles completion when shutdown owner cleanup fails", async () => {
+    const driver = createDriver({ playbackStopError: new Error("speaker stop failed") });
+    const completionFailure = driver.runtime.completion.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+
+    await expect(driver.runtime.stop()).rejects.toThrow("speaker stop failed");
+    await expect(completionFailure).resolves.toEqual(new Error("speaker stop failed"));
+    expect(driver.runtime.state()).toBe("stopped");
+  });
+
+  it("settles active cancellation cleanup failure through stop and completion", async () => {
+    const cancellationFailure = new Error("echo flush failed during cancellation");
+    let rejectCancellationFlush: (error: Error) => void = () => undefined;
+    const cancellationFlush = new Promise<void>((_resolve, reject) => {
+      rejectCancellationFlush = reject;
+    });
+    let flushCount = 0;
+    const driver = createDriver({
+      echoFlush: () => {
+        flushCount += 1;
+        return flushCount === 1 ? cancellationFlush : Promise.resolve();
+      }
+    });
+    const completionFailure = driver.runtime.completion.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+
+    await driver.press();
+    await driver.cancel();
+    await vi.waitFor(() => expect(flushCount).toBe(1));
+    const stopFailure = driver.runtime.stop().then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    rejectCancellationFlush(cancellationFailure);
+
+    await expect(stopFailure).resolves.toBe(cancellationFailure);
+    await expect(completionFailure).resolves.toBe(cancellationFailure);
+    expect(flushCount).toBe(2);
+  });
+
+  it("preserves the first shutdown failure across later cancellation failure", async () => {
+    vi.useFakeTimers();
+    const shutdownFailure = new Error("deferred cancellation failed during shutdown");
+    const laterCancellationFailure = new Error("echo flush failed after shutdown started");
+    let rejectCancellationFlush: (error: Error) => void = () => undefined;
+    const cancellationFlush = new Promise<void>((_resolve, reject) => {
+      rejectCancellationFlush = reject;
+    });
+    let flushCount = 0;
+    let deferredCancellationCount = 0;
+    const driver = createDriver({
+      echoFlush: () => {
+        flushCount += 1;
+        return flushCount === 1 ? cancellationFlush : Promise.resolve();
+      },
+      cancelDeferred: () => {
+        deferredCancellationCount += 1;
+
+        if (deferredCancellationCount === 1) {
+          throw shutdownFailure;
+        }
+      }
+    });
+
+    await completeHold(driver, "shutdown-first-failure");
+    await driver.press();
+    await driver.cancel();
+    await vi.waitFor(() => expect(flushCount).toBe(1));
+    const completionFailure = driver.runtime.completion.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    const stopFailure = driver.runtime.stop().then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    rejectCancellationFlush(laterCancellationFailure);
+
+    const stopError = await stopFailure;
+    const completionError = await completionFailure;
+    expect(stopError).toBe(shutdownFailure);
+    expect(completionError).toBe(stopError);
+    expect(deferredCancellationCount).toBe(2);
+  });
 });
 
 type Driver = ReturnType<typeof createDriver>;
@@ -885,6 +974,8 @@ function createDriver(
     readonly ttsResponse?: (signal: AbortSignal | undefined) => Promise<TtsSynthesisResult>;
     readonly playbackCompletion?: (signal: AbortSignal | undefined) => Promise<void>;
     readonly playbackStopError?: Error;
+    readonly echoFlush?: () => Promise<void>;
+    readonly cancelDeferred?: () => void;
     readonly lifecycleEvents?: string[];
     readonly nearEndGate?: Promise<void>;
     readonly processedFrameIds?: string[];
@@ -981,7 +1072,7 @@ function createDriver(
       },
       flush: () => {
         echoFlushCount += 1;
-        return Promise.resolve();
+        return options.echoFlush?.() ?? Promise.resolve();
       }
     },
     speechActivity: {
@@ -999,12 +1090,15 @@ function createDriver(
     ...(options.farewellEnabled === undefined
       ? {}
       : { farewell: { enabled: options.farewellEnabled } }),
-    ...(options.lifecycleEvents === undefined
+    ...(options.lifecycleEvents === undefined && options.cancelDeferred === undefined
       ? {}
       : {
           deferredTools: {
             collectDeliverableResults: () => [],
-            cancelSession: () => options.lifecycleEvents?.push("cancel_session"),
+            cancelSession: () => {
+              options.lifecycleEvents?.push("cancel_session");
+              options.cancelDeferred?.();
+            },
             waitForIdle: () => {
               options.lifecycleEvents?.push("wait_idle");
               return Promise.resolve();
