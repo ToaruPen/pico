@@ -20,8 +20,8 @@ end-to-end検証は、このホストでMoonlander、8BitDo、その他のキー
 
 | 対象 | コマンドまたは確認方法 | 結果 |
 | --- | --- | --- |
-| TypeScript全テスト | `npm run test` | PASS、64 files / 667 tests |
-| 自動検証commit | `git rev-parse HEAD` | `d397b6b604f7175c0c89cc787297600412f67fba` |
+| TypeScript全テスト | `npm run test` | PASS、64 files / 668 tests |
+| 自動検証commit | `git rev-parse HEAD` | `fbf6d5070a9c4c3c0e6a610e8969a974093ef708` |
 | フィールドCLI契約 | `npm run field:resident-hold-to-talk -- --help` | PASS |
 | キーボード接続 | `system_profiler SPUSBDataType`をMoonlander、ZSA、8BitDo、keyboardで照合 | 該当なし |
 | 音声入力候補 | AVFoundation device listing | `SRS-XB100`、`UAB-80`を検出 |

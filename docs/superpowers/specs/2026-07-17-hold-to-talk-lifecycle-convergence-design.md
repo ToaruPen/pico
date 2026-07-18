@@ -41,6 +41,10 @@ resource が bounded な手順で収束してから ownership を解放する。
 11. Node child processのterminal completionはstdioを含む`close` eventで確定する。spawn
     `error`後に`exit`が来ない経路でもownerをboundedにsettleする。SIGKILL後にも`close`が来ない
     場合はbounded terminal errorを保持し、runtimeのstopとcompletionを同じfailureでsettleする。
+    abort後の`exit`だけではplayback成功を確定せず、`close`またはbounded terminal errorを待つ。
+12. runtime shutdownはactive turnのcancellation operationもowner境界として待つ。cancellation
+    cleanupが失敗した場合は、shared owner cleanupの成否にかかわらずstopとcompletionを同じ
+    failureでsettleする。
 
 ## State Boundary
 
@@ -91,8 +95,9 @@ resource が bounded な手順で収束してから ownership を解放する。
    deadlineでactive connectionを閉じること、spawn error後の`close`でbridgeがsettleすること、
    TTS cancelが`skipped`となること、release timer observer failureがerrorへ収束すること、
    capture/playbackのfinal timeout後にlistenerとownershipが解放されること、shutdown failureで
-   stop/completionが同じerrorを返すことをdeterministicに検証する。BridgeContextのstrong
-   lifetimeはnative buildとevent-tap scopeを明示する実装形で検証する。
+   stop/completionが同じerrorを返すこと、abort後にchildが`exit`だけを通知する経路、active
+   cancellation cleanup failureをshutdownが待つことをdeterministicに検証する。BridgeContextの
+   strong lifetimeはnative buildとevent-tap scopeを明示する実装形で検証する。
 8. **Async ownership and terminal states:** channelは`finish()`、controller generationはidle/error/
    stopped、bridge/playback childは`close`またはbounded termination error、Apple Speech requestは
    first causeを持つresult、Pi bootstrapはcached session promiseのsettlementでterminalとなる。
@@ -118,6 +123,8 @@ monotonic wall-clock計測、media duration分離、cancel/error stage settlemen
   決まる。
 - bridge childは`close`までownerに残る。audio capture/playback childは`close`またはbounded
   terminal errorまでownerに残り、TERM→KILL後のfinal timeoutではlistenerとownershipを解放する。
+- playbackはabort後の`exit`だけでは成功せず、active cancellation cleanupはruntime shutdownの
+  owned boundaryとしてsettleされる。
 - Pi session bootstrap中のcancelはsession creationを待たずにturn cancellationへ収束する。
 - field validationはcompleted hold自身がcaptureしたframeを要求する。
 - cancelled holdはrelease-tail sampleを生成せず、TTS cancelは`skipped`として記録される。
