@@ -254,10 +254,11 @@ record exactly one released or cancelled outcome.
 - [x] **Step 9: Settle final-timeout and shutdown failures**
 
 Add failing tests for a release-timer observer exception, capture/playback children that never
-close after SIGKILL, exit-only playback after abort, active cancellation cleanup rejection, and
-shutdown cleanup rejection. Contain scheduled observer failure, release child listeners and active
-ownership on the bounded terminal error, await cancellation as an owned shutdown boundary, and
-reject runtime completion with the same shutdown failure returned by stop.
+close after SIGKILL, exit/error-only playback after abort, natural exit before close, listen-time
+abort, active cancellation cleanup rejection, and competing shutdown failures. Contain scheduled
+observer failure, release child listeners and active ownership on the bounded terminal error, await
+listen/cancellation as owned shutdown boundaries, and settle stop/completion through one canonical
+first failure.
 
 ## Task 10: Verify and converge PR #99
 
