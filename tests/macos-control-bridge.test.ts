@@ -102,6 +102,34 @@ describe("managed macOS resident control bridge", () => {
     );
   });
 
+  it("settles a spawn failure when close follows error without exit", async () => {
+    const process = new ControlledProcess();
+    const starting = startMacOSControlBridge({
+      control: controlConfig(),
+      platform: "darwin",
+      spawnProcess: () => process
+    });
+    const outcome = starting.then(
+      () => "resolved",
+      (error: unknown) => (error instanceof Error ? error.message : String(error))
+    );
+
+    process.emit("error", new Error("spawn ENOENT"));
+    process.close();
+
+    try {
+      await expect(
+        Promise.race([
+          outcome,
+          new Promise<string>((resolve) => setImmediate(() => resolve("still pending")))
+        ])
+      ).resolves.toBe("pico macOS control bridge process failed: spawn ENOENT");
+    } finally {
+      process.exit();
+      await starting.catch(() => undefined);
+    }
+  });
+
   it("reports an unexpected exit after readiness", async () => {
     const process = new ControlledProcess();
     const starting = startMacOSControlBridge({
@@ -216,9 +244,14 @@ class ControlledProcess extends EventEmitter implements MacOSControlProcess {
     return true;
   }
 
-  exit(code: number | null, signal: NodeJS.Signals = "SIGTERM"): void {
+  exit(code?: number, signal: NodeJS.Signals = "SIGTERM"): void {
+    this.emit("exit", code, signal);
+    this.close(code, signal);
+  }
+
+  close(code?: number, signal: NodeJS.Signals = "SIGTERM"): void {
     this.stdout.end();
     this.stderr.end();
-    this.emit("exit", code, signal);
+    this.emit("close", code, signal);
   }
 }

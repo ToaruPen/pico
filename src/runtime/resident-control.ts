@@ -23,6 +23,7 @@ export type LoopbackHttpResidentControlServerOptions = {
   readonly port: number;
   readonly authTokenPath: string;
   readonly handle: ResidentControlHandler;
+  readonly shutdownTimeoutMs: number;
   readonly now?: () => string;
   readonly signal?: AbortSignal;
 };
@@ -30,6 +31,7 @@ export type LoopbackHttpResidentControlServerOptions = {
 const controlPath = "/v1/resident-control/events";
 const healthPath = "/v1/resident-control/health";
 const maximumRequestBytes = 4096;
+const maximumTimeoutMs = 2_147_483_647;
 const controlKinds = new Set(["talk_pressed", "talk_released", "cancel_pressed"]);
 const defaultNow = (): string => new Date().toISOString();
 
@@ -39,6 +41,7 @@ export async function createLoopbackHttpResidentControlServer(
   throwIfControlStartupAborted(options.signal);
   const token = readControlToken(options.authTokenPath);
   throwIfControlStartupAborted(options.signal);
+  const shutdownTimeoutMs = requireShutdownTimeout(options.shutdownTimeoutMs);
   const now = options.now ?? defaultNow;
   const server = createServer((request, response) => {
     void handleControlRequest(request, response, token, now, options.handle).catch(() => {
@@ -50,15 +53,17 @@ export async function createLoopbackHttpResidentControlServer(
       response.destroy();
     });
   });
+  let closeOperation: Promise<void> | undefined;
+  const close = (): Promise<void> => {
+    options.signal?.removeEventListener("abort", closeOnAbort);
+    closeOperation ??= closeServer(server, shutdownTimeoutMs);
+    return closeOperation;
+  };
   const closeOnAbort = (): void => {
-    void closeServer(server).catch(() => undefined);
+    void close().catch(() => undefined);
   };
 
   options.signal?.addEventListener("abort", closeOnAbort, { once: true });
-  const close = async (): Promise<void> => {
-    options.signal?.removeEventListener("abort", closeOnAbort);
-    await closeServer(server);
-  };
 
   try {
     throwIfControlStartupAborted(options.signal);
@@ -168,6 +173,16 @@ function throwIfControlStartupAborted(signal: AbortSignal | undefined): void {
   }
 }
 
+function requireShutdownTimeout(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > maximumTimeoutMs) {
+    throw new Error(
+      `pico resident control shutdownTimeoutMs must be a positive integer <= ${maximumTimeoutMs}`
+    );
+  }
+
+  return value;
+}
+
 function readControlToken(path: string): string {
   const descriptor = openControlTokenFile(path);
 
@@ -246,14 +261,20 @@ function listen(server: Server, port: number, host: "127.0.0.1" | "::1"): Promis
   });
 }
 
-function closeServer(server: Server): Promise<void> {
+function closeServer(server: Server, shutdownTimeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
     if (!server.listening) {
       resolve();
       return;
     }
 
+    const timeout = setTimeout(() => {
+      server.closeAllConnections();
+    }, shutdownTimeoutMs);
+    timeout.unref();
     server.close((error) => {
+      clearTimeout(timeout);
+
       if (error === undefined) {
         resolve();
         return;

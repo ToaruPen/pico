@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createLoopbackHttpResidentControlServer,
   type ResidentControlEvent,
+  type ResidentControlHandler,
   type ResidentControlServer
 } from "../src/runtime/resident-control.js";
 
@@ -115,6 +116,7 @@ describe("resident semantic control transport", () => {
         host: "127.0.0.1",
         port: 0,
         authTokenPath: unsafePath,
+        shutdownTimeoutMs: 1_000,
         handle: () => "accepted"
       })
     ).rejects.toThrow("pico resident control token file must have 0600 permissions");
@@ -123,6 +125,7 @@ describe("resident semantic control transport", () => {
         host: "127.0.0.1",
         port: 0,
         authTokenPath: linkPath,
+        shutdownTimeoutMs: 1_000,
         handle: () => "accepted"
       })
     ).rejects.toThrow("pico resident control token file must not be a symbolic link");
@@ -137,17 +140,67 @@ describe("resident semantic control transport", () => {
         host: "127.0.0.1",
         port: 0,
         authTokenPath: "/tmp/pico-missing-control-token",
+        shutdownTimeoutMs: 1_000,
         handle: () => "accepted",
         signal: controller.signal
       })
     ).rejects.toThrow("pico resident control server startup was aborted");
   });
+
+  it("shares an abort-triggered close and force-closes an active request at the deadline", async () => {
+    vi.useFakeTimers();
+    const abortController = new AbortController();
+    let notifyStarted: () => void = () => undefined;
+    let finishRequest: () => void = () => undefined;
+    const requestStarted = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    const requestGate = new Promise<void>((resolve) => {
+      finishRequest = resolve;
+    });
+    const server = await startControlServer({
+      signal: abortController.signal,
+      shutdownTimeoutMs: 100,
+      handle: async () => {
+        notifyStarted();
+        await requestGate;
+        return "accepted" as const;
+      }
+    });
+    const request = postEvent(server, "talk_pressed", "secret-token");
+    void request.catch(() => undefined);
+    await requestStarted;
+
+    try {
+      abortController.abort();
+      const firstClose = server.close();
+      const secondClose = server.close();
+      let closed = false;
+      void firstClose.then(
+        () => {
+          closed = true;
+        },
+        () => undefined
+      );
+
+      expect(firstClose).toBe(secondClose);
+      await vi.advanceTimersByTimeAsync(99);
+      expect(closed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(firstClose).resolves.toBeUndefined();
+      expect(closed).toBe(true);
+      await expect(request).rejects.toThrow();
+    } finally {
+      finishRequest();
+      vi.useRealTimers();
+    }
+  });
 });
 
 async function startControlServer(input: {
-  readonly handle: (
-    event: ResidentControlEvent
-  ) => "accepted" | "ignored_busy" | "ignored_stale" | "noop";
+  readonly handle: ResidentControlHandler;
+  readonly signal?: AbortSignal;
+  readonly shutdownTimeoutMs?: number;
 }): Promise<ResidentControlServer> {
   const directory = mkdtempSync(join(tmpdir(), "pico-control-test-"));
   const authTokenPath = join(directory, "control-token");
@@ -160,7 +213,9 @@ async function startControlServer(input: {
     port: 0,
     authTokenPath,
     handle: input.handle,
-    now: () => "2026-07-17T00:00:00.000Z"
+    now: () => "2026-07-17T00:00:00.000Z",
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
+    shutdownTimeoutMs: input.shutdownTimeoutMs ?? 1_000
   });
   servers.push(server);
 

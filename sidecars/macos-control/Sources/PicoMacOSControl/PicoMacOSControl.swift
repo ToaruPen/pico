@@ -70,15 +70,17 @@ enum PicoMacOSControlMain {
     }
 
     let signalSource = installTerminationSignal(runLoop: runLoop)
-    CFRunLoopAddSource(runLoop, source, .commonModes)
-    CGEvent.tapEnable(tap: tap, enable: true)
-    FileHandle.standardOutput.write(Data("{\"event\":\"ready\"}\n".utf8))
-    CFRunLoopRun()
+    withExtendedLifetime(context) {
+      CFRunLoopAddSource(runLoop, source, .commonModes)
+      CGEvent.tapEnable(tap: tap, enable: true)
+      FileHandle.standardOutput.write(Data("{\"event\":\"ready\"}\n".utf8))
+      CFRunLoopRun()
 
-    CFRunLoopRemoveSource(runLoop, source, .commonModes)
-    CFMachPortInvalidate(tap)
-    signalSource.cancel()
-    _ = finishAndDrainControlEvents(channel: eventChannel, sender: sender)
+      CFRunLoopRemoveSource(runLoop, source, .commonModes)
+      CFMachPortInvalidate(tap)
+      signalSource.cancel()
+      _ = finishAndDrainControlEvents(channel: eventChannel, sender: sender)
+    }
 
     if let failure = reporter.failureReason() {
       throw BridgeError.runtimeFailure(failure)

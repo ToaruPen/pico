@@ -479,6 +479,42 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
+  it("records a provider-cancelled TTS request as skipped", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    const driver = createDriver({
+      audit,
+      ttsResponse: () =>
+        Promise.resolve({
+          ok: false,
+          reason: "cancelled",
+          message: "request cancelled",
+          sentenceIndex: 0,
+          source: {
+            serviceId: "test-tts",
+            provider: "aivis-speech",
+            speakerId: 1
+          }
+        })
+    });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    const events = voiceStageEvents(audit, "tts_request_wall");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      attributes: {
+        "pico.voice.stage": "tts_request_wall",
+        "pico.voice.stage_status": "skipped",
+        "pico.voice.error_code": "cancelled"
+      }
+    });
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({ failedTurns: 0 });
+  });
+
   it("fails the runtime immediately when capture frames reject during a hold", async () => {
     const driver = createDriver();
 

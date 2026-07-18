@@ -232,10 +232,15 @@ describe("session lifecycle", () => {
           entries: () => []
         }
       });
+      const ended: string[] = [];
+      lifecycle.subscribeEnded((session) => ended.push(session.id));
       lifecycle.start(trigger);
 
       expect(() => vi.advanceTimersByTime(1)).not.toThrow();
       expect(lifecycle.read("session-1")?.state).toBe("ended");
+      expect(ended).toEqual(["session-1"]);
+      lifecycle.end("session-1");
+      expect(ended).toEqual(["session-1"]);
     } finally {
       vi.useRealTimers();
     }

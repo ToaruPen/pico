@@ -190,24 +190,85 @@ Represent the active playback operation with the child and an exit promise. A wr
 
 Run the complete audio I/O test file.
 
-## Task 9: Verify and converge PR #99
+## Task 9: Close the late-review terminal ownership gaps
+
+**Files:**
+- Modify: `docs/superpowers/research/2026-07-17-hold-to-talk-field-validation.md`
+- Modify: `scripts/field/resident-hold-to-talk.ts`
+- Modify: `sidecars/macos-control/Sources/PicoMacOSControl/PicoMacOSControl.swift`
+- Modify: `src/modules/session/index.ts` only if the regression test disproves audit isolation
+- Modify: `src/runtime/macos-control-bridge.ts`
+- Modify: `src/runtime/resident-control.ts`
+- Modify: `src/runtime/resident-voice-runner.ts`
+- Modify: `src/runtime/voice-resident.ts`
+- Test: `tests/resident-hold-to-talk-field-runtime.test.ts`
+- Test: `tests/session.test.ts`
+- Test: `tests/macos-control-bridge.test.ts`
+- Test: `tests/resident-control.test.ts`
+- Test: `tests/voice-resident.test.ts`
+
+- [x] **Step 1: Separate released and cancelled field metrics**
+
+Add a failing cancellation-during-tail test proving a cancelled hold does not add hold or
+release-tail samples. Move those samples into the completed-release terminalizer while leaving
+aggregate capture and cancellation metrics in their respective owners.
+
+- [x] **Step 2: Keep the Core Graphics callback context alive**
+
+Keep `BridgeContext` strongly alive from event tap creation through run-loop exit, tap invalidation,
+and semantic sender drain. Run the native macOS control gate.
+
+- [x] **Step 3: Prove session notification is audit-independent**
+
+Extend the audit-failure regression test to subscribe before ending and require exactly one ended
+notification. Change `endSession` only if the test fails; the audit helper already claims to isolate
+sink failures.
+
+- [x] **Step 4: Settle bridge spawn failure on process close**
+
+Add a failing spawn-error-without-exit test. Settle the managed child from `close`, including the
+post-error close path, and update listener cleanup without weakening TERM-to-KILL ownership.
+
+- [x] **Step 5: Share and bound loopback server close**
+
+Add deterministic tests proving abort and explicit close await one cached operation and that an
+active request is force-closed after the configured resident shutdown grace. Pass the existing
+startup-only `voice.resident.shutdownGraceMs` into the server owner; do not add another config field.
+
+- [x] **Step 6: Classify cancelled TTS as skipped**
+
+Add a failing stage-probe test for a provider cancellation. Preserve failure accounting for other
+provider errors and emit `skipped/cancelled` for normal cancellation.
+
+- [x] **Step 7: Refresh field validation evidence**
+
+Run the full current suite, then update the field validation record with the exact test count and
+validated commit SHA. Do not mark the unperformed physical keyboard/microphone path as passing.
+
+- [x] **Step 8: Settle a tail-completion cancellation once**
+
+Add a delayed capture-stop regression test for tail expiry followed by cancel. Keep one shared
+terminal operation per capture, claim the matching controller terminal state before metrics, and
+record exactly one released or cancelled outcome.
+
+## Task 10: Verify and converge PR #99
 
 **Files:**
 - Modify only review findings within the lifecycle brief.
 
-- [ ] **Step 1: Run focused tests**
+- [x] **Step 1: Run focused tests**
 
-Run all seven focused TypeScript/native test targets from Tasks 2-8.
+Run the focused TypeScript/native test targets from Tasks 2-9.
 
-- [ ] **Step 2: Run the full gate**
+- [x] **Step 2: Run the full gate**
 
 Run `just check`, `git diff --check`, and the repository secret scan enforced by pre-commit.
 
-- [ ] **Step 3: Run independent review and cleanup**
+- [x] **Step 3: Run independent review and cleanup**
 
 Require a fresh `APPROVE`, then apply the requested `polishment` and `ai-slop-cleaner` sequence only to changed files. Re-run `just check` after cleanup.
 
-- [ ] **Step 4: Commit, push, and update PR #99**
+- [x] **Step 4: Commit, push, and update PR #99**
 
 Use a conventional commit, update the PR body to remove latency-observability scope, push without force, and request current-head review.
 
@@ -215,7 +276,7 @@ Use a conventional commit, update the PR body to remove latency-observability sc
 
 Wait for CI and CodeRabbit. Address every current actionable finding, verify review-thread state, and stop at draft, green, reviewed, mergeable PR #99.
 
-## Task 10: Replay latency observability as a stacked PR
+## Task 11: Replay latency observability as a stacked PR
 
 **Files:**
 - Restore from commit: `3bbb97b`

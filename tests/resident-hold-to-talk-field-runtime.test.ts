@@ -8,6 +8,7 @@ const fieldTestState = vi.hoisted(() => ({
   starts: 0,
   captureCloses: 0,
   captureFrameCounts: [] as number[],
+  captureStopGate: undefined as Promise<void> | undefined,
   serverFailure: undefined as Error | undefined,
   bridgeStartup: undefined as Promise<void> | undefined
 }));
@@ -17,6 +18,7 @@ vi.mock("../src/config/index.js", () => ({
     voice: {
       resident: {
         enabled: true,
+        shutdownGraceMs: 5_000,
         control: {
           provider: "loopback_http",
           host: "127.0.0.1",
@@ -83,9 +85,9 @@ vi.mock("../src/runtime/resident-audio-io.js", () => ({
             await stopped;
           }
         },
-        stop: () => {
+        stop: async () => {
+          await fieldTestState.captureStopGate;
           finish();
-          return Promise.resolve();
         }
       };
     },
@@ -106,6 +108,7 @@ describe("resident hold-to-talk field runtime", () => {
     fieldTestState.starts = 0;
     fieldTestState.captureCloses = 0;
     fieldTestState.captureFrameCounts = [];
+    fieldTestState.captureStopGate = undefined;
     fieldTestState.serverFailure = undefined;
     fieldTestState.bridgeStartup = undefined;
   });
@@ -150,6 +153,59 @@ describe("resident hold-to-talk field runtime", () => {
       completedHolds: 1,
       holdDuration: { samples: 1 },
       releaseTailDuration: { samples: 1 }
+    });
+  });
+
+  it("does not record release timing for a hold cancelled during tailing", async () => {
+    const validation = runResidentHoldToTalkFieldValidation({ durationMs: 1_000, help: false });
+    const handle = await waitForHandle();
+
+    expect(handle(control("talk_pressed"))).toBe("accepted");
+    expect(handle(control("talk_released"))).toBe("accepted");
+    expect(handle(control("cancel_pressed"))).toBe("accepted");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(handle(control("talk_pressed"))).toBe("accepted");
+    expect(handle(control("talk_released"))).toBe("accepted");
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await expect(validation).resolves.toMatchObject({
+      cancelledHolds: 1,
+      completedHolds: 1,
+      holdDuration: { samples: 1 },
+      releaseTailDuration: { samples: 1 },
+      cancellationDuration: { samples: 1 }
+    });
+  });
+
+  it("settles a cancellation once when capture stop is already in progress", async () => {
+    let allowCaptureStop: () => void = () => undefined;
+    fieldTestState.captureStopGate = new Promise<void>((resolve) => {
+      allowCaptureStop = resolve;
+    });
+    const validation = runResidentHoldToTalkFieldValidation({ durationMs: 1_000, help: false });
+    const handle = await waitForHandle();
+
+    expect(handle(control("talk_pressed"))).toBe("accepted");
+    expect(handle(control("talk_released"))).toBe("accepted");
+    await vi.advanceTimersByTimeAsync(250);
+    expect(handle(control("cancel_pressed"))).toBe("accepted");
+    allowCaptureStop();
+    fieldTestState.captureStopGate = undefined;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(handle(control("talk_pressed"))).toBe("accepted");
+    expect(handle(control("talk_released"))).toBe("accepted");
+    await vi.advanceTimersByTimeAsync(750);
+
+    await expect(validation).resolves.toMatchObject({
+      cancelledHolds: 1,
+      completedHolds: 1,
+      frameCount: 2,
+      captureStartupLatency: { samples: 2 },
+      holdDuration: { samples: 1 },
+      releaseTailDuration: { samples: 1 },
+      cancellationDuration: { samples: 1 }
     });
   });
 
