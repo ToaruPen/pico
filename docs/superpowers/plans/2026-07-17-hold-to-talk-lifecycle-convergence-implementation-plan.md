@@ -264,7 +264,7 @@ Run the focused TypeScript/native test targets from Tasks 2-9.
 
 Run `just check`, `git diff --check`, and the repository secret scan enforced by pre-commit.
 
-- [ ] **Step 3: Run independent review and cleanup**
+- [x] **Step 3: Run independent review and cleanup**
 
 Require a fresh `APPROVE`, then apply the requested `polishment` and `ai-slop-cleaner` sequence only to changed files. Re-run `just check` after cleanup.
 
