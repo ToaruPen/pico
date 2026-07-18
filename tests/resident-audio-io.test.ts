@@ -519,11 +519,9 @@ describe("resident audio I/O plans", () => {
     vi.useFakeTimers();
     const config = avfoundationResidentAudioConfig({ frameMs: 10 });
     const process = createAudioProcess({ stdout: new PassThrough() });
-    const capture = createResidentAudioCapture(
-      config,
-      vi.fn(() => process.child),
-      "darwin"
-    );
+    const nextProcess = createAudioProcess({ stdout: new PassThrough() });
+    const spawn = vi.fn().mockReturnValueOnce(process.child).mockReturnValueOnce(nextProcess.child);
+    const capture = createResidentAudioCapture(config, spawn, "darwin");
     const session = capture.start(new AbortController().signal);
     const collection = (async (): Promise<void> => {
       for await (const frame of session.frames) {
@@ -544,6 +542,15 @@ describe("resident audio I/O plans", () => {
       await vi.advanceTimersByTimeAsync(2_000);
       await stopFailure;
       await collectionFailure;
+      expect(process.listenerCount("close")).toBe(0);
+      expect(process.listenerCount("error")).toBe(0);
+
+      const nextSession = capture.start(new AbortController().signal);
+      expect(spawn).toHaveBeenCalledTimes(2);
+      const nextStopped = nextSession.stop();
+      nextProcess.stdout.end();
+      nextProcess.emitClose(0, "SIGTERM");
+      await nextStopped;
     } finally {
       process.emitClose(0, "SIGKILL");
       await capture.close();
@@ -948,6 +955,70 @@ describe("resident audio I/O plans", () => {
     }
   });
 
+  it("releases playback ownership after the final termination timeout", async () => {
+    vi.useFakeTimers();
+    const config = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: { provider: "alsa", device: "hw:1,0" },
+          audioOutput: { provider: "alsa", device: "hw:0,0" }
+        }
+      }
+    });
+    const process = createAudioProcess({ stdin: new PassThrough() });
+    const nextProcess = createAudioProcess({ stdin: new PassThrough() });
+    const spawn = vi.fn().mockReturnValueOnce(process.child).mockReturnValueOnce(nextProcess.child);
+    const playback = createResidentPlaybackSink(config, spawn, "linux");
+    const chunk = {
+      sentenceIndex: 0,
+      text: "hello",
+      audio: new Uint8Array([1, 2]),
+      encoding: "pcm16le",
+      sampleRateHz: 24_000,
+      channels: 1,
+      durationMs: 1,
+      source: {
+        serviceId: "test-aivis",
+        provider: "aivis-speech",
+        speakerId: 1
+      }
+    } as const;
+    const playing = playback.play(chunk, "2026-07-17T00:00:00.000Z");
+    const playingFailure = playing.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    const stopped = playback.stop();
+    const stopFailure = stopped.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(stopFailure).resolves.toEqual(
+        new Error("pico resident voice alsa output did not stop after SIGKILL")
+      );
+      await expect(playingFailure).resolves.toEqual(
+        new Error("pico resident voice alsa output did not stop after SIGKILL")
+      );
+      expect(process.listenerCount("close")).toBe(0);
+      expect(process.listenerCount("exit")).toBe(0);
+      expect(process.listenerCount("error")).toBe(0);
+      expect(process.stdin.listenerCount("error")).toBe(0);
+
+      const next = playback.play(chunk, "2026-07-17T00:00:01.000Z");
+      expect(spawn).toHaveBeenCalledTimes(2);
+      nextProcess.emitExit(0);
+      await next;
+    } finally {
+      process.emitExit(137);
+      await Promise.allSettled([stopped, playing]);
+      vi.useRealTimers();
+    }
+  });
+
   it("removes the afplay temporary directory after playback", async () => {
     const config = definePicoConfig({
       voice: {
@@ -1007,6 +1078,7 @@ function createAudioProcess(streams: {
   readonly emitClose: (code: number, signal: NodeJS.Signals | undefined) => void;
   readonly emitError: (error: Error) => void;
   readonly emitExit: (code: number) => void;
+  readonly listenerCount: (event: "close" | "exit" | "error") => number;
 } {
   const stdout = streams.stdout ?? new PassThrough();
   const stdin = streams.stdin ?? new PassThrough();
@@ -1024,6 +1096,23 @@ function createAudioProcess(streams: {
       listeners[event] = listener as never;
 
       return child;
+    },
+    removeListener(event: "close" | "exit" | "error", listener: (...arguments_: never[]) => void) {
+      if (listeners[event] === listener) {
+        switch (event) {
+          case "close":
+            delete listeners.close;
+            break;
+          case "exit":
+            delete listeners.exit;
+            break;
+          case "error":
+            delete listeners.error;
+            break;
+        }
+      }
+
+      return child;
     }
   } as unknown as ChildProcessByStdio<Writable | null, Readable | null, null>;
 
@@ -1033,15 +1122,24 @@ function createAudioProcess(streams: {
     stdin,
     kill,
     emitClose(code, signal) {
-      listeners.close?.(code, signal);
+      const listener = listeners.close;
+      delete listeners.close;
+      listener?.(code, signal);
     },
     emitError(error) {
-      listeners.error?.(error);
+      const listener = listeners.error;
+      delete listeners.error;
+      listener?.(error);
     },
     emitExit(code) {
-      listeners.exit?.(code);
-      listeners.close?.(code, undefined);
-    }
+      const exitListener = listeners.exit;
+      const closeListener = listeners.close;
+      delete listeners.exit;
+      delete listeners.close;
+      exitListener?.(code);
+      closeListener?.(code, undefined);
+    },
+    listenerCount: (event) => (listeners[event] === undefined ? 0 : 1)
   };
 }
 

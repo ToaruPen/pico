@@ -128,6 +128,29 @@ describe("resident hold-to-talk control controller", () => {
     expect(controller.state()).toBe("error");
   });
 
+  it("contains a transition observer failure inside the release timer", () => {
+    const scheduler = createScheduler();
+    const tailReady: ResidentTurnGeneration[] = [];
+    const controller = createResidentControlController({
+      scheduler,
+      onTailReady: (generation) => tailReady.push(generation),
+      onTransition: ({ to }) => {
+        if (to === "transcribing") {
+          throw new Error("timer transition observer failed");
+        }
+      }
+    });
+
+    controller.handle(event("talk_pressed"));
+    const generation = controller.generation();
+    controller.handle(event("talk_released"));
+
+    expect(() => scheduler.advance(250)).not.toThrow();
+    expect(controller.state()).toBe("error");
+    expect(generation?.signal.aborted).toBe(true);
+    expect(tailReady).toEqual([]);
+  });
+
   it("suppresses completions from an invalid generation", () => {
     const controller = createResidentControlController();
 

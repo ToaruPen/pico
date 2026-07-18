@@ -329,6 +329,14 @@ export function createVoiceResidentRuntime(
           runtimeSettled = true;
           resolveCompletion(Object.freeze({ ...counters }));
         }
+      },
+      (error: unknown) => {
+        if (!runtimeSettled) {
+          runtimeSettled = true;
+          rejectCompletion(asError(error));
+        }
+
+        throw error;
       }
     );
 

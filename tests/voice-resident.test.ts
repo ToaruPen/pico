@@ -687,6 +687,18 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(driver.capture.stops()).toBe(1);
     expect(driver.playbackCloses()).toBe(1);
   });
+
+  it("settles completion when shutdown owner cleanup fails", async () => {
+    const driver = createDriver({ playbackStopError: new Error("speaker stop failed") });
+    const completionFailure = driver.runtime.completion.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+
+    await expect(driver.runtime.stop()).rejects.toThrow("speaker stop failed");
+    await expect(completionFailure).resolves.toEqual(new Error("speaker stop failed"));
+    expect(driver.runtime.state()).toBe("stopped");
+  });
 });
 
 type Driver = ReturnType<typeof createDriver>;

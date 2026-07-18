@@ -84,6 +84,8 @@ type OwnedPlayback = {
   readonly abortController: AbortController;
   child: ReturnType<SpawnAudioProcess> | undefined;
   childCompletion: Promise<void> | undefined;
+  terminalize: ((error: Error) => void) | undefined;
+  releaseOwnership: (() => void) | undefined;
   terminationRequested: boolean;
   completion: Promise<void> | undefined;
   stopOperation: Promise<void> | undefined;
@@ -286,7 +288,12 @@ export function createResidentPlaybackSink(
       () => owned.child,
       completion,
       `pico resident voice ${plan.provider} output`
-    );
+    ).catch((error: unknown) => {
+      const stopError = error instanceof Error ? error : new Error(String(error));
+      owned.terminalize?.(stopError);
+      owned.releaseOwnership?.();
+      throw stopError;
+    });
     return owned.stopOperation;
   };
 
@@ -301,6 +308,8 @@ export function createResidentPlaybackSink(
         abortController,
         child: undefined,
         childCompletion: undefined,
+        terminalize: undefined,
+        releaseOwnership: undefined,
         terminationRequested: false,
         completion: undefined,
         stopOperation: undefined
@@ -322,12 +331,15 @@ export function createResidentPlaybackSink(
           active = undefined;
         }
       };
+      owned.releaseOwnership = releaseOwnership;
       const onChild = (
         child: ReturnType<SpawnAudioProcess>,
-        childCompletion: Promise<void>
+        childCompletion: Promise<void>,
+        terminalize: (error: Error) => void
       ): void => {
         owned.child = child;
         owned.childCompletion = childCompletion;
+        owned.terminalize = terminalize;
         void childCompletion.finally(releaseOwnership).catch(() => undefined);
 
         if (abortController.signal.aborted) {
@@ -363,7 +375,8 @@ export function createResidentPlaybackSink(
 
 type PlaybackChildOwner = (
   child: ReturnType<SpawnAudioProcess>,
-  childCompletion: Promise<void>
+  childCompletion: Promise<void>,
+  terminalize: (error: Error) => void
 ) => void;
 
 function settlePlaybackError(signal: AbortSignal, error: Error): Error | undefined {
@@ -569,33 +582,53 @@ function createResidentCaptureSession(
   let childFailure: Error | undefined;
   let stopping = false;
   let closed = false;
+  let terminalized = false;
   let stopOperation: Promise<void> | undefined;
   let iteratorClaimed = false;
   const captureStartedAtMs = Date.parse(now());
+  let resolveClosed: () => void = () => undefined;
   const closedOperation = new Promise<void>((resolve) => {
-    child.once("close", (code, signalName) => {
-      closed = true;
-      const expectedStopExit =
-        stopping &&
-        (code === 0 ||
-          signalName === "SIGTERM" ||
-          signalName === "SIGKILL" ||
-          (plan.provider === "avfoundation" && code === 255));
-
-      if (code !== 0 && !expectedStopExit) {
-        childFailure = new Error(
-          `pico resident voice ${plan.provider} input exited with code ${String(
-            code
-          )} signal ${String(signalName)}`
-        );
-        stdout.destroy(childFailure);
-      }
-
-      signal.removeEventListener("abort", stopFromSignal);
-      onClose();
-      resolve();
-    });
+    resolveClosed = resolve;
   });
+  const cleanupListeners = (): void => {
+    signal.removeEventListener("abort", stopFromSignal);
+    child.removeListener("close", onChildClose);
+    child.removeListener("error", onChildError);
+  };
+  const terminalize = (): void => {
+    if (terminalized) {
+      return;
+    }
+
+    terminalized = true;
+    cleanupListeners();
+    onClose();
+    resolveClosed();
+  };
+  const onChildClose = (code: number | null, signalName: NodeJS.Signals | null): void => {
+    closed = true;
+    const expectedStopExit =
+      stopping &&
+      (code === 0 ||
+        signalName === "SIGTERM" ||
+        signalName === "SIGKILL" ||
+        (plan.provider === "avfoundation" && code === 255));
+
+    if (code !== 0 && !expectedStopExit) {
+      childFailure = new Error(
+        `pico resident voice ${plan.provider} input exited with code ${String(
+          code
+        )} signal ${String(signalName)}`
+      );
+      stdout.destroy(childFailure);
+    }
+
+    terminalize();
+  };
+  const onChildError = (error: Error): void => {
+    childFailure = error;
+    stdout.destroy(error);
+  };
   const stop = (): Promise<void> => {
     if (stopOperation !== undefined) {
       return stopOperation;
@@ -615,6 +648,7 @@ function createResidentCaptureSession(
       const stopError = error instanceof Error ? error : new Error(String(error));
       childFailure = stopError;
       stdout.destroy(stopError);
+      terminalize();
       throw stopError;
     });
     return stopOperation;
@@ -623,10 +657,8 @@ function createResidentCaptureSession(
     stop().catch(() => undefined);
   };
 
-  child.once("error", (error) => {
-    childFailure = error;
-    stdout.destroy(error);
-  });
+  child.once("close", onChildClose);
+  child.once("error", onChildError);
   signal.addEventListener("abort", stopFromSignal, { once: true });
 
   return {
@@ -763,11 +795,21 @@ function playRawPcm(
     const child = spawnAudioProcess(plan.command, createAlsaPlaybackArguments(plan, chunk), {
       stdio: ["pipe", "ignore", "inherit"]
     });
-    onChild(child, childCompletion);
     const stdin = child.stdin;
-    child.once("error", (error) => settle(settlePlaybackError(signal, error)));
-    child.once("close", resolveChildCompletion);
-    child.once("exit", (code) => {
+    const cleanupListeners = (): void => {
+      child.removeListener("error", onChildError);
+      child.removeListener("close", onChildClose);
+      child.removeListener("exit", onChildExit);
+      stdin?.removeListener("error", onStdinError);
+    };
+    const onChildError = (error: Error): void => {
+      settle(settlePlaybackError(signal, error));
+    };
+    const onChildClose = (): void => {
+      cleanupListeners();
+      resolveChildCompletion();
+    };
+    const onChildExit = (code: number | null): void => {
       if (code === 0 || signal.aborted) {
         settle(undefined);
         return;
@@ -776,7 +818,20 @@ function playRawPcm(
       settle(
         new Error(`pico resident voice ${plan.provider} output exited with code ${String(code)}`)
       );
-    });
+    };
+    const onStdinError = (error: Error): void => {
+      settle(settlePlaybackError(signal, error));
+    };
+    const terminalize = (error: Error): void => {
+      cleanupListeners();
+      stdin?.destroy();
+      resolveChildCompletion();
+      settle(error);
+    };
+    child.once("error", onChildError);
+    child.once("close", onChildClose);
+    child.once("exit", onChildExit);
+    onChild(child, childCompletion, terminalize);
 
     if (stdin === null) {
       settle(
@@ -788,7 +843,7 @@ function playRawPcm(
       return;
     }
 
-    stdin.once("error", (error) => settle(settlePlaybackError(signal, error)));
+    stdin.once("error", onStdinError);
     stdin.end(chunk.audio);
   });
 }
@@ -850,27 +905,52 @@ function playFile(
     const child = spawnAudioProcess(command, arguments_, {
       stdio: ["ignore", "pipe", "inherit"]
     });
-    onChild(child, childCompletion);
-    child.once("close", resolveChildCompletion);
+    let settled = false;
+    const settle = (error: Error | undefined): void => {
+      if (settled) {
+        return;
+      }
 
-    child.once("error", (error) => {
+      settled = true;
+
+      if (error === undefined) {
+        resolve();
+        return;
+      }
+
+      reject(error);
+    };
+    const cleanupListeners = (): void => {
+      child.removeListener("close", onChildClose);
+      child.removeListener("error", onChildError);
+      child.removeListener("exit", onChildExit);
+    };
+    const onChildClose = (): void => {
+      cleanupListeners();
+      resolveChildCompletion();
+    };
+    const onChildError = (error: Error): void => {
       const resolvedError = settlePlaybackError(signal, error);
 
-      if (resolvedError === undefined) {
-        resolve();
-        return;
-      }
-
-      reject(resolvedError);
-    });
-    child.once("exit", (code) => {
+      settle(resolvedError);
+    };
+    const onChildExit = (code: number | null): void => {
       if (code === 0 || signal.aborted) {
-        resolve();
+        settle(undefined);
         return;
       }
 
-      reject(new Error(`pico resident voice ${command} output exited with code ${String(code)}`));
-    });
+      settle(new Error(`pico resident voice ${command} output exited with code ${String(code)}`));
+    };
+    const terminalize = (error: Error): void => {
+      cleanupListeners();
+      resolveChildCompletion();
+      settle(error);
+    };
+    child.once("close", onChildClose);
+    child.once("error", onChildError);
+    child.once("exit", onChildExit);
+    onChild(child, childCompletion, terminalize);
   });
 }
 
