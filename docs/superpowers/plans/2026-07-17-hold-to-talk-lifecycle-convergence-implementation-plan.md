@@ -268,7 +268,7 @@ Run `just check`, `git diff --check`, and the repository secret scan enforced by
 
 Require a fresh `APPROVE`, then apply the requested `polishment` and `ai-slop-cleaner` sequence only to changed files. Re-run `just check` after cleanup.
 
-- [ ] **Step 4: Commit, push, and update PR #99**
+- [x] **Step 4: Commit, push, and update PR #99**
 
 Use a conventional commit, update the PR body to remove latency-observability scope, push without force, and request current-head review.
 
