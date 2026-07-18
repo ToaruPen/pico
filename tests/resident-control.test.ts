@@ -1,4 +1,5 @@
 import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer as createTcpServer, type Server as TcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -147,6 +148,29 @@ describe("resident semantic control transport", () => {
     ).rejects.toThrow("pico resident control server startup was aborted");
   });
 
+  it("closes a socket that starts listening after startup is aborted", async () => {
+    const port = await reserveTcpPort();
+    const directory = mkdtempSync(join(tmpdir(), "pico-control-test-"));
+    const authTokenPath = join(directory, "control-token");
+    writeFileSync(authTokenPath, "secret-token\n");
+    chmodSync(authTokenPath, 0o600);
+    const controller = new AbortController();
+    const starting = createLoopbackHttpResidentControlServer({
+      host: "127.0.0.1",
+      port,
+      authTokenPath,
+      shutdownTimeoutMs: 1_000,
+      handle: () => "accepted",
+      signal: controller.signal
+    });
+
+    controller.abort();
+    await expect(starting).rejects.toThrow("pico resident control server startup was aborted");
+
+    const rebound = await bindTcpPort(port);
+    await closeTcpServer(rebound);
+  });
+
   it("shares an abort-triggered close and force-closes an active request at the deadline", async () => {
     vi.useFakeTimers();
     const abortController = new AbortController();
@@ -234,5 +258,42 @@ function postEvent(
       ...(token === undefined ? {} : { authorization: `Bearer ${token}` })
     },
     body: JSON.stringify({ event })
+  });
+}
+
+async function reserveTcpPort(): Promise<number> {
+  const server = await bindTcpPort(0);
+  const address = server.address();
+
+  if (address === null || typeof address === "string") {
+    await closeTcpServer(server);
+    throw new Error("expected a TCP address");
+  }
+
+  await closeTcpServer(server);
+  return address.port;
+}
+
+function bindTcpPort(port: number): Promise<TcpServer> {
+  return new Promise((resolve, reject) => {
+    const server = createTcpServer();
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve(server);
+    });
+  });
+}
+
+function closeTcpServer(server: TcpServer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error === undefined) {
+        resolve();
+        return;
+      }
+
+      reject(error);
+    });
   });
 }

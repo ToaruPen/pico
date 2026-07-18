@@ -379,14 +379,6 @@ type PlaybackChildOwner = (
   terminalize: (error: Error) => void
 ) => void;
 
-function settlePlaybackError(signal: AbortSignal, error: Error): Error | undefined {
-  if (signal.aborted) {
-    return undefined;
-  }
-
-  return error;
-}
-
 function throwIfPlaybackAborted(signal: AbortSignal): void {
   if (signal.aborted) {
     throw new DOMException("Resident playback was aborted", "AbortError");
@@ -796,6 +788,7 @@ function playRawPcm(
       stdio: ["pipe", "ignore", "inherit"]
     });
     const stdin = child.stdin;
+    let exitFailure: Error | undefined;
     const cleanupListeners = (): void => {
       child.removeListener("error", onChildError);
       child.removeListener("close", onChildClose);
@@ -803,13 +796,12 @@ function playRawPcm(
       stdin?.removeListener("error", onStdinError);
     };
     const onChildError = (error: Error): void => {
-      settle(settlePlaybackError(signal, error));
+      if (!signal.aborted) {
+        settle(error);
+      }
     };
     const onChildClose = (): void => {
-      if (signal.aborted) {
-        settle(undefined);
-      }
-
+      settle(exitFailure);
       cleanupListeners();
       resolveChildCompletion();
     };
@@ -818,17 +810,16 @@ function playRawPcm(
         return;
       }
 
-      if (code === 0) {
-        settle(undefined);
-        return;
+      if (code !== 0) {
+        exitFailure = new Error(
+          `pico resident voice ${plan.provider} output exited with code ${String(code)}`
+        );
       }
-
-      settle(
-        new Error(`pico resident voice ${plan.provider} output exited with code ${String(code)}`)
-      );
     };
     const onStdinError = (error: Error): void => {
-      settle(settlePlaybackError(signal, error));
+      if (!signal.aborted) {
+        settle(error);
+      }
     };
     const terminalize = (error: Error): void => {
       cleanupListeners();
@@ -842,12 +833,10 @@ function playRawPcm(
     onChild(child, childCompletion, terminalize);
 
     if (stdin === null) {
-      settle(
-        settlePlaybackError(
-          signal,
-          new Error(`pico resident voice ${plan.provider} output did not expose stdin`)
-        )
-      );
+      if (!signal.aborted) {
+        settle(new Error(`pico resident voice ${plan.provider} output did not expose stdin`));
+      }
+
       return;
     }
 
@@ -913,6 +902,7 @@ function playFile(
     const child = spawnAudioProcess(command, arguments_, {
       stdio: ["ignore", "pipe", "inherit"]
     });
+    let exitFailure: Error | undefined;
     let settled = false;
     const settle = (error: Error | undefined): void => {
       if (settled) {
@@ -934,29 +924,25 @@ function playFile(
       child.removeListener("exit", onChildExit);
     };
     const onChildClose = (): void => {
-      if (signal.aborted) {
-        settle(undefined);
-      }
-
+      settle(exitFailure);
       cleanupListeners();
       resolveChildCompletion();
     };
     const onChildError = (error: Error): void => {
-      const resolvedError = settlePlaybackError(signal, error);
-
-      settle(resolvedError);
+      if (!signal.aborted) {
+        settle(error);
+      }
     };
     const onChildExit = (code: number | null): void => {
       if (signal.aborted) {
         return;
       }
 
-      if (code === 0) {
-        settle(undefined);
-        return;
+      if (code !== 0) {
+        exitFailure = new Error(
+          `pico resident voice ${command} output exited with code ${String(code)}`
+        );
       }
-
-      settle(new Error(`pico resident voice ${command} output exited with code ${String(code)}`));
     };
     const terminalize = (error: Error): void => {
       cleanupListeners();

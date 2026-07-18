@@ -996,14 +996,14 @@ describe("resident audio I/O plans", () => {
     );
 
     try {
-      process.emitExitOnly(137);
+      process.emitError(new Error("playback child failed after abort"));
       await vi.advanceTimersByTimeAsync(2_000);
-      await expect(stopFailure).resolves.toEqual(
+      const stopError = await stopFailure;
+      const playError = await playingFailure;
+      expect(stopError).toEqual(
         new Error("pico resident voice alsa output did not stop after SIGKILL")
       );
-      await expect(playingFailure).resolves.toEqual(
-        new Error("pico resident voice alsa output did not stop after SIGKILL")
-      );
+      expect(playError).toBe(stopError);
       expect(process.listenerCount("close")).toBe(0);
       expect(process.listenerCount("exit")).toBe(0);
       expect(process.listenerCount("error")).toBe(0);
@@ -1016,6 +1016,175 @@ describe("resident audio I/O plans", () => {
     } finally {
       process.emitExit(137);
       await Promise.allSettled([stopped, playing]);
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves a final timeout after playback exits successfully without closing", async () => {
+    vi.useFakeTimers();
+    const config = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: { provider: "alsa", device: "hw:1,0" },
+          audioOutput: { provider: "alsa", device: "hw:0,0" }
+        }
+      }
+    });
+    const process = createAudioProcess({ stdin: new PassThrough() });
+    const playback = createResidentPlaybackSink(
+      config,
+      vi.fn(() => process.child),
+      "linux"
+    );
+    const playing = playback.play(
+      {
+        sentenceIndex: 0,
+        text: "hello",
+        audio: new Uint8Array([1, 2]),
+        encoding: "pcm16le",
+        sampleRateHz: 24_000,
+        channels: 1,
+        durationMs: 1,
+        source: {
+          serviceId: "test-aivis",
+          provider: "aivis-speech",
+          speakerId: 1
+        }
+      },
+      "2026-07-17T00:00:00.000Z"
+    );
+    const playingFailure = playing.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    process.emitExitOnly(0);
+    const stopped = playback.stop();
+    const stopFailure = stopped.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      const expected = new Error("pico resident voice alsa output did not stop after SIGKILL");
+      const stopError = await stopFailure;
+      const playError = await playingFailure;
+      expect(stopError).toEqual(expected);
+      expect(playError).toBe(stopError);
+    } finally {
+      process.emitClose(0, undefined);
+      await Promise.allSettled([stopped, playing]);
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for playback close before admitting the next chunk", async () => {
+    const config = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: { provider: "alsa", device: "hw:1,0" },
+          audioOutput: { provider: "alsa", device: "hw:0,0" }
+        }
+      }
+    });
+    const firstProcess = createAudioProcess({ stdin: new PassThrough() });
+    const nextProcess = createAudioProcess({ stdin: new PassThrough() });
+    const spawn = vi
+      .fn()
+      .mockReturnValueOnce(firstProcess.child)
+      .mockReturnValueOnce(nextProcess.child);
+    const playback = createResidentPlaybackSink(config, spawn, "linux");
+    const chunk = {
+      sentenceIndex: 0,
+      text: "hello",
+      audio: new Uint8Array([1, 2]),
+      encoding: "pcm16le",
+      sampleRateHz: 24_000,
+      channels: 1,
+      durationMs: 1,
+      source: {
+        serviceId: "test-aivis",
+        provider: "aivis-speech",
+        speakerId: 1
+      }
+    } as const;
+    const first = playback.play(chunk, "2026-07-17T00:00:00.000Z");
+    const firstOutcome = first.then(
+      () => "resolved",
+      (error: unknown) => (error instanceof Error ? error.message : String(error))
+    );
+
+    firstProcess.emitExitOnly(0);
+    await expect(
+      Promise.race([
+        firstOutcome,
+        new Promise<string>((resolve) => setImmediate(() => resolve("still pending")))
+      ])
+    ).resolves.toBe("still pending");
+    firstProcess.emitClose(0, undefined);
+    await first;
+
+    const next = playback.play(chunk, "2026-07-17T00:00:02.000Z");
+    expect(spawn).toHaveBeenCalledTimes(2);
+    nextProcess.emitExit(0);
+    await next;
+  });
+
+  it("preserves an afplay final timeout after an exit-only cancellation", async () => {
+    vi.useFakeTimers();
+    const config = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: { provider: "avfoundation", device: ":0" },
+          audioOutput: { provider: "afplay", route: "system_default" }
+        }
+      }
+    });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const spawn = vi.fn(() => process.child);
+    const playback = createResidentPlaybackSink(config, spawn, "darwin");
+    const playing = playback.play(
+      {
+        sentenceIndex: 0,
+        text: "hello",
+        audio: new Uint8Array([0, 0, 1, 0]),
+        encoding: "pcm16le",
+        sampleRateHz: 16_000,
+        channels: 1,
+        durationMs: 1,
+        source: {
+          serviceId: "test-aivis",
+          provider: "aivis-speech",
+          speakerId: 1
+        }
+      },
+      "2026-07-17T00:00:00.000Z"
+    );
+    const playingFailure = playing.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+
+    try {
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(1));
+      const stopped = playback.stop();
+      const stopFailure = stopped.then(
+        () => undefined,
+        (error: unknown) => error
+      );
+      process.emitExitOnly(143);
+      await vi.advanceTimersByTimeAsync(2_000);
+      const expected = new Error("pico resident voice afplay output did not stop after SIGKILL");
+      const stopError = await stopFailure;
+      const playError = await playingFailure;
+      expect(stopError).toEqual(expected);
+      expect(playError).toBe(stopError);
+    } finally {
+      process.emitClose(0, undefined);
+      await Promise.allSettled([playing]);
       vi.useRealTimers();
     }
   });
