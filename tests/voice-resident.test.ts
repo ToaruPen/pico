@@ -126,7 +126,7 @@ describe("resident hold-to-talk voice runtime", () => {
     monotonicTimeMs = 450;
     ttsGate.resolve(successfulSynthesis(1_200));
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
-    monotonicTimeMs = 1_650;
+    monotonicTimeMs = 1_500;
     playbackGate.resolve(undefined);
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
@@ -139,7 +139,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
     expect(voiceStageEvent(audit, "tts_playback")).toMatchObject({
       attributes: {
-        "pico.voice.stage_duration_ms": 1_200,
+        "pico.voice.stage_duration_ms": 1_050,
         "pico.voice.utterance_duration_ms": 1_200,
         "pico.voice.chunk_count": 1
       }
@@ -1336,7 +1336,9 @@ function successfulSynthesis(durationMs = 10): TtsSynthesisSuccess {
 }
 
 function voiceStageEvent(audit: ReturnType<typeof createStructuredAuditLog>, stage: string) {
-  return voiceStageEvents(audit, stage)[0];
+  const events = voiceStageEvents(audit, stage);
+  expect(events).toHaveLength(1);
+  return events[0];
 }
 
 function voiceStageEvents(audit: ReturnType<typeof createStructuredAuditLog>, stage: string) {

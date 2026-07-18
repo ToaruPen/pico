@@ -54,7 +54,7 @@ Expected: FAIL because the runtime currently records the provider duration as `p
 
 - [x] **Step 3: Add a failing TTS request/playback wall-clock test**
 
-Use deferred synthesis and playback gates. Assert that synthesis emits `tts_request_wall` with real request latency and playback emits `tts_playback` with real playback latency:
+Use deferred synthesis and playback gates. Advance the monotonic clock from `450` to `1_500` before playback completes so the `1_050` ms playback wall time cannot be confused with the synthesized media duration. Assert that synthesis emits `tts_request_wall` with real request latency and playback emits `tts_playback` with real playback latency:
 
 ```ts
 expect(stageEvent(audit, "tts_request_wall")).toMatchObject({
@@ -66,7 +66,7 @@ expect(stageEvent(audit, "tts_request_wall")).toMatchObject({
 });
 expect(stageEvent(audit, "tts_playback")).toMatchObject({
   attributes: {
-    "pico.voice.stage_duration_ms": 1_200,
+    "pico.voice.stage_duration_ms": 1_050,
     "pico.voice.utterance_duration_ms": 1_200,
     "pico.voice.chunk_count": 1
   }
