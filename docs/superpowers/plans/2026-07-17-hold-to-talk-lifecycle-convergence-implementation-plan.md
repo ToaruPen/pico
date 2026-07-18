@@ -251,6 +251,13 @@ Add a delayed capture-stop regression test for tail expiry followed by cancel. K
 terminal operation per capture, claim the matching controller terminal state before metrics, and
 record exactly one released or cancelled outcome.
 
+- [x] **Step 9: Settle final-timeout and shutdown failures**
+
+Add failing tests for a release-timer observer exception, capture/playback children that never
+close after SIGKILL, and shutdown cleanup rejection. Contain scheduled observer failure, release
+child listeners and active ownership on the bounded terminal error, and reject runtime completion
+with the same shutdown failure returned by stop.
+
 ## Task 10: Verify and converge PR #99
 
 **Files:**
