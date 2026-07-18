@@ -699,6 +699,38 @@ describe("resident hold-to-talk voice runtime", () => {
     await expect(completionFailure).resolves.toEqual(new Error("speaker stop failed"));
     expect(driver.runtime.state()).toBe("stopped");
   });
+
+  it("settles active cancellation cleanup failure through stop and completion", async () => {
+    const cancellationFailure = new Error("echo flush failed during cancellation");
+    let rejectCancellationFlush: (error: Error) => void = () => undefined;
+    const cancellationFlush = new Promise<void>((_resolve, reject) => {
+      rejectCancellationFlush = reject;
+    });
+    let flushCount = 0;
+    const driver = createDriver({
+      echoFlush: () => {
+        flushCount += 1;
+        return flushCount === 1 ? cancellationFlush : Promise.resolve();
+      }
+    });
+    const completionFailure = driver.runtime.completion.then(
+      () => undefined,
+      (error: unknown) => error
+    );
+
+    await driver.press();
+    await driver.cancel();
+    await vi.waitFor(() => expect(flushCount).toBe(1));
+    const stopFailure = driver.runtime.stop().then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    rejectCancellationFlush(cancellationFailure);
+
+    await expect(stopFailure).resolves.toBe(cancellationFailure);
+    await expect(completionFailure).resolves.toBe(cancellationFailure);
+    expect(flushCount).toBe(2);
+  });
 });
 
 type Driver = ReturnType<typeof createDriver>;
@@ -711,6 +743,7 @@ function createDriver(
     readonly ttsResponse?: (signal: AbortSignal | undefined) => Promise<TtsSynthesisResult>;
     readonly playbackCompletion?: (signal: AbortSignal | undefined) => Promise<void>;
     readonly playbackStopError?: Error;
+    readonly echoFlush?: () => Promise<void>;
     readonly lifecycleEvents?: string[];
     readonly nearEndGate?: Promise<void>;
     readonly processedFrameIds?: string[];
@@ -806,7 +839,7 @@ function createDriver(
       },
       flush: () => {
         echoFlushCount += 1;
-        return Promise.resolve();
+        return options.echoFlush?.() ?? Promise.resolve();
       }
     },
     speechActivity: {

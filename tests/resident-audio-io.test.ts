@@ -996,6 +996,7 @@ describe("resident audio I/O plans", () => {
     );
 
     try {
+      process.emitExitOnly(137);
       await vi.advanceTimersByTimeAsync(2_000);
       await expect(stopFailure).resolves.toEqual(
         new Error("pico resident voice alsa output did not stop after SIGKILL")
@@ -1078,6 +1079,7 @@ function createAudioProcess(streams: {
   readonly emitClose: (code: number, signal: NodeJS.Signals | undefined) => void;
   readonly emitError: (error: Error) => void;
   readonly emitExit: (code: number) => void;
+  readonly emitExitOnly: (code: number) => void;
   readonly listenerCount: (event: "close" | "exit" | "error") => number;
 } {
   const stdout = streams.stdout ?? new PassThrough();
@@ -1138,6 +1140,11 @@ function createAudioProcess(streams: {
       delete listeners.close;
       exitListener?.(code);
       closeListener?.(code, undefined);
+    },
+    emitExitOnly(code) {
+      const listener = listeners.exit;
+      delete listeners.exit;
+      listener?.(code);
     },
     listenerCount: (event) => (listeners[event] === undefined ? 0 : 1)
   };

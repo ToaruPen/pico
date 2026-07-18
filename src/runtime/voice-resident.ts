@@ -952,7 +952,12 @@ async function shutdownVoiceRuntime(
   const turnResults = await Promise.allSettled(
     turn === undefined
       ? []
-      : [turn.capture.stop(), turn.frameCollection, turn.operation ?? Promise.resolve()]
+      : [
+          turn.capture.stop(),
+          turn.frameCollection,
+          turn.operation ?? Promise.resolve(),
+          turn.cancellation ?? Promise.resolve()
+        ]
   );
   const endingResults = await Promise.allSettled([interactionEnding]);
   const ownerResults = await Promise.allSettled([

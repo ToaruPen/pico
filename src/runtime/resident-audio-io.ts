@@ -806,11 +806,19 @@ function playRawPcm(
       settle(settlePlaybackError(signal, error));
     };
     const onChildClose = (): void => {
+      if (signal.aborted) {
+        settle(undefined);
+      }
+
       cleanupListeners();
       resolveChildCompletion();
     };
     const onChildExit = (code: number | null): void => {
-      if (code === 0 || signal.aborted) {
+      if (signal.aborted) {
+        return;
+      }
+
+      if (code === 0) {
         settle(undefined);
         return;
       }
@@ -926,6 +934,10 @@ function playFile(
       child.removeListener("exit", onChildExit);
     };
     const onChildClose = (): void => {
+      if (signal.aborted) {
+        settle(undefined);
+      }
+
       cleanupListeners();
       resolveChildCompletion();
     };
@@ -935,7 +947,11 @@ function playFile(
       settle(resolvedError);
     };
     const onChildExit = (code: number | null): void => {
-      if (code === 0 || signal.aborted) {
+      if (signal.aborted) {
+        return;
+      }
+
+      if (code === 0) {
         settle(undefined);
         return;
       }
