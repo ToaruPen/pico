@@ -36,21 +36,26 @@ UTF-8の認識結果を内部でhash化して照合し、期待hashも実値もm
 
 ## 実行方法
 
-各runは次の形で個別に実行した。`N`は1から3である。
+現在の再実行手順は次の形である。`N`は1から3である。
 
 ```bash
 umask 077
 npm run field:resident-voice-pseudo-audio -- \
   --audio-fixture /tmp/pico-otel-stackchan-check-20260719.wav \
   --validation-output /tmp/pico-tts-pipeline-final-v2.xls3fZ/events-N.jsonl \
+  --report-output /tmp/pico-tts-pipeline-final-v2.xls3fZ/report-N.json \
   --required-tool-name stackchan_get_status \
   --expected-transcript-sha256 a4704845dc50a8c392ce82e6b9544e88f3a79b65543ed23320bfd147ae23d266 \
   --timeout-ms 120000
 ```
 
 ユーザーのPi設定には、最終assistant本文をOSC 777 desktop notificationとしてstdoutへ送るPi-level
-extensionがある。PicoはPi plugin設定を所有しないためextension自体は変更せず、field commandの
-出力段でOSC notificationだけを除去した。保存した`report-N.txt`にOSC列や本文は残っていない。
+extensionがある。3-run計測時は、PicoがPi plugin設定を所有しないためextension自体は変更せず、
+field commandの出力段でOSC notificationだけを除去した。保存した`report-N.txt`にOSC列や本文は
+残っていない。
+
+このshell filter依存は振り返りで不十分と判断した。現在のfield harnessは`--report-output`を指定すると
+metadata reportをshared stdout経由ではなく、private fileへ直接書く。
 
 ## 内容とownershipの検証
 
@@ -132,6 +137,33 @@ field harnessの厳格な`passed`判定により、この不完全な診断run�
 `events-*.jsonl`だけがtranscript、最終assistant本文、tool arguments/resultsを保持する。
 `report-*.txt`はstage、件数、duration、model設定、healthだけを保持し、OSC notificationは除去済みで
 ある。通常のauditとOpenTelemetryにも本文、tool body、audio、session identifierは含まれない。
+
+## 振り返り還元後のsmoke
+
+private report実装後、同じcanonical fixtureと実providerでfull-turn smokeを1回行った。このrunは
+3-run中央値を置き換えるbenchmark sampleではなく、新しいartifact boundaryの受け入れ確認である。
+
+- field statusは`passed`。
+- transcript hashはcanonical値と一致し、期待hashも実hashもreportに含まれない。
+- `stackchan_get_status`は1回だけ成功し、tool bodyはreportに含まれない。
+- completed turn 1、failed/cancelled/late turn 0、playback sink open 1。
+- 3 chunkを同じplayback processで全て再生。
+- OpenTelemetry Logs/Metricsのconsecutive failureは0。
+- `tts_time_to_first_chunk`は955.701 ms、`pi_time_to_first_text`は8,738.186 ms、
+  `ptt_release_to_playback_start`は10,179.525 ms。
+
+証拠は`/tmp/pico-field-evidence-smoke.zEYgDi`に保存した。directoryは`0700`、`events.jsonl`、
+`report.json`、`stderr.txt`は`0600`である。shared stdoutは保存せず、`report.json`はfield harnessが
+直接作成した。JSON構造検査では`text`、`args`、`result`、`sessionId`、`toolCallId` fieldが存在せず、
+canonical transcript hashも存在しない。
+
+その後、validationとreportをprovider起動前に両方予約する最終修正を加え、同じ受け入れ確認を
+最終treeでも再実行した。`/tmp/pico-field-evidence-final.2YNmmF`のdirectoryは`0700`、3 fileは
+`0600`で、field statusは`passed`だった。`stackchan_get_status`は1回成功し、completed turn 1、
+failed/cancelled/late turn 0、playback sink open 1、2 chunk全再生、OpenTelemetry Logs/Metricsの
+consecutive failure 0を確認した。`stt`は189.083 ms、`pi_time_to_first_text`は6,635.979 ms、
+`tts_time_to_first_chunk`は1,132.153 ms、`ptt_release_to_playback_start`は8,251.147 msだった。
+reportの同じJSON構造検査も通過し、shared stdoutは保存していない。
 
 ## 残る検証範囲
 

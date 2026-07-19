@@ -239,9 +239,6 @@ export async function runResidentVoicePseudoAudioCommand(
       writeStdout(serialized);
     } else {
       artifact.write(serialized);
-      writeStdout(
-        `pico pseudo-audio ${report.status}; metadata report written to ${arguments_.reportOutputPath}\n`
-      );
     }
     return report.status === "passed" ? 0 : 1;
   } catch (error) {
@@ -297,7 +294,8 @@ git commit -m "feat(voice): write private field reports"
 ## Real-Provider Field Validation
 
 1. Run focused tests and type/lint checks while iterating.
-2. Run `just smoke-voice-providers` for Apple Speech and AivisSpeech reachability.
+2. Run `just smoke-voice-providers` for Apple Speech and AivisSpeech reachability. Require both
+   sections to have `status: passed`; stop when either section is `skipped` or `failed`.
 3. Run one strict full-turn pseudo-audio smoke with canonical fixture hash, required tool,
    private validation output, and `--report-output`.
 4. Do not benchmark until that report is `passed`.

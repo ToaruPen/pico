@@ -679,15 +679,17 @@ testと`just check`を再実行する。
 - [ ] **Step 4: 疑似音声をreal providerへ注入する**
 
 ```bash
+set -euo pipefail
 umask 077
 pico_validation_dir=$(mktemp -d /tmp/pico-tts-pipeline.XXXXXX)
 for pico_run in 1 2 3; do
   npm run field:resident-voice-pseudo-audio -- \
     --audio-fixture /tmp/pico-otel-stackchan-check-20260719.wav \
     --validation-output "$pico_validation_dir/events-$pico_run.jsonl" \
+    --report-output "$pico_validation_dir/report-$pico_run.json" \
     --required-tool-name stackchan_get_status \
     --expected-transcript-sha256 a4704845dc50a8c392ce82e6b9544e88f3a79b65543ed23320bfd147ae23d266 \
-    --timeout-ms 120000 | tee "$pico_validation_dir/report-$pico_run.txt"
+    --timeout-ms 120000
 done
 ```
 
@@ -702,6 +704,8 @@ Expected:
 - `ptt_release_to_playback_start`の中央値が12,792.912 ms baselineより1,000 ms以上短い。Pi TTFTも
   併記し、モデル側の変動とPico側の短縮を混同しない。
 - playback childは1つで、health failureは0。
+- `report-*.json`はfield harnessが直接作成したmetadata-onlyな`0600` fileであり、shared stdoutを
+  証拠として使用しない。
 
 - [ ] **Step 5: field結果を研究記録へ固定する**
 
