@@ -48,6 +48,8 @@ type PipelineState = {
   deferredRequest?: { readonly status: VoiceStageStatus; readonly errorCode: string };
   pendingPull: Promise<Settlement<TimedPull>> | undefined;
   iteratorCleanup?: Promise<void>;
+  activeEchoFlush?: Promise<Settlement<void>>;
+  echoCleanup?: Promise<void>;
 };
 
 type TimedPull = {
@@ -90,9 +92,10 @@ export async function runTtsPlaybackPipeline(
     deferRequest(state, "error", "tts_pipeline_failed");
   }
 
-  await cleanUpIterator(state);
+  const result = execution.ok ? execution.value : failedResult(state, "tts_pipeline_failed");
+  await cleanUpIterator(state, result.status === "completed" || result.status === "empty");
   options.signal.removeEventListener("abort", forwardAbort);
-  return execution.ok ? execution.value : failedResult(state, "tts_pipeline_failed");
+  return result;
 }
 
 async function executePipeline(state: PipelineState): Promise<TtsPlaybackPipelineResult> {
@@ -183,12 +186,11 @@ async function submitChunk(
     }
   }
 
-  const echoSettlement = await awaitWithAbort(
-    registerEchoReference(state, chunk),
-    state.producerController.signal
-  );
+  const echoRegistration = registerEchoReference(state, chunk);
+  const ownedEchoRegistration = settle(echoRegistration);
+  const echoSettlement = await awaitWithAbort(echoRegistration, state.producerController.signal);
   if (isAborted(echoSettlement)) {
-    return convergeCancellation(state);
+    return convergeCancellationDuringEcho(state, ownedEchoRegistration);
   }
   if (!echoSettlement.ok) {
     return convergePlaybackFailure(state, "echo_control_failed");
@@ -350,10 +352,42 @@ async function convergePlaybackFailure(
 
 async function stopAndFlush(state: PipelineState): Promise<void> {
   state.stopSettlement ??= settle(Promise.resolve().then(() => state.options.playback.stop()));
-  await Promise.all([
-    state.stopSettlement,
-    settle(Promise.resolve().then(() => state.options.echoControl.flush()))
+  const echoFlush = settle(Promise.resolve().then(() => state.options.echoControl.flush()));
+  state.activeEchoFlush = echoFlush;
+  await Promise.all([state.stopSettlement, echoFlush]);
+}
+
+async function convergeCancellationDuringEcho(
+  state: PipelineState,
+  echoRegistration: Promise<Settlement<void>>
+): Promise<TtsPlaybackPipelineResult> {
+  const cancellation = convergeCancellation(state);
+  const echoFlush = state.activeEchoFlush;
+  if (echoFlush === undefined) {
+    return cancellation;
+  }
+
+  const firstSettlement = await Promise.race([
+    echoRegistration.then((registration) => ({ owner: "echo" as const, registration })),
+    echoFlush.then(() => ({ owner: "flush" as const }))
   ]);
+  const result = await cancellation;
+  if (firstSettlement.owner === "flush") {
+    scheduleCompensatingEchoFlush(state, echoRegistration);
+  }
+  return result;
+}
+
+function scheduleCompensatingEchoFlush(
+  state: PipelineState,
+  echoRegistration: Promise<Settlement<void>>
+): void {
+  const cleanup = echoRegistration.then(async (registration) => {
+    if (registration.ok) {
+      await settle(Promise.resolve().then(() => state.options.echoControl.flush()));
+    }
+  });
+  state.echoCleanup = settle(cleanup).then(() => undefined);
 }
 
 function abortProducer(state: PipelineState): void {
@@ -474,9 +508,9 @@ function pullNext(
   iterator: AsyncIterator<TtsSynthesisEvent>,
   monotonicNow: () => number
 ): Promise<TimedPull> {
-  return Promise.resolve()
-    .then(() => iterator.next())
-    .then((result) => ({ result, settledAtMs: monotonicNow() }));
+  return new Promise<IteratorResult<TtsSynthesisEvent>>((resolve) => resolve(iterator.next())).then(
+    (result) => ({ result, settledAtMs: monotonicNow() })
+  );
 }
 
 async function registerEchoReference(state: PipelineState, chunk: TtsAudioChunk): Promise<void> {
@@ -529,10 +563,14 @@ function settle<T>(promise: Promise<T>): Promise<Settlement<T>> {
   );
 }
 
-async function cleanUpIterator(state: PipelineState): Promise<void> {
+async function cleanUpIterator(state: PipelineState, waitForCleanup: boolean): Promise<void> {
   if (state.pendingPull === undefined) {
-    await closeIterator(state.iterator);
-    settleDeferredRequest(state);
+    const cleanup = closeIterator(state.iterator).then(() => settleDeferredRequest(state));
+    if (waitForCleanup) {
+      await cleanup;
+    } else {
+      state.iteratorCleanup = settle(cleanup).then(() => undefined);
+    }
     return;
   }
 

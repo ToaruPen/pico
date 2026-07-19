@@ -67,6 +67,38 @@ describe("TTS playback pipeline", () => {
     expect(pullCount).toBe(3);
   });
 
+  it("invokes every lookahead pull before registering the current echo reference", async () => {
+    const order: string[] = [];
+    const events = [chunkEvent(0), chunkEvent(1), completedEvent(2)] as const;
+    let eventIndex = 0;
+    const tts = ttsFromIterator({
+      next: () => {
+        order.push(eventIndex === 2 ? "pull-terminal" : `pull-${String(eventIndex)}`);
+        const value = requireSynthesisEvent(events[eventIndex]);
+        eventIndex += 1;
+        return Promise.resolve({ done: false, value });
+      }
+    });
+    const echo = recordingEcho({ onAccept: (frame) => order.push(`echo-${frame.id}`) });
+    const playback = recordingPlayback({
+      onWrite: (chunk) => {
+        order.push(`write-${String(chunk.sentenceIndex)}`);
+      }
+    });
+
+    await runTtsPlaybackPipeline(pipelineInput({ tts, playback, echoControl: echo.provider }));
+
+    expect(order).toEqual([
+      "pull-0",
+      "pull-1",
+      "echo-tts-0",
+      "write-0",
+      "pull-terminal",
+      "echo-tts-1",
+      "write-1"
+    ]);
+  });
+
   it("opens one session, writes chunks in order, and awaits playback completion", async () => {
     const finishGate = createSignalGate();
     const playback = recordingPlayback({ onFinish: () => finishGate.promise });
@@ -239,6 +271,33 @@ describe("TTS playback pipeline", () => {
     expect(playback.state.stops).toBe(1);
     expect(echo.state.flushes).toBe(1);
     writeGate.resolve();
+  });
+
+  it("flushes a late echo reference that completes after cancellation", async () => {
+    const controller = new AbortController();
+    const acceptGate = createSignalGate();
+    const echo = delayedEcho(acceptGate.promise);
+    const playback = recordingPlayback();
+    const running = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+        playback,
+        echoControl: echo.provider,
+        signal: controller.signal
+      })
+    );
+    await vi.waitFor(() => expect(echo.state.acceptStarts).toBe(1));
+
+    controller.abort(new Error("cancelled"));
+
+    await expect(running).resolves.toEqual({ status: "cancelled", playedChunkCount: 0 });
+    expect(playback.state.writes).toHaveLength(0);
+    expect(echo.state.flushes).toBe(1);
+
+    acceptGate.resolve();
+    await vi.waitFor(() => expect(echo.state.acceptCompletions).toBe(1));
+    expect(echo.state.references).toEqual([]);
+    expect(echo.state.flushes).toBe(2);
   });
 
   it("does not wait for an abort-insensitive lookahead after stopping playback", async () => {
@@ -480,6 +539,30 @@ describe("TTS playback pipeline", () => {
         ?.attributes["pico.voice.stage_duration_ms"]
     ).toBe(100);
   });
+
+  it("does not wait for an abort-insensitive iterator return after playback failure", async () => {
+    const returnGate = createSignalGate();
+    const events = [chunkEvent(0), completedEvent(1)] as const;
+    let eventIndex = 0;
+    const tts = ttsFromIterator({
+      next: () => {
+        const value = requireSynthesisEvent(events[eventIndex]);
+        eventIndex += 1;
+        return Promise.resolve({ done: false, value });
+      },
+      return: () => returnGate.promise.then(() => ({ done: true, value: undefined }))
+    });
+    const playback = recordingPlayback({ finishError: new Error("finish failed") });
+    const running = runTtsPlaybackPipeline(pipelineInput({ tts, playback }));
+
+    await expect(
+      Promise.race([
+        running,
+        new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), 25))
+      ])
+    ).resolves.toMatchObject({ status: "failed", errorCode: "playback_finish_failed" });
+    returnGate.resolve();
+  });
 });
 
 function chunkEvent(
@@ -540,6 +623,21 @@ function ttsFromArray(events: readonly TtsSynthesisEvent[]): TtsClient {
     await Promise.resolve();
     yield* events;
   });
+}
+
+function ttsFromIterator(iterator: AsyncIterator<TtsSynthesisEvent>): TtsClient {
+  return {
+    synthesize: () => ({
+      [Symbol.asyncIterator]: () => iterator
+    })
+  };
+}
+
+function requireSynthesisEvent(event: TtsSynthesisEvent | undefined): TtsSynthesisEvent {
+  if (event === undefined) {
+    throw new Error("test TTS event is required");
+  }
+  return event;
 }
 
 function recordingPlayback(
@@ -657,6 +755,58 @@ function recordingEcho(
           }
         }),
       flush: () => {
+        state.flushes += 1;
+        return Promise.resolve();
+      }
+    },
+    state
+  };
+}
+
+function delayedEcho(accept: Promise<void>): {
+  readonly provider: EchoControlProvider;
+  readonly state: {
+    readonly references: VoicePcmFrame[];
+    acceptStarts: number;
+    acceptCompletions: number;
+    flushes: number;
+  };
+} {
+  const state = {
+    references: [] as VoicePcmFrame[],
+    acceptStarts: 0,
+    acceptCompletions: 0,
+    flushes: 0
+  };
+  return {
+    provider: {
+      describe: () => ({ provider: "half_duplex", mode: "half_duplex" }),
+      checkHealth: () =>
+        Promise.resolve({
+          ok: true,
+          provider: "half_duplex",
+          mode: "half_duplex",
+          engine: "test"
+        }),
+      acceptFarEndReference: async (frame) => {
+        state.acceptStarts += 1;
+        await accept;
+        state.references.push(frame);
+        state.acceptCompletions += 1;
+      },
+      processNearEnd: (frame) =>
+        Promise.resolve({
+          action: "pass",
+          reason: "no_far_end_tail",
+          frame,
+          diagnostics: {
+            provider: "half_duplex",
+            residualEchoProbability: 0,
+            voiceActivity: false
+          }
+        }),
+      flush: () => {
+        state.references.length = 0;
         state.flushes += 1;
         return Promise.resolve();
       }
