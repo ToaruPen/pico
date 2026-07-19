@@ -29,7 +29,11 @@ import {
 import { createDeferredToolCoordinator } from "./deferred-tool-coordinator.js";
 import { type MacOSControlBridge, startMacOSControlBridge } from "./macos-control-bridge.js";
 import type { PiAgentTurnClientOptions } from "./pi-agent-turn.js";
-import { createResidentAudioCapture, createResidentPlaybackSink } from "./resident-audio-io.js";
+import { createResidentAudioCapture } from "./resident-audio-io.js";
+import {
+  createResidentAudioOutputPlan,
+  createResidentContinuousPlaybackSink
+} from "./resident-audio-playback.js";
 import {
   createLoopbackHttpResidentControlServer,
   type ResidentControlHandler,
@@ -169,7 +173,7 @@ export async function runResidentVoiceWithProviders(input: {
     const control = requireResidentControlConfig(config);
     const audioCapture = createResidentAudioCapture(config);
     const echoControl = createConfiguredEchoControl(config);
-    const playback = createResidentPlaybackSink(config);
+    const playback = createResidentContinuousPlaybackSink(createResidentAudioOutputPlan(config));
     const piAgent = resolveResidentPiAgent(input.piAgent, input.createPiAgent, {
       cwd: process.cwd(),
       deferredTools: {

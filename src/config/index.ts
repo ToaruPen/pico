@@ -263,7 +263,7 @@ export type PicoResidentAudioOutputConfig =
       readonly device: string;
     }
   | {
-      readonly provider: "afplay";
+      readonly provider: "ffplay";
       readonly route: "system_default";
     };
 
@@ -957,7 +957,7 @@ function defineResidentAudioOutput(input: Record<string, unknown>): PicoResident
     };
   }
 
-  if (provider === "afplay") {
+  if (provider === "ffplay") {
     const route = requireString(input.route, "pico config voice.resident.audioOutput.route");
 
     if (route !== "system_default") {
@@ -967,7 +967,7 @@ function defineResidentAudioOutput(input: Record<string, unknown>): PicoResident
     return { provider, route };
   }
 
-  throw new Error("pico config voice.resident.audioOutput.provider must be alsa or afplay");
+  throw new Error("pico config voice.resident.audioOutput.provider must be alsa or ffplay");
 }
 
 function defineVoiceProbeConfig(input: Record<string, unknown> | undefined): PicoVoiceProbeConfig {

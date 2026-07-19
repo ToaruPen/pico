@@ -278,7 +278,7 @@ voice:
       provider: avfoundation
       device: ':0'
     audioOutput:
-      provider: afplay
+      provider: ffplay
       route: system_default
     singleInstanceLockPath: tmp/pico-custom-resident.lock
     shutdownGraceMs: 3000
@@ -402,7 +402,7 @@ telemetry:
             device: ":0"
           },
           audioOutput: {
-            provider: "afplay",
+            provider: "ffplay",
             route: "system_default"
           },
           singleInstanceLockPath: join(dirname(path), "tmp/pico-custom-resident.lock"),
@@ -472,6 +472,20 @@ telemetry:
         }
       }
     });
+  });
+
+  it("rejects the removed afplay resident audio output provider", () => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          resident: {
+            enabled: true,
+            audioInput: { provider: "avfoundation", device: ":0" },
+            audioOutput: { provider: "afplay", route: "system_default" }
+          }
+        }
+      })
+    ).toThrow("pico config voice.resident.audioOutput.provider must be alsa or ffplay");
   });
 
   it("defaults session ending to one timed minute", () => {

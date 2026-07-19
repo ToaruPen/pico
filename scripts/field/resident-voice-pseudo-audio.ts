@@ -8,10 +8,11 @@ import type { AuditEvent } from "../../src/modules/audit/index.js";
 import { createSessionLifecycle } from "../../src/modules/session/index.js";
 import type { PicoTelemetry, TelemetryHealthSnapshot } from "../../src/modules/telemetry/index.js";
 import { createPiAgentTurnClient } from "../../src/runtime/pi-agent-turn.js";
+import type { ResidentAudioCapture } from "../../src/runtime/resident-audio-io.js";
 import {
-  createResidentPlaybackSink,
-  type ResidentAudioCapture
-} from "../../src/runtime/resident-audio-io.js";
+  createResidentAudioOutputPlan,
+  createResidentContinuousPlaybackSink
+} from "../../src/runtime/resident-audio-playback.js";
 import { createResidentVoiceAuditLog } from "../../src/runtime/resident-voice-audit-log.js";
 import {
   assertResidentVoiceStartupReadiness,
@@ -344,7 +345,7 @@ async function executeResidentVoicePseudoAudio(input: {
       speechActivity: await createConfiguredSpeechActivityGate(config),
       stt: createConfiguredStt(config),
       tts: createConfiguredTts(config),
-      playback: createResidentPlaybackSink(config),
+      playback: createResidentContinuousPlaybackSink(createResidentAudioOutputPlan(config)),
       piAgent,
       farewell: { enabled: false },
       probe: { audit },

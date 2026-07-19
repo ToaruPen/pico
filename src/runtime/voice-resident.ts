@@ -4,12 +4,7 @@ import {
   type EchoControlProvider,
   type VoicePcmFrame
 } from "../modules/voice/echo-control.js";
-import {
-  collectTtsSynthesisEvents,
-  type SttClient,
-  type TtsAudioChunk,
-  type TtsClient
-} from "../modules/voice/index.js";
+import type { SttClient, TtsClient } from "../modules/voice/index.js";
 import type { DeferredToolDeliverableResult } from "./deferred-tool-coordinator.js";
 import type { ResidentAudioCapture, ResidentCaptureSession } from "./resident-audio-io.js";
 import type { ResidentControlEvent, ResidentControlResult } from "./resident-control.js";
@@ -22,13 +17,9 @@ import {
 } from "./resident-control-controller.js";
 import type { ResidentVoiceValidationSink } from "./resident-voice-validation.js";
 import type { SpeechActivityGate } from "./speech-activity-gate.js";
+import { runTtsPlaybackPipeline, type TtsPlaybackPipelineResult } from "./tts-playback-pipeline.js";
+import type { VoicePlaybackSink } from "./voice-playback.js";
 import { recordVoiceStageProbe, type VoiceStageProbe } from "./voice-stage-probe.js";
-
-export type VoicePlaybackSink = {
-  readonly play: (chunk: TtsAudioChunk, startedAt: string, signal?: AbortSignal) => Promise<void>;
-  readonly stop: () => Promise<void>;
-  readonly close: () => Promise<void>;
-};
 
 export type PiAgentTurnClient = {
   readonly prompt: (input: {
@@ -250,7 +241,7 @@ export function createVoiceResidentRuntime(
           }
         });
     },
-    onCancel(generation) {
+    onCancel(generation, cancelledState) {
       const turn = currentTurn(activeTurn, generation.id);
 
       if (turn === undefined || turn.cancellation !== undefined) {
@@ -259,7 +250,12 @@ export function createVoiceResidentRuntime(
 
       counters.cancelledTurns += 1;
       settlePttReleaseMeasurement(turn, options, "skipped", monotonicNow, "cancelled");
-      turn.cancellation = convergeCancellation(turn, controller, options).then(() => {
+      turn.cancellation = convergeCancellation(
+        turn,
+        controller,
+        options,
+        cancelledState === "synthesizing" || cancelledState === "speaking"
+      ).then(() => {
         if (activeTurn === turn) {
           activeTurn = undefined;
         }
@@ -267,7 +263,7 @@ export function createVoiceResidentRuntime(
       turn.cancellation.catch((error: unknown) => failRuntime(error, generation.id));
     }
   });
-  const cancelInteractionEnding = (stopPlayback: boolean): boolean => {
+  const cancelInteractionEnding = (): boolean => {
     const ending = activeInteractionEnding;
 
     if (ending === undefined || ending.abortController.signal.aborted) {
@@ -275,11 +271,6 @@ export function createVoiceResidentRuntime(
     }
 
     ending.abortController.abort(new Error("pico resident interaction ending cancelled"));
-
-    if (stopPlayback) {
-      ending.cancellation = convergeInteractionEndingCancellation(options);
-      void ending.cancellation.catch(() => undefined);
-    }
 
     return true;
   };
@@ -355,7 +346,7 @@ export function createVoiceResidentRuntime(
 
     shutdownStarted = true;
     options.signal?.removeEventListener("abort", stopFromSignal);
-    cancelInteractionEnding(true);
+    cancelInteractionEnding();
     const turn = activeTurn;
 
     if (turn !== undefined && isCancellableControlState(controller.state())) {
@@ -420,7 +411,7 @@ export function createVoiceResidentRuntime(
     const result = controller.handle(event);
     recordAcceptedPttRelease(event, result, activeTurn, monotonicNow);
 
-    if (acceptInteractionEndingCancel(event, result, cancelInteractionEnding)) {
+    if (acceptInteractionEndingCancel(event, cancelInteractionEnding)) {
       return "accepted";
     }
 
@@ -468,10 +459,9 @@ function recordAcceptedPttRelease(
 
 function acceptInteractionEndingCancel(
   event: ResidentControlEvent,
-  controlResult: ResidentControlResult,
-  cancel: (stopPlayback: boolean) => boolean
+  cancel: () => boolean
 ): boolean {
-  return event.kind === "cancel_pressed" && cancel(controlResult !== "accepted");
+  return event.kind === "cancel_pressed" && cancel();
 }
 
 async function collectCaptureFrames(
@@ -628,54 +618,81 @@ async function processCompletedHoldWork(
     return;
   }
 
-  const synthesis = await requestTts(
-    response.text,
-    turn.generation.signal,
+  const playback = await runTtsPlaybackPipeline({
+    text: response.text,
+    signal: turn.generation.signal,
+    tts: options.tts,
+    playback: options.playback,
+    echoControl: options.echoControl,
+    ...(options.probe === undefined ? {} : { probe: options.probe }),
+    now: state.now,
+    monotonicNow: state.monotonicNow,
+    onFirstPlaybackStart: () => {
+      if (
+        controller.generation()?.id !== turn.generation.id ||
+        controller.state() !== "synthesizing"
+      ) {
+        return false;
+      }
+      if (!controller.advance(turn.generation.id, "synthesizing", "speaking")) {
+        return false;
+      }
+      settlePttReleaseMeasurement(turn, options, "ok", state.monotonicNow);
+      return true;
+    }
+  });
+
+  settleCompletedTurn(
+    playback,
+    turn.generation.id,
+    controller,
     options,
     counters,
-    state.now,
-    state.monotonicNow
+    sessionId,
+    deferredResults
   );
+}
 
-  if (!isCurrentStage(controller, turn.generation.id, "synthesizing", counters)) {
+function settleCompletedTurn(
+  result: TtsPlaybackPipelineResult,
+  generationId: number,
+  controller: ResidentControlController,
+  options: VoiceResidentRuntimeOptions,
+  counters: RuntimeCounters,
+  sessionId: string,
+  deferredResults: readonly DeferredToolDeliverableResult[]
+): void {
+  const state = currentPlaybackState(controller, generationId);
+  if (state === undefined) {
     return;
   }
 
-  if (synthesis === undefined || synthesis.length === 0) {
-    finishCurrentTurn(controller, turn.generation.id, "synthesizing", counters);
-    return;
+  switch (result.status) {
+    case "completed":
+      acknowledgeDeferredResults(options, deferredResults);
+      refreshSession(options.sessionLifecycle, sessionId);
+      counters.completedTurns += 1;
+      break;
+    case "failed":
+      counters.failedTurns += 1;
+      break;
+    case "cancelled":
+    case "empty":
+      break;
   }
 
-  if (!controller.advance(turn.generation.id, "synthesizing", "speaking")) {
-    counters.lateResultsSuppressed += 1;
-    return;
+  controller.finish(generationId, state);
+}
+
+function currentPlaybackState(
+  controller: ResidentControlController,
+  generationId: number
+): "synthesizing" | "speaking" | undefined {
+  if (controller.generation()?.id !== generationId) {
+    return undefined;
   }
-
-  const played = await playTurnChunks(
-    synthesis,
-    turn.generation.signal,
-    options,
-    state.now,
-    state.monotonicNow,
-    () => settlePttReleaseMeasurement(turn, options, "ok", state.monotonicNow)
-  );
-
-  if (!isCurrentStage(controller, turn.generation.id, "speaking", counters)) {
-    return;
-  }
-
-  if (!played) {
-    counters.failedTurns += 1;
-    await options.playback.stop();
-    await options.echoControl.flush();
-    finishCurrentTurn(controller, turn.generation.id, "speaking", counters);
-    return;
-  }
-
-  acknowledgeDeferredResults(options, deferredResults);
-  refreshSession(options.sessionLifecycle, sessionId);
-  counters.completedTurns += 1;
-  finishCurrentTurn(controller, turn.generation.id, "speaking", counters);
+  const state = controller.state();
+  return state === "synthesizing" || state === "speaking" ? state : undefined;
 }
 
 // Frame admission keeps echo suppression, optional VAD, and audio retention in one pass.
@@ -846,200 +863,6 @@ async function requestPiTurn(
   }
 }
 
-async function requestTts(
-  text: string,
-  signal: AbortSignal | undefined,
-  options: VoiceResidentRuntimeOptions,
-  counters: RuntimeCounters,
-  now: () => string,
-  monotonicNow: () => number
-): Promise<readonly TtsAudioChunk[] | undefined> {
-  const startedAt = now();
-  const startedAtMs = monotonicNow();
-
-  try {
-    const result = await collectTtsSynthesisEvents(
-      options.tts.synthesize({
-        text,
-        ...(signal === undefined ? {} : { signal })
-      })
-    );
-
-    if (isAbortRequested(signal)) {
-      recordTtsRequestFailure(
-        true,
-        "cancelled",
-        options,
-        counters,
-        startedAt,
-        startedAtMs,
-        monotonicNow
-      );
-      return undefined;
-    }
-
-    if (!result.ok) {
-      recordTtsRequestFailure(
-        result.reason === "cancelled",
-        result.reason,
-        options,
-        counters,
-        startedAt,
-        startedAtMs,
-        monotonicNow
-      );
-      return undefined;
-    }
-
-    recordStage(
-      options,
-      "tts_request_wall",
-      "ok",
-      startedAt,
-      Math.max(0, monotonicNow() - startedAtMs),
-      {
-        "pico.voice.utterance_duration_ms": result.totalDurationMs,
-        "pico.voice.chunk_count": result.chunks.length
-      }
-    );
-    return result.chunks;
-  } catch {
-    const cancelled = isAbortRequested(signal);
-    recordTtsRequestFailure(
-      cancelled,
-      cancelled ? "cancelled" : "tts_request_failed",
-      options,
-      counters,
-      startedAt,
-      startedAtMs,
-      monotonicNow
-    );
-    return undefined;
-  }
-}
-
-function recordTtsRequestFailure(
-  cancelled: boolean,
-  errorCode: string,
-  options: VoiceResidentRuntimeOptions,
-  counters: RuntimeCounters,
-  startedAt: string,
-  startedAtMs: number,
-  monotonicNow: () => number
-): void {
-  if (!cancelled) {
-    counters.failedTurns += 1;
-  }
-
-  recordStage(
-    options,
-    "tts_request_wall",
-    cancelled ? "skipped" : "error",
-    startedAt,
-    Math.max(0, monotonicNow() - startedAtMs),
-    { "pico.voice.error_code": errorCode }
-  );
-}
-
-// Abort checks intentionally bracket every awaited playback boundary.
-// eslint-disable-next-line complexity
-async function playTurnChunks(
-  chunks: readonly TtsAudioChunk[],
-  signal: AbortSignal | undefined,
-  options: VoiceResidentRuntimeOptions,
-  now: () => string,
-  monotonicNow: () => number,
-  onFirstPlaybackStart?: () => void
-): Promise<boolean> {
-  let offsetMs = 0;
-  const playbackSignal = signal ?? new AbortController().signal;
-  const playbackStartedAt = now();
-  const playbackStartedAtMs = monotonicNow();
-  const attributes = {
-    "pico.voice.utterance_duration_ms": chunks.reduce(
-      (durationMs, chunk) => durationMs + chunk.durationMs,
-      0
-    ),
-    "pico.voice.chunk_count": chunks.length
-  };
-  let playbackStarted = false;
-  const finishPlayback = (
-    status: Parameters<typeof recordStage>[2],
-    errorCode?: string
-  ): boolean => {
-    recordStage(
-      options,
-      "tts_playback",
-      status,
-      playbackStartedAt,
-      Math.max(0, monotonicNow() - playbackStartedAtMs),
-      {
-        ...attributes,
-        ...(errorCode === undefined ? {} : { "pico.voice.error_code": errorCode })
-      }
-    );
-    return status === "ok";
-  };
-
-  try {
-    for (const chunk of chunks) {
-      if (isAbortRequested(signal)) {
-        return finishPlayback("skipped", "cancelled");
-      }
-
-      const chunkStartedAt = addMilliseconds(playbackStartedAt, offsetMs);
-      const echoRegistration = await options.echoControl.acceptFarEndReference(
-        defineVoicePcmFrame({
-          id: `tts-${String(chunk.sentenceIndex)}`,
-          direction: "far_end",
-          audio: chunk.audio,
-          encoding: chunk.encoding,
-          sampleRateHz: chunk.sampleRateHz,
-          channels: chunk.channels,
-          capturedAt: chunkStartedAt,
-          durationMs: chunk.durationMs
-        }),
-        playbackSignal
-      );
-      if (echoRegistration.status !== "applied") {
-        throw echoRegistration.error;
-      }
-
-      if (isAbortRequested(signal)) {
-        await requireEchoControlReset(options.echoControl);
-        return finishPlayback("skipped", "cancelled");
-      }
-
-      if (!playbackStarted) {
-        playbackStarted = true;
-        onFirstPlaybackStart?.();
-      }
-
-      await options.playback.play(chunk, chunkStartedAt, signal);
-
-      if (isAbortRequested(signal)) {
-        return finishPlayback("skipped", "cancelled");
-      }
-
-      offsetMs += chunk.durationMs;
-    }
-
-    return finishPlayback("ok");
-  } catch {
-    return finishPlayback(
-      isAbortRequested(signal) ? "skipped" : "error",
-      isAbortRequested(signal) ? "cancelled" : "playback_failed"
-    );
-  }
-}
-
-async function requireEchoControlReset(echoControl: EchoControlProvider): Promise<void> {
-  const reset = await echoControl.flush();
-  if (reset.status !== "reset") {
-    throw new Error("pico echo-control reset is required before cancelling playback");
-  }
-}
-
 function isCancellableControlState(state: ResidentControlState): boolean {
   return state !== "idle" && state !== "cancelling" && state !== "error" && state !== "stopped";
 }
@@ -1110,17 +933,6 @@ function cancelDeferredAfterInteraction(
   });
 }
 
-async function convergeInteractionEndingCancellation(
-  options: VoiceResidentRuntimeOptions
-): Promise<void> {
-  const results = await Promise.allSettled([options.playback.stop(), options.echoControl.flush()]);
-  const rejected = findRejected(results);
-
-  if (rejected !== undefined) {
-    throw asError(rejected.reason);
-  }
-}
-
 async function runInteractionFarewell(
   sessionId: string,
   signal: AbortSignal,
@@ -1144,31 +956,31 @@ async function runInteractionFarewell(
     return;
   }
 
-  const synthesis = await requestTts(response.text, signal, options, counters, now, monotonicNow);
-
-  await playFarewellSynthesis(synthesis, signal, options, counters, now, monotonicNow);
+  await runFarewellPlayback(response.text, signal, options, counters, now, monotonicNow);
 }
 
-async function playFarewellSynthesis(
-  synthesis: readonly TtsAudioChunk[] | undefined,
+async function runFarewellPlayback(
+  text: string,
   signal: AbortSignal,
   options: VoiceResidentRuntimeOptions,
   counters: RuntimeCounters,
   now: () => string,
   monotonicNow: () => number
 ): Promise<void> {
-  if (synthesis === undefined || synthesis.length === 0 || isAbortRequested(signal)) {
-    return;
+  const result = await runTtsPlaybackPipeline({
+    text,
+    signal,
+    tts: options.tts,
+    playback: options.playback,
+    echoControl: options.echoControl,
+    ...(options.probe === undefined ? {} : { probe: options.probe }),
+    now,
+    monotonicNow
+  });
+
+  if (result.status === "failed") {
+    counters.failedTurns += 1;
   }
-
-  const played = await playTurnChunks(synthesis, signal, options, now, monotonicNow);
-
-  if (played || isAbortRequested(signal)) {
-    return;
-  }
-
-  counters.failedTurns += 1;
-  await Promise.allSettled([options.playback.stop(), options.echoControl.flush()]);
 }
 
 function isAbortRequested(signal: AbortSignal | undefined): boolean {
@@ -1214,12 +1026,18 @@ function recordPiTurnSettlement(
 async function convergeCancellation(
   turn: ActiveTurn,
   controller: ResidentControlController,
-  options: VoiceResidentRuntimeOptions
+  options: VoiceResidentRuntimeOptions,
+  pipelineOwnsPlayback: boolean
 ): Promise<void> {
-  const stops = await Promise.allSettled([turn.capture.stop(), options.playback.stop()]);
+  const stops = await Promise.allSettled([
+    turn.capture.stop(),
+    ...(pipelineOwnsPlayback ? [] : [options.playback.stop()])
+  ]);
   await turn.frameCollection.catch(() => undefined);
   await turn.operation?.catch(() => undefined);
-  await options.echoControl.flush();
+  if (!pipelineOwnsPlayback) {
+    await options.echoControl.flush();
+  }
   const rejected = findRejected(stops);
 
   if (rejected !== undefined) {
@@ -1458,8 +1276,4 @@ function settlePttReleaseMeasurement(
     Math.max(0, monotonicNow() - measurement.startedAtMs),
     errorCode === undefined ? undefined : { "pico.voice.error_code": errorCode }
   );
-}
-
-function addMilliseconds(timestamp: string, milliseconds: number): string {
-  return new Date(Date.parse(timestamp) + milliseconds).toISOString();
 }

@@ -78,7 +78,7 @@ voice:
       provider: avfoundation
       device: ':0'
     audioOutput:
-      provider: afplay
+      provider: ffplay
       route: system_default
     # Raspberry Pi / Linux resident runtime:
     # audioInput:

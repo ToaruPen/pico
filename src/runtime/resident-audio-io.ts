@@ -1,13 +1,8 @@
 import { type ChildProcessByStdio, spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 
 import type { PicoConfig } from "../config/index.js";
 import type { VoicePcmFrame } from "../modules/voice/echo-control.js";
-import type { TtsAudioChunk } from "../modules/voice/index.js";
-import type { VoicePlaybackSink } from "./voice-resident.js";
 
 type Platform = NodeJS.Platform;
 const audioProcessTerminationGraceMs = 1_000;
@@ -50,18 +45,6 @@ export type ResidentAudioInputPlan =
       readonly frameIdPrefix: "avfoundation-mic";
     };
 
-export type ResidentAudioOutputPlan =
-  | {
-      readonly provider: "alsa";
-      readonly command: "aplay";
-      readonly device: string;
-    }
-  | {
-      readonly provider: "afplay";
-      readonly command: "afplay";
-      readonly route: "system_default";
-    };
-
 export type ResidentCaptureSession = {
   readonly frames: AsyncIterable<VoicePcmFrame>;
   readonly stop: () => Promise<void>;
@@ -76,20 +59,9 @@ type SpawnAudioProcess = (
   command: string,
   arguments_: readonly string[],
   options: {
-    readonly stdio: ["ignore", "pipe", "inherit"] | ["pipe", "ignore", "inherit"];
+    readonly stdio: ["ignore", "pipe", "inherit"];
   }
 ) => ChildProcessByStdio<Writable | null, Readable | null, null>;
-
-type OwnedPlayback = {
-  readonly abortController: AbortController;
-  child: ReturnType<SpawnAudioProcess> | undefined;
-  childCompletion: Promise<void> | undefined;
-  terminalize: ((error: Error) => void) | undefined;
-  releaseOwnership: (() => void) | undefined;
-  terminationRequested: boolean;
-  completion: Promise<void> | undefined;
-  stopOperation: Promise<void> | undefined;
-};
 
 export function createResidentAudioInputPlan(
   config: PicoConfig,
@@ -151,34 +123,9 @@ export function createResidentAudioInputPlan(
   };
 }
 
-export function createResidentAudioOutputPlan(
-  config: PicoConfig,
-  platform: Platform = process.platform
-): ResidentAudioOutputPlan {
-  const output = requireAudioOutputConfig(config);
-
-  if (output.provider === "alsa") {
-    requirePlatform(platform, "linux", "pico resident voice ALSA output requires Linux");
-
-    return {
-      provider: "alsa",
-      command: "aplay",
-      device: output.device
-    };
-  }
-
-  requirePlatform(platform, "darwin", "pico resident voice afplay output requires macOS");
-
-  return {
-    provider: "afplay",
-    command: "afplay",
-    route: output.route
-  };
-}
-
 export function createResidentAudioCapture(
   config: PicoConfig,
-  spawnAudioProcess: SpawnAudioProcess = spawn as SpawnAudioProcess,
+  spawnAudioProcess: SpawnAudioProcess = spawn,
   platform: Platform = process.platform,
   now: () => string = defaultNow
 ): ResidentAudioCapture {
@@ -220,7 +167,7 @@ export function createResidentAudioCapture(
 export async function measureResidentAudioInputLevel(
   config: PicoConfig,
   options: ResidentAudioInputLevelOptions,
-  spawnAudioProcess: SpawnAudioProcess = spawn as SpawnAudioProcess,
+  spawnAudioProcess: SpawnAudioProcess = spawn,
   platform: Platform = process.platform
 ): Promise<ResidentAudioInputLevel> {
   const captureMs = requirePositiveInteger(options.captureMs, "resident audio captureMs");
@@ -261,138 +208,6 @@ export function measurePcm16leAudioLevel(
   accumulator.accept(audio);
 
   return accumulator.measure();
-}
-
-export function createResidentPlaybackSink(
-  config: PicoConfig,
-  spawnAudioProcess: SpawnAudioProcess = spawn as SpawnAudioProcess,
-  platform: Platform = process.platform
-): VoicePlaybackSink {
-  const plan = createResidentAudioOutputPlan(config, platform);
-  let active: OwnedPlayback | undefined;
-
-  const stopActive = (): Promise<void> => {
-    const owned = active;
-
-    if (owned === undefined) {
-      return Promise.resolve();
-    }
-
-    if (owned.stopOperation !== undefined) {
-      return owned.stopOperation;
-    }
-
-    owned.abortController.abort();
-    const completion = owned.childCompletion ?? owned.completion ?? Promise.resolve();
-    owned.stopOperation = stopAudioProcess(
-      () => owned.child,
-      completion,
-      `pico resident voice ${plan.provider} output`
-    ).catch((error: unknown) => {
-      const stopError = error instanceof Error ? error : new Error(String(error));
-      owned.terminalize?.(stopError);
-      owned.releaseOwnership?.();
-      throw stopError;
-    });
-    return owned.stopOperation;
-  };
-
-  return {
-    async play(chunk, _startedAt, signal) {
-      if (active !== undefined) {
-        throw new Error("pico resident voice playback is already active");
-      }
-
-      const abortController = new AbortController();
-      const owned: OwnedPlayback = {
-        abortController,
-        child: undefined,
-        childCompletion: undefined,
-        terminalize: undefined,
-        releaseOwnership: undefined,
-        terminationRequested: false,
-        completion: undefined,
-        stopOperation: undefined
-      };
-      const requestTermination = (): void => {
-        if (owned.child === undefined || owned.terminationRequested) {
-          return;
-        }
-
-        owned.terminationRequested = true;
-        owned.child.kill("SIGTERM");
-      };
-      const onExternalAbort = (): void => abortController.abort(signal?.reason);
-      const releaseOwnership = (): void => {
-        signal?.removeEventListener("abort", onExternalAbort);
-        abortController.signal.removeEventListener("abort", requestTermination);
-
-        if (active === owned) {
-          active = undefined;
-        }
-      };
-      owned.releaseOwnership = releaseOwnership;
-      const onChild = (
-        child: ReturnType<SpawnAudioProcess>,
-        childCompletion: Promise<void>,
-        terminalize: (error: Error) => void
-      ): void => {
-        owned.child = child;
-        owned.childCompletion = childCompletion;
-        owned.terminalize = terminalize;
-        void childCompletion.finally(releaseOwnership).catch(() => undefined);
-
-        if (abortController.signal.aborted) {
-          requestTermination();
-        }
-      };
-      abortController.signal.addEventListener("abort", requestTermination, { once: true });
-      signal?.addEventListener("abort", onExternalAbort, { once: true });
-
-      if (signal?.aborted === true) {
-        onExternalAbort();
-      }
-
-      active = owned;
-      const completion =
-        plan.provider === "alsa"
-          ? playRawPcm(plan, chunk, spawnAudioProcess, abortController.signal, onChild)
-          : playWavFile(plan, chunk, spawnAudioProcess, abortController.signal, onChild);
-      owned.completion = completion;
-
-      try {
-        await completion;
-      } finally {
-        if (owned.childCompletion === undefined) {
-          releaseOwnership();
-        }
-      }
-    },
-    stop: stopActive,
-    close: stopActive
-  };
-}
-
-type PlaybackChildOwner = (
-  child: ReturnType<SpawnAudioProcess>,
-  childCompletion: Promise<void>,
-  terminalize: (error: Error) => void
-) => void;
-
-function throwIfPlaybackAborted(signal: AbortSignal): void {
-  if (signal.aborted) {
-    throw new DOMException("Resident playback was aborted", "AbortError");
-  }
-}
-
-async function ignorePlaybackAbort(operation: () => Promise<void>): Promise<void> {
-  try {
-    await operation();
-  } catch (error) {
-    if (!(error instanceof DOMException && error.name === "AbortError")) {
-      throw error;
-    }
-  }
 }
 
 function createPcm16leAudioLevelAccumulator(
@@ -757,226 +572,6 @@ async function* readOwnedPcmFrames(
 
 const defaultNow = (): string => new Date().toISOString();
 
-function playRawPcm(
-  plan: Extract<ResidentAudioOutputPlan, { readonly provider: "alsa" }>,
-  chunk: TtsAudioChunk,
-  spawnAudioProcess: SpawnAudioProcess,
-  signal: AbortSignal,
-  onChild: PlaybackChildOwner
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let resolveChildCompletion: () => void = () => undefined;
-    const childCompletion = new Promise<void>((resolveCompletion) => {
-      resolveChildCompletion = resolveCompletion;
-    });
-    let settled = false;
-    const settle = (error: Error | undefined): void => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-
-      if (error === undefined) {
-        resolve();
-        return;
-      }
-
-      reject(error);
-    };
-    const child = spawnAudioProcess(plan.command, createAlsaPlaybackArguments(plan, chunk), {
-      stdio: ["pipe", "ignore", "inherit"]
-    });
-    const stdin = child.stdin;
-    let exitFailure: Error | undefined;
-    const cleanupListeners = (): void => {
-      child.removeListener("error", onChildError);
-      child.removeListener("close", onChildClose);
-      child.removeListener("exit", onChildExit);
-      stdin?.removeListener("error", onStdinError);
-    };
-    const onChildError = (error: Error): void => {
-      if (!signal.aborted) {
-        settle(error);
-      }
-    };
-    const onChildClose = (): void => {
-      settle(exitFailure);
-      cleanupListeners();
-      resolveChildCompletion();
-    };
-    const onChildExit = (code: number | null): void => {
-      if (signal.aborted) {
-        return;
-      }
-
-      if (code !== 0) {
-        exitFailure = new Error(
-          `pico resident voice ${plan.provider} output exited with code ${String(code)}`
-        );
-      }
-    };
-    const onStdinError = (error: Error): void => {
-      if (!signal.aborted) {
-        settle(error);
-      }
-    };
-    const terminalize = (error: Error): void => {
-      cleanupListeners();
-      stdin?.destroy();
-      resolveChildCompletion();
-      settle(error);
-    };
-    child.once("error", onChildError);
-    child.once("close", onChildClose);
-    child.once("exit", onChildExit);
-    onChild(child, childCompletion, terminalize);
-
-    if (stdin === null) {
-      if (!signal.aborted) {
-        settle(new Error(`pico resident voice ${plan.provider} output did not expose stdin`));
-      }
-
-      return;
-    }
-
-    stdin.once("error", onStdinError);
-    stdin.end(chunk.audio);
-  });
-}
-
-async function playWavFile(
-  plan: Extract<ResidentAudioOutputPlan, { readonly provider: "afplay" }>,
-  chunk: TtsAudioChunk,
-  spawnAudioProcess: SpawnAudioProcess,
-  signal: AbortSignal,
-  onChild: PlaybackChildOwner
-): Promise<void> {
-  await ignorePlaybackAbort(async () => {
-    throwIfPlaybackAborted(signal);
-    const directory = await mkdtemp(join(tmpdir(), "pico-resident-voice-"));
-    const path = join(directory, "tts.wav");
-
-    try {
-      throwIfPlaybackAborted(signal);
-      await writeFile(path, encodePcm16leWav(chunk.audio, chunk.sampleRateHz, chunk.channels));
-      throwIfPlaybackAborted(signal);
-      await playFile(plan.command, [path], spawnAudioProcess, signal, onChild);
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-}
-
-function createAlsaPlaybackArguments(
-  plan: Extract<ResidentAudioOutputPlan, { readonly provider: "alsa" }>,
-  chunk: TtsAudioChunk
-): readonly string[] {
-  return [
-    "-q",
-    "-f",
-    "S16_LE",
-    "-r",
-    String(chunk.sampleRateHz),
-    "-c",
-    String(chunk.channels),
-    "-t",
-    "raw",
-    "-D",
-    plan.device
-  ];
-}
-
-function playFile(
-  command: string,
-  arguments_: readonly string[],
-  spawnAudioProcess: SpawnAudioProcess,
-  signal: AbortSignal,
-  onChild: PlaybackChildOwner
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let resolveChildCompletion: () => void = () => undefined;
-    const childCompletion = new Promise<void>((resolveCompletion) => {
-      resolveChildCompletion = resolveCompletion;
-    });
-    const child = spawnAudioProcess(command, arguments_, {
-      stdio: ["ignore", "pipe", "inherit"]
-    });
-    let exitFailure: Error | undefined;
-    let settled = false;
-    const settle = (error: Error | undefined): void => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-
-      if (error === undefined) {
-        resolve();
-        return;
-      }
-
-      reject(error);
-    };
-    const cleanupListeners = (): void => {
-      child.removeListener("close", onChildClose);
-      child.removeListener("error", onChildError);
-      child.removeListener("exit", onChildExit);
-    };
-    const onChildClose = (): void => {
-      settle(exitFailure);
-      cleanupListeners();
-      resolveChildCompletion();
-    };
-    const onChildError = (error: Error): void => {
-      if (!signal.aborted) {
-        settle(error);
-      }
-    };
-    const onChildExit = (code: number | null): void => {
-      if (signal.aborted) {
-        return;
-      }
-
-      if (code !== 0) {
-        exitFailure = new Error(
-          `pico resident voice ${command} output exited with code ${String(code)}`
-        );
-      }
-    };
-    const terminalize = (error: Error): void => {
-      cleanupListeners();
-      resolveChildCompletion();
-      settle(error);
-    };
-    child.once("close", onChildClose);
-    child.once("error", onChildError);
-    child.once("exit", onChildExit);
-    onChild(child, childCompletion, terminalize);
-  });
-}
-
-function encodePcm16leWav(audio: Uint8Array, sampleRateHz: number, channels: number): Buffer {
-  const dataSize = audio.byteLength;
-  const header = Buffer.alloc(44);
-  const bytesPerSample = 2;
-  header.write("RIFF", 0);
-  header.writeUInt32LE(36 + dataSize, 4);
-  header.write("WAVE", 8);
-  header.write("fmt ", 12);
-  header.writeUInt32LE(16, 12 + 4);
-  header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(channels, 22);
-  header.writeUInt32LE(sampleRateHz, 24);
-  header.writeUInt32LE(sampleRateHz * channels * bytesPerSample, 28);
-  header.writeUInt16LE(channels * bytesPerSample, 32);
-  header.writeUInt16LE(16, 34);
-  header.write("data", 36);
-  header.writeUInt32LE(dataSize, 40);
-
-  return Buffer.concat([header, Buffer.from(audio)]);
-}
-
 function requireAudioInputConfig(
   config: PicoConfig
 ): NonNullable<PicoConfig["voice"]["resident"]["audioInput"]> {
@@ -987,18 +582,6 @@ function requireAudioInputConfig(
   }
 
   return input;
-}
-
-function requireAudioOutputConfig(
-  config: PicoConfig
-): NonNullable<PicoConfig["voice"]["resident"]["audioOutput"]> {
-  const output = config.voice.resident.audioOutput;
-
-  if (output === undefined) {
-    throw new Error("pico resident voice requires voice.resident.audioOutput config");
-  }
-
-  return output;
 }
 
 function requirePlatform(platform: Platform, expected: Platform, message: string): void {

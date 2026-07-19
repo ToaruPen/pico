@@ -2,11 +2,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createStructuredAuditLog } from "../src/modules/audit/index.js";
 import { createSessionLifecycle } from "../src/modules/session/index.js";
-import type { VoicePcmFrame } from "../src/modules/voice/echo-control.js";
+import {
+  createHttpEchoControlProvider,
+  type EchoControlProvider,
+  type VoicePcmFrame
+} from "../src/modules/voice/echo-control.js";
 import type {
   SttClient,
   SttTranscriptionResult,
   TtsClient,
+  TtsSynthesisEvent,
   TtsSynthesisResult,
   TtsSynthesisSuccess
 } from "../src/modules/voice/index.js";
@@ -15,10 +20,10 @@ import type {
   ResidentCaptureSession
 } from "../src/runtime/resident-audio-io.js";
 import type { ResidentVoiceValidationEvent } from "../src/runtime/resident-voice-validation.js";
+import type { VoicePlaybackSession, VoicePlaybackSink } from "../src/runtime/voice-playback.js";
 import {
   createVoiceResidentRuntime,
-  type PiAgentTurnClient,
-  type VoicePlaybackSink
+  type PiAgentTurnClient
 } from "../src/runtime/voice-resident.js";
 
 afterEach(() => {
@@ -134,17 +139,38 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(voiceStageEvent(audit, "tts_request_wall")).toMatchObject({
       attributes: {
         "pico.voice.stage_duration_ms": 450,
-        "pico.voice.utterance_duration_ms": 1_200,
-        "pico.voice.chunk_count": 1
+        "pico.voice.chunk_count": 1,
+        "pico.voice.played_chunk_count": 1
       }
     });
     expect(voiceStageEvent(audit, "tts_playback")).toMatchObject({
       attributes: {
         "pico.voice.stage_duration_ms": 1_050,
         "pico.voice.utterance_duration_ms": 1_200,
-        "pico.voice.chunk_count": 1
+        "pico.voice.played_chunk_count": 1
       }
     });
+
+    await driver.runtime.stop();
+  });
+
+  it("starts speaking after the first chunk while the next synthesis remains pending", async () => {
+    vi.useFakeTimers();
+    const second = createGate<TtsSynthesisEvent>();
+    const driver = createDriver({
+      ttsEvents: async function* () {
+        yield chunkEvent(0);
+        yield await second.promise;
+        yield completedEvent(2);
+      }
+    });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
+    expect(driver.playedChunks.map((chunk) => chunk.sentenceIndex)).toEqual([0]);
+    second.resolve(chunkEvent(1));
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
     await driver.runtime.stop();
   });
@@ -475,6 +501,97 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
+  it("poisons HTTP echo after post-write cancellation and blocks the next generation before registration", async () => {
+    vi.useFakeTimers();
+    const pendingSynthesis = createGate<TtsSynthesisEvent>();
+    let synthesisCount = 0;
+    let farEndRequests = 0;
+    const echoControl = createHttpEchoControlProvider({
+      provider: "web_rtc_aec3",
+      mode: "aec",
+      providerEndpoint: "http://127.0.0.1:8770",
+      fetchImplementation: (input) => {
+        const path = new URL(input instanceof Request ? input.url : input).pathname;
+        if (path === "/v1/echo-control/far-end") {
+          farEndRequests += 1;
+        }
+        return Promise.resolve(echoControlPassResponse());
+      }
+    });
+    const driver = createDriver({
+      echoControl,
+      ttsEvents: async function* () {
+        synthesisCount += 1;
+        yield chunkEvent(0);
+        if (synthesisCount === 1) {
+          yield await pendingSynthesis.promise;
+        }
+        yield completedEvent(1);
+      }
+    });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.playedChunks).toHaveLength(1));
+    await driver.cancel();
+    pendingSynthesis.resolve(completedEvent(1));
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    await completeHold(driver, "poisoned-http-next-generation");
+    expect(farEndRequests).toBe(1);
+    expect(driver.playedChunks).toHaveLength(1);
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({
+      cancelledTurns: 1,
+      failedTurns: 1
+    });
+  });
+
+  it("poisons echo after an applied but unwritten cancellation with malformed cleanup", async () => {
+    vi.useFakeTimers();
+    let cancel = (): Promise<unknown> => Promise.resolve();
+    let registrations = 0;
+    const echoControl: EchoControlProvider = {
+      describe: () => ({ provider: "half_duplex", mode: "half_duplex" }),
+      checkHealth: () =>
+        Promise.resolve({
+          ok: true,
+          provider: "half_duplex",
+          mode: "half_duplex",
+          engine: "test"
+        }),
+      acceptFarEndReference: () => {
+        registrations += 1;
+        queueMicrotask(() => {
+          void cancel().catch(() => undefined);
+        });
+        return Promise.resolve({ status: "applied" });
+      },
+      processNearEnd: (input) => Promise.resolve(passingNearEnd(input)),
+      flush: () => Promise.resolve({ status: "unexpected" }) as never
+    };
+    const driver = createDriver({ echoControl });
+    cancel = driver.cancel;
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+    expect(driver.playedChunks).toHaveLength(0);
+
+    await driver.press();
+    driver.capture.emit(frame("poisoned-malformed-next-generation", [1, 0]));
+    await driver.release();
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+    expect(registrations).toBe(1);
+    expect(driver.playedChunks).toHaveLength(0);
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({
+      cancelledTurns: 1,
+      failedTurns: 1
+    });
+  });
+
   it("suppresses a late STT result from a cancelled generation", async () => {
     vi.useFakeTimers();
     const audit = createStructuredAuditLog();
@@ -597,7 +714,7 @@ describe("resident hold-to-talk voice runtime", () => {
       }
     });
     await driver.runtime.stop();
-    await expect(driver.runtime.completion).resolves.toMatchObject({ failedTurns: 0 });
+    await expect(driver.runtime.completion).resolves.toMatchObject({ failedTurns: 1 });
   });
 
   it("fails the runtime immediately when capture frames reject during a hold", async () => {
@@ -917,9 +1034,9 @@ describe("resident hold-to-talk voice runtime", () => {
     farewellPlaybackGate.resolve(undefined);
     await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
 
-    await expect(completionFailure).resolves.toEqual(new Error("speaker stop failed"));
     expect(driver.disposedSessions).toEqual(["session-1"]);
     await expect(driver.runtime.stop()).rejects.toThrow("speaker stop failed");
+    await expect(completionFailure).resolves.toEqual(new Error("speaker stop failed"));
   });
 
   it("runs normal interaction ending before shared-owner shutdown", async () => {
@@ -1080,16 +1197,20 @@ describe("resident hold-to-talk voice runtime", () => {
 
 type Driver = ReturnType<typeof createDriver>;
 
+// The driver keeps all independently injectable runtime boundaries in one deterministic fixture.
+// eslint-disable-next-line complexity
 function createDriver(
   options: {
     readonly speechDetected?: boolean;
     readonly sttResponse?: (signal: AbortSignal | undefined) => Promise<SttTranscriptionResult>;
     readonly piResponse?: (signal: AbortSignal | undefined) => Promise<{ readonly text: string }>;
     readonly ttsResponse?: (signal: AbortSignal | undefined) => Promise<TtsSynthesisResult>;
+    readonly ttsEvents?: (signal: AbortSignal | undefined) => AsyncIterable<TtsSynthesisEvent>;
     readonly playbackCompletion?: (signal: AbortSignal | undefined) => Promise<void>;
     readonly disposalCompletion?: () => Promise<void>;
     readonly playbackStopError?: Error;
     readonly echoFlush?: () => Promise<void>;
+    readonly echoControl?: EchoControlProvider;
     readonly cancelDeferred?: () => void;
     readonly lifecycleEvents?: string[];
     readonly nearEndGate?: Promise<void>;
@@ -1104,7 +1225,7 @@ function createDriver(
   const capture = createControlledCapture();
   const sttRequests: Array<Parameters<SttClient["transcribe"]>[0]> = [];
   const piRequests: Array<Parameters<PiAgentTurnClient["prompt"]>[0]> = [];
-  const playedChunks: Array<Parameters<VoicePlaybackSink["play"]>[0]> = [];
+  const playedChunks: Array<Parameters<VoicePlaybackSession["write"]>[0]> = [];
   const disposedSessions: string[] = [];
   let playbackStopCount = 0;
   let playbackCloseCount = 0;
@@ -1134,6 +1255,11 @@ function createDriver(
   };
   const tts: TtsClient = {
     async *synthesize(request) {
+      if (options.ttsEvents !== undefined) {
+        yield* options.ttsEvents(request.signal);
+        return;
+      }
+
       const result = await (options.ttsResponse?.(request.signal) ??
         Promise.resolve(successfulSynthesis()));
 
@@ -1155,9 +1281,16 @@ function createDriver(
     }
   };
   const playback: VoicePlaybackSink = {
-    play(chunk, _startedAt, signal) {
-      playedChunks.push(chunk);
-      return options.playbackCompletion?.(signal) ?? Promise.resolve();
+    open(_firstChunk, signal) {
+      return {
+        async write(chunk) {
+          playedChunks.push(chunk);
+          await options.playbackCompletion?.(signal);
+        },
+        finish() {
+          return Promise.resolve();
+        }
+      };
     },
     stop() {
       playbackStopCount += 1;
@@ -1173,10 +1306,9 @@ function createDriver(
   const sessionLifecycle = createSessionLifecycle({
     ending: { mode: "timed", durationMs: options.sessionDurationMs ?? 60_000 }
   });
-  const runtime = createVoiceResidentRuntime({
-    audioCapture: capture.provider,
-    sessionLifecycle,
-    echoControl: {
+  const echoControl =
+    options.echoControl ??
+    ({
       describe: () => ({ provider: "half_duplex", mode: "half_duplex" }),
       checkHealth: () =>
         Promise.resolve({
@@ -1209,7 +1341,11 @@ function createDriver(
         await options.echoFlush?.();
         return { status: "reset" };
       }
-    },
+    } satisfies EchoControlProvider);
+  const runtime = createVoiceResidentRuntime({
+    audioCapture: capture.provider,
+    sessionLifecycle,
+    echoControl,
     speechActivity: {
       process: () =>
         Promise.resolve({
@@ -1469,6 +1605,51 @@ function successfulSynthesis(durationMs = 10): TtsSynthesisSuccess {
       speakerId: 1
     }
   };
+}
+
+function chunkEvent(sentenceIndex: number): TtsSynthesisEvent {
+  const synthesis = successfulSynthesis();
+  const chunk = synthesis.chunks[0];
+
+  if (chunk === undefined) {
+    throw new Error("expected a synthesis chunk");
+  }
+
+  return {
+    kind: "chunk",
+    chunk: { ...chunk, sentenceIndex, text: `Picoの応答${String(sentenceIndex)}` }
+  };
+}
+
+function completedEvent(chunkCount: number): TtsSynthesisEvent {
+  const synthesis = successfulSynthesis();
+  return {
+    kind: "completed",
+    chunkCount,
+    totalDurationMs: synthesis.totalDurationMs * chunkCount,
+    source: synthesis.source
+  };
+}
+
+function echoControlPassResponse(): Response {
+  return Response.json({
+    action: "pass",
+    audioBase64: Buffer.from([1, 0]).toString("base64"),
+    diagnostics: { residualEchoProbability: 0, voiceActivity: true }
+  });
+}
+
+function passingNearEnd(frame: VoicePcmFrame) {
+  return {
+    action: "pass",
+    reason: "no_far_end_tail",
+    frame,
+    diagnostics: {
+      provider: "half_duplex",
+      residualEchoProbability: 0,
+      voiceActivity: true
+    }
+  } as const;
 }
 
 function voiceStageEvent(audit: ReturnType<typeof createStructuredAuditLog>, stage: string) {

@@ -105,7 +105,7 @@ function residentAudioInputConfig() {
           device: ":0"
         },
         audioOutput: {
-          provider: "afplay",
+          provider: "ffplay",
           route: "system_default"
         },
         vad: {

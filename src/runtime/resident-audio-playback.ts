@@ -1,6 +1,7 @@
 import { type ChildProcess, type ChildProcessByStdio, spawn } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
 
+import type { PicoConfig } from "../config/index.js";
 import type { TtsAudioChunk } from "../modules/voice/index.js";
 import type { VoicePlaybackSession, VoicePlaybackSink } from "./voice-playback.js";
 
@@ -34,6 +35,32 @@ type SpawnProbeProcess = (
   arguments_: readonly string[],
   options: { readonly stdio: "ignore" }
 ) => ProbeChild;
+
+export function createResidentAudioOutputPlan(
+  config: PicoConfig,
+  platform: NodeJS.Platform = process.platform
+): ResidentAudioOutputPlan {
+  const output = config.voice.resident.audioOutput;
+  if (output === undefined) {
+    throw new Error("pico resident voice requires voice.resident.audioOutput config");
+  }
+
+  if (output.provider === "alsa") {
+    requirePlaybackPlatform(platform, "linux", "pico resident voice ALSA output requires Linux");
+    return { provider: "alsa", command: "aplay", device: output.device };
+  }
+
+  requirePlaybackPlatform(platform, "darwin", "pico resident voice ffplay output requires macOS");
+  return { provider: "ffplay", command: "ffplay", route: output.route };
+}
+
+function requirePlaybackPlatform(
+  platform: NodeJS.Platform,
+  expected: NodeJS.Platform,
+  message: string
+): void {
+  if (platform !== expected) throw new Error(message);
+}
 
 export function createResidentContinuousPlaybackSink(
   plan: ResidentAudioOutputPlan,

@@ -4,9 +4,11 @@ import { PassThrough, type Readable, type Writable } from "node:stream";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { definePicoConfig } from "../src/config/index.js";
 import type { TtsAudioChunk } from "../src/modules/voice/index.js";
 import {
   assertResidentPlaybackReadiness,
+  createResidentAudioOutputPlan,
   createResidentContinuousPlaybackSink,
   type ResidentAudioOutputPlan,
   runPlaybackCommandProbe
@@ -25,6 +27,64 @@ const alsaPlan = {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("resident audio output plans", () => {
+  it("maps macOS ffplay config to the continuous playback command", () => {
+    const config = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: { provider: "avfoundation", device: ":0" },
+          audioOutput: { provider: "ffplay", route: "system_default" }
+        }
+      }
+    });
+
+    expect(createResidentAudioOutputPlan(config, "darwin")).toEqual(ffplayPlan);
+  });
+
+  it("maps Linux ALSA config to aplay with the configured device", () => {
+    const config = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: { provider: "alsa", device: "hw:1,0" },
+          audioOutput: { provider: "alsa", device: "hw:0,0" }
+        }
+      }
+    });
+
+    expect(createResidentAudioOutputPlan(config, "linux")).toEqual(alsaPlan);
+  });
+
+  it("rejects output providers configured for another platform before playback spawn", () => {
+    const ffplayConfig = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: { provider: "avfoundation", device: ":0" },
+          audioOutput: { provider: "ffplay", route: "system_default" }
+        }
+      }
+    });
+    const alsaConfig = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: { provider: "alsa", device: "hw:1,0" },
+          audioOutput: { provider: "alsa", device: "hw:0,0" }
+        }
+      }
+    });
+
+    expect(() => createResidentAudioOutputPlan(ffplayConfig, "linux")).toThrow(
+      "pico resident voice ffplay output requires macOS"
+    );
+    expect(() => createResidentAudioOutputPlan(alsaConfig, "darwin")).toThrow(
+      "pico resident voice ALSA output requires Linux"
+    );
+  });
 });
 
 describe("resident continuous audio playback", () => {
