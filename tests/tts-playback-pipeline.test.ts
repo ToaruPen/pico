@@ -300,6 +300,49 @@ describe("TTS playback pipeline", () => {
     expect(echo.state.flushes).toBe(2);
   });
 
+  it("does not flush the next generation reference when a cancelled echo registration arrives late", async () => {
+    const controller = new AbortController();
+    const firstAcceptGate = createSignalGate();
+    const echo = generationEcho(firstAcceptGate.promise);
+    const firstPlayback = recordingPlayback();
+    const firstRunning = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts: ttsFromArray([chunkEvent(0, { audio: [1, 0] }), completedEvent(1)]),
+        playback: firstPlayback,
+        echoControl: echo.provider,
+        signal: controller.signal
+      })
+    );
+    await vi.waitFor(() => expect(echo.state.acceptedStarts).toEqual([1]));
+
+    controller.abort(new Error("cancelled"));
+
+    await expect(firstRunning).resolves.toEqual({ status: "cancelled", playedChunkCount: 0 });
+    expect(firstPlayback.state.writes).toHaveLength(0);
+
+    const secondPlayback = recordingPlayback();
+    const secondRunning = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts: ttsFromArray([chunkEvent(0, { audio: [2, 0] }), completedEvent(1)]),
+        playback: secondPlayback,
+        echoControl: echo.provider
+      })
+    );
+    await Promise.race([
+      echo.secondAcceptStarted,
+      new Promise<void>((resolve) => setTimeout(resolve, 25))
+    ]);
+
+    firstAcceptGate.resolve();
+
+    await expect(secondRunning).resolves.toMatchObject({
+      status: "completed",
+      playedChunkCount: 1
+    });
+    await vi.waitFor(() => expect(echo.state.flushes).toBe(2));
+    expect(echo.state.references).toEqual([2]);
+  });
+
   it("does not wait for an abort-insensitive lookahead after stopping playback", async () => {
     const controller = new AbortController();
     const pendingSynthesis = createSignalGate();
@@ -811,6 +854,62 @@ function delayedEcho(accept: Promise<void>): {
         return Promise.resolve();
       }
     },
+    state
+  };
+}
+
+function generationEcho(firstAccept: Promise<void>): {
+  readonly provider: EchoControlProvider;
+  readonly secondAcceptStarted: Promise<void>;
+  readonly state: {
+    readonly references: number[];
+    readonly acceptedStarts: number[];
+    flushes: number;
+  };
+} {
+  const secondAcceptStarted = createSignalGate();
+  const state = { references: [] as number[], acceptedStarts: [] as number[], flushes: 0 };
+  return {
+    provider: {
+      describe: () => ({ provider: "half_duplex", mode: "half_duplex" }),
+      checkHealth: () =>
+        Promise.resolve({
+          ok: true,
+          provider: "half_duplex",
+          mode: "half_duplex",
+          engine: "test"
+        }),
+      acceptFarEndReference: async (frame) => {
+        const generation = frame.audio[0];
+        if (generation === undefined) {
+          throw new Error("test echo generation marker is required");
+        }
+        state.acceptedStarts.push(generation);
+        if (generation === 1) {
+          await firstAccept;
+        } else {
+          secondAcceptStarted.resolve();
+        }
+        state.references.push(generation);
+      },
+      processNearEnd: (frame) =>
+        Promise.resolve({
+          action: "pass",
+          reason: "no_far_end_tail",
+          frame,
+          diagnostics: {
+            provider: "half_duplex",
+            residualEchoProbability: 0,
+            voiceActivity: false
+          }
+        }),
+      flush: () => {
+        state.references.length = 0;
+        state.flushes += 1;
+        return Promise.resolve();
+      }
+    },
+    secondAcceptStarted: secondAcceptStarted.promise,
     state
   };
 }

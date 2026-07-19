@@ -63,6 +63,8 @@ type Settlement<T> =
 
 type AbortableSettlement<T> = Settlement<T> | { readonly ok: false; readonly aborted: true };
 
+const echoMutationFences = new WeakMap<EchoControlProvider, Promise<void>>();
+
 export async function runTtsPlaybackPipeline(
   options: TtsPlaybackPipelineOptions
 ): Promise<TtsPlaybackPipelineResult> {
@@ -382,12 +384,22 @@ function scheduleCompensatingEchoFlush(
   state: PipelineState,
   echoRegistration: Promise<Settlement<void>>
 ): void {
-  const cleanup = echoRegistration.then(async (registration) => {
+  const echoControl = state.options.echoControl;
+  const previousFence = echoMutationFences.get(echoControl) ?? Promise.resolve();
+  const cleanup = previousFence.then(async () => {
+    const registration = await echoRegistration;
     if (registration.ok) {
-      await settle(Promise.resolve().then(() => state.options.echoControl.flush()));
+      await settle(Promise.resolve().then(() => echoControl.flush()));
     }
   });
-  state.echoCleanup = settle(cleanup).then(() => undefined);
+  const fence = settle(cleanup).then(() => undefined);
+  echoMutationFences.set(echoControl, fence);
+  const release = fence.then(() => {
+    if (echoMutationFences.get(echoControl) === fence) {
+      echoMutationFences.delete(echoControl);
+    }
+  });
+  state.echoCleanup = settle(release).then(() => undefined);
 }
 
 function abortProducer(state: PipelineState): void {
@@ -517,6 +529,10 @@ async function registerEchoReference(state: PipelineState, chunk: TtsAudioChunk)
   const playbackStartedAt = state.playbackStartedAt;
   if (playbackStartedAt === undefined) {
     return Promise.reject(new Error("pico TTS playback session has not started"));
+  }
+  const echoMutationFence = echoMutationFences.get(state.options.echoControl);
+  if (echoMutationFence !== undefined) {
+    await echoMutationFence;
   }
   await state.options.echoControl.acceptFarEndReference(
     defineVoicePcmFrame({
