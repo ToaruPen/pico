@@ -15,6 +15,20 @@ export type ResidentVoiceAuditLogOptions = {
 
 export type ResidentVoiceAuditLogStdoutMode = "summary" | "verbose";
 
+export function createAuditEventFanout(
+  writers: readonly ((event: AuditEvent) => void)[]
+): (event: AuditEvent) => void {
+  return (event) => {
+    for (const writer of writers) {
+      try {
+        writer(event);
+      } catch {
+        // Audit sinks are independent; one failure must not suppress the others.
+      }
+    }
+  };
+}
+
 const voiceStageAttributeNames = {
   stage: "pico.voice.stage",
   status: "pico.voice.stage_status",

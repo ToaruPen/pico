@@ -12,8 +12,14 @@ import type {
   DeferredToolDeliverableResult
 } from "./deferred-tool-coordinator.js";
 import { registerPicoExtensionWithRuntime } from "./pico-extension-runtime.js";
+import type { ResidentVoiceValidationSink } from "./resident-voice-validation.js";
 import type { PiAgentTurnClient } from "./voice-resident.js";
-import type { VoiceStageProbe } from "./voice-stage-probe.js";
+import {
+  recordVoiceStageProbe,
+  type VoiceRuntimeStage,
+  type VoiceStageProbe,
+  type VoiceStageStatus
+} from "./voice-stage-probe.js";
 
 export const residentPiAgentToolNames = Object.freeze([
   "pico_camera_scene_description_deferred",
@@ -89,12 +95,18 @@ export type PiAgentTurnClientOptions = {
   readonly deferredTools?: {
     readonly coordinator: Pick<DeferredToolCoordinator, "enqueue">;
   };
+  readonly validation?: ResidentVoiceValidationSink;
   readonly createAgentSession?: PiAgentSessionFactory;
   readonly createResourceLoader?: (
     input: PiAgentResourceLoaderFactoryInput
   ) => PiAgentResourceLoader;
   readonly sessionManager?: unknown;
+  readonly now?: () => string;
+  readonly monotonicNow?: () => number;
 };
+
+const defaultNow = (): string => new Date().toISOString();
+const defaultMonotonicNow = (): number => performance.now();
 
 export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAgentTurnClient {
   const sessions = new Map<string, Promise<PiAgentSdkSession>>();
@@ -113,29 +125,33 @@ export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAg
       const output: string[] = [];
       let unsubscribe: (() => void) | undefined;
       let abortHandle: PromptAbortHandle | undefined;
+      const observation = createPromptObservation(options, output, input.sessionId);
 
       try {
         throwIfSignalAborted(input.signal);
         const pendingSession = getOrCreateTurnSession(options, sessions, input.sessionId);
         const session = await waitForTurnSession(pendingSession, input.signal);
-        unsubscribe = subscribeTextDeltas(session, output);
+        unsubscribe = session.subscribe(observation.accept);
         abortHandle = installPromptAbort(session, input.signal);
         throwIfSignalAborted(input.signal);
         await session.prompt(
           formatPromptForSdkSession(input.text, input.deferredToolResults ?? [])
         );
         throwIfSignalAborted(input.signal);
+        observation.settle("skipped", "no_text_delta");
 
         return {
           text: output.join("")
         };
       } catch (error) {
-        if (abortHandle !== undefined) {
-          await abortIfSignalAborted(input.signal, abortHandle);
-        }
+        const settlement = interruptedStageSettlement(input.signal, "pi_agent_prompt_failed");
+        observation.settle(settlement.status, settlement.errorCode);
+        await abortIfSignalAborted(input.signal, abortHandle);
         throw error;
       } finally {
         try {
+          const settlement = interruptedStageSettlement(input.signal, "tool_execution_incomplete");
+          observation.settleOpenTools(settlement.status, settlement.errorCode);
           abortHandle?.remove();
           unsubscribe?.();
         } finally {
@@ -145,6 +161,7 @@ export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAg
     },
     async disposeSession(sessionId) {
       const disposal = getOrStartSessionDisposal(
+        options,
         sessions,
         sessionDisposals,
         activeTurns,
@@ -166,6 +183,7 @@ export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAg
         const results = await Promise.allSettled(
           sessionIds.map(async (sessionId) => {
             const disposal = getOrStartSessionDisposal(
+              options,
               sessions,
               sessionDisposals,
               activeTurns,
@@ -322,6 +340,7 @@ function waitForTurnSession(
 }
 
 function getOrStartSessionDisposal(
+  options: PiAgentTurnClientOptions,
   sessions: Map<string, Promise<PiAgentSdkSession>>,
   sessionDisposals: Map<string, Promise<void>>,
   activeTurns: Map<string, Promise<void>>,
@@ -338,6 +357,7 @@ function getOrStartSessionDisposal(
   }
 
   const disposal = disposePendingSession(
+    options,
     sessions,
     sessionId,
     pendingSession,
@@ -362,6 +382,7 @@ async function awaitSessionDisposal(
 }
 
 async function disposePendingSession(
+  options: PiAgentTurnClientOptions,
   sessions: Map<string, Promise<PiAgentSdkSession>>,
   sessionId: string,
   pendingSession: Promise<PiAgentSdkSession>,
@@ -369,7 +390,7 @@ async function disposePendingSession(
 ): Promise<void> {
   try {
     await activeTurn;
-    await shutdownAndDisposeSession(await pendingSession);
+    await shutdownAndDisposeSession(options, await pendingSession);
   } finally {
     if (sessions.get(sessionId) === pendingSession) {
       sessions.delete(sessionId);
@@ -383,24 +404,36 @@ async function createTurnSession(
 ): Promise<PiAgentSdkSession> {
   const requiredToolNames = requiredResidentPiAgentToolNames(options);
   const resourceLoader = createTurnResourceLoader(options, sessionId);
-  await resourceLoader.reload?.();
+  if (resourceLoader.reload !== undefined) {
+    await measurePiStage(options, "pi_session_resource_load", "resource_load_failed", () =>
+      resourceLoader.reload?.()
+    );
+  }
 
   const createAgentSession = options.createAgentSession ?? createDefaultPiAgentSession;
-  const { session, extensionsResult } = await createAgentSession({
-    cwd: options.cwd,
-    resourceLoader,
-    sessionManager: options.sessionManager ?? SessionManager.inMemory(),
-    ...(options.model === undefined ? {} : { model: options.model }),
-    thinkingLevel: options.thinkingLevel ?? "medium",
-    tools: [...requiredToolNames]
-  });
+  const { session, extensionsResult } = await measurePiStage(
+    options,
+    "pi_session_create",
+    "session_create_failed",
+    () =>
+      createAgentSession({
+        cwd: options.cwd,
+        resourceLoader,
+        sessionManager: options.sessionManager ?? SessionManager.inMemory(),
+        ...(options.model === undefined ? {} : { model: options.model }),
+        thinkingLevel: options.thinkingLevel ?? "medium",
+        tools: [...requiredToolNames]
+      })
+  );
 
   try {
-    assertExtensionsLoaded(extensionsResult);
-    await session.bindExtensions({ mode: "print" });
-    enforceResidentPiAgentTools(session, requiredToolNames);
+    await measurePiStage(options, "pi_session_bind", "session_bind_failed", async () => {
+      assertExtensionsLoaded(extensionsResult);
+      await session.bindExtensions({ mode: "print" });
+      enforceResidentPiAgentTools(session, requiredToolNames);
+    });
   } catch (error) {
-    await Promise.allSettled([shutdownAndDisposeSession(session)]);
+    await Promise.allSettled([shutdownAndDisposeSession(options, session)]);
     throw error;
   }
 
@@ -490,17 +523,127 @@ function createResidentPicoExtensionFactory(
     });
 }
 
-function subscribeTextDeltas(
-  session: PiAgentSdkSession,
-  output: string[]
-): (() => void) | undefined {
-  return session.subscribe((event) => {
-    const delta = readTextDelta(event);
+type PromptObservation = {
+  readonly accept: (event: unknown) => void;
+  readonly settle: (status: VoiceStageStatus, errorCode: string) => void;
+  readonly settleOpenTools: (status: VoiceStageStatus, errorCode: string) => void;
+};
 
-    if (delta !== undefined) {
-      output.push(delta);
+type PendingToolExecution = {
+  readonly startedAt: string;
+  readonly startedAtMs: number;
+};
+
+function createPromptObservation(
+  options: PiAgentTurnClientOptions,
+  output: string[],
+  sessionId: string
+): PromptObservation {
+  const now = options.now ?? defaultNow;
+  const monotonicNow = options.monotonicNow ?? defaultMonotonicNow;
+  const promptStartedAt = now();
+  const promptStartedAtMs = monotonicNow();
+  const pendingTools = new Map<string, PendingToolExecution>();
+  let firstTextSettled = false;
+
+  const settleFirstText = (status: VoiceStageStatus, errorCode?: string): void => {
+    if (firstTextSettled) {
+      return;
     }
-  });
+
+    firstTextSettled = true;
+    recordPiStage(
+      options,
+      "pi_time_to_first_text",
+      status,
+      promptStartedAt,
+      elapsedSince(promptStartedAtMs, monotonicNow),
+      errorCode
+    );
+  };
+
+  const settleTool = (toolCallId: string, status: VoiceStageStatus, errorCode?: string): void => {
+    const pending = pendingTools.get(toolCallId);
+    if (pending === undefined) {
+      return;
+    }
+
+    pendingTools.delete(toolCallId);
+    recordPiStage(
+      options,
+      "pi_tool_execution",
+      status,
+      pending.startedAt,
+      elapsedSince(pending.startedAtMs, monotonicNow),
+      errorCode
+    );
+  };
+
+  const acceptToolStart = (event: Extract<ToolExecutionEvent, { kind: "start" }>): void => {
+    if (pendingTools.has(event.toolCallId)) {
+      return;
+    }
+
+    const startedAt = now();
+    const startedAtMs = monotonicNow();
+    pendingTools.set(event.toolCallId, { startedAt, startedAtMs });
+    options.validation?.record({
+      kind: "tool_execution_start",
+      occurredAt: startedAt,
+      sessionId,
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      args: event.args
+    });
+  };
+
+  const acceptToolEnd = (event: Extract<ToolExecutionEvent, { kind: "end" }>): void => {
+    const pending = pendingTools.get(event.toolCallId);
+    if (pending !== undefined) {
+      options.validation?.record({
+        kind: "tool_execution_end",
+        occurredAt: now(),
+        sessionId,
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        result: event.result,
+        isError: event.isError,
+        durationMs: elapsedSince(pending.startedAtMs, monotonicNow)
+      });
+    }
+    settleTool(
+      event.toolCallId,
+      event.isError ? "error" : "ok",
+      event.isError ? "tool_execution_failed" : undefined
+    );
+  };
+
+  return {
+    accept(event) {
+      const delta = readTextDelta(event);
+      if (delta !== undefined) {
+        output.push(delta);
+        if (delta.length > 0) {
+          settleFirstText("ok");
+        }
+      }
+
+      const toolEvent = readToolExecutionEvent(event);
+      if (toolEvent?.kind === "start") {
+        acceptToolStart(toolEvent);
+      } else if (toolEvent?.kind === "end") {
+        acceptToolEnd(toolEvent);
+      }
+    },
+    settle(status, errorCode) {
+      settleFirstText(status, errorCode);
+    },
+    settleOpenTools(status, errorCode) {
+      for (const toolCallId of [...pendingTools.keys()]) {
+        settleTool(toolCallId, status, errorCode);
+      }
+    }
+  };
 }
 
 type PromptAbortHandle = {
@@ -552,12 +695,21 @@ function installPromptAbort(
 
 async function abortIfSignalAborted(
   signal: AbortSignal | undefined,
-  abortHandle: PromptAbortHandle
+  abortHandle: PromptAbortHandle | undefined
 ): Promise<void> {
-  if (signal?.aborted) {
+  if (signal?.aborted && abortHandle !== undefined) {
     abortHandle.remove();
     await abortHandle.abort();
   }
+}
+
+function interruptedStageSettlement(
+  signal: AbortSignal | undefined,
+  failureCode: string
+): { readonly status: "skipped" | "error"; readonly errorCode: string } {
+  return signal?.aborted === true
+    ? { status: "skipped", errorCode: "cancelled" }
+    : { status: "error", errorCode: failureCode };
 }
 
 function throwIfSignalAborted(signal: AbortSignal | undefined): void {
@@ -588,17 +740,71 @@ function createDefaultPiAgentSession(input: {
   return createDefaultAgentSession(input as never);
 }
 
-async function shutdownAndDisposeSession(session: PiAgentSdkSession): Promise<void> {
-  try {
-    if (session.extensionRunner.hasHandlers("session_shutdown")) {
-      await session.extensionRunner.emit({
-        type: "session_shutdown",
-        reason: "quit"
-      });
+async function shutdownAndDisposeSession(
+  options: PiAgentTurnClientOptions,
+  session: PiAgentSdkSession
+): Promise<void> {
+  await measurePiStage(options, "pi_session_dispose", "session_dispose_failed", async () => {
+    try {
+      if (session.extensionRunner.hasHandlers("session_shutdown")) {
+        await session.extensionRunner.emit({
+          type: "session_shutdown",
+          reason: "quit"
+        });
+      }
+    } finally {
+      session.dispose();
     }
-  } finally {
-    session.dispose();
+  });
+}
+
+async function measurePiStage<T>(
+  options: PiAgentTurnClientOptions,
+  stage: VoiceRuntimeStage,
+  errorCode: string,
+  operation: () => T | Promise<T>
+): Promise<T> {
+  const now = options.now ?? defaultNow;
+  const monotonicNow = options.monotonicNow ?? defaultMonotonicNow;
+  const startedAt = now();
+  const startedAtMs = monotonicNow();
+
+  try {
+    const result = await operation();
+    recordPiStage(options, stage, "ok", startedAt, elapsedSince(startedAtMs, monotonicNow));
+    return result;
+  } catch (error) {
+    recordPiStage(
+      options,
+      stage,
+      "error",
+      startedAt,
+      elapsedSince(startedAtMs, monotonicNow),
+      errorCode
+    );
+    throw error;
   }
+}
+
+function recordPiStage(
+  options: PiAgentTurnClientOptions,
+  stage: VoiceRuntimeStage,
+  status: VoiceStageStatus,
+  startedAt: string,
+  durationMs: number,
+  errorCode?: string
+): void {
+  recordVoiceStageProbe(options.voiceProbe ?? {}, {
+    stage,
+    status,
+    startedAt,
+    durationMs,
+    ...(errorCode === undefined ? {} : { attributes: { "pico.voice.error_code": errorCode } })
+  });
+}
+
+function elapsedSince(startedAtMs: number, monotonicNow: () => number): number {
+  return Math.max(0, monotonicNow() - startedAtMs);
 }
 
 function readTextDelta(event: unknown): string | undefined {
@@ -623,4 +829,89 @@ function readTextDelta(event: unknown): string | undefined {
   }
 
   return undefined;
+}
+
+type ToolExecutionEvent =
+  | {
+      readonly kind: "start";
+      readonly toolCallId: string;
+      readonly toolName: string;
+      readonly args: unknown;
+    }
+  | {
+      readonly kind: "end";
+      readonly toolCallId: string;
+      readonly toolName: string;
+      readonly result: unknown;
+      readonly isError: boolean;
+    };
+
+function readToolExecutionEvent(event: unknown): ToolExecutionEvent | undefined {
+  const candidate = readToolExecutionCandidate(event);
+  if (candidate === undefined) {
+    return undefined;
+  }
+
+  if (candidate.type === "tool_execution_start") {
+    return {
+      kind: "start",
+      toolCallId: candidate.toolCallId,
+      toolName: candidate.toolName,
+      args: candidate.args
+    };
+  }
+
+  if (candidate.type === "tool_execution_end") {
+    return {
+      kind: "end",
+      toolCallId: candidate.toolCallId,
+      toolName: candidate.toolName,
+      result: candidate.result,
+      isError: candidate.isError === true
+    };
+  }
+
+  return undefined;
+}
+
+function readToolExecutionCandidate(event: unknown):
+  | {
+      readonly type: unknown;
+      readonly toolCallId: string;
+      readonly toolName: string;
+      readonly args: unknown;
+      readonly result: unknown;
+      readonly isError: unknown;
+    }
+  | undefined {
+  if (typeof event !== "object" || event === null || Array.isArray(event)) {
+    return undefined;
+  }
+
+  const candidate = event as {
+    readonly type?: unknown;
+    readonly toolCallId?: unknown;
+    readonly toolName?: unknown;
+    readonly args?: unknown;
+    readonly result?: unknown;
+    readonly isError?: unknown;
+  };
+
+  if (
+    typeof candidate.toolCallId !== "string" ||
+    candidate.toolCallId.length === 0 ||
+    typeof candidate.toolName !== "string" ||
+    candidate.toolName.length === 0
+  ) {
+    return undefined;
+  }
+
+  return {
+    type: candidate.type,
+    toolCallId: candidate.toolCallId,
+    toolName: candidate.toolName,
+    args: candidate.args,
+    result: candidate.result,
+    isError: candidate.isError
+  };
 }

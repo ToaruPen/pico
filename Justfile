@@ -18,6 +18,9 @@ test:
 smoke-milestone:
   npm run smoke:milestone
 
+smoke-otel-telemetry:
+  npm run smoke:otel-telemetry
+
 smoke-camera-vlm-scene:
   npm run smoke:camera-vlm-scene
 
@@ -61,6 +64,9 @@ resident-voice-dev-terminal:
 
 field-resident-hold-to-talk:
   npm run field:resident-hold-to-talk
+
+field-resident-voice-pseudo-audio fixture output:
+  npm run field:resident-voice-pseudo-audio -- --audio-fixture {{fixture}} --validation-output {{output}}
 
 ast:
   npm run ast:test

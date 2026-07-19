@@ -51,6 +51,20 @@ sections make the command fail.
 just smoke-milestone
 ```
 
+When `telemetry.otel.enabled` is true, run a loopback OpenTelemetry Collector
+before Pico. The tracked example is for `otelcol-contrib` because it uses the
+file and Prometheus exporters:
+
+```bash
+otelcol-contrib --config config/otel-collector.example.yaml
+PICO_CONFIG_PATH=config/pico.local.yaml just smoke-otel-telemetry
+```
+
+The Collector accepts OTLP HTTP only on `127.0.0.1:4318` and exposes Prometheus
+metrics only on `127.0.0.1:9464`. Pico emits metadata-only Logs and Metrics; it
+does not send transcripts, responses, tool arguments, tool results, or resident
+session identifiers to OTel.
+
 Pico smoke provider settings are loaded from `config/pico.local.yaml` by
 default. Copy the tracked example and fill in local-only values, including the
 Tapo camera account credentials created in the Tapo app:
@@ -255,6 +269,29 @@ PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice
 `resident:voice` owns the live microphone, speaker, and interaction lifecycle in
 the current terminal for direct field validation. It is not the public pico
 startup contract.
+
+For a repeatable full-turn measurement, inject one finite PCM16LE mono 16 kHz
+WAV or raw PCM fixture through the explicit field harness. This path invokes the
+configured Apple Speech STT, Pi Agent, Aivis Speech TTS, and playback providers:
+
+```bash
+validation_dir="$(mktemp -d /tmp/pico-voice-validation.XXXXXX)"
+PICO_CONFIG_PATH=config/pico.local.yaml \
+  npm run field:resident-voice-pseudo-audio -- \
+  --audio-fixture /tmp/pico-known-ja.wav \
+  --validation-output "$validation_dir/events.jsonl" \
+  --required-tool-name stackchan_get_status
+```
+
+The validation JSONL is intentionally contentful and mode `0600`: it contains
+the recognized transcript, Pi response, and tool names/arguments/results so the
+operator can verify correctness as well as timing. It is never forwarded to
+OTel or normal resident logs. Treat it as sensitive, keep it only for the field
+run, and delete it when validation is complete. Its immediate parent must be a
+real, current-user-owned mode-`0700` directory, and the output file must not
+already exist. If OTel is disabled, the field harness still executes the same
+SDK pipeline with in-process recording exporters and reports their Log/Metric
+counts.
 
 ### Memory ownership
 

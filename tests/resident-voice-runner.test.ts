@@ -1,13 +1,73 @@
 import { describe, expect, it } from "vitest";
 
+import type {
+  OpenTelemetryProviderOptions,
+  PicoTelemetry
+} from "../src/modules/telemetry/index.js";
 import type { ResidentControlHandler } from "../src/runtime/resident-control.js";
 import {
+  createConfiguredOpenTelemetry,
   requireResidentVoiceEnabled,
   runResidentControlLifecycle,
+  shutdownResidentVoiceTelemetry,
   waitForDirectResidentVoiceRuntime
 } from "../src/runtime/resident-voice-runner.js";
 
 describe("resident voice runner ownership", () => {
+  it("constructs OpenTelemetry only when enabled", async () => {
+    const constructed: string[] = [];
+    const createTelemetry = (options: OpenTelemetryProviderOptions): PicoTelemetry => {
+      constructed.push(options.serviceName);
+      return {
+        record: () => undefined,
+        forceFlush: () => Promise.resolve(),
+        shutdown: () => Promise.resolve(),
+        health: () => ({
+          logs: { consecutiveFailures: 0 },
+          metrics: { consecutiveFailures: 0 }
+        })
+      };
+    };
+
+    expect(createConfiguredOpenTelemetry({ enabled: false }, createTelemetry)).toBeUndefined();
+    const telemetry = createConfiguredOpenTelemetry(
+      {
+        enabled: true,
+        baseUrl: "http://127.0.0.1:4318",
+        serviceName: "pico-resident",
+        timeoutMs: 10_000,
+        metricExportIntervalMs: 15_000,
+        shutdownTimeoutMs: 5_000
+      },
+      createTelemetry
+    );
+
+    expect(constructed).toEqual(["pico-resident"]);
+    await expect(telemetry?.shutdown()).resolves.toBeUndefined();
+  });
+
+  it("contains telemetry shutdown failures to a bounded process diagnostic", async () => {
+    const lines: string[] = [];
+
+    await expect(
+      shutdownResidentVoiceTelemetry(
+        {
+          record: () => undefined,
+          forceFlush: () => Promise.resolve(),
+          shutdown: () => Promise.reject(new Error("collector shutdown failed")),
+          health: () => ({
+            logs: { consecutiveFailures: 1 },
+            metrics: { consecutiveFailures: 1 }
+          })
+        },
+        (line) => {
+          lines.push(line);
+        }
+      )
+    ).resolves.toBeUndefined();
+    expect(lines).toEqual(["[pico] telemetry shutdown failed\n"]);
+  });
+
   it("keeps the direct harness lock until a timed-out runtime actually settles", async () => {
     const abortController = new AbortController();
     const events: string[] = [];

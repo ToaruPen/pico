@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
+import { createStructuredAuditLog } from "../src/modules/audit/index.js";
 import { createPiAgentTurnClient } from "../src/runtime/pi-agent-turn.js";
 
 const inactiveExtensionRunner = {
@@ -1280,5 +1281,197 @@ describe("Pi Agent turn adapter", () => {
     });
     expect(createdSessions).toBe(1);
     expect(promptCalls).toBe(1);
+  });
+
+  it("records child setup, TTFT, tool execution, and disposal wall time", async () => {
+    const audit = createStructuredAuditLog();
+    const validationEvents: unknown[] = [];
+    let elapsedMs = 0;
+    let listener: ((event: unknown) => void) | undefined;
+    const now = () => new Date(Date.parse("2026-07-19T02:00:00.000Z") + elapsedMs).toISOString();
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      voiceProbe: { audit },
+      validation: { record: (event) => validationEvents.push(event) },
+      now,
+      monotonicNow: () => elapsedMs,
+      createResourceLoader: () => ({
+        reload: () => {
+          elapsedMs = 100;
+          return Promise.resolve();
+        }
+      }),
+      createAgentSession: () => {
+        elapsedMs = 250;
+        return Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => {
+              elapsedMs = 300;
+              return Promise.resolve();
+            },
+            extensionRunner: {
+              hasHandlers: () => true,
+              emit: () => {
+                elapsedMs = 1_000;
+                return Promise.resolve();
+              }
+            },
+            subscribe: (inputListener) => {
+              listener = inputListener;
+              return () => undefined;
+            },
+            prompt: () => {
+              elapsedMs = 350;
+              listener?.({
+                type: "tool_execution_start",
+                toolCallId: "private-tool-call",
+                toolName: "stackchan_get_status",
+                args: { detail: true }
+              });
+              elapsedMs = 700;
+              listener?.({
+                type: "tool_execution_end",
+                toolCallId: "private-tool-call",
+                toolName: "stackchan_get_status",
+                result: { status: "ready" },
+                isError: false
+              });
+              elapsedMs = 800;
+              listener?.({
+                type: "message_update",
+                assistantMessageEvent: { type: "text_delta", delta: "応答" }
+              });
+              elapsedMs = 900;
+              return Promise.resolve();
+            },
+            dispose: () => {
+              elapsedMs = 1_100;
+            }
+          }
+        });
+      }
+    });
+
+    await expect(client.prompt({ sessionId: "session-1", text: "計測" })).resolves.toEqual({
+      text: "応答"
+    });
+    await client.disposeSession?.("session-1");
+
+    const stages: Record<
+      string,
+      {
+        readonly status: unknown;
+        readonly durationMs: unknown;
+        readonly attributes: Readonly<Record<string, string | number | boolean>>;
+      }
+    > = {};
+    for (const event of audit.entries()) {
+      const stage = event.attributes["pico.voice.stage"];
+      if (typeof stage === "string") {
+        stages[stage] = {
+          status: event.attributes["pico.voice.stage_status"],
+          durationMs: event.attributes["pico.voice.stage_duration_ms"],
+          attributes: event.attributes
+        };
+      }
+    }
+    expect(stages).toMatchObject({
+      pi_session_resource_load: { status: "ok", durationMs: 100 },
+      pi_session_create: { status: "ok", durationMs: 150 },
+      pi_session_bind: { status: "ok", durationMs: 50 },
+      pi_tool_execution: { status: "ok", durationMs: 350 },
+      pi_time_to_first_text: { status: "ok", durationMs: 800 },
+      pi_session_dispose: { status: "ok", durationMs: 200 }
+    });
+    expect(JSON.stringify(audit.entries())).not.toContain("private-tool-call");
+    expect(validationEvents).toEqual([
+      {
+        kind: "tool_execution_start",
+        occurredAt: "2026-07-19T02:00:00.350Z",
+        sessionId: "session-1",
+        toolCallId: "private-tool-call",
+        toolName: "stackchan_get_status",
+        args: { detail: true }
+      },
+      {
+        kind: "tool_execution_end",
+        occurredAt: "2026-07-19T02:00:00.700Z",
+        sessionId: "session-1",
+        toolCallId: "private-tool-call",
+        toolName: "stackchan_get_status",
+        result: { status: "ready" },
+        isError: false,
+        durationMs: 350
+      }
+    ]);
+  });
+
+  it("preserves the resource loader receiver while measuring reload", async () => {
+    const resourceLoader = {
+      loaded: false,
+      reload() {
+        this.loaded = true;
+        return Promise.resolve();
+      }
+    };
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      createResourceLoader: () => resourceLoader,
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: () => () => undefined,
+            prompt: () => Promise.resolve(),
+            dispose: () => undefined
+          }
+        })
+    });
+
+    await expect(client.prompt({ sessionId: "session-1", text: "receiver" })).resolves.toEqual({
+      text: ""
+    });
+    expect(resourceLoader.loaded).toBe(true);
+  });
+
+  it("settles TTFT once when a prompt completes without text", async () => {
+    const audit = createStructuredAuditLog();
+    let elapsedMs = 0;
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      voiceProbe: { audit },
+      now: () => "2026-07-19T02:00:00.000Z",
+      monotonicNow: () => elapsedMs,
+      createResourceLoader: () => ({ reload: () => Promise.resolve() }),
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: () => () => undefined,
+            prompt: () => {
+              elapsedMs = 125;
+              return Promise.resolve();
+            },
+            dispose: () => undefined
+          }
+        })
+    });
+
+    await client.prompt({ sessionId: "session-1", text: "無音応答" });
+
+    const events = audit
+      .entries()
+      .filter((event) => event.attributes["pico.voice.stage"] === "pi_time_to_first_text");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.attributes).toMatchObject({
+      "pico.voice.stage_status": "skipped",
+      "pico.voice.stage_duration_ms": 125,
+      "pico.voice.error_code": "no_text_delta"
+    });
   });
 });

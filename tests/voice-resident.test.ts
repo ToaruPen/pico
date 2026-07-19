@@ -14,6 +14,7 @@ import type {
   ResidentAudioCapture,
   ResidentCaptureSession
 } from "../src/runtime/resident-audio-io.js";
+import type { ResidentVoiceValidationEvent } from "../src/runtime/resident-voice-validation.js";
 import {
   createVoiceResidentRuntime,
   type PiAgentTurnClient,
@@ -148,6 +149,53 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
+  it("records wall time from an accepted PTT release to first playback", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    const ttsGate = createGate<TtsSynthesisResult>();
+    let monotonicTimeMs = 100;
+    const driver = createDriver({
+      audit,
+      monotonicNow: () => monotonicTimeMs,
+      ttsResponse: () => ttsGate.promise
+    });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("synthesizing"));
+    monotonicTimeMs = 850;
+    ttsGate.resolve(successfulSynthesis());
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(voiceStageEvent(audit, "ptt_release_to_playback_start")).toMatchObject({
+      attributes: {
+        "pico.voice.stage_status": "ok",
+        "pico.voice.stage_duration_ms": 750
+      }
+    });
+
+    await driver.runtime.stop();
+  });
+
+  it("settles an accepted PTT release when no playback starts", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    const driver = createDriver({ audit, speechDetected: false });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(voiceStageEvent(audit, "ptt_release_to_playback_start")).toMatchObject({
+      attributes: {
+        "pico.voice.stage_status": "skipped",
+        "pico.voice.error_code": "playback_not_started"
+      }
+    });
+
+    await driver.runtime.stop();
+  });
+
   it("records Pi prompt failure wall time", async () => {
     vi.useFakeTimers();
     const audit = createStructuredAuditLog();
@@ -189,6 +237,31 @@ describe("resident hold-to-talk voice runtime", () => {
       "session-1"
     ]);
     expect(driver.piRequests).toHaveLength(2);
+
+    await driver.runtime.stop();
+  });
+
+  it("records recognized and generated text only in an explicit validation sink", async () => {
+    vi.useFakeTimers();
+    const validationEvents: ResidentVoiceValidationEvent[] = [];
+    const driver = createDriver({ validationEvents });
+
+    await completeHold(driver, "validation-content");
+
+    expect(validationEvents).toEqual([
+      {
+        kind: "staff_transcript",
+        occurredAt: "2026-07-17T00:00:00.000Z",
+        sessionId: "session-1",
+        text: "職員の発話"
+      },
+      {
+        kind: "pi_response",
+        occurredAt: "2026-07-17T00:00:00.000Z",
+        sessionId: "session-1",
+        text: "Picoの応答"
+      }
+    ]);
 
     await driver.runtime.stop();
   });
@@ -312,18 +385,30 @@ describe("resident hold-to-talk voice runtime", () => {
 
   it("cancels the release tail without starting transcription", async () => {
     vi.useFakeTimers();
-    const driver = createDriver();
+    const audit = createStructuredAuditLog();
+    let monotonicTimeMs = 100;
+    const driver = createDriver({ audit, monotonicNow: () => monotonicTimeMs });
 
     await driver.press();
     driver.capture.emit(frame("tail-cancel", [1, 0]));
     await driver.release();
     expect(driver.runtime.state()).toBe("tailing");
+    monotonicTimeMs = 175;
     await expect(driver.cancel()).resolves.toBe("accepted");
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
     await vi.advanceTimersByTimeAsync(250);
 
     expect(driver.sttRequests).toEqual([]);
     expect(driver.piRequests).toEqual([]);
+    const pttEvents = audit
+      .entries()
+      .filter((event) => event.attributes["pico.voice.stage"] === "ptt_release_to_playback_start");
+    expect(pttEvents).toHaveLength(1);
+    expect(pttEvents[0]?.attributes).toMatchObject({
+      "pico.voice.stage_status": "skipped",
+      "pico.voice.stage_duration_ms": 75,
+      "pico.voice.error_code": "cancelled"
+    });
     await driver.runtime.stop();
   });
 
@@ -705,6 +790,35 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(driver.playedChunks).toHaveLength(1);
   });
 
+  it("records interaction ending wall time through Pi session disposal", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    const disposalGate = createGate<undefined>();
+    let monotonicTimeMs = 100;
+    const driver = createDriver({
+      audit,
+      sessionDurationMs: 1_000,
+      monotonicNow: () => monotonicTimeMs,
+      disposalCompletion: () => disposalGate.promise
+    });
+
+    await completeHold(driver, "interaction-end-latency");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
+    monotonicTimeMs = 525;
+    disposalGate.resolve(undefined);
+    await vi.waitFor(() => expect(voiceStageEvents(audit, "interaction_end")).toHaveLength(1));
+
+    expect(voiceStageEvent(audit, "interaction_end")).toMatchObject({
+      attributes: {
+        "pico.voice.stage_status": "ok",
+        "pico.voice.stage_duration_ms": 425
+      }
+    });
+
+    await driver.runtime.stop();
+  });
+
   it("stops farewell playback when interaction ending is cancelled", async () => {
     vi.useFakeTimers();
     const farewellPlaybackGate = createGate<undefined>();
@@ -973,6 +1087,7 @@ function createDriver(
     readonly piResponse?: (signal: AbortSignal | undefined) => Promise<{ readonly text: string }>;
     readonly ttsResponse?: (signal: AbortSignal | undefined) => Promise<TtsSynthesisResult>;
     readonly playbackCompletion?: (signal: AbortSignal | undefined) => Promise<void>;
+    readonly disposalCompletion?: () => Promise<void>;
     readonly playbackStopError?: Error;
     readonly echoFlush?: () => Promise<void>;
     readonly cancelDeferred?: () => void;
@@ -983,6 +1098,7 @@ function createDriver(
     readonly sessionDurationMs?: number;
     readonly audit?: ReturnType<typeof createStructuredAuditLog>;
     readonly monotonicNow?: () => number;
+    readonly validationEvents?: ResidentVoiceValidationEvent[];
   } = {}
 ) {
   const capture = createControlledCapture();
@@ -1010,6 +1126,7 @@ function createDriver(
     },
     disposeSession(sessionId) {
       disposedSessions.push(sessionId);
+      return options.disposalCompletion?.();
     },
     disposeAll() {
       options.lifecycleEvents?.push("dispose_all");
@@ -1106,6 +1223,7 @@ function createDriver(
           }
         }),
     ...(options.audit === undefined ? {} : { probe: { audit: options.audit } }),
+    validation: { record: (event) => options.validationEvents?.push(event) },
     now: () => "2026-07-17T00:00:00.000Z",
     monotonicNow: options.monotonicNow ?? (() => 0)
   });

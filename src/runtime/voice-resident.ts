@@ -15,6 +15,7 @@ import {
   type ResidentControlState,
   type ResidentTurnGeneration
 } from "./resident-control-controller.js";
+import type { ResidentVoiceValidationSink } from "./resident-voice-validation.js";
 import type { SpeechActivityGate } from "./speech-activity-gate.js";
 import { recordVoiceStageProbe, type VoiceStageProbe } from "./voice-stage-probe.js";
 
@@ -77,6 +78,7 @@ export type VoiceResidentRuntimeOptions = {
   };
   readonly log?: VoiceResidentLogSink;
   readonly probe?: VoiceStageProbe;
+  readonly validation?: ResidentVoiceValidationSink;
   readonly signal?: AbortSignal;
   readonly now?: () => string;
   readonly monotonicNow?: () => number;
@@ -118,11 +120,20 @@ type ActiveTurn = {
   readonly frameCollection: Promise<void>;
   operation: Promise<void> | undefined;
   cancellation: Promise<void> | undefined;
+  pttRelease: PttReleaseMeasurement | undefined;
+};
+
+type PttReleaseMeasurement = {
+  readonly startedAt: string;
+  readonly startedAtMs: number;
+  settled: boolean;
 };
 
 type InteractionEndingControl = {
   readonly sessionId: string;
   readonly abortController: AbortController;
+  readonly startedAt: string;
+  readonly startedAtMs: number;
   cancellation: Promise<void> | undefined;
 };
 
@@ -200,7 +211,8 @@ export function createVoiceResidentRuntime(
         frames,
         frameCollection,
         operation: undefined,
-        cancellation: undefined
+        cancellation: undefined,
+        pttRelease: undefined
       };
       counters.acceptedHolds += 1;
     },
@@ -241,6 +253,7 @@ export function createVoiceResidentRuntime(
       }
 
       counters.cancelledTurns += 1;
+      settlePttReleaseMeasurement(turn, options, "skipped", monotonicNow, "cancelled");
       turn.cancellation = convergeCancellation(turn, controller, options).then(() => {
         if (activeTurn === turn) {
           activeTurn = undefined;
@@ -273,12 +286,19 @@ export function createVoiceResidentRuntime(
     const ending: InteractionEndingControl = {
       sessionId: session.id,
       abortController: new AbortController(),
+      startedAt: now(),
+      startedAtMs: monotonicNow(),
       cancellation: undefined
     };
     activeInteractionEnding = ending;
     const turn = activeTurn;
 
     const operation = interactionEnding.then(async () => {
+      let settlement: {
+        readonly status: Parameters<typeof recordStage>[2];
+        readonly errorCode?: string;
+      } = { status: "ok" };
+
       try {
         await waitForTurnBoundary(turn);
         await finalizeEndedInteraction(
@@ -292,7 +312,23 @@ export function createVoiceResidentRuntime(
         if (activeSessionId === session.id) {
           activeSessionId = undefined;
         }
+        if (ending.abortController.signal.aborted) {
+          settlement = { status: "skipped", errorCode: "cancelled" };
+        }
+      } catch (error) {
+        settlement = { status: "error", errorCode: "interaction_end_failed" };
+        throw error;
       } finally {
+        recordStage(
+          options,
+          "interaction_end",
+          settlement.status,
+          ending.startedAt,
+          Math.max(0, monotonicNow() - ending.startedAtMs),
+          settlement.errorCode === undefined
+            ? undefined
+            : { "pico.voice.error_code": settlement.errorCode }
+        );
         shutdownCancelledSessionIds.delete(session.id);
 
         if (activeInteractionEnding === ending) {
@@ -370,35 +406,58 @@ export function createVoiceResidentRuntime(
     stopFromSignal();
   }
 
+  const processControlEvent = (event: ResidentControlEvent): ResidentControlResult => {
+    if (event.kind === "talk_pressed" && activeInteractionEnding !== undefined) {
+      counters.ignoredBusyTalkPresses += 1;
+      return "ignored_busy";
+    }
+
+    const result = controller.handle(event);
+    recordAcceptedPttRelease(event, result, activeTurn, monotonicNow);
+
+    if (acceptInteractionEndingCancel(event, result, cancelInteractionEnding)) {
+      return "accepted";
+    }
+
+    if (event.kind === "talk_pressed" && result === "ignored_busy") {
+      counters.ignoredBusyTalkPresses += 1;
+    }
+
+    return result;
+  };
+  const handleControlEvent = (event: ResidentControlEvent): ResidentControlResult => {
+    try {
+      return processControlEvent(event);
+    } catch (error) {
+      failRuntime(error, controller.generation()?.id);
+      throw error;
+    }
+  };
+
   return {
     handleControl(event) {
-      return Promise.resolve().then(() => {
-        try {
-          if (event.kind === "talk_pressed" && activeInteractionEnding !== undefined) {
-            counters.ignoredBusyTalkPresses += 1;
-            return "ignored_busy";
-          }
-
-          const result = controller.handle(event);
-
-          if (acceptInteractionEndingCancel(event, result, cancelInteractionEnding)) {
-            return "accepted";
-          }
-
-          if (event.kind === "talk_pressed" && result === "ignored_busy") {
-            counters.ignoredBusyTalkPresses += 1;
-          }
-
-          return result;
-        } catch (error) {
-          failRuntime(error, controller.generation()?.id);
-          throw error;
-        }
-      });
+      return Promise.resolve().then(() => handleControlEvent(event));
     },
     state: controller.state,
     completion,
     stop
+  };
+}
+
+function recordAcceptedPttRelease(
+  event: ResidentControlEvent,
+  result: ResidentControlResult,
+  activeTurn: ActiveTurn | undefined,
+  monotonicNow: () => number
+): void {
+  if (event.kind !== "talk_released" || result !== "accepted" || activeTurn === undefined) {
+    return;
+  }
+
+  activeTurn.pttRelease = {
+    startedAt: event.occurredAt,
+    startedAtMs: monotonicNow(),
+    settled: false
   };
 }
 
@@ -421,9 +480,44 @@ async function collectCaptureFrames(
   }
 }
 
+async function processCompletedHold(
+  turn: ActiveTurn,
+  controller: ResidentControlController,
+  options: VoiceResidentRuntimeOptions,
+  counters: RuntimeCounters,
+  state: {
+    readonly now: () => string;
+    readonly monotonicNow: () => number;
+    readonly getActiveSessionId: () => string | undefined;
+    readonly getEndingSessionId: () => string | undefined;
+    readonly setActiveSessionId: (sessionId: string | undefined) => void;
+  }
+): Promise<void> {
+  try {
+    await processCompletedHoldWork(turn, controller, options, counters, state);
+  } catch (error) {
+    settlePttReleaseMeasurement(
+      turn,
+      options,
+      turn.generation.signal.aborted ? "skipped" : "error",
+      state.monotonicNow,
+      turn.generation.signal.aborted ? "cancelled" : "turn_failed_before_playback"
+    );
+    throw error;
+  } finally {
+    settlePttReleaseMeasurement(
+      turn,
+      options,
+      "skipped",
+      state.monotonicNow,
+      turn.generation.signal.aborted ? "cancelled" : "playback_not_started"
+    );
+  }
+}
+
 // Each guard rejects results that no longer belong to the active generation and stage.
 // eslint-disable-next-line complexity
-async function processCompletedHold(
+async function processCompletedHoldWork(
   turn: ActiveTurn,
   controller: ResidentControlController,
   options: VoiceResidentRuntimeOptions,
@@ -476,6 +570,12 @@ async function processCompletedHold(
 
   const sessionId = await ensureActiveSession(options, state);
   const deferredResults = collectDeferredResults(options, sessionId, state.now());
+  options.validation?.record({
+    kind: "staff_transcript",
+    occurredAt: state.now(),
+    sessionId,
+    text: transcript
+  });
   recordLog(options.log, {
     kind: "staff_input",
     occurredAt: state.now(),
@@ -503,6 +603,13 @@ async function processCompletedHold(
     finishCurrentTurn(controller, turn.generation.id, "processing", counters);
     return;
   }
+
+  options.validation?.record({
+    kind: "pi_response",
+    occurredAt: state.now(),
+    sessionId,
+    text: response.text
+  });
 
   recordLog(options.log, {
     kind: "pi_agent_response",
@@ -544,7 +651,8 @@ async function processCompletedHold(
     turn.generation.signal,
     options,
     state.now,
-    state.monotonicNow
+    state.monotonicNow,
+    () => settlePttReleaseMeasurement(turn, options, "ok", state.monotonicNow)
   );
 
   if (!isCurrentStage(controller, turn.generation.id, "speaking", counters)) {
@@ -826,12 +934,15 @@ function recordTtsRequestFailure(
   );
 }
 
+// Abort checks intentionally bracket every awaited playback boundary.
+// eslint-disable-next-line complexity
 async function playTurnChunks(
   chunks: readonly TtsAudioChunk[],
   signal: AbortSignal | undefined,
   options: VoiceResidentRuntimeOptions,
   now: () => string,
-  monotonicNow: () => number
+  monotonicNow: () => number,
+  onFirstPlaybackStart?: () => void
 ): Promise<boolean> {
   let offsetMs = 0;
   const playbackStartedAt = now();
@@ -843,6 +954,7 @@ async function playTurnChunks(
     ),
     "pico.voice.chunk_count": chunks.length
   };
+  let playbackStarted = false;
   const finishPlayback = (
     status: Parameters<typeof recordStage>[2],
     errorCode?: string
@@ -884,6 +996,11 @@ async function playTurnChunks(
       if (isAbortRequested(signal)) {
         await options.echoControl.flush();
         return finishPlayback("skipped", "cancelled");
+      }
+
+      if (!playbackStarted) {
+        playbackStarted = true;
+        onFirstPlaybackStart?.();
       }
 
       await options.playback.play(chunk, chunkStartedAt, signal);
@@ -1299,6 +1416,29 @@ function recordStage(
     durationMs,
     ...(attributes === undefined ? {} : { attributes })
   });
+}
+
+function settlePttReleaseMeasurement(
+  turn: ActiveTurn,
+  options: VoiceResidentRuntimeOptions,
+  status: Parameters<typeof recordStage>[2],
+  monotonicNow: () => number,
+  errorCode?: string
+): void {
+  const measurement = turn.pttRelease;
+  if (measurement === undefined || measurement.settled) {
+    return;
+  }
+
+  measurement.settled = true;
+  recordStage(
+    options,
+    "ptt_release_to_playback_start",
+    status,
+    measurement.startedAt,
+    Math.max(0, monotonicNow() - measurement.startedAtMs),
+    errorCode === undefined ? undefined : { "pico.voice.error_code": errorCode }
+  );
 }
 
 function addMilliseconds(timestamp: string, milliseconds: number): string {

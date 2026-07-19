@@ -327,12 +327,14 @@ voice:
       speakerId: 888753760
       timeoutMs: 30000
       text: こんにちは。
-audit:
+telemetry:
   otel:
     enabled: true
-    endpoint: http://127.0.0.1:4318/v1/logs
+    baseUrl: http://127.0.0.1:4318
     serviceName: pico
     timeoutMs: 5000
+    metricExportIntervalMs: 15000
+    shutdownTimeoutMs: 3000
 `);
 
     expect(loadPicoConfig({ path })).toMatchObject({
@@ -459,12 +461,14 @@ audit:
           }
         }
       },
-      audit: {
+      telemetry: {
         otel: {
           enabled: true,
-          endpoint: "http://127.0.0.1:4318/v1/logs",
+          baseUrl: "http://127.0.0.1:4318",
           serviceName: "pico",
-          timeoutMs: 5000
+          timeoutMs: 5000,
+          metricExportIntervalMs: 15_000,
+          shutdownTimeoutMs: 3000
         }
       }
     });
@@ -479,7 +483,7 @@ audit:
           durationMs: 60_000
         }
       },
-      audit: {
+      telemetry: {
         otel: {
           enabled: false
         }
@@ -761,17 +765,94 @@ voice:
     ).toThrow("pico config voice.echoControl.mode platform_voice_processing is not implemented");
   });
 
-  it("rejects non-local audit OTel Collector endpoints", () => {
+  it("parses telemetry OTel settings and applies disabled defaults", () => {
+    expect(definePicoConfig({}).telemetry).toEqual({
+      otel: {
+        enabled: false
+      }
+    });
+    expect(
+      definePicoConfig({
+        telemetry: {
+          otel: {
+            enabled: true,
+            baseUrl: "http://127.0.0.1:4318",
+            serviceName: "pico-resident",
+            timeoutMs: 10_000,
+            metricExportIntervalMs: 15_000,
+            shutdownTimeoutMs: 5_000
+          }
+        }
+      }).telemetry
+    ).toEqual({
+      otel: {
+        enabled: true,
+        baseUrl: "http://127.0.0.1:4318",
+        serviceName: "pico-resident",
+        timeoutMs: 10_000,
+        metricExportIntervalMs: 15_000,
+        shutdownTimeoutMs: 5_000
+      }
+    });
+  });
+
+  it("rejects invalid telemetry OTel settings", () => {
+    const telemetry = (otel: unknown) => ({ telemetry: { otel } });
+
+    for (const baseUrl of [
+      "https://otel.example.com:4318",
+      ["http://user", "password@127.0.0.1:4318"].join(":"),
+      "http://127.0.0.1:4318/v1/logs",
+      "http://127.0.0.1:4318?signal=logs",
+      "ftp://127.0.0.1:4318"
+    ]) {
+      expect(() =>
+        definePicoConfig(
+          telemetry({
+            enabled: true,
+            baseUrl,
+            timeoutMs: 10_000,
+            metricExportIntervalMs: 15_000
+          })
+        )
+      ).toThrow("pico config telemetry.otel.baseUrl");
+    }
+
+    expect(() =>
+      definePicoConfig(
+        telemetry({
+          enabled: true,
+          baseUrl: "http://127.0.0.1:4318",
+          timeoutMs: 10_000,
+          metricExportIntervalMs: 10_000
+        })
+      )
+    ).toThrow("pico config telemetry.otel.metricExportIntervalMs must exceed timeoutMs");
+  });
+
+  it("rejects the removed audit OTel settings", () => {
     expect(() =>
       definePicoConfig({
         audit: {
           otel: {
-            enabled: true,
-            endpoint: "https://otel.example.com/v1/logs"
+            enabled: false
           }
         }
       })
-    ).toThrow("pico config audit.otel.endpoint must use a local Collector URL");
+    ).toThrow("pico config audit.otel was removed; use telemetry.otel");
+  });
+
+  it("rejects non-local telemetry OTel Collector origins", () => {
+    expect(() =>
+      definePicoConfig({
+        telemetry: {
+          otel: {
+            enabled: true,
+            baseUrl: "https://otel.example.com:4318"
+          }
+        }
+      })
+    ).toThrow("pico config telemetry.otel.baseUrl must use a local Collector URL");
   });
 
   it("uses PICO_CONFIG_PATH as the only config environment selector", () => {
