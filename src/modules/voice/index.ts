@@ -135,13 +135,15 @@ export type TtsClient = {
   readonly synthesize: (request: TtsSynthesisRequest) => AsyncIterable<TtsSynthesisEvent>;
 };
 
+export type TtsProviderStageErrorCode = TtsSynthesisFailure["reason"];
+
 export type TtsProviderStageObservation = {
   readonly stage: "audio_query" | "synthesis";
   readonly sentenceIndex: number;
   readonly status: "ok" | "error" | "skipped";
   readonly startedAt: string;
   readonly durationMs: number;
-  readonly errorCode?: string;
+  readonly errorCode?: TtsProviderStageErrorCode;
 };
 
 export type AivisSpeechTtsClientOptions = {
@@ -206,6 +208,22 @@ const SENTENCE_BOUNDARIES = new Set([".", "。", "！", "？", "!", "?", "…"])
 const MAX_SPEECH_SEGMENT_CODE_POINTS = 120;
 const SOFT_SPEECH_BOUNDARIES = new Set(["、", ",", "，", ";", "；", ":", "：", " ", "\u3000"]);
 const MAX_STAGE_DURATION_MS = 2_147_483_647;
+const TTS_PROVIDER_STAGES = new Set<TtsProviderStageObservation["stage"]>([
+  "audio_query",
+  "synthesis"
+]);
+const TTS_PROVIDER_STAGE_STATUSES = new Set<TtsProviderStageObservation["status"]>([
+  "ok",
+  "error",
+  "skipped"
+]);
+const TTS_PROVIDER_STAGE_ERROR_CODES = new Set<TtsProviderStageErrorCode>([
+  "invalid_request",
+  "timeout",
+  "cancelled",
+  "backend_error",
+  "invalid_response"
+]);
 const defaultNow = (): string => new Date().toISOString();
 const defaultMonotonicNow = (): number => performance.now();
 const TRAILING_SENTENCE_CLOSERS = new Set([
@@ -346,6 +364,32 @@ export function createAivisSpeechTtsClient(
       };
     }
   };
+}
+
+export function defineTtsProviderStageObservation(input: unknown): TtsProviderStageObservation {
+  const observation = requireRecord(input, "pico TTS provider stage observation must be an object");
+  const stage = requireTtsProviderStage(observation.stage);
+  const sentenceIndex = requireNonNegativeInteger(
+    observation.sentenceIndex,
+    "pico TTS provider stage observation sentenceIndex is invalid"
+  );
+  const status = requireTtsProviderStageStatus(observation.status);
+  const startedAt = requireString(
+    observation.startedAt,
+    "pico TTS provider stage observation startedAt is invalid"
+  );
+  const durationMs = requireTtsProviderStageDuration(observation.durationMs);
+  const errorCode = requireOptionalTtsProviderStageErrorCode(observation.errorCode);
+  requireConsistentTtsProviderStageOutcome(status, errorCode);
+
+  return Object.freeze({
+    stage,
+    sentenceIndex,
+    status,
+    startedAt,
+    durationMs,
+    ...(errorCode === undefined ? {} : { errorCode })
+  });
 }
 
 export async function collectTtsSynthesisEvents(
@@ -901,6 +945,68 @@ function requireString(value: unknown, message: string): string {
   return trimmed;
 }
 
+function requireTtsProviderStage(value: unknown): TtsProviderStageObservation["stage"] {
+  if (
+    typeof value === "string" &&
+    TTS_PROVIDER_STAGES.has(value as TtsProviderStageObservation["stage"])
+  ) {
+    return value as TtsProviderStageObservation["stage"];
+  }
+
+  throw new Error("pico TTS provider stage observation stage is invalid");
+}
+
+function requireTtsProviderStageStatus(value: unknown): TtsProviderStageObservation["status"] {
+  if (
+    typeof value === "string" &&
+    TTS_PROVIDER_STAGE_STATUSES.has(value as TtsProviderStageObservation["status"])
+  ) {
+    return value as TtsProviderStageObservation["status"];
+  }
+
+  throw new Error("pico TTS provider stage observation status is invalid");
+}
+
+function requireTtsProviderStageDuration(value: unknown): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > MAX_STAGE_DURATION_MS
+  ) {
+    throw new Error("pico TTS provider stage observation durationMs is invalid");
+  }
+
+  return value;
+}
+
+function requireOptionalTtsProviderStageErrorCode(
+  value: unknown
+): TtsProviderStageErrorCode | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value === "string" &&
+    TTS_PROVIDER_STAGE_ERROR_CODES.has(value as TtsProviderStageErrorCode)
+  ) {
+    return value as TtsProviderStageErrorCode;
+  }
+
+  throw new Error("pico TTS provider stage observation errorCode is invalid");
+}
+
+function requireConsistentTtsProviderStageOutcome(
+  status: TtsProviderStageObservation["status"],
+  errorCode: TtsProviderStageErrorCode | undefined
+): void {
+  const invalidSuccess = status === "ok" && errorCode !== undefined;
+  const invalidSkipped =
+    status === "skipped" && errorCode !== undefined && errorCode !== "cancelled";
+  const invalidError = status === "error" && errorCode === "cancelled";
+  if (invalidSuccess || invalidSkipped || invalidError) {
+    throw new Error("pico TTS provider stage observation outcome is inconsistent");
+  }
+}
+
 function requireAppleSpeechProvider(value: unknown): "apple-speech" {
   if (value === "apple-speech") {
     return value;
@@ -1228,7 +1334,7 @@ function observeSettledAivisSpeechStage(
   startedAtMs: number,
   result: { readonly ok: true } | TtsSynthesisFailure
 ): void {
-  const observation: TtsProviderStageObservation = result.ok
+  const observation = result.ok
     ? {
         stage,
         sentenceIndex,
@@ -1246,7 +1352,7 @@ function observeSettledAivisSpeechStage(
       };
 
   try {
-    runtime.observeStage?.(observation);
+    runtime.observeStage?.(defineTtsProviderStageObservation(observation));
   } catch {
     // Provider telemetry is best-effort and cannot change TTS settlement.
   }

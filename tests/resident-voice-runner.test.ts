@@ -186,6 +186,53 @@ describe("resident voice TTS telemetry wiring", () => {
     expect(audit.entries()).toHaveLength(2);
   });
 
+  it("prevents caller observation mutation from injecting trusted probe attributes", async () => {
+    const audit = createStructuredAuditLog();
+    let callerObservationCount = 0;
+    let callerObservationWasFrozen = false;
+    const tts = createConfiguredTts(
+      residentConfig(),
+      { audit },
+      {
+        fetch: () => Promise.resolve(new Response("provider unavailable", { status: 503 })),
+        observeStage: (observation) => {
+          callerObservationCount += 1;
+          callerObservationWasFrozen = Object.isFrozen(observation);
+          try {
+            Object.defineProperty(observation, "errorCode", {
+              configurable: true,
+              enumerable: true,
+              value: "injected-child-secret",
+              writable: true
+            });
+            Object.defineProperty(observation, "status", {
+              configurable: true,
+              enumerable: true,
+              value: "ok",
+              writable: true
+            });
+          } catch {
+            // Frozen observer input rejects runtime mutation.
+          }
+        }
+      }
+    );
+
+    await expect(collectEvents(tts.synthesize({ text: "一文。" }))).resolves.toMatchObject([
+      { kind: "failed", failure: { reason: "backend_error" } }
+    ]);
+
+    expect(callerObservationCount).toBe(1);
+    expect(callerObservationWasFrozen).toBe(true);
+    expect(audit.entries()).toHaveLength(1);
+    expect(audit.entries()[0]?.attributes).toMatchObject({
+      "pico.voice.stage": "tts_audio_query",
+      "pico.voice.stage_status": "error",
+      "pico.voice.error_code": "backend_error"
+    });
+    expect(JSON.stringify(audit.entries())).not.toContain("injected-child-secret");
+  });
+
   it("maps provider error and skipped observations with only bounded error attributes", async () => {
     const errorAudit = createStructuredAuditLog();
     const errorTts = createConfiguredTts(

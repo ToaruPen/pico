@@ -25,7 +25,8 @@ import {
   createAivisSpeechTtsClient,
   createAppleSpeechSttClient,
   defineAivisSpeechService,
-  defineAppleSpeechSidecar
+  defineAppleSpeechSidecar,
+  defineTtsProviderStageObservation
 } from "../modules/voice/index.js";
 import { createDeferredToolCoordinator } from "./deferred-tool-coordinator.js";
 import { type MacOSControlBridge, startMacOSControlBridge } from "./macos-control-bridge.js";
@@ -639,8 +640,10 @@ export function createConfiguredTts(
   return createAivisSpeechTtsClient(buildAivisSpeechService(config), {
     ...options,
     observeStage: (observation) => {
-      notifyTtsStageObserver(callerObserver, observation);
-      notifyTtsStageObserver(probeObserver, observation);
+      const trustedObservation = defineTtsProviderStageObservation(observation);
+      const callerObservation = defineTtsProviderStageObservation(observation);
+      notifyTtsStageObserver(probeObserver, trustedObservation);
+      notifyTtsStageObserver(callerObserver, callerObservation);
     }
   });
 }

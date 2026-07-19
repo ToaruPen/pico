@@ -6,6 +6,7 @@ import {
   createAppleSpeechSttClient,
   defineAivisSpeechService,
   defineAppleSpeechSidecar,
+  defineTtsProviderStageObservation,
   parseAppleSpeechSidecarResponse,
   type SttTranscriptionRequest,
   segmentJapaneseSentences,
@@ -724,6 +725,38 @@ function ttsChunk(sentenceIndex: number, durationMs = 1): TtsAudioChunk {
 }
 
 describe("Aivis Speech TTS boundary", () => {
+  it("validates, allowlists, and freezes provider stage observations", () => {
+    const observation = defineTtsProviderStageObservation({
+      stage: "audio_query",
+      sentenceIndex: 0,
+      status: "error",
+      startedAt: "2026-07-19T00:00:00.000Z",
+      durationMs: 3,
+      errorCode: "backend_error",
+      text: "must not survive validation"
+    });
+
+    expect(observation).toEqual({
+      stage: "audio_query",
+      sentenceIndex: 0,
+      status: "error",
+      startedAt: "2026-07-19T00:00:00.000Z",
+      durationMs: 3,
+      errorCode: "backend_error"
+    });
+    expect(Object.isFrozen(observation)).toBe(true);
+    expect(() =>
+      defineTtsProviderStageObservation({
+        stage: "audio_query",
+        sentenceIndex: 0,
+        status: "error",
+        startedAt: "2026-07-19T00:00:00.000Z",
+        durationMs: 3,
+        errorCode: "injected-child-secret"
+      })
+    ).toThrow("pico TTS provider stage observation errorCode is invalid");
+  });
+
   it("observes Aivis substages without exposing provider payloads", async () => {
     const observations: TtsProviderStageObservation[] = [];
     const wallClock = ["2026-07-19T00:00:00.000Z", "2026-07-19T00:00:01.000Z"];
@@ -767,6 +800,7 @@ describe("Aivis Speech TTS boundary", () => {
         durationMs: 7
       }
     ]);
+    expect(observations.every((observation) => Object.isFrozen(observation))).toBe(true);
     const serialized = JSON.stringify(observations);
     expect(serialized).not.toContain("観測対象の本文");
     expect(serialized).not.toContain("queryPayload");
