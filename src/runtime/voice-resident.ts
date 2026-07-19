@@ -952,6 +952,7 @@ async function playTurnChunks(
   onFirstPlaybackStart?: () => void
 ): Promise<boolean> {
   let offsetMs = 0;
+  const playbackSignal = signal ?? new AbortController().signal;
   const playbackStartedAt = now();
   const playbackStartedAtMs = monotonicNow();
   const attributes = {
@@ -987,7 +988,7 @@ async function playTurnChunks(
       }
 
       const chunkStartedAt = addMilliseconds(playbackStartedAt, offsetMs);
-      await options.echoControl.acceptFarEndReference(
+      const echoRegistration = await options.echoControl.acceptFarEndReference(
         defineVoicePcmFrame({
           id: `tts-${String(chunk.sentenceIndex)}`,
           direction: "far_end",
@@ -997,11 +998,15 @@ async function playTurnChunks(
           channels: chunk.channels,
           capturedAt: chunkStartedAt,
           durationMs: chunk.durationMs
-        })
+        }),
+        playbackSignal
       );
+      if (echoRegistration.status !== "applied") {
+        throw echoRegistration.error;
+      }
 
       if (isAbortRequested(signal)) {
-        await options.echoControl.flush();
+        await requireEchoControlReset(options.echoControl);
         return finishPlayback("skipped", "cancelled");
       }
 
@@ -1025,6 +1030,13 @@ async function playTurnChunks(
       isAbortRequested(signal) ? "skipped" : "error",
       isAbortRequested(signal) ? "cancelled" : "playback_failed"
     );
+  }
+}
+
+async function requireEchoControlReset(echoControl: EchoControlProvider): Promise<void> {
+  const reset = await echoControl.flush();
+  if (reset.status !== "reset") {
+    throw new Error("pico echo-control reset is required before cancelling playback");
   }
 }
 

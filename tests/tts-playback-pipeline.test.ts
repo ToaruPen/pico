@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createStructuredAuditLog } from "../src/modules/audit/index.js";
-import type { EchoControlProvider, VoicePcmFrame } from "../src/modules/voice/echo-control.js";
+import {
+  createHttpEchoControlProvider,
+  type EchoControlProvider,
+  type VoicePcmFrame
+} from "../src/modules/voice/echo-control.js";
 import type {
   TtsAudioChunk,
   TtsClient,
@@ -341,6 +345,210 @@ describe("TTS playback pipeline", () => {
     });
     await vi.waitFor(() => expect(echo.state.flushes).toBe(2));
     expect(echo.state.references).toEqual([2]);
+  });
+
+  it("fails the next generation when a cancelled echo registration never settles", async () => {
+    const controller = new AbortController();
+    const echo = delayedEcho(new Promise<void>(() => undefined));
+    const firstPlayback = recordingPlayback();
+    const firstRunning = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+        playback: firstPlayback,
+        echoControl: echo.provider,
+        signal: controller.signal
+      })
+    );
+    await vi.waitFor(() => expect(echo.state.acceptStarts).toBe(1));
+
+    controller.abort(new Error("cancelled"));
+
+    await expect(firstRunning).resolves.toEqual({ status: "cancelled", playedChunkCount: 0 });
+    expect(firstPlayback.state.writes).toHaveLength(0);
+
+    const secondPlayback = recordingPlayback();
+    const secondRunning = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+        playback: secondPlayback,
+        echoControl: echo.provider
+      })
+    );
+
+    await expect(
+      Promise.race([
+        secondRunning,
+        new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), 1_200))
+      ])
+    ).resolves.toEqual({
+      status: "failed",
+      errorCode: "echo_control_failed",
+      playedChunkCount: 0
+    });
+    expect(echo.state.acceptStarts).toBe(1);
+    expect(secondPlayback.state.writes).toHaveLength(0);
+  });
+
+  it("does not reuse an HTTP provider after an aborted request can still mutate remote state", async () => {
+    const controller = new AbortController();
+    const lateRemoteMutation = createSignalGate();
+    const remoteReferences: number[] = [];
+    let farEndRequests = 0;
+    const echoControl = createHttpEchoControlProvider({
+      provider: "web_rtc_aec3",
+      mode: "aec",
+      providerEndpoint: "http://127.0.0.1:8770",
+      fetchImplementation: (_url, init) => {
+        farEndRequests += 1;
+        const generation = farEndRequests;
+        if (generation === 1) {
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => {
+                reject(new Error("client request aborted after dispatch"));
+                void lateRemoteMutation.promise.then(
+                  () => remoteReferences.push(generation),
+                  () => undefined
+                );
+              },
+              { once: true }
+            );
+          });
+        }
+
+        remoteReferences.push(generation);
+        return Promise.resolve(echoRegistrationResponse());
+      }
+    });
+    const firstPlayback = recordingPlayback();
+    const firstRunning = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+        playback: firstPlayback,
+        echoControl,
+        signal: controller.signal
+      })
+    );
+    await vi.waitFor(() => expect(farEndRequests).toBe(1));
+
+    controller.abort(new Error("cancelled"));
+
+    await expect(firstRunning).resolves.toEqual({ status: "cancelled", playedChunkCount: 0 });
+
+    const secondPlayback = recordingPlayback();
+    await expect(
+      runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+          playback: secondPlayback,
+          echoControl
+        })
+      )
+    ).resolves.toEqual({
+      status: "failed",
+      errorCode: "echo_control_failed",
+      playedChunkCount: 0
+    });
+    expect(farEndRequests).toBe(1);
+    expect(secondPlayback.state.writes).toHaveLength(0);
+
+    lateRemoteMutation.resolve();
+    await vi.waitFor(() => expect(remoteReferences).toEqual([1]));
+  });
+
+  it("does not reuse an HTTP provider when cancellation leaves an applied reference unwritten", async () => {
+    const controller = new AbortController();
+    let farEndRequests = 0;
+    const echoControl = createHttpEchoControlProvider({
+      provider: "web_rtc_aec3",
+      mode: "aec",
+      providerEndpoint: "http://127.0.0.1:8770",
+      fetchImplementation: () => {
+        farEndRequests += 1;
+        if (farEndRequests === 1) {
+          queueMicrotask(() => controller.abort(new Error("cancelled after apply")));
+        }
+        return Promise.resolve(echoRegistrationResponse());
+      }
+    });
+    const firstPlayback = recordingPlayback();
+
+    await expect(
+      runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+          playback: firstPlayback,
+          echoControl,
+          signal: controller.signal
+        })
+      )
+    ).resolves.toEqual({ status: "cancelled", playedChunkCount: 0 });
+    expect(firstPlayback.state.writes).toHaveLength(0);
+
+    const secondPlayback = recordingPlayback();
+    await expect(
+      runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+          playback: secondPlayback,
+          echoControl
+        })
+      )
+    ).resolves.toEqual({
+      status: "failed",
+      errorCode: "echo_control_failed",
+      playedChunkCount: 0
+    });
+    expect(farEndRequests).toBe(1);
+    expect(secondPlayback.state.writes).toHaveLength(0);
+  });
+
+  it("reuses an HTTP provider after cancellation when its applied reference was written", async () => {
+    const controller = new AbortController();
+    const producerGate = createSignalGate();
+    let farEndRequests = 0;
+    const echoControl = createHttpEchoControlProvider({
+      provider: "web_rtc_aec3",
+      mode: "aec",
+      providerEndpoint: "http://127.0.0.1:8770",
+      fetchImplementation: () => {
+        farEndRequests += 1;
+        return Promise.resolve(echoRegistrationResponse());
+      }
+    });
+    const firstPlayback = recordingPlayback();
+    const firstRunning = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts: ttsFromEvents(async function* () {
+          yield chunkEvent(0);
+          await producerGate.promise;
+          yield completedEvent(1);
+        }),
+        playback: firstPlayback,
+        echoControl,
+        signal: controller.signal
+      })
+    );
+    await vi.waitFor(() => expect(firstPlayback.state.writes).toHaveLength(1));
+
+    controller.abort(new Error("cancelled after write"));
+
+    await expect(firstRunning).resolves.toEqual({ status: "cancelled", playedChunkCount: 1 });
+
+    const secondPlayback = recordingPlayback();
+    await expect(
+      runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+          playback: secondPlayback,
+          echoControl
+        })
+      )
+    ).resolves.toEqual({ status: "completed", playedChunkCount: 1, durationMs: 10 });
+    expect(farEndRequests).toBe(2);
+    expect(secondPlayback.state.writes).toHaveLength(1);
+    producerGate.resolve();
   });
 
   it("does not wait for an abort-insensitive lookahead after stopping playback", async () => {
@@ -780,11 +988,14 @@ function recordingEcho(
         }),
       acceptFarEndReference: (frame) => {
         if (options.acceptError !== undefined) {
-          return Promise.reject(options.acceptError);
+          return Promise.resolve({
+            status: "definitely_not_applied",
+            error: options.acceptError
+          });
         }
         state.references.push(frame);
         options.onAccept?.(frame);
-        return Promise.resolve();
+        return Promise.resolve({ status: "applied" });
       },
       processNearEnd: (frame) =>
         Promise.resolve({
@@ -799,7 +1010,7 @@ function recordingEcho(
         }),
       flush: () => {
         state.flushes += 1;
-        return Promise.resolve();
+        return Promise.resolve({ status: "reset" });
       }
     },
     state
@@ -836,6 +1047,7 @@ function delayedEcho(accept: Promise<void>): {
         await accept;
         state.references.push(frame);
         state.acceptCompletions += 1;
+        return { status: "applied" };
       },
       processNearEnd: (frame) =>
         Promise.resolve({
@@ -851,7 +1063,7 @@ function delayedEcho(accept: Promise<void>): {
       flush: () => {
         state.references.length = 0;
         state.flushes += 1;
-        return Promise.resolve();
+        return Promise.resolve({ status: "reset" });
       }
     },
     state
@@ -891,6 +1103,7 @@ function generationEcho(firstAccept: Promise<void>): {
           secondAcceptStarted.resolve();
         }
         state.references.push(generation);
+        return { status: "applied" };
       },
       processNearEnd: (frame) =>
         Promise.resolve({
@@ -906,12 +1119,30 @@ function generationEcho(firstAccept: Promise<void>): {
       flush: () => {
         state.references.length = 0;
         state.flushes += 1;
-        return Promise.resolve();
+        return Promise.resolve({ status: "reset" });
       }
     },
     secondAcceptStarted: secondAcceptStarted.promise,
     state
   };
+}
+
+function echoRegistrationResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      action: "pass",
+      reason: "aec_processed",
+      audioBase64: Buffer.from([1, 0]).toString("base64"),
+      diagnostics: {
+        residualEchoProbability: 0,
+        voiceActivity: false
+      }
+    }),
+    {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    }
+  );
 }
 
 function waitForAbort(signal: AbortSignal): Promise<void> {

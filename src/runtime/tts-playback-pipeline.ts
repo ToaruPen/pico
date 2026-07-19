@@ -1,4 +1,9 @@
-import { defineVoicePcmFrame, type EchoControlProvider } from "../modules/voice/echo-control.js";
+import {
+  defineVoicePcmFrame,
+  ECHO_CONTROL_REGISTRATION_TIMEOUT_MS,
+  type EchoControlProvider,
+  type EchoControlRegistrationResult
+} from "../modules/voice/echo-control.js";
 import type { TtsAudioChunk, TtsClient, TtsSynthesisEvent } from "../modules/voice/index.js";
 import type { VoicePlaybackSession, VoicePlaybackSink } from "./voice-playback.js";
 import {
@@ -48,8 +53,7 @@ type PipelineState = {
   deferredRequest?: { readonly status: VoiceStageStatus; readonly errorCode: string };
   pendingPull: Promise<Settlement<TimedPull>> | undefined;
   iteratorCleanup?: Promise<void>;
-  activeEchoFlush?: Promise<Settlement<void>>;
-  echoCleanup?: Promise<void>;
+  echoReferencePendingWrite: boolean;
 };
 
 type TimedPull = {
@@ -63,7 +67,18 @@ type Settlement<T> =
 
 type AbortableSettlement<T> = Settlement<T> | { readonly ok: false; readonly aborted: true };
 
-const echoMutationFences = new WeakMap<EchoControlProvider, Promise<void>>();
+type EchoProviderSafetyState = {
+  unsafe: boolean;
+  pending: Promise<"safe" | "unsafe"> | undefined;
+};
+
+type EchoRegistrationOutcome =
+  | { readonly status: "registered" }
+  | { readonly status: "failed"; readonly error: unknown }
+  | { readonly status: "unsafe" };
+
+const ECHO_PROVIDER_SAFETY_BOUND_MS = ECHO_CONTROL_REGISTRATION_TIMEOUT_MS + 100;
+const echoProviderSafetyStates = new WeakMap<EchoControlProvider, EchoProviderSafetyState>();
 
 export async function runTtsPlaybackPipeline(
   options: TtsPlaybackPipelineOptions
@@ -85,7 +100,8 @@ export async function runTtsPlaybackPipeline(
     firstChunkSettled: false,
     requestSettled: false,
     playbackSettled: false,
-    pendingPull: undefined
+    pendingPull: undefined,
+    echoReferencePendingWrite: false
   };
   const execution = await settle(executePipeline(state));
   if (!execution.ok) {
@@ -189,10 +205,9 @@ async function submitChunk(
   }
 
   const echoRegistration = registerEchoReference(state, chunk);
-  const ownedEchoRegistration = settle(echoRegistration);
   const echoSettlement = await awaitWithAbort(echoRegistration, state.producerController.signal);
   if (isAborted(echoSettlement)) {
-    return convergeCancellationDuringEcho(state, ownedEchoRegistration);
+    return convergeCancellation(state);
   }
   if (!echoSettlement.ok) {
     return convergePlaybackFailure(state, "echo_control_failed");
@@ -213,6 +228,7 @@ async function submitChunk(
     return convergePlaybackFailure(state, "playback_write_failed");
   }
 
+  state.echoReferencePendingWrite = false;
   state.playedChunkCount += 1;
   state.playedDurationMs += chunk.durationMs;
   return undefined;
@@ -355,51 +371,15 @@ async function convergePlaybackFailure(
 async function stopAndFlush(state: PipelineState): Promise<void> {
   state.stopSettlement ??= settle(Promise.resolve().then(() => state.options.playback.stop()));
   const echoFlush = settle(Promise.resolve().then(() => state.options.echoControl.flush()));
-  state.activeEchoFlush = echoFlush;
   await Promise.all([state.stopSettlement, echoFlush]);
-}
-
-async function convergeCancellationDuringEcho(
-  state: PipelineState,
-  echoRegistration: Promise<Settlement<void>>
-): Promise<TtsPlaybackPipelineResult> {
-  const cancellation = convergeCancellation(state);
-  const echoFlush = state.activeEchoFlush;
-  if (echoFlush === undefined) {
-    return cancellation;
-  }
-
-  const firstSettlement = await Promise.race([
-    echoRegistration.then((registration) => ({ owner: "echo" as const, registration })),
-    echoFlush.then(() => ({ owner: "flush" as const }))
-  ]);
-  const result = await cancellation;
-  if (firstSettlement.owner === "flush") {
-    scheduleCompensatingEchoFlush(state, echoRegistration);
-  }
-  return result;
-}
-
-function scheduleCompensatingEchoFlush(
-  state: PipelineState,
-  echoRegistration: Promise<Settlement<void>>
-): void {
-  const echoControl = state.options.echoControl;
-  const previousFence = echoMutationFences.get(echoControl) ?? Promise.resolve();
-  const cleanup = previousFence.then(async () => {
-    const registration = await echoRegistration;
-    if (registration.ok) {
-      await settle(Promise.resolve().then(() => echoControl.flush()));
+  const reset = await echoFlush;
+  if (state.echoReferencePendingWrite) {
+    if (!reset.ok || reset.value.status !== "reset") {
+      markEchoProviderUnsafe(state.options.echoControl);
+    } else {
+      state.echoReferencePendingWrite = false;
     }
-  });
-  const fence = settle(cleanup).then(() => undefined);
-  echoMutationFences.set(echoControl, fence);
-  const release = fence.then(() => {
-    if (echoMutationFences.get(echoControl) === fence) {
-      echoMutationFences.delete(echoControl);
-    }
-  });
-  state.echoCleanup = settle(release).then(() => undefined);
+  }
 }
 
 function abortProducer(state: PipelineState): void {
@@ -530,22 +510,123 @@ async function registerEchoReference(state: PipelineState, chunk: TtsAudioChunk)
   if (playbackStartedAt === undefined) {
     return Promise.reject(new Error("pico TTS playback session has not started"));
   }
-  const echoMutationFence = echoMutationFences.get(state.options.echoControl);
-  if (echoMutationFence !== undefined) {
-    await echoMutationFence;
+  const echoControl = state.options.echoControl;
+  const providerState = getEchoProviderSafetyState(echoControl);
+  const previousRegistration = providerState.pending;
+  if (previousRegistration !== undefined) {
+    await previousRegistration;
   }
-  await state.options.echoControl.acceptFarEndReference(
-    defineVoicePcmFrame({
-      id: `tts-${String(chunk.sentenceIndex)}`,
-      direction: "far_end",
-      audio: chunk.audio,
-      encoding: chunk.encoding,
-      sampleRateHz: chunk.sampleRateHz,
-      channels: chunk.channels,
-      capturedAt: addMilliseconds(playbackStartedAt, state.playedDurationMs),
-      durationMs: chunk.durationMs
-    })
+  state.producerController.signal.throwIfAborted();
+  if (providerState.unsafe) {
+    throw new Error("pico echo-control provider state is unsafe after registration timeout");
+  }
+
+  const registration = settle(
+    Promise.resolve().then(() =>
+      echoControl.acceptFarEndReference(
+        defineVoicePcmFrame({
+          id: `tts-${String(chunk.sentenceIndex)}`,
+          direction: "far_end",
+          audio: chunk.audio,
+          encoding: chunk.encoding,
+          sampleRateHz: chunk.sampleRateHz,
+          channels: chunk.channels,
+          capturedAt: addMilliseconds(playbackStartedAt, state.playedDurationMs),
+          durationMs: chunk.durationMs
+        }),
+        state.producerController.signal
+      )
+    )
   );
+  const outcome = monitorEchoRegistration(state, providerState, registration);
+  const safety = outcome.then((result) => (result.status === "unsafe" ? "unsafe" : "safe"));
+  providerState.pending = safety;
+  void safety.then(
+    () => {
+      if (providerState.pending === safety) {
+        providerState.pending = undefined;
+      }
+    },
+    () => undefined
+  );
+
+  const result = await outcome;
+  if (result.status === "failed") {
+    throw result.error;
+  }
+  if (result.status === "unsafe") {
+    throw new Error("pico echo-control provider registration exceeded its safety bound");
+  }
+}
+
+function getEchoProviderSafetyState(provider: EchoControlProvider): EchoProviderSafetyState {
+  const current = echoProviderSafetyStates.get(provider);
+  if (current !== undefined) {
+    return current;
+  }
+
+  const created = { unsafe: false, pending: undefined };
+  echoProviderSafetyStates.set(provider, created);
+  return created;
+}
+
+function monitorEchoRegistration(
+  state: PipelineState,
+  providerState: EchoProviderSafetyState,
+  registration: Promise<Settlement<EchoControlRegistrationResult>>
+): Promise<EchoRegistrationOutcome> {
+  const provider = state.options.echoControl;
+  const signal = state.producerController.signal;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const completion = registration.then(async (settlement): Promise<EchoRegistrationOutcome> => {
+    if (!settlement.ok) {
+      providerState.unsafe = true;
+      return { status: "unsafe" };
+    }
+    if (settlement.value.status === "indeterminate") {
+      providerState.unsafe = true;
+      return { status: "unsafe" };
+    }
+    if (settlement.value.status === "definitely_not_applied") {
+      return { status: "failed", error: settlement.value.error };
+    }
+    state.echoReferencePendingWrite = true;
+    if (!signal.aborted) {
+      return { status: "registered" };
+    }
+
+    const flush = await settle(Promise.resolve().then(() => provider.flush()));
+    if (flush.ok && flush.value.status === "reset") {
+      state.echoReferencePendingWrite = false;
+      return { status: "failed", error: signal.reason };
+    }
+    return { status: "unsafe" };
+  });
+  const expired = new Promise<EchoRegistrationOutcome>((resolve) => {
+    timeout = setTimeout(() => {
+      providerState.unsafe = true;
+      resolve({ status: "unsafe" });
+    }, ECHO_PROVIDER_SAFETY_BOUND_MS);
+  });
+
+  return settle(Promise.race([completion, expired])).then((settlement) => {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+    if (!settlement.ok) {
+      providerState.unsafe = true;
+      return { status: "unsafe" };
+    }
+    const outcome = settlement.value;
+    if (outcome.status === "unsafe") {
+      providerState.unsafe = true;
+    }
+    return outcome;
+  });
+}
+
+function markEchoProviderUnsafe(provider: EchoControlProvider): void {
+  getEchoProviderSafetyState(provider).unsafe = true;
 }
 
 async function awaitWithAbort<T>(

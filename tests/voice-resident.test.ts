@@ -1187,7 +1187,7 @@ function createDriver(
         }),
       acceptFarEndReference: () => {
         echoFarEndReferenceCount += 1;
-        return Promise.resolve();
+        return Promise.resolve({ status: "applied" });
       },
       processNearEnd: async (input) => {
         options.processedFrameIds?.push(input.id);
@@ -1204,9 +1204,10 @@ function createDriver(
           }
         };
       },
-      flush: () => {
+      flush: async () => {
         echoFlushCount += 1;
-        return options.echoFlush?.() ?? Promise.resolve();
+        await options.echoFlush?.();
+        return { status: "reset" };
       }
     },
     speechActivity: {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createStructuredAuditLog } from "../src/modules/audit/index.js";
 import {
@@ -25,7 +25,9 @@ describe("voice echo control", () => {
       provider: "half_duplex",
       mode: "half_duplex"
     });
-    await echoControl.acceptFarEndReference(farEnd);
+    await expect(
+      echoControl.acceptFarEndReference(farEnd, new AbortController().signal)
+    ).resolves.toEqual({ status: "applied" });
 
     const nearEnd = defineVoicePcmFrame({
       id: "mic-frame-1",
@@ -72,8 +74,8 @@ describe("voice echo control", () => {
       durationMs: 100
     });
 
-    await echoControl.acceptFarEndReference(farEnd);
-    await echoControl.flush();
+    await echoControl.acceptFarEndReference(farEnd, new AbortController().signal);
+    await expect(echoControl.flush()).resolves.toEqual({ status: "reset" });
 
     await expect(echoControl.processNearEnd(nearEnd)).resolves.toEqual({
       action: "pass",
@@ -84,6 +86,43 @@ describe("voice echo control", () => {
         residualEchoProbability: 0,
         voiceActivity: true
       }
+    });
+  });
+
+  it("reports an aborted half-duplex registration as definitely not applied", async () => {
+    const echoControl = createHalfDuplexEchoControl({ tailMuteMs: 700 });
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled"));
+    const farEnd = defineVoicePcmFrame({
+      id: "tts-frame-aborted",
+      direction: "far_end",
+      audio: new Uint8Array([1, 2]),
+      encoding: "pcm16le",
+      sampleRateHz: 16_000,
+      channels: 1,
+      capturedAt: "2026-06-14T10:00:00.000Z",
+      durationMs: 300
+    });
+    const nearEnd = defineVoicePcmFrame({
+      id: "mic-frame-after-abort",
+      direction: "near_end",
+      audio: new Uint8Array([3, 4]),
+      encoding: "pcm16le",
+      sampleRateHz: 16_000,
+      channels: 1,
+      capturedAt: "2026-06-14T10:00:00.100Z",
+      durationMs: 100
+    });
+
+    await expect(
+      echoControl.acceptFarEndReference(farEnd, controller.signal)
+    ).resolves.toMatchObject({
+      status: "definitely_not_applied",
+      error: new Error("cancelled")
+    });
+    await expect(echoControl.processNearEnd(nearEnd)).resolves.toMatchObject({
+      action: "pass",
+      reason: "no_far_end_tail"
     });
   });
 
@@ -114,7 +153,7 @@ describe("voice echo control", () => {
       durationMs: 100
     });
 
-    await echoControl.acceptFarEndReference(farEnd);
+    await echoControl.acceptFarEndReference(farEnd, new AbortController().signal);
     await echoControl.processNearEnd(afterTail);
 
     expect(audit.entries()).toMatchObject([
@@ -188,7 +227,9 @@ describe("voice echo control", () => {
       durationMs: 100
     });
 
-    await provider.acceptFarEndReference(farEnd);
+    await expect(
+      provider.acceptFarEndReference(farEnd, new AbortController().signal)
+    ).resolves.toEqual({ status: "applied" });
 
     await expect(provider.processNearEnd(nearEnd)).resolves.toMatchObject({
       action: "pass",
@@ -206,6 +247,132 @@ describe("voice echo control", () => {
       "http://127.0.0.1:8770/v1/echo-control/far-end",
       "http://127.0.0.1:8770/v1/echo-control/near-end"
     ]);
+  });
+
+  it("propagates caller cancellation to HTTP far-end registration", async () => {
+    let requestSignal: AbortSignal | null | undefined;
+    let requestCount = 0;
+    const provider = createHttpEchoControlProvider({
+      provider: "web_rtc_aec3",
+      mode: "aec",
+      providerEndpoint: "http://127.0.0.1:8770",
+      fetchImplementation: (_url, init) => {
+        requestCount += 1;
+        if (requestCount > 1) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                action: "pass",
+                reason: "aec_processed",
+                audioBase64: Buffer.from([1, 2]).toString("base64"),
+                diagnostics: { residualEchoProbability: 0, voiceActivity: false }
+              }),
+              { status: 200, headers: { "content-type": "application/json" } }
+            )
+          );
+        }
+        requestSignal = init?.signal;
+        return new Promise<Response>((_resolve, reject) => {
+          requestSignal?.addEventListener("abort", () => reject(new Error("request aborted")), {
+            once: true
+          });
+        });
+      }
+    });
+    const controller = new AbortController();
+    const registration = provider.acceptFarEndReference(
+      defineVoicePcmFrame({
+        id: "tts-frame-cancelled-http",
+        direction: "far_end",
+        audio: new Uint8Array([1, 2]),
+        encoding: "pcm16le",
+        sampleRateHz: 16_000,
+        channels: 1,
+        capturedAt: "2026-06-14T10:00:00.000Z",
+        durationMs: 300
+      }),
+      controller.signal
+    );
+    const outcome = registration.then(
+      (value) => ({ settlement: "resolved" as const, value }),
+      (error: unknown) => ({ settlement: "rejected" as const, error })
+    );
+
+    controller.abort(new Error("cancelled"));
+
+    await expect(outcome).resolves.toMatchObject({
+      settlement: "resolved",
+      value: { status: "indeterminate", error: new Error("cancelled") }
+    });
+    expect(requestSignal).toBeInstanceOf(AbortSignal);
+    expect(requestSignal?.aborted).toBe(true);
+    await expect(provider.flush()).resolves.toEqual({ status: "unsupported" });
+    await expect(
+      provider.acceptFarEndReference(
+        defineVoicePcmFrame({
+          id: "tts-frame-after-indeterminate",
+          direction: "far_end",
+          audio: new Uint8Array([3, 4]),
+          encoding: "pcm16le",
+          sampleRateHz: 16_000,
+          channels: 1,
+          capturedAt: "2026-06-14T10:00:01.000Z",
+          durationMs: 300
+        }),
+        new AbortController().signal
+      )
+    ).resolves.toMatchObject({ status: "indeterminate" });
+    expect(requestCount).toBe(1);
+  });
+
+  it("times out HTTP far-end registration with a fixed internal bound", async () => {
+    vi.useFakeTimers();
+    try {
+      let requestSignal: AbortSignal | null | undefined;
+      const provider = createHttpEchoControlProvider({
+        provider: "web_rtc_aec3",
+        mode: "aec",
+        providerEndpoint: "http://127.0.0.1:8770",
+        fetchImplementation: (_url, init) => {
+          requestSignal = init?.signal;
+          return new Promise<Response>((_resolve, reject) => {
+            requestSignal?.addEventListener("abort", () => reject(new Error("request aborted")), {
+              once: true
+            });
+          });
+        }
+      });
+      const registration = provider.acceptFarEndReference(
+        defineVoicePcmFrame({
+          id: "tts-frame-timeout-http",
+          direction: "far_end",
+          audio: new Uint8Array([1, 2]),
+          encoding: "pcm16le",
+          sampleRateHz: 16_000,
+          channels: 1,
+          capturedAt: "2026-06-14T10:00:00.000Z",
+          durationMs: 300
+        }),
+        new AbortController().signal
+      );
+      const outcome = registration.then(
+        (value) => ({ settlement: "resolved" as const, value }),
+        (error: unknown) => ({ settlement: "rejected" as const, error })
+      );
+      await vi.advanceTimersByTimeAsync(1_001);
+
+      await expect(outcome).resolves.toMatchObject({
+        settlement: "resolved",
+        value: {
+          status: "indeterminate",
+          error: new Error("pico echo-control far-end registration timed out after 1000 ms")
+        }
+      });
+      expect(requestSignal).toBeInstanceOf(AbortSignal);
+      expect(requestSignal?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("checks explicit HTTP AEC provider health before live use", async () => {
