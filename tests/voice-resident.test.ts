@@ -12,9 +12,11 @@ import type {
   SttTranscriptionResult,
   TtsClient,
   TtsSynthesisEvent,
+  TtsSynthesisFailure,
   TtsSynthesisResult,
   TtsSynthesisSuccess
 } from "../src/modules/voice/index.js";
+import type { DeferredToolDeliverableResult } from "../src/runtime/deferred-tool-coordinator.js";
 import type {
   ResidentAudioCapture,
   ResidentCaptureSession
@@ -173,6 +175,134 @@ describe("resident hold-to-talk voice runtime", () => {
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
     await driver.runtime.stop();
+  });
+
+  it("settles a non-empty completed turn exactly once", async () => {
+    vi.useFakeTimers();
+    const deferredResults = [deferredResult("job-1"), deferredResult("job-2")];
+    const driver = createDriver({ deferredResults });
+
+    await completeHold(driver, "completed-settlement");
+
+    expect(driver.runtime.state()).toBe("idle");
+    expect(driver.deferredAcknowledgements()).toEqual([["job-1", "job-2"]]);
+    expect(driver.sessionRefreshes()).toEqual(["session-1"]);
+    expect(driver.playbackOpens()).toBe(1);
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({
+      completedTurns: 1,
+      failedTurns: 0
+    });
+  });
+
+  it.each([
+    [
+      "provider",
+      () => ({
+        ttsEvents: async function* (): AsyncIterable<TtsSynthesisEvent> {
+          await Promise.resolve();
+          yield failedEvent("backend_error");
+        }
+      })
+    ],
+    ["playback", () => ({ playbackCompletion: () => Promise.reject(new Error("speaker failed")) })],
+    ["echo", () => ({ echoControl: failingFarEndEchoControl() })]
+  ] as const)("settles a representative %s failure without delivery activity", async (_name, setup) => {
+    vi.useFakeTimers();
+    const driver = createDriver({
+      ...setup(),
+      deferredResults: [deferredResult("failed-job")]
+    });
+
+    await completeHold(driver, "failed-settlement");
+
+    expect(driver.runtime.state()).toBe("idle");
+    expect(driver.deferredAcknowledgements()).toEqual([]);
+    expect(driver.sessionRefreshes()).toEqual([]);
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({
+      completedTurns: 0,
+      failedTurns: 1
+    });
+  });
+
+  it("settles cancellation without completing or failing the turn", async () => {
+    vi.useFakeTimers();
+    const playbackGate = createGate<undefined>();
+    const driver = createDriver({
+      deferredResults: [deferredResult("cancelled-job")],
+      playbackCompletion: () => playbackGate.promise
+    });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    playbackGate.resolve(undefined);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(driver.deferredAcknowledgements()).toEqual([]);
+    expect(driver.sessionRefreshes()).toEqual([]);
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({
+      cancelledTurns: 1,
+      completedTurns: 0,
+      failedTurns: 0
+    });
+  });
+
+  it("settles an empty completed event stream without delivery activity or playback", async () => {
+    vi.useFakeTimers();
+    const driver = createDriver({
+      deferredResults: [deferredResult("empty-job")],
+      ttsEvents: async function* () {
+        await Promise.resolve();
+        yield completedEvent(0);
+      }
+    });
+
+    await completeHold(driver, "empty-settlement");
+
+    expect(driver.runtime.state()).toBe("idle");
+    expect(driver.deferredAcknowledgements()).toEqual([]);
+    expect(driver.sessionRefreshes()).toEqual([]);
+    expect(driver.playbackOpens()).toBe(0);
+    expect(driver.playedChunks).toEqual([]);
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({
+      completedTurns: 0,
+      failedTurns: 0
+    });
+  });
+
+  it.each([
+    ["completed", () => successfulSynthesis()],
+    ["failed", () => failedSynthesis("backend_error")]
+  ] as const)("suppresses an invalidated generation's late %s TTS result", async (_name, result) => {
+    vi.useFakeTimers();
+    const ttsGate = createGate<TtsSynthesisResult>();
+    const driver = createDriver({
+      deferredResults: [deferredResult("late-job")],
+      ttsResponse: () => ttsGate.promise
+    });
+
+    await startReleasedHold(driver);
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("synthesizing"));
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    ttsGate.resolve(result());
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(driver.deferredAcknowledgements()).toEqual([]);
+    expect(driver.sessionRefreshes()).toEqual([]);
+    expect(driver.playbackOpens()).toBe(0);
+    expect(driver.playedChunks).toEqual([]);
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({
+      cancelledTurns: 1,
+      completedTurns: 0,
+      failedTurns: 0
+    });
   });
 
   it("records wall time from an accepted PTT release to first playback", async () => {
@@ -1217,6 +1347,7 @@ function createDriver(
     readonly processedFrameIds?: string[];
     readonly farewellEnabled?: boolean;
     readonly sessionDurationMs?: number;
+    readonly deferredResults?: readonly DeferredToolDeliverableResult[];
     readonly audit?: ReturnType<typeof createStructuredAuditLog>;
     readonly monotonicNow?: () => number;
     readonly validationEvents?: ResidentVoiceValidationEvent[];
@@ -1227,6 +1358,9 @@ function createDriver(
   const piRequests: Array<Parameters<PiAgentTurnClient["prompt"]>[0]> = [];
   const playedChunks: Array<Parameters<VoicePlaybackSession["write"]>[0]> = [];
   const disposedSessions: string[] = [];
+  const deferredAcknowledgements: string[][] = [];
+  const sessionRefreshes: string[] = [];
+  let playbackOpenCount = 0;
   let playbackStopCount = 0;
   let playbackCloseCount = 0;
   let echoFlushCount = 0;
@@ -1282,6 +1416,7 @@ function createDriver(
   };
   const playback: VoicePlaybackSink = {
     open(_firstChunk, signal) {
+      playbackOpenCount += 1;
       return {
         async write(chunk) {
           playedChunks.push(chunk);
@@ -1303,9 +1438,16 @@ function createDriver(
       return Promise.resolve();
     }
   };
-  const sessionLifecycle = createSessionLifecycle({
+  const baseSessionLifecycle = createSessionLifecycle({
     ending: { mode: "timed", durationMs: options.sessionDurationMs ?? 60_000 }
   });
+  const sessionLifecycle = {
+    ...baseSessionLifecycle,
+    refreshActivity(sessionId: string) {
+      sessionRefreshes.push(sessionId);
+      return baseSessionLifecycle.refreshActivity(sessionId);
+    }
+  };
   const echoControl =
     options.echoControl ??
     ({
@@ -1361,11 +1503,16 @@ function createDriver(
     ...(options.farewellEnabled === undefined
       ? {}
       : { farewell: { enabled: options.farewellEnabled } }),
-    ...(options.lifecycleEvents === undefined && options.cancelDeferred === undefined
+    ...(options.lifecycleEvents === undefined &&
+    options.cancelDeferred === undefined &&
+    options.deferredResults === undefined
       ? {}
       : {
           deferredTools: {
-            collectDeliverableResults: () => [],
+            collectDeliverableResults: () => options.deferredResults ?? [],
+            acknowledgeDelivered: (jobIds: readonly string[]) => {
+              deferredAcknowledgements.push([...jobIds]);
+            },
             cancelSession: () => {
               options.lifecycleEvents?.push("cancel_session");
               options.cancelDeferred?.();
@@ -1389,6 +1536,9 @@ function createDriver(
     piRequests,
     playedChunks,
     disposedSessions,
+    deferredAcknowledgements: () => deferredAcknowledgements,
+    sessionRefreshes: () => sessionRefreshes,
+    playbackOpens: () => playbackOpenCount,
     playbackStops: () => playbackStopCount,
     playbackCloses: () => playbackCloseCount,
     echoFlushes: () => echoFlushCount,
@@ -1628,6 +1778,51 @@ function completedEvent(chunkCount: number): TtsSynthesisEvent {
     chunkCount,
     totalDurationMs: synthesis.totalDurationMs * chunkCount,
     source: synthesis.source
+  };
+}
+
+function failedSynthesis(reason: TtsSynthesisFailure["reason"]): TtsSynthesisFailure {
+  return {
+    ok: false,
+    reason,
+    message: `TTS ${reason}`,
+    sentenceIndex: 0,
+    source: {
+      serviceId: "test-tts",
+      provider: "aivis-speech",
+      speakerId: 1
+    }
+  };
+}
+
+function failedEvent(reason: TtsSynthesisFailure["reason"]): TtsSynthesisEvent {
+  return { kind: "failed", failure: failedSynthesis(reason) };
+}
+
+function deferredResult(jobId: string): DeferredToolDeliverableResult {
+  return {
+    jobId,
+    kind: "camera_scene_description",
+    status: "completed",
+    capturedAt: "2026-07-17T00:00:00.000Z",
+    completedAt: "2026-07-17T00:00:01.000Z",
+    summary: `result for ${jobId}`
+  };
+}
+
+function failingFarEndEchoControl(): EchoControlProvider {
+  return {
+    describe: () => ({ provider: "half_duplex", mode: "half_duplex" }),
+    checkHealth: () =>
+      Promise.resolve({
+        ok: true,
+        provider: "half_duplex",
+        mode: "half_duplex",
+        engine: "test"
+      }),
+    acceptFarEndReference: () => Promise.reject(new Error("echo registration failed")),
+    processNearEnd: (input) => Promise.resolve(passingNearEnd(input)),
+    flush: () => Promise.resolve({ status: "reset" })
   };
 }
 
