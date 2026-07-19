@@ -44,7 +44,15 @@
 `pico` の TUI 起動では、この sink を Pi `ExtensionContext.ui.setWidget` に接続する。
 widget は UI 状態であり、Pi session entry や LLM message を作らない。直近の会話を
 上限付きで保持し、stage はターンごとの一行へ集約する。tool payload と本文は UI を
-占有しないよう UTF-8 上限を設ける。sink の例外は runtime の成否へ影響させない。
+占有しないよう UTF-8 上限を設ける。改行、端末制御文字、Unicode の行区切りは
+単一行へ正規化する。応答本文を返さず終了した assistant の stop reason と、SDK の
+終了イベントを返さず中断した tool call も確定状態として表示する。sink の例外は
+runtime の成否へ影響させない。
+
+本文の byte 上限は走査中に適用する。tool payload は getter、`toJSON`、custom inspect、
+Proxy trap を実行せず、depth、node、property、array item、byte の各 budget 内でのみ
+data property を整形する。未完了 tool は raw args ではなく、この不活性な文字列
+snapshot だけを上限32件まで保持する。
 
 通常の `VoiceResidentLogSink`、検証 artifact、監査ログ、OTel の契約は変更しない。
 とくに通常ログはこれまでどおり本文を受け取らない。
@@ -92,4 +100,3 @@ Pico: 準備できています [stop=stop]
 - PCM padding の byte 数、final-only、backpressure、cancel、idempotent finish を試験する。
 - 末尾無音測定を mono/stereo、有音末尾、全無音、不正 alignment で試験する。
 - `just check` と疑似音声 field harness で全体を確認する。
-

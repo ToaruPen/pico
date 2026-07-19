@@ -14,7 +14,8 @@ import { createPiAgentTurnClient } from "../../src/runtime/pi-agent-turn.js";
 import type { ResidentAudioCapture } from "../../src/runtime/resident-audio-io.js";
 import {
   createResidentAudioOutputPlan,
-  createResidentContinuousPlaybackSink
+  createResidentContinuousPlaybackSink,
+  residentPlaybackFinalSilenceMs
 } from "../../src/runtime/resident-audio-playback.js";
 import { createResidentVoiceAuditLog } from "../../src/runtime/resident-voice-audit-log.js";
 import {
@@ -92,6 +93,7 @@ export type ResidentVoicePseudoAudioReport = {
     readonly sentenceIndex?: number;
     readonly chunkCount?: number;
     readonly playedChunkCount?: number;
+    readonly trailingSilenceMs?: number;
   }[];
 };
 
@@ -673,7 +675,9 @@ async function executeResidentVoicePseudoAudio(input: {
     }
   });
   const playbackMeasurement = createResidentVoicePseudoAudioPlaybackMeasurement(
-    createResidentContinuousPlaybackSink(createResidentAudioOutputPlan(config))
+    createResidentContinuousPlaybackSink(createResidentAudioOutputPlan(config), undefined, {
+      finalSilenceMs: residentPlaybackFinalSilenceMs
+    })
   );
   const piAgent = createPiAgentTurnClient({
     cwd: process.cwd(),
@@ -766,6 +770,7 @@ function summarizeStages(events: readonly AuditEvent[]): ResidentVoicePseudoAudi
     const sentenceIndex = event.attributes["pico.voice.sentence_index"];
     const chunkCount = event.attributes["pico.voice.chunk_count"];
     const playedChunkCount = event.attributes["pico.voice.played_chunk_count"];
+    const trailingSilenceMs = event.attributes["pico.voice.trailing_silence_ms"];
     if (typeof stage !== "string" || typeof status !== "string" || typeof durationMs !== "number") {
       return [];
     }
@@ -775,7 +780,13 @@ function summarizeStages(events: readonly AuditEvent[]): ResidentVoicePseudoAudi
         stage,
         status,
         durationMs,
-        ...summarizeStageMetadata({ errorCode, sentenceIndex, chunkCount, playedChunkCount })
+        ...summarizeStageMetadata({
+          errorCode,
+          sentenceIndex,
+          chunkCount,
+          playedChunkCount,
+          trailingSilenceMs
+        })
       }
     ];
   });
@@ -786,9 +797,10 @@ function summarizeStageMetadata(input: {
   readonly sentenceIndex: unknown;
   readonly chunkCount: unknown;
   readonly playedChunkCount: unknown;
+  readonly trailingSilenceMs: unknown;
 }): Pick<
   ResidentVoicePseudoAudioReport["stages"][number],
-  "errorCode" | "sentenceIndex" | "chunkCount" | "playedChunkCount"
+  "errorCode" | "sentenceIndex" | "chunkCount" | "playedChunkCount" | "trailingSilenceMs"
 > {
   return {
     ...(typeof input.errorCode === "string" ? { errorCode: input.errorCode } : {}),
@@ -796,6 +808,9 @@ function summarizeStageMetadata(input: {
     ...(typeof input.chunkCount === "number" ? { chunkCount: input.chunkCount } : {}),
     ...(typeof input.playedChunkCount === "number"
       ? { playedChunkCount: input.playedChunkCount }
+      : {}),
+    ...(typeof input.trailingSilenceMs === "number"
+      ? { trailingSilenceMs: input.trailingSilenceMs }
       : {})
   };
 }

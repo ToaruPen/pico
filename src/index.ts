@@ -4,6 +4,7 @@ import { createPiAgentTurnClient } from "./runtime/pi-agent-turn.js";
 import { registerPicoExtensionWithRuntime } from "./runtime/pico-extension-runtime.js";
 import { registerPicoStartup } from "./runtime/pico-startup.js";
 import { createResidentVoiceService } from "./runtime/resident-voice-service.js";
+import { createResidentVoiceTerminalOperator } from "./runtime/resident-voice-terminal-display.js";
 
 export {
   buildPicoExtensionSystemPrompt,
@@ -17,8 +18,13 @@ export default function registerPicoExtension(pi: ExtensionAPI): void {
   registerPicoExtensionWithRuntime(pi);
 
   registerPicoStartup(pi, {
-    createController: (context, agentSettings) =>
-      createResidentVoiceService({
+    createController: (context, agentSettings) => {
+      const operator = createResidentVoiceTerminalOperator({
+        mode: context.mode,
+        setWidget: (key, lines, options) => context.ui.setWidget(key, [...lines], options)
+      });
+
+      return createResidentVoiceService({
         createPiAgent: (options) =>
           createPiAgentTurnClient({
             ...options,
@@ -30,7 +36,9 @@ export default function registerPicoExtension(pi: ExtensionAPI): void {
         onError: (error) => {
           context.ui.notify(error.message, "error");
           context.shutdown();
-        }
-      })
+        },
+        ...(operator === undefined ? {} : { operator })
+      });
+    }
   });
 }

@@ -47,6 +47,7 @@ type PipelineState = {
   session?: VoicePlaybackSession;
   playedChunkCount: number;
   playedDurationMs: number;
+  trailingSilenceMs?: number;
   firstChunkSettled: boolean;
   requestSettled: boolean;
   playbackStartedAt?: string;
@@ -108,6 +109,7 @@ const ECHO_PROVIDER_SAFETY_BOUND_MS = ECHO_CONTROL_REGISTRATION_TIMEOUT_MS + 100
 // The resident sink owns sequential 1,000 ms SIGTERM and SIGKILL windows.
 const PLAYBACK_STOP_SAFETY_BOUND_MS = 2_100;
 const ITERATOR_CLEANUP_SAFETY_BOUND_MS = 100;
+const trailingSilenceAmplitudeThreshold = 16;
 const echoProviderSafetyStates = new WeakMap<EchoControlProvider, EchoProviderSafetyState>();
 
 export async function runTtsPlaybackPipeline(
@@ -291,6 +293,11 @@ async function submitChunk(
 
   state.playedChunkCount += 1;
   state.playedDurationMs += chunk.durationMs;
+  state.trailingSilenceMs = measureTrailingPcm16SilenceMs(
+    chunk.audio,
+    chunk.sampleRateHz,
+    chunk.channels
+  );
   return undefined;
 }
 
@@ -574,10 +581,67 @@ function settlePlayback(state: PipelineState, status: VoiceStageStatus, errorCod
     {
       "pico.voice.played_chunk_count": state.playedChunkCount,
       "pico.voice.utterance_duration_ms": state.playedDurationMs,
+      ...(state.trailingSilenceMs === undefined
+        ? {}
+        : { "pico.voice.trailing_silence_ms": state.trailingSilenceMs }),
       ...(errorCode === undefined ? {} : { "pico.voice.error_code": errorCode })
     },
     state.playbackStartedAtMs
   );
+}
+
+export function measureTrailingPcm16SilenceMs(
+  audio: Uint8Array,
+  sampleRateHz: number,
+  channels: number,
+  amplitudeThreshold: number = trailingSilenceAmplitudeThreshold
+): number {
+  const bytesPerFrame = channels * 2;
+  if (!isValidPcm16Measurement(audio, sampleRateHz, channels, amplitudeThreshold)) {
+    throw new Error("pico trailing silence received invalid PCM16 audio");
+  }
+
+  const samples = new DataView(audio.buffer, audio.byteOffset, audio.byteLength);
+  let silentFrames = 0;
+
+  for (
+    let frameOffset = audio.byteLength - bytesPerFrame;
+    frameOffset >= 0;
+    frameOffset -= bytesPerFrame
+  ) {
+    let silent = true;
+    for (let channel = 0; channel < channels; channel += 1) {
+      const sample = samples.getInt16(frameOffset + channel * 2, true);
+      if (Math.abs(sample) > amplitudeThreshold) {
+        silent = false;
+        break;
+      }
+    }
+    if (!silent) {
+      break;
+    }
+    silentFrames += 1;
+  }
+
+  return (silentFrames * 1_000) / sampleRateHz;
+}
+
+function isValidPcm16Measurement(
+  audio: Uint8Array,
+  sampleRateHz: number,
+  channels: number,
+  amplitudeThreshold: number
+): boolean {
+  if (audio.byteLength === 0) return false;
+  if (!isPositiveInteger(sampleRateHz)) return false;
+  if (!isPositiveInteger(channels)) return false;
+  if (audio.byteLength % (channels * 2) !== 0) return false;
+  if (!Number.isInteger(amplitudeThreshold)) return false;
+  return amplitudeThreshold >= 0 && amplitudeThreshold <= 32_767;
+}
+
+function isPositiveInteger(value: number): boolean {
+  return Number.isInteger(value) && value > 0;
 }
 
 function recordStage(

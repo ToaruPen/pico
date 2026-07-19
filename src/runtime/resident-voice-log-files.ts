@@ -47,7 +47,8 @@ const voiceMetricAttributeKeys = new Set([
   "pico.voice.frame_bytes",
   "pico.voice.vlm_frame_bytes",
   "pico.voice.queue_depth",
-  "pico.voice.error_code"
+  "pico.voice.error_code",
+  "pico.voice.trailing_silence_ms"
 ]);
 
 export function createResidentVoiceFileLogSink(
