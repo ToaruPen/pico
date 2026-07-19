@@ -12,9 +12,27 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { createPrivateResidentVoiceValidationSink } from "../src/runtime/resident-voice-validation.js";
+import {
+  createPrivateResidentVoiceArtifact,
+  createPrivateResidentVoiceValidationSink
+} from "../src/runtime/resident-voice-validation.js";
 
 describe("resident voice explicit validation artifact", () => {
+  it("writes a private metadata artifact and refuses overwrite", () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-voice-report-"));
+    const path = join(directory, "report.json");
+    const artifact = createPrivateResidentVoiceArtifact({ path });
+
+    artifact.write('{"status":"passed"}\n');
+    artifact.close();
+
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(readFileSync(path, "utf8")).toBe('{"status":"passed"}\n');
+    expect(() => createPrivateResidentVoiceArtifact({ path })).toThrow(
+      "private artifact must not already exist"
+    );
+  });
+
   it("writes contentful transcript, response, and tool evidence to a private JSONL file", () => {
     const directory = mkdtempSync(join(tmpdir(), "pico-voice-validation-"));
     const path = join(directory, "validation.jsonl");

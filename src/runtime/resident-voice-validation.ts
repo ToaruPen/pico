@@ -41,7 +41,18 @@ export type PrivateResidentVoiceValidationSink = ResidentVoiceValidationSink & {
   readonly close: () => void;
 };
 
+export type PrivateResidentVoiceArtifact = {
+  readonly write: (content: string) => void;
+  readonly close: () => void;
+};
+
 const defaultMaximumPayloadBytes = 256 * 1024;
+
+export function createPrivateResidentVoiceArtifact(options: {
+  readonly path: string;
+}): PrivateResidentVoiceArtifact {
+  return createPrivateArtifact(options.path, "private artifact");
+}
 
 export function createPrivateResidentVoiceValidationSink(
   options: PrivateResidentVoiceValidationSinkOptions
@@ -49,19 +60,30 @@ export function createPrivateResidentVoiceValidationSink(
   const maximumPayloadBytes = requireMaximumPayloadBytes(
     options.maximumPayloadBytes ?? defaultMaximumPayloadBytes
   );
-  const directory = dirname(options.path);
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  requirePrivateValidationDirectory(directory);
-  const descriptor = openNewValidationArtifact(options.path);
-  let closed = false;
+  const artifact = createPrivateArtifact(options.path, "validation output");
 
   return {
     record(event) {
-      if (closed) {
-        throw new Error("pico resident voice validation output is closed");
-      }
       const normalized = normalizeValidationEvent(event, maximumPayloadBytes);
-      writeSync(descriptor, `${JSON.stringify(normalized)}\n`, undefined, "utf8");
+      artifact.write(`${JSON.stringify(normalized)}\n`);
+    },
+    close: artifact.close
+  };
+}
+
+function createPrivateArtifact(path: string, label: string): PrivateResidentVoiceArtifact {
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  requirePrivateArtifactDirectory(directory, label);
+  const descriptor = openNewPrivateArtifact(path, label);
+  let closed = false;
+
+  return {
+    write(content) {
+      if (closed) {
+        throw new Error(`pico resident voice ${label} is closed`);
+      }
+      writeSync(descriptor, content, undefined, "utf8");
     },
     close() {
       if (closed) {
@@ -73,20 +95,20 @@ export function createPrivateResidentVoiceValidationSink(
   };
 }
 
-function requirePrivateValidationDirectory(path: string): void {
+function requirePrivateArtifactDirectory(path: string, label: string): void {
   const stats = lstatSync(path);
   if (stats.isSymbolicLink() || !stats.isDirectory()) {
-    throw new Error("pico resident voice validation output directory must be a real directory");
+    throw new Error(`pico resident voice ${label} directory must be a real directory`);
   }
   if ((stats.mode & 0o777) !== 0o700) {
-    throw new Error("pico resident voice validation output directory must have 0700 permissions");
+    throw new Error(`pico resident voice ${label} directory must have 0700 permissions`);
   }
   if (typeof process.getuid === "function" && stats.uid !== process.getuid()) {
-    throw new Error("pico resident voice validation output directory must be owned by this user");
+    throw new Error(`pico resident voice ${label} directory must be owned by this user`);
   }
 }
 
-function openNewValidationArtifact(path: string): number {
+function openNewPrivateArtifact(path: string, label: string): number {
   let descriptor: number | undefined;
   try {
     descriptor = openSync(path, "wx", 0o600);
@@ -97,7 +119,7 @@ function openNewValidationArtifact(path: string): number {
       closeSync(descriptor);
     }
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      throw new Error("pico resident voice validation output must not already exist", {
+      throw new Error(`pico resident voice ${label} must not already exist`, {
         cause: error
       });
     }
