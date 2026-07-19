@@ -274,14 +274,16 @@ export function createVoiceResidentRuntime(
   const cancelInteractionEnding = (): boolean => {
     const ending = activeInteractionEnding;
 
-    if (ending === undefined || !ending.acceptingCancellation) {
+    if (
+      ending === undefined ||
+      !ending.acceptingCancellation ||
+      ending.cancellation !== undefined
+    ) {
       return false;
     }
 
-    if (ending.cancellation === undefined) {
-      ending.abortController.abort(new Error("pico resident interaction ending cancelled"));
-      ending.cancellation = cancelInteractionEndingResources(ending, options);
-    }
+    ending.abortController.abort(new Error("pico resident interaction ending cancelled"));
+    ending.cancellation = cancelInteractionEndingResources(ending, options);
     void ending.cancellation.catch(() => undefined);
 
     return true;

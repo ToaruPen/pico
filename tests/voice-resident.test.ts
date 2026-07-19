@@ -1378,7 +1378,7 @@ describe("resident hold-to-talk voice runtime", () => {
     await completeHold(driver, "farewell-pre-close-cancellation");
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(boundaryCancellations).toHaveLength(2));
-    await expect(Promise.all(boundaryCancellations)).resolves.toEqual(["accepted", "accepted"]);
+    await expect(Promise.all(boundaryCancellations)).resolves.toEqual(["accepted", "noop"]);
     await vi.waitFor(() => expect(driver.echoFlushes()).toBe(1));
 
     expect(voiceStageEvents(audit, "interaction_end")).toHaveLength(0);
