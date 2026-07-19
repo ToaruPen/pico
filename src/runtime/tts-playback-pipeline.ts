@@ -1,3 +1,5 @@
+import { types as nodeUtilityTypes } from "node:util";
+
 import {
   defineVoicePcmFrame,
   ECHO_CONTROL_REGISTRATION_TIMEOUT_MS,
@@ -53,7 +55,9 @@ type PipelineState = {
   deferredRequest?: { readonly status: VoiceStageStatus; readonly errorCode: string };
   pendingPull: Promise<Settlement<TimedPull>> | undefined;
   iteratorCleanup?: Promise<void>;
+  echoReferenceApplied: boolean;
   echoReferencePendingWrite: boolean;
+  echoReset?: Promise<"reset" | "unsafe">;
 };
 
 type TimedPull = {
@@ -69,6 +73,7 @@ type AbortableSettlement<T> = Settlement<T> | { readonly ok: false; readonly abo
 
 type EchoProviderSafetyState = {
   unsafe: boolean;
+  unsafeRevision: number;
   pending: Promise<"safe" | "unsafe"> | undefined;
 };
 
@@ -78,6 +83,7 @@ type EchoRegistrationOutcome =
   | { readonly status: "unsafe" };
 
 const ECHO_PROVIDER_SAFETY_BOUND_MS = ECHO_CONTROL_REGISTRATION_TIMEOUT_MS + 100;
+const ITERATOR_CLEANUP_SAFETY_BOUND_MS = 100;
 const echoProviderSafetyStates = new WeakMap<EchoControlProvider, EchoProviderSafetyState>();
 
 export async function runTtsPlaybackPipeline(
@@ -101,6 +107,7 @@ export async function runTtsPlaybackPipeline(
     requestSettled: false,
     playbackSettled: false,
     pendingPull: undefined,
+    echoReferenceApplied: false,
     echoReferencePendingWrite: false
   };
   const execution = await settle(executePipeline(state));
@@ -370,16 +377,18 @@ async function convergePlaybackFailure(
 
 async function stopAndFlush(state: PipelineState): Promise<void> {
   state.stopSettlement ??= settle(Promise.resolve().then(() => state.options.playback.stop()));
-  const echoFlush = settle(Promise.resolve().then(() => state.options.echoControl.flush()));
-  await Promise.all([state.stopSettlement, echoFlush]);
-  const reset = await echoFlush;
-  if (state.echoReferencePendingWrite) {
-    if (!reset.ok || reset.value.status !== "reset") {
-      markEchoProviderUnsafe(state.options.echoControl);
-    } else {
-      state.echoReferencePendingWrite = false;
-    }
-  }
+  const echoCleanup =
+    state.echoReset ??
+    (state.echoReferenceApplied
+      ? resetPendingEchoReference(state)
+      : settleWithinSafetyBound(
+          settle(Promise.resolve().then(() => state.options.echoControl.flush())),
+          ECHO_PROVIDER_SAFETY_BOUND_MS
+        ).then(() => undefined));
+  await Promise.all([
+    settleWithinSafetyBound(state.stopSettlement, ECHO_PROVIDER_SAFETY_BOUND_MS),
+    echoCleanup
+  ]);
 }
 
 function abortProducer(state: PipelineState): void {
@@ -565,7 +574,7 @@ function getEchoProviderSafetyState(provider: EchoControlProvider): EchoProvider
     return current;
   }
 
-  const created = { unsafe: false, pending: undefined };
+  const created = { unsafe: false, unsafeRevision: 0, pending: undefined };
   echoProviderSafetyStates.set(provider, created);
   return created;
 }
@@ -581,7 +590,7 @@ function monitorEchoRegistration(
   );
   const expired = new Promise<EchoRegistrationOutcome>((resolve) => {
     timeout = setTimeout(() => {
-      providerState.unsafe = true;
+      poisonEchoProviderState(providerState);
       resolve({ status: "unsafe" });
     }, ECHO_PROVIDER_SAFETY_BOUND_MS);
   });
@@ -591,12 +600,12 @@ function monitorEchoRegistration(
       clearTimeout(timeout);
     }
     if (!settlement.ok) {
-      providerState.unsafe = true;
+      poisonEchoProviderState(providerState);
       return { status: "unsafe" };
     }
     const outcome = settlement.value;
     if (outcome.status === "unsafe") {
-      providerState.unsafe = true;
+      poisonEchoProviderState(providerState);
     }
     return outcome;
   });
@@ -608,18 +617,18 @@ async function resolveEchoRegistration(
   settlement: Settlement<EchoControlRegistrationResult>
 ): Promise<EchoRegistrationOutcome> {
   if (!settlement.ok) {
-    providerState.unsafe = true;
+    poisonEchoProviderState(providerState);
     return { status: "unsafe" };
   }
   const registrationResult = validateEchoRegistrationResult(settlement.value);
   if (registrationResult === undefined) {
-    providerState.unsafe = true;
+    poisonEchoProviderState(providerState);
     return { status: "unsafe" };
   }
 
   switch (registrationResult.status) {
     case "indeterminate":
-      providerState.unsafe = true;
+      poisonEchoProviderState(providerState);
       return { status: "unsafe" };
     case "definitely_not_applied":
       return { status: "failed", error: registrationResult.error };
@@ -632,17 +641,62 @@ async function resolveAppliedEchoRegistration(
   state: PipelineState
 ): Promise<EchoRegistrationOutcome> {
   state.echoReferencePendingWrite = true;
+  state.echoReferenceApplied = true;
   const signal = state.producerController.signal;
   if (!signal.aborted) {
     return { status: "registered" };
   }
 
-  const flush = await settle(Promise.resolve().then(() => state.options.echoControl.flush()));
-  if (flush.ok && flush.value.status === "reset") {
-    state.echoReferencePendingWrite = false;
+  const reset = await resetPendingEchoReference(state);
+  if (reset === "reset") {
     return { status: "failed", error: signal.reason };
   }
   return { status: "unsafe" };
+}
+
+function resetPendingEchoReference(state: PipelineState): Promise<"reset" | "unsafe"> {
+  if (state.echoReset !== undefined) {
+    return state.echoReset;
+  }
+
+  const providerState = getEchoProviderSafetyState(state.options.echoControl);
+  const unsafeRevision = poisonEchoProviderState(providerState);
+  const reset = settleWithinSafetyBound(
+    settle(Promise.resolve().then(() => state.options.echoControl.flush())),
+    ECHO_PROVIDER_SAFETY_BOUND_MS
+  ).then((settlement): "reset" | "unsafe" => {
+    if (
+      settlement?.ok &&
+      isPlainResetResult(settlement.value) &&
+      providerState.unsafeRevision === unsafeRevision
+    ) {
+      providerState.unsafe = false;
+      state.echoReferenceApplied = false;
+      state.echoReferencePendingWrite = false;
+      return "reset";
+    }
+    return "unsafe";
+  });
+  state.echoReset = reset;
+  return reset;
+}
+
+function isPlainResetResult(value: unknown): boolean {
+  try {
+    if (typeof value !== "object" || value === null) {
+      return false;
+    }
+    if (nodeUtilityTypes.isProxy(value)) {
+      return false;
+    }
+    if (Object.getPrototypeOf(value) !== Object.prototype) {
+      return false;
+    }
+    const status = Object.getOwnPropertyDescriptor(value, "status");
+    return status !== undefined && "value" in status && status.value === "reset";
+  } catch {
+    return false;
+  }
 }
 
 function validateEchoRegistrationResult(value: unknown): EchoControlRegistrationResult | undefined {
@@ -674,8 +728,25 @@ function validateEchoRegistrationFailure(
   return value.error instanceof Error ? { status, error: value.error } : undefined;
 }
 
-function markEchoProviderUnsafe(provider: EchoControlProvider): void {
-  getEchoProviderSafetyState(provider).unsafe = true;
+function poisonEchoProviderState(state: EchoProviderSafetyState): number {
+  state.unsafe = true;
+  state.unsafeRevision += 1;
+  return state.unsafeRevision;
+}
+
+async function settleWithinSafetyBound<T>(
+  settlement: Promise<Settlement<T>>,
+  timeoutMs: number
+): Promise<Settlement<T> | undefined> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<undefined>((resolve) => {
+    timeout = setTimeout(() => resolve(undefined), timeoutMs);
+  });
+  const result = await Promise.race([settlement, expired]);
+  if (timeout !== undefined) {
+    clearTimeout(timeout);
+  }
+  return result;
 }
 
 async function awaitWithAbort<T>(
@@ -711,12 +782,14 @@ function settle<T>(promise: Promise<T>): Promise<Settlement<T>> {
 
 async function cleanUpIterator(state: PipelineState, waitForCleanup: boolean): Promise<void> {
   if (state.pendingPull === undefined) {
-    const cleanup = closeIterator(state.iterator).then(() => settleDeferredRequest(state));
     if (waitForCleanup) {
-      await cleanup;
-    } else {
-      state.iteratorCleanup = settle(cleanup).then(() => undefined);
+      const cleanup = settle(closeIterator(state.iterator));
+      state.iteratorCleanup = cleanup.then(() => undefined);
+      await settleWithinSafetyBound(cleanup, ITERATOR_CLEANUP_SAFETY_BOUND_MS);
+      return;
     }
+    const cleanup = closeIterator(state.iterator).then(() => settleDeferredRequest(state));
+    state.iteratorCleanup = settle(cleanup).then(() => undefined);
     return;
   }
 

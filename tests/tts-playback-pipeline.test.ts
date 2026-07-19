@@ -504,7 +504,7 @@ describe("TTS playback pipeline", () => {
     expect(secondPlayback.state.writes).toHaveLength(0);
   });
 
-  it("reuses an HTTP provider after cancellation when its applied reference was written", async () => {
+  it("does not reuse an HTTP provider when post-write cancellation cannot reset it", async () => {
     const controller = new AbortController();
     const producerGate = createSignalGate();
     let farEndRequests = 0;
@@ -545,9 +545,13 @@ describe("TTS playback pipeline", () => {
           echoControl
         })
       )
-    ).resolves.toEqual({ status: "completed", playedChunkCount: 1, durationMs: 10 });
-    expect(farEndRequests).toBe(2);
-    expect(secondPlayback.state.writes).toHaveLength(1);
+    ).resolves.toEqual({
+      status: "failed",
+      errorCode: "echo_control_failed",
+      playedChunkCount: 0
+    });
+    expect(farEndRequests).toBe(1);
+    expect(secondPlayback.state.writes).toHaveLength(0);
     producerGate.resolve();
   });
 
@@ -561,6 +565,217 @@ describe("TTS playback pipeline", () => {
     await expectNonConformingRegistrationToFailClosed(() =>
       Promise.reject(new Error("provider contract rejection"))
     );
+  });
+
+  it("poisons a provider within the safety bound when stop and reset never settle", async () => {
+    const controller = new AbortController();
+    const pending = new Promise<void>(() => undefined);
+    const flushStarted = createSignalGate();
+    const state = { acceptStarts: 0, flushes: 0 };
+    const echoControl = hostileResetEcho(
+      state,
+      () => pending as never,
+      () => {
+        if (state.acceptStarts === 1) {
+          queueMicrotask(() => controller.abort(new Error("cancelled after apply")));
+        }
+      },
+      () => flushStarted.resolve()
+    );
+    const firstPlayback = recordingPlayback({ onStop: () => pending });
+    const firstRunning = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+        playback: firstPlayback,
+        echoControl,
+        signal: controller.signal
+      })
+    );
+    await flushStarted.promise;
+
+    const secondPlayback = recordingPlayback();
+    const secondRunning = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+        playback: secondPlayback,
+        echoControl
+      })
+    );
+
+    await expect(within(firstRunning, 1_250)).resolves.toEqual({
+      status: "cancelled",
+      playedChunkCount: 0
+    });
+    expect(state.acceptStarts).toBe(1);
+    expect(firstPlayback.state.writes).toHaveLength(0);
+    expect(secondPlayback.state.writes).toHaveLength(0);
+    await expect(within(secondRunning, 1_250)).resolves.toEqual({
+      status: "failed",
+      errorCode: "echo_control_failed",
+      playedChunkCount: 0
+    });
+  });
+
+  it.each([
+    [
+      "throwing status getter",
+      Object.defineProperty({}, "status", {
+        get: () => {
+          throw new Error("hostile status getter");
+        }
+      })
+    ],
+    [
+      "throwing proxy",
+      new Proxy(
+        {},
+        {
+          getOwnPropertyDescriptor: () => {
+            throw new Error("hostile proxy");
+          }
+        }
+      )
+    ],
+    ["non-object", 42],
+    ["malformed object", { status: "unexpected" }],
+    ["transparent proxy", new Proxy({ status: "reset" }, {})],
+    [
+      "spoofing proxy",
+      new Proxy(
+        { status: "reset" },
+        {
+          getPrototypeOf: () => {
+            throw new Error("hostile prototype trap");
+          }
+        }
+      )
+    ]
+  ] as const)("poisons a provider after a %s reset result", async (_name, resetResult) => {
+    await expectUnsafeResetToPoisonProvider(resetResult);
+  });
+
+  it.each([
+    ["unsupported", () => Promise.resolve({ status: "unsupported" }) as never],
+    ["rejection", () => Promise.reject(new Error("reset rejected")) as never],
+    ["non-object", () => Promise.resolve(42) as never],
+    ["malformed object", () => Promise.resolve({ status: "unexpected" }) as never],
+    [
+      "throwing getter",
+      () =>
+        Promise.resolve(
+          Object.defineProperty({}, "status", {
+            get: () => {
+              throw new Error("hostile status getter");
+            }
+          })
+        ) as never
+    ],
+    ["transparent proxy", () => Promise.resolve(new Proxy({ status: "reset" }, {})) as never],
+    [
+      "spoofing proxy",
+      () =>
+        Promise.resolve(
+          new Proxy(
+            { status: "reset" },
+            {
+              getOwnPropertyDescriptor: () => {
+                throw new Error("hostile descriptor trap");
+              }
+            }
+          )
+        ) as never
+    ]
+  ] as const)("poisons a provider after a post-write %s reset", async (_name, reset) => {
+    await expectUnsafePostWriteResetToPoisonProvider(reset);
+  });
+
+  it("poisons a provider after a post-write reset timeout", async () => {
+    await expectUnsafePostWriteResetToPoisonProvider(
+      () => new Promise<never>(() => undefined),
+      1_250
+    );
+  });
+
+  it("reuses a provider after a post-write plain reset", async () => {
+    const controller = new AbortController();
+    const producerGate = createSignalGate();
+    const state = { acceptStarts: 0, flushes: 0 };
+    const echoControl = hostileResetEcho(
+      state,
+      () => Promise.resolve({ status: "reset" }) as never
+    );
+    const firstPlayback = recordingPlayback();
+    const firstRunning = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts: ttsFromEvents(async function* () {
+          yield chunkEvent(0);
+          await producerGate.promise;
+          yield completedEvent(1);
+        }),
+        playback: firstPlayback,
+        echoControl,
+        signal: controller.signal
+      })
+    );
+    await vi.waitFor(() => expect(firstPlayback.state.writes).toHaveLength(1));
+
+    controller.abort(new Error("cancelled after write"));
+
+    await expect(firstRunning).resolves.toEqual({ status: "cancelled", playedChunkCount: 1 });
+    const secondPlayback = recordingPlayback();
+    await expect(
+      runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+          playback: secondPlayback,
+          echoControl
+        })
+      )
+    ).resolves.toEqual({ status: "completed", playedChunkCount: 1, durationMs: 10 });
+    expect(state.acceptStarts).toBe(2);
+    expect(secondPlayback.state.writes).toHaveLength(1);
+    producerGate.resolve();
+  });
+
+  it("poisons a provider when playback failure cannot reset a written reference", async () => {
+    const state = { acceptStarts: 0, flushes: 0 };
+    const echoControl = hostileResetEcho(
+      state,
+      () => Promise.resolve({ status: "unsupported" }) as never
+    );
+    const firstPlayback = recordingPlayback({ finishError: new Error("finish failed") });
+
+    await expect(
+      runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+          playback: firstPlayback,
+          echoControl
+        })
+      )
+    ).resolves.toEqual({
+      status: "failed",
+      errorCode: "playback_finish_failed",
+      playedChunkCount: 1
+    });
+
+    const secondPlayback = recordingPlayback();
+    await expect(
+      runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+          playback: secondPlayback,
+          echoControl
+        })
+      )
+    ).resolves.toEqual({
+      status: "failed",
+      errorCode: "echo_control_failed",
+      playedChunkCount: 0
+    });
+    expect(state.acceptStarts).toBe(1);
+    expect(firstPlayback.state.writes).toHaveLength(1);
+    expect(secondPlayback.state.writes).toHaveLength(0);
   });
 
   it("does not wait for an abort-insensitive lookahead after stopping playback", async () => {
@@ -826,6 +1041,60 @@ describe("TTS playback pipeline", () => {
     ).resolves.toMatchObject({ status: "failed", errorCode: "playback_finish_failed" });
     returnGate.resolve();
   });
+
+  it("bounds iterator cleanup after a completed playback", async () => {
+    const events = [chunkEvent(0), completedEvent(1)] as const;
+    let eventIndex = 0;
+    let returnStarts = 0;
+    let rejectReturn: (error: Error) => void = () => {
+      throw new Error("test iterator reject function was not initialized");
+    };
+    const pendingReturn = new Promise<IteratorResult<TtsSynthesisEvent>>((_resolve, reject) => {
+      rejectReturn = reject;
+    });
+    const playback = recordingPlayback();
+    const tts = ttsFromIterator({
+      next: () =>
+        Promise.resolve({ done: false, value: requireSynthesisEvent(events[eventIndex++]) }),
+      return: () => {
+        returnStarts += 1;
+        return pendingReturn;
+      }
+    });
+
+    await expect(
+      within(runTtsPlaybackPipeline(pipelineInput({ tts, playback })), 250)
+    ).resolves.toEqual({ status: "completed", playedChunkCount: 1, durationMs: 10 });
+    expect(returnStarts).toBe(1);
+    expect(playback.state.writes).toHaveLength(1);
+    rejectReturn(new Error("late iterator cleanup rejection"));
+    await Promise.resolve();
+    expect(returnStarts).toBe(1);
+    expect(playback.state.writes).toHaveLength(1);
+  });
+
+  it("bounds iterator cleanup after an empty completion", async () => {
+    let nextCalls = 0;
+    let returnStarts = 0;
+    const playback = recordingPlayback();
+    const tts = ttsFromIterator({
+      next: () => {
+        nextCalls += 1;
+        return Promise.resolve({ done: false, value: completedEvent(0) });
+      },
+      return: () => {
+        returnStarts += 1;
+        return new Promise<IteratorResult<TtsSynthesisEvent>>(() => undefined);
+      }
+    });
+
+    await expect(
+      within(runTtsPlaybackPipeline(pipelineInput({ tts, playback })), 250)
+    ).resolves.toEqual({ status: "empty", playedChunkCount: 0 });
+    expect(nextCalls).toBe(1);
+    expect(returnStarts).toBe(1);
+    expect(playback.state.opens).toBe(0);
+  });
 });
 
 function chunkEvent(
@@ -907,6 +1176,7 @@ function recordingPlayback(
   options: {
     readonly onWrite?: (chunk: TtsAudioChunk) => void | Promise<void>;
     readonly onFinish?: () => void | Promise<void>;
+    readonly onStop?: () => void | Promise<void>;
     readonly openError?: Error;
     readonly writeError?: Error;
     readonly finishError?: Error;
@@ -939,7 +1209,7 @@ function recordingPlayback(
     }),
     stop: () => {
       state.stops += 1;
-      return Promise.resolve();
+      return Promise.resolve(options.onStop?.());
     },
     close: () => Promise.resolve()
   };
@@ -954,6 +1224,153 @@ function recordingPlayback(
     },
     state
   };
+}
+
+function hostileResetEcho(
+  state: { acceptStarts: number; flushes: number },
+  reset: () => Promise<never>,
+  onAccept?: () => void,
+  onFlush?: () => void
+): EchoControlProvider {
+  return {
+    describe: () => ({ provider: "half_duplex", mode: "half_duplex" }),
+    checkHealth: () =>
+      Promise.resolve({
+        ok: true,
+        provider: "half_duplex",
+        mode: "half_duplex",
+        engine: "test"
+      }),
+    acceptFarEndReference: () => {
+      state.acceptStarts += 1;
+      onAccept?.();
+      return Promise.resolve({ status: "applied" });
+    },
+    processNearEnd: (frame) =>
+      Promise.resolve({
+        action: "pass",
+        reason: "no_far_end_tail",
+        frame,
+        diagnostics: {
+          provider: "half_duplex",
+          residualEchoProbability: 0,
+          voiceActivity: false
+        }
+      }),
+    flush: () => {
+      state.flushes += 1;
+      onFlush?.();
+      return reset();
+    }
+  };
+}
+
+async function expectUnsafeResetToPoisonProvider(resetResult: unknown): Promise<void> {
+  const controller = new AbortController();
+  const state = { acceptStarts: 0, flushes: 0 };
+  const echoControl = hostileResetEcho(
+    state,
+    () => Promise.resolve(resetResult) as never,
+    () => {
+      if (state.acceptStarts === 1) {
+        queueMicrotask(() => controller.abort(new Error("cancelled after apply")));
+      }
+    }
+  );
+  const firstPlayback = recordingPlayback();
+
+  await expect(
+    runTtsPlaybackPipeline(
+      pipelineInput({
+        tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+        playback: firstPlayback,
+        echoControl,
+        signal: controller.signal
+      })
+    )
+  ).resolves.toEqual({ status: "cancelled", playedChunkCount: 0 });
+
+  const secondPlayback = recordingPlayback();
+  await expect(
+    runTtsPlaybackPipeline(
+      pipelineInput({
+        tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+        playback: secondPlayback,
+        echoControl
+      })
+    )
+  ).resolves.toEqual({
+    status: "failed",
+    errorCode: "echo_control_failed",
+    playedChunkCount: 0
+  });
+  expect(state.acceptStarts).toBe(1);
+  expect(firstPlayback.state.writes).toHaveLength(0);
+  expect(secondPlayback.state.writes).toHaveLength(0);
+}
+
+async function expectUnsafePostWriteResetToPoisonProvider(
+  reset: () => Promise<never>,
+  timeoutMs?: number
+): Promise<void> {
+  const controller = new AbortController();
+  const producerGate = createSignalGate();
+  const state = { acceptStarts: 0, flushes: 0 };
+  const echoControl = hostileResetEcho(state, reset);
+  const firstPlayback = recordingPlayback();
+  const firstRunning = runTtsPlaybackPipeline(
+    pipelineInput({
+      tts: ttsFromEvents(async function* () {
+        yield chunkEvent(0);
+        await producerGate.promise;
+        yield completedEvent(1);
+      }),
+      playback: firstPlayback,
+      echoControl,
+      signal: controller.signal
+    })
+  );
+  await vi.waitFor(() => expect(firstPlayback.state.writes).toHaveLength(1));
+
+  controller.abort(new Error("cancelled after write"));
+
+  const firstResult =
+    timeoutMs === undefined ? await firstRunning : await within(firstRunning, timeoutMs);
+  expect(firstResult).toEqual({ status: "cancelled", playedChunkCount: 1 });
+
+  const secondPlayback = recordingPlayback();
+  const secondRunning = runTtsPlaybackPipeline(
+    pipelineInput({
+      tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+      playback: secondPlayback,
+      echoControl
+    })
+  );
+  const secondResult =
+    timeoutMs === undefined ? await secondRunning : await within(secondRunning, timeoutMs);
+  expect(secondResult).toEqual({
+    status: "failed",
+    errorCode: "echo_control_failed",
+    playedChunkCount: 0
+  });
+  expect(state.acceptStarts).toBe(1);
+  expect(firstPlayback.state.writes).toHaveLength(1);
+  expect(secondPlayback.state.writes).toHaveLength(0);
+  producerGate.resolve();
+}
+
+async function within<T>(promise: Promise<T>, timeoutMs: number): Promise<T | "timed_out"> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const result = await Promise.race([
+    promise,
+    new Promise<"timed_out">((resolve) => {
+      timeout = setTimeout(() => resolve("timed_out"), timeoutMs);
+    })
+  ]);
+  if (timeout !== undefined) {
+    clearTimeout(timeout);
+  }
+  return result;
 }
 
 function pipelineInput(input: {
