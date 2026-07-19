@@ -551,6 +551,18 @@ describe("TTS playback pipeline", () => {
     producerGate.resolve();
   });
 
+  it("fails closed when a provider returns an unknown registration status", async () => {
+    await expectNonConformingRegistrationToFailClosed(() =>
+      Promise.resolve({ status: "unexpected" } as never)
+    );
+  });
+
+  it("fails closed when a provider rejects its registration promise", async () => {
+    await expectNonConformingRegistrationToFailClosed(() =>
+      Promise.reject(new Error("provider contract rejection"))
+    );
+  });
+
   it("does not wait for an abort-insensitive lookahead after stopping playback", async () => {
     const controller = new AbortController();
     const pendingSynthesis = createSignalGate();
@@ -1123,6 +1135,78 @@ function generationEcho(firstAccept: Promise<void>): {
       }
     },
     secondAcceptStarted: secondAcceptStarted.promise,
+    state
+  };
+}
+
+async function expectNonConformingRegistrationToFailClosed(
+  registration: () => Promise<never>
+): Promise<void> {
+  const echo = nonConformingEcho(registration);
+  const firstPlayback = recordingPlayback();
+  const firstResult = await runTtsPlaybackPipeline(
+    pipelineInput({
+      tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+      playback: firstPlayback,
+      echoControl: echo.provider
+    })
+  );
+  const secondPlayback = recordingPlayback();
+  const secondResult = await runTtsPlaybackPipeline(
+    pipelineInput({
+      tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+      playback: secondPlayback,
+      echoControl: echo.provider
+    })
+  );
+
+  expect(firstResult).toEqual({
+    status: "failed",
+    errorCode: "echo_control_failed",
+    playedChunkCount: 0
+  });
+  expect(secondResult).toEqual({
+    status: "failed",
+    errorCode: "echo_control_failed",
+    playedChunkCount: 0
+  });
+  expect(echo.state.acceptStarts).toBe(1);
+  expect(firstPlayback.state.writes).toHaveLength(0);
+  expect(secondPlayback.state.writes).toHaveLength(0);
+}
+
+function nonConformingEcho(registration: () => Promise<never>): {
+  readonly provider: EchoControlProvider;
+  readonly state: { acceptStarts: number };
+} {
+  const state = { acceptStarts: 0 };
+  return {
+    provider: {
+      describe: () => ({ provider: "half_duplex", mode: "half_duplex" }),
+      checkHealth: () =>
+        Promise.resolve({
+          ok: true,
+          provider: "half_duplex",
+          mode: "half_duplex",
+          engine: "test"
+        }),
+      acceptFarEndReference: () => {
+        state.acceptStarts += 1;
+        return registration();
+      },
+      processNearEnd: (frame) =>
+        Promise.resolve({
+          action: "pass",
+          reason: "no_far_end_tail",
+          frame,
+          diagnostics: {
+            provider: "half_duplex",
+            residualEchoProbability: 0,
+            voiceActivity: false
+          }
+        }),
+      flush: () => Promise.resolve({ status: "reset" })
+    },
     state
   };
 }

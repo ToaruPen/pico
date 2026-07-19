@@ -575,33 +575,10 @@ function monitorEchoRegistration(
   providerState: EchoProviderSafetyState,
   registration: Promise<Settlement<EchoControlRegistrationResult>>
 ): Promise<EchoRegistrationOutcome> {
-  const provider = state.options.echoControl;
-  const signal = state.producerController.signal;
   let timeout: ReturnType<typeof setTimeout> | undefined;
-  const completion = registration.then(async (settlement): Promise<EchoRegistrationOutcome> => {
-    if (!settlement.ok) {
-      providerState.unsafe = true;
-      return { status: "unsafe" };
-    }
-    if (settlement.value.status === "indeterminate") {
-      providerState.unsafe = true;
-      return { status: "unsafe" };
-    }
-    if (settlement.value.status === "definitely_not_applied") {
-      return { status: "failed", error: settlement.value.error };
-    }
-    state.echoReferencePendingWrite = true;
-    if (!signal.aborted) {
-      return { status: "registered" };
-    }
-
-    const flush = await settle(Promise.resolve().then(() => provider.flush()));
-    if (flush.ok && flush.value.status === "reset") {
-      state.echoReferencePendingWrite = false;
-      return { status: "failed", error: signal.reason };
-    }
-    return { status: "unsafe" };
-  });
+  const completion = registration.then((settlement) =>
+    resolveEchoRegistration(state, providerState, settlement)
+  );
   const expired = new Promise<EchoRegistrationOutcome>((resolve) => {
     timeout = setTimeout(() => {
       providerState.unsafe = true;
@@ -623,6 +600,78 @@ function monitorEchoRegistration(
     }
     return outcome;
   });
+}
+
+async function resolveEchoRegistration(
+  state: PipelineState,
+  providerState: EchoProviderSafetyState,
+  settlement: Settlement<EchoControlRegistrationResult>
+): Promise<EchoRegistrationOutcome> {
+  if (!settlement.ok) {
+    providerState.unsafe = true;
+    return { status: "unsafe" };
+  }
+  const registrationResult = validateEchoRegistrationResult(settlement.value);
+  if (registrationResult === undefined) {
+    providerState.unsafe = true;
+    return { status: "unsafe" };
+  }
+
+  switch (registrationResult.status) {
+    case "indeterminate":
+      providerState.unsafe = true;
+      return { status: "unsafe" };
+    case "definitely_not_applied":
+      return { status: "failed", error: registrationResult.error };
+    case "applied":
+      return resolveAppliedEchoRegistration(state);
+  }
+}
+
+async function resolveAppliedEchoRegistration(
+  state: PipelineState
+): Promise<EchoRegistrationOutcome> {
+  state.echoReferencePendingWrite = true;
+  const signal = state.producerController.signal;
+  if (!signal.aborted) {
+    return { status: "registered" };
+  }
+
+  const flush = await settle(Promise.resolve().then(() => state.options.echoControl.flush()));
+  if (flush.ok && flush.value.status === "reset") {
+    state.echoReferencePendingWrite = false;
+    return { status: "failed", error: signal.reason };
+  }
+  return { status: "unsafe" };
+}
+
+function validateEchoRegistrationResult(value: unknown): EchoControlRegistrationResult | undefined {
+  const record = echoRegistrationRecord(value);
+  if (record === undefined) {
+    return undefined;
+  }
+
+  switch (record.status) {
+    case "applied":
+      return { status: "applied" };
+    case "definitely_not_applied":
+      return validateEchoRegistrationFailure("definitely_not_applied", record);
+    case "indeterminate":
+      return validateEchoRegistrationFailure("indeterminate", record);
+    default:
+      return undefined;
+  }
+}
+
+function echoRegistrationRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && "status" in value ? value : undefined;
+}
+
+function validateEchoRegistrationFailure(
+  status: "definitely_not_applied" | "indeterminate",
+  value: Record<string, unknown>
+): EchoControlRegistrationResult | undefined {
+  return value.error instanceof Error ? { status, error: value.error } : undefined;
 }
 
 function markEchoProviderUnsafe(provider: EchoControlProvider): void {
