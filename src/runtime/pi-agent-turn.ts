@@ -622,10 +622,14 @@ function createPromptObservation(
     accept(event) {
       const delta = readTextDelta(event);
       if (delta !== undefined) {
-        output.push(delta);
         if (delta.length > 0) {
           settleFirstText("ok");
         }
+      }
+
+      const settledAssistantText = readSettledAssistantText(event);
+      if (settledAssistantText !== undefined) {
+        output.splice(0, output.length, settledAssistantText);
       }
 
       const toolEvent = readToolExecutionEvent(event);
@@ -829,6 +833,69 @@ function readTextDelta(event: unknown): string | undefined {
   }
 
   return undefined;
+}
+
+function readSettledAssistantText(event: unknown): string | undefined {
+  const messages = readSettledAgentEndMessages(event);
+  if (messages === undefined) {
+    return undefined;
+  }
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const text = readAssistantMessageText(messages[index]);
+    if (text !== undefined) {
+      return text;
+    }
+  }
+
+  return undefined;
+}
+
+function readSettledAgentEndMessages(event: unknown): readonly unknown[] | undefined {
+  if (typeof event !== "object" || event === null || Array.isArray(event)) {
+    return undefined;
+  }
+
+  const candidate = event as {
+    readonly type?: unknown;
+    readonly messages?: readonly unknown[];
+    readonly willRetry?: unknown;
+  };
+
+  if (
+    candidate.type !== "agent_end" ||
+    candidate.willRetry !== false ||
+    !Array.isArray(candidate.messages)
+  ) {
+    return undefined;
+  }
+
+  return candidate.messages as readonly unknown[];
+}
+
+function readAssistantMessageText(message: unknown): string | undefined {
+  if (typeof message !== "object" || message === null || Array.isArray(message)) {
+    return undefined;
+  }
+
+  const assistant = message as { readonly role?: unknown; readonly content?: unknown };
+  if (assistant.role !== "assistant" || !Array.isArray(assistant.content)) {
+    return undefined;
+  }
+
+  return assistant.content
+    .filter(isTextContent)
+    .map((part) => part.text)
+    .join("");
+}
+
+function isTextContent(part: unknown): part is { readonly type: "text"; readonly text: string } {
+  if (typeof part !== "object" || part === null || Array.isArray(part)) {
+    return false;
+  }
+
+  const candidate = part as { readonly type?: unknown; readonly text?: unknown };
+  return candidate.type === "text" && typeof candidate.text === "string";
 }
 
 type ToolExecutionEvent =

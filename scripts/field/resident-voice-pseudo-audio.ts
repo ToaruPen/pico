@@ -27,8 +27,10 @@ import {
 import {
   createPrivateResidentVoiceValidationSink,
   type PrivateResidentVoiceValidationSink,
+  type ResidentVoiceValidationEvent,
   type ResidentVoiceValidationSink
 } from "../../src/runtime/resident-voice-validation.js";
+import type { VoicePlaybackSink } from "../../src/runtime/voice-playback.js";
 import {
   createVoiceResidentRuntime,
   type VoiceResidentRuntime,
@@ -53,6 +55,10 @@ export type ResidentVoicePseudoAudioReport = {
   readonly audioFixturePath: string;
   readonly validationOutputPath: string;
   readonly validationEventCount: number;
+  readonly validation: {
+    readonly staffTranscriptPresent: boolean;
+    readonly finalPiResponsePresent: boolean;
+  };
   readonly requiredToolName?: string;
   readonly toolExecutions: readonly {
     readonly toolName: string;
@@ -65,6 +71,7 @@ export type ResidentVoicePseudoAudioReport = {
     readonly thinkingLevel: ResidentVoicePseudoAudioAgentSettings["thinkingLevel"];
   };
   readonly runtime: VoiceResidentRuntimeResult;
+  readonly playback: { readonly sinkOpenCount: number };
   readonly telemetry: {
     readonly mode: "configured_collector" | "in_process";
     readonly health: TelemetryHealthSnapshot;
@@ -76,8 +83,173 @@ export type ResidentVoicePseudoAudioReport = {
     readonly status: string;
     readonly durationMs: number;
     readonly errorCode?: string;
+    readonly sentenceIndex?: number;
+    readonly chunkCount?: number;
+    readonly playedChunkCount?: number;
   }[];
 };
+
+export type ResidentVoicePseudoAudioEvidence = {
+  readonly passed: boolean;
+  readonly validationEventCount: number;
+  readonly validation: {
+    readonly staffTranscriptPresent: boolean;
+    readonly finalPiResponsePresent: boolean;
+  };
+  readonly toolExecutions: ResidentVoicePseudoAudioReport["toolExecutions"];
+  readonly playback: { readonly sinkOpenCount: number };
+  readonly stages: ResidentVoicePseudoAudioReport["stages"];
+};
+
+export type ResidentVoicePseudoAudioPlaybackMeasurement = {
+  readonly playback: VoicePlaybackSink;
+  readonly openCount: () => number;
+};
+
+// Exported only as a field-harness test seam around the real playback sink.
+export function createResidentVoicePseudoAudioPlaybackMeasurement(
+  delegate: VoicePlaybackSink
+): ResidentVoicePseudoAudioPlaybackMeasurement {
+  let openCount = 0;
+
+  return {
+    playback: {
+      open(firstChunk, signal) {
+        openCount += 1;
+        return delegate.open(firstChunk, signal);
+      },
+      stop: () => delegate.stop(),
+      close: () => delegate.close()
+    },
+    openCount: () => openCount
+  };
+}
+
+const requiredMeasuredStages = new Set([
+  "tts_time_to_first_chunk",
+  "tts_audio_query",
+  "tts_synthesize",
+  "tts_request_wall",
+  "ptt_release_to_playback_start",
+  "tts_playback"
+]);
+
+// Exported only as a field-harness test seam. It never returns validation content.
+export function evaluateResidentVoicePseudoAudioEvidence(input: {
+  readonly validationEvents: readonly ResidentVoiceValidationEvent[];
+  readonly auditEvents: readonly AuditEvent[];
+  readonly requiredToolName?: string;
+  readonly playbackSinkOpenCount: number;
+}): ResidentVoicePseudoAudioEvidence {
+  const validation = {
+    staffTranscriptPresent: input.validationEvents.some(
+      (event) => event.kind === "staff_transcript" && event.text.trim().length > 0
+    ),
+    finalPiResponsePresent: hasNonEmptyFinalPiResponse(input.validationEvents)
+  };
+  const toolExecutions = summarizePairedToolExecutions(input.validationEvents);
+  const stages = summarizeStages(input.auditEvents);
+  const requiredToolSucceeded = didRequiredToolSucceed(
+    input.validationEvents,
+    input.requiredToolName
+  );
+  const requiredStagesSucceeded = [...requiredMeasuredStages].every((requiredStage) => {
+    const matching = stages.filter(({ stage }) => stage === requiredStage);
+    return matching.length > 0 && matching.every(({ status }) => status === "ok");
+  });
+  const passed =
+    validation.staffTranscriptPresent &&
+    validation.finalPiResponsePresent &&
+    requiredToolSucceeded &&
+    requiredStagesSucceeded &&
+    input.playbackSinkOpenCount === 1;
+
+  return {
+    passed,
+    validationEventCount: input.validationEvents.length,
+    validation,
+    toolExecutions,
+    playback: { sinkOpenCount: input.playbackSinkOpenCount },
+    stages
+  };
+}
+
+function hasNonEmptyFinalPiResponse(events: readonly ResidentVoiceValidationEvent[]): boolean {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.kind === "pi_response") {
+      return event.text.trim().length > 0;
+    }
+  }
+
+  return false;
+}
+
+function summarizePairedToolExecutions(
+  events: readonly ResidentVoiceValidationEvent[]
+): ResidentVoicePseudoAudioReport["toolExecutions"] {
+  const starts = events.filter(
+    (event): event is Extract<ResidentVoiceValidationEvent, { kind: "tool_execution_start" }> =>
+      event.kind === "tool_execution_start"
+  );
+  const ends = events.filter(
+    (event): event is Extract<ResidentVoiceValidationEvent, { kind: "tool_execution_end" }> =>
+      event.kind === "tool_execution_end"
+  );
+
+  return ends.flatMap((end) => {
+    const matchingStarts = starts.filter(({ toolCallId }) => toolCallId === end.toolCallId);
+    const matchingEnds = ends.filter(({ toolCallId }) => toolCallId === end.toolCallId);
+    const start = matchingStarts[0];
+    if (
+      matchingStarts.length !== 1 ||
+      matchingEnds.length !== 1 ||
+      start === undefined ||
+      start.toolName !== end.toolName
+    ) {
+      return [];
+    }
+
+    return [{ toolName: end.toolName, isError: end.isError, durationMs: end.durationMs }];
+  });
+}
+
+function didRequiredToolSucceed(
+  events: readonly ResidentVoiceValidationEvent[],
+  requiredToolName: string | undefined
+): boolean {
+  if (requiredToolName === undefined) {
+    return true;
+  }
+  const requiredStarts = events.filter(
+    (event): event is Extract<ResidentVoiceValidationEvent, { kind: "tool_execution_start" }> =>
+      event.kind === "tool_execution_start" && event.toolName === requiredToolName
+  );
+  const requiredEnds = events.filter(
+    (event): event is Extract<ResidentVoiceValidationEvent, { kind: "tool_execution_end" }> =>
+      event.kind === "tool_execution_end" && event.toolName === requiredToolName
+  );
+  const start = requiredStarts[0];
+  const end = requiredEnds[0];
+  if (
+    requiredStarts.length !== 1 ||
+    requiredEnds.length !== 1 ||
+    start === undefined ||
+    end === undefined ||
+    start.toolCallId !== end.toolCallId ||
+    end.isError
+  ) {
+    return false;
+  }
+
+  return (
+    events.filter(
+      (event) =>
+        (event.kind === "tool_execution_start" || event.kind === "tool_execution_end") &&
+        event.toolCallId === start.toolCallId
+    ).length === 2
+  );
+}
 
 export function createResidentVoicePseudoAudioTts(
   config: PicoConfig,
@@ -315,19 +487,11 @@ async function executeResidentVoicePseudoAudio(input: {
 }): Promise<ResidentVoicePseudoAudioReport> {
   const { arguments_, config, telemetry, inProcessCapture, audioCapture, agentSettings } = input;
   const auditEvents: AuditEvent[] = [];
-  const toolExecutions: Array<{ toolName: string; isError: boolean; durationMs: number }> = [];
-  let validationEventCount = 0;
+  const validationEvents: ResidentVoiceValidationEvent[] = [];
   const validation: ResidentVoiceValidationSink = {
     record(event) {
       input.privateValidation.record(event);
-      validationEventCount += 1;
-      if (event.kind === "tool_execution_end") {
-        toolExecutions.push({
-          toolName: event.toolName,
-          isError: event.isError,
-          durationMs: event.durationMs
-        });
-      }
+      validationEvents.push(event);
     }
   };
   const audit = createResidentVoiceAuditLog({
@@ -337,6 +501,9 @@ async function executeResidentVoicePseudoAudio(input: {
       telemetry.record(event);
     }
   });
+  const playbackMeasurement = createResidentVoicePseudoAudioPlaybackMeasurement(
+    createResidentContinuousPlaybackSink(createResidentAudioOutputPlan(config))
+  );
   const piAgent = createPiAgentTurnClient({
     cwd: process.cwd(),
     voiceProbe: { audit },
@@ -354,7 +521,7 @@ async function executeResidentVoicePseudoAudio(input: {
       speechActivity: await createConfiguredSpeechActivityGate(config),
       stt: createConfiguredStt(config),
       tts: createResidentVoicePseudoAudioTts(config, audit),
-      playback: createResidentContinuousPlaybackSink(createResidentAudioOutputPlan(config)),
+      playback: playbackMeasurement.playback,
       piAgent,
       farewell: { enabled: false },
       probe: { audit },
@@ -369,15 +536,17 @@ async function executeResidentVoicePseudoAudio(input: {
     await telemetry.forceFlush();
     const inspection = inProcessCapture?.inspection();
     const health = telemetry.health();
-    const requiredToolSucceeded =
-      arguments_.requiredToolName === undefined ||
-      toolExecutions.some(
-        (execution) => execution.toolName === arguments_.requiredToolName && !execution.isError
-      );
+    const evidence = evaluateResidentVoicePseudoAudioEvidence({
+      validationEvents,
+      auditEvents,
+      ...(arguments_.requiredToolName === undefined
+        ? {}
+        : { requiredToolName: arguments_.requiredToolName }),
+      playbackSinkOpenCount: playbackMeasurement.openCount()
+    });
     const passed =
       runtimeResult.completedTurns === 1 &&
-      validationEventCount >= 2 &&
-      requiredToolSucceeded &&
+      evidence.passed &&
       health.logs.consecutiveFailures === 0 &&
       health.metrics.consecutiveFailures === 0;
 
@@ -385,23 +554,25 @@ async function executeResidentVoicePseudoAudio(input: {
       status: passed ? "passed" : "failed",
       audioFixturePath: arguments_.audioFixturePath,
       validationOutputPath: arguments_.validationOutputPath,
-      validationEventCount,
+      validationEventCount: evidence.validationEventCount,
+      validation: evidence.validation,
       ...(arguments_.requiredToolName === undefined
         ? {}
         : { requiredToolName: arguments_.requiredToolName }),
-      toolExecutions,
+      toolExecutions: evidence.toolExecutions,
       agent: {
         provider: agentSettings.model.provider,
         id: agentSettings.model.id,
         thinkingLevel: agentSettings.thinkingLevel
       },
       runtime: runtimeResult,
+      playback: evidence.playback,
       telemetry: {
         mode: inProcessCapture === undefined ? "configured_collector" : "in_process",
         health,
         ...(inspection === undefined ? {} : inspection)
       },
-      stages: summarizeStages(auditEvents)
+      stages: evidence.stages
     };
   } finally {
     await runtime?.stop().catch(() => undefined);
@@ -418,6 +589,9 @@ function summarizeStages(events: readonly AuditEvent[]): ResidentVoicePseudoAudi
     const status = event.attributes["pico.voice.stage_status"];
     const durationMs = event.attributes["pico.voice.stage_duration_ms"];
     const errorCode = event.attributes["pico.voice.error_code"];
+    const sentenceIndex = event.attributes["pico.voice.sentence_index"];
+    const chunkCount = event.attributes["pico.voice.chunk_count"];
+    const playedChunkCount = event.attributes["pico.voice.played_chunk_count"];
     if (typeof stage !== "string" || typeof status !== "string" || typeof durationMs !== "number") {
       return [];
     }
@@ -427,10 +601,29 @@ function summarizeStages(events: readonly AuditEvent[]): ResidentVoicePseudoAudi
         stage,
         status,
         durationMs,
-        ...(typeof errorCode === "string" ? { errorCode } : {})
+        ...summarizeStageMetadata({ errorCode, sentenceIndex, chunkCount, playedChunkCount })
       }
     ];
   });
+}
+
+function summarizeStageMetadata(input: {
+  readonly errorCode: unknown;
+  readonly sentenceIndex: unknown;
+  readonly chunkCount: unknown;
+  readonly playedChunkCount: unknown;
+}): Pick<
+  ResidentVoicePseudoAudioReport["stages"][number],
+  "errorCode" | "sentenceIndex" | "chunkCount" | "playedChunkCount"
+> {
+  return {
+    ...(typeof input.errorCode === "string" ? { errorCode: input.errorCode } : {}),
+    ...(typeof input.sentenceIndex === "number" ? { sentenceIndex: input.sentenceIndex } : {}),
+    ...(typeof input.chunkCount === "number" ? { chunkCount: input.chunkCount } : {}),
+    ...(typeof input.playedChunkCount === "number"
+      ? { playedChunkCount: input.playedChunkCount }
+      : {})
+  };
 }
 
 async function waitForIdle(runtime: VoiceResidentRuntime, timeoutMs: number): Promise<void> {

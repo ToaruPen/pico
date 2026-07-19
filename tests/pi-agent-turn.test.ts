@@ -50,12 +50,7 @@ function createSdkToolState(
 describe("Pi Agent turn adapter", () => {
   it("uses the SDK session prompt stream and returns assistant text", async () => {
     const prompts: string[] = [];
-    let listener:
-      | ((event: {
-          readonly type: "message_update";
-          readonly assistantMessageEvent: { readonly type: "text_delta"; readonly delta: string };
-        }) => void)
-      | undefined;
+    let listener: ((event: unknown) => void) | undefined;
     const client = createPiAgentTurnClient({
       cwd: testCwd,
       createResourceLoader: () => ({
@@ -87,6 +82,16 @@ describe("Pi Agent turn adapter", () => {
                   delta: "。"
                 }
               });
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "こんにちは。" }]
+                  }
+                ],
+                willRetry: false
+              });
               return Promise.resolve();
             },
             dispose: () => undefined
@@ -98,6 +103,133 @@ describe("Pi Agent turn adapter", () => {
       text: "こんにちは。"
     });
     expect(prompts).toEqual(["ピコ"]);
+  });
+
+  it("returns only the final assistant message after a tool call", async () => {
+    let listener: ((event: unknown) => void) | undefined;
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      createResourceLoader: () => ({
+        reload: () => Promise.resolve()
+      }),
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: (inputListener) => {
+              listener = inputListener;
+              return () => undefined;
+            },
+            prompt: () => {
+              listener?.({
+                type: "message_update",
+                assistantMessageEvent: { type: "text_delta", delta: "確認します。" }
+              });
+              listener?.({
+                type: "tool_execution_start",
+                toolCallId: "tool-call-1",
+                toolName: "stackchan_get_status",
+                args: {}
+              });
+              listener?.({
+                type: "tool_execution_end",
+                toolCallId: "tool-call-1",
+                toolName: "stackchan_get_status",
+                result: { status: "ready" },
+                isError: false
+              });
+              listener?.({
+                type: "message_update",
+                assistantMessageEvent: { type: "text_delta", delta: "準備できています。" }
+              });
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [
+                      { type: "text", text: "確認します。" },
+                      { type: "toolCall", id: "tool-call-1", name: "stackchan_get_status" }
+                    ]
+                  },
+                  { role: "toolResult", content: [{ type: "text", text: "ready" }] },
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "準備できています。" }]
+                  }
+                ],
+                willRetry: false
+              });
+              return Promise.resolve();
+            },
+            dispose: () => undefined
+          }
+        })
+    });
+
+    await expect(client.prompt({ sessionId: "session-1", text: "状態は？" })).resolves.toEqual({
+      text: "準備できています。"
+    });
+  });
+
+  it("returns only the final assistant message after an automatic retry", async () => {
+    let listener: ((event: unknown) => void) | undefined;
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      createResourceLoader: () => ({
+        reload: () => Promise.resolve()
+      }),
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: (inputListener) => {
+              listener = inputListener;
+              return () => undefined;
+            },
+            prompt: () => {
+              listener?.({
+                type: "message_update",
+                assistantMessageEvent: { type: "text_delta", delta: "再試行前の途中回答" }
+              });
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "再試行前の途中回答" }]
+                  }
+                ],
+                willRetry: true
+              });
+              listener?.({
+                type: "message_update",
+                assistantMessageEvent: { type: "text_delta", delta: "確定回答" }
+              });
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "確定回答" }]
+                  }
+                ],
+                willRetry: false
+              });
+              return Promise.resolve();
+            },
+            dispose: () => undefined
+          }
+        })
+    });
+
+    await expect(client.prompt({ sessionId: "session-1", text: "もう一度" })).resolves.toEqual({
+      text: "確定回答"
+    });
   });
 
   it("renders deferred tool results as isolated untrusted context for the SDK prompt", async () => {
@@ -1341,6 +1473,16 @@ describe("Pi Agent turn adapter", () => {
               listener?.({
                 type: "message_update",
                 assistantMessageEvent: { type: "text_delta", delta: "応答" }
+              });
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "応答" }]
+                  }
+                ],
+                willRetry: false
               });
               elapsedMs = 900;
               return Promise.resolve();
