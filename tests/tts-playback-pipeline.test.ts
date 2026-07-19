@@ -254,6 +254,72 @@ describe("TTS playback pipeline", () => {
     expect(playback.state.stops).toBe(0);
   });
 
+  it.each([
+    [
+      "completed",
+      completedEvent(0),
+      { status: "ok" as const, durationMs: 20, chunkCount: 0, playedChunkCount: 0 }
+    ],
+    [
+      "failed",
+      failedEvent("backend_error", 0),
+      {
+        status: "error" as const,
+        durationMs: 20,
+        errorCode: "backend_error",
+        sentenceIndex: 0,
+        playedChunkCount: 0
+      }
+    ],
+    [
+      "non-terminal chunk",
+      chunkEvent(0),
+      {
+        status: "skipped" as const,
+        durationMs: 10,
+        errorCode: "cancelled",
+        playedChunkCount: 0
+      }
+    ]
+  ] as const)("settles %s initial-pull telemetry after cancellation without iterator cleanup", async (_name, event, expected) => {
+    const audit = createStructuredAuditLog();
+    const clock = { value: 0 };
+    const controller = new AbortController();
+    const nextStarted = createSignalGate();
+    const nextGate = createGate<IteratorResult<TtsSynthesisEvent>>();
+    const tts = ttsFromIterator({
+      next: () => {
+        nextStarted.resolve();
+        return nextGate.promise;
+      },
+      return: () => new Promise<IteratorResult<TtsSynthesisEvent>>(() => undefined)
+    });
+    const running = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts,
+        playback: recordingPlayback(),
+        signal: controller.signal,
+        probe: { audit },
+        monotonicNow: () => clock.value
+      })
+    );
+    await nextStarted.promise;
+    clock.value = 10;
+
+    controller.abort(new Error("cancelled"));
+
+    await expect(running).resolves.toEqual({ status: "cancelled", playedChunkCount: 0 });
+    expect(
+      audit.entries().find((entry) => entry.attributes["pico.voice.stage"] === "tts_request_wall")
+    ).toBeUndefined();
+    clock.value = 20;
+
+    nextGate.resolve({ done: false, value: event });
+
+    await vi.waitFor(() => expectRequestTelemetry(audit, expected));
+    expectRequestTelemetry(audit, expected);
+  });
+
   it("stops immediately when cancelled during a pending playback write", async () => {
     const controller = new AbortController();
     const writeGate = createSignalGate();
@@ -1193,14 +1259,16 @@ describe("TTS playback pipeline", () => {
     expectRequestTelemetry(audit, {
       status: "ok",
       durationMs: 20,
-      chunkCount: 1
+      chunkCount: 1,
+      playedChunkCount: 0
     });
     returnGate.resolve();
     await Promise.resolve();
     expectRequestTelemetry(audit, {
       status: "ok",
       durationMs: 20,
-      chunkCount: 1
+      chunkCount: 1,
+      playedChunkCount: 0
     });
   });
 
@@ -1241,7 +1309,8 @@ describe("TTS playback pipeline", () => {
     expectRequestTelemetry(audit, {
       status: "ok",
       durationMs: 20,
-      chunkCount: 1
+      chunkCount: 1,
+      playedChunkCount: 0
     });
     returnGate.resolve();
     writeGate.resolve();
@@ -1249,7 +1318,8 @@ describe("TTS playback pipeline", () => {
     expectRequestTelemetry(audit, {
       status: "ok",
       durationMs: 20,
-      chunkCount: 1
+      chunkCount: 1,
+      playedChunkCount: 0
     });
   });
 
@@ -1293,7 +1363,8 @@ describe("TTS playback pipeline", () => {
       status: "error",
       durationMs: 20,
       errorCode: "backend_error",
-      sentenceIndex: 1
+      sentenceIndex: 1,
+      playedChunkCount: 0
     });
     returnGate.resolve();
     await Promise.resolve();
@@ -1301,8 +1372,297 @@ describe("TTS playback pipeline", () => {
       status: "error",
       durationMs: 20,
       errorCode: "backend_error",
+      sentenceIndex: 1,
+      playedChunkCount: 0
+    });
+  });
+
+  it("records a cancelled producer terminal as skipped when the current write fails", async () => {
+    const audit = createStructuredAuditLog();
+    const clock = { value: 0 };
+    const writeGate = createSignalGate();
+    const events = [chunkEvent(0), failedEvent("cancelled", 1)] as const;
+    let eventIndex = 0;
+    const tts = ttsFromIterator({
+      next: () => {
+        clock.value = eventIndex === 0 ? 10 : 20;
+        const value = requireSynthesisEvent(events[eventIndex]);
+        eventIndex += 1;
+        return Promise.resolve({ done: false, value });
+      },
+      return: () => new Promise<IteratorResult<TtsSynthesisEvent>>(() => undefined)
+    });
+    const playback = recordingPlayback({
+      onWrite: () =>
+        writeGate.promise.then(() => {
+          throw new Error("write failed");
+        })
+    });
+    const running = runTtsPlaybackPipeline(
+      pipelineInput({ tts, playback, probe: { audit }, monotonicNow: () => clock.value })
+    );
+    await vi.waitFor(() => expect(eventIndex).toBe(2));
+    await Promise.resolve();
+    clock.value = 30;
+
+    writeGate.resolve();
+
+    await expect(running).resolves.toEqual({
+      status: "failed",
+      errorCode: "playback_write_failed",
+      playedChunkCount: 0
+    });
+    expectRequestTelemetry(audit, {
+      status: "skipped",
+      durationMs: 20,
+      errorCode: "cancelled",
+      sentenceIndex: 1,
+      playedChunkCount: 0
+    });
+  });
+
+  it("records a cancelled producer terminal as skipped when the caller cancels", async () => {
+    const audit = createStructuredAuditLog();
+    const clock = { value: 0 };
+    const controller = new AbortController();
+    const writeGate = createSignalGate();
+    const events = [chunkEvent(0), failedEvent("cancelled", 1)] as const;
+    let eventIndex = 0;
+    const tts = ttsFromIterator({
+      next: () => {
+        clock.value = eventIndex === 0 ? 10 : 20;
+        const value = requireSynthesisEvent(events[eventIndex]);
+        eventIndex += 1;
+        return Promise.resolve({ done: false, value });
+      },
+      return: () => new Promise<IteratorResult<TtsSynthesisEvent>>(() => undefined)
+    });
+    const playback = recordingPlayback({ onWrite: () => writeGate.promise });
+    const running = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts,
+        playback,
+        signal: controller.signal,
+        probe: { audit },
+        monotonicNow: () => clock.value
+      })
+    );
+    await vi.waitFor(() => expect(eventIndex).toBe(2));
+    await Promise.resolve();
+    clock.value = 30;
+
+    controller.abort(new Error("cancelled"));
+
+    await expect(running).resolves.toEqual({ status: "cancelled", playedChunkCount: 0 });
+    expectRequestTelemetry(audit, {
+      status: "skipped",
+      durationMs: 20,
+      errorCode: "cancelled",
+      sentenceIndex: 1,
+      playedChunkCount: 0
+    });
+    writeGate.resolve();
+  });
+
+  it("emits partial-failure telemetry after the current write updates played count", async () => {
+    const audit = createStructuredAuditLog();
+    const clock = { value: 0 };
+    const writeGate = createSignalGate();
+    const events = [chunkEvent(0), failedEvent("backend_error", 1)] as const;
+    let eventIndex = 0;
+    const tts = ttsFromIterator({
+      next: () => {
+        clock.value = eventIndex === 0 ? 10 : 20;
+        const value = requireSynthesisEvent(events[eventIndex]);
+        eventIndex += 1;
+        return Promise.resolve({ done: false, value });
+      },
+      return: () => new Promise<IteratorResult<TtsSynthesisEvent>>(() => undefined)
+    });
+    const playback = recordingPlayback({ onWrite: () => writeGate.promise });
+    const running = runTtsPlaybackPipeline(
+      pipelineInput({ tts, playback, probe: { audit }, monotonicNow: () => clock.value })
+    );
+    await vi.waitFor(() => expect(eventIndex).toBe(2));
+    await Promise.resolve();
+    expect(
+      audit.entries().find((entry) => entry.attributes["pico.voice.stage"] === "tts_request_wall")
+    ).toBeUndefined();
+    clock.value = 30;
+
+    writeGate.resolve();
+
+    await expect(running).resolves.toEqual({
+      status: "failed",
+      errorCode: "backend_error",
+      playedChunkCount: 1,
       sentenceIndex: 1
     });
+    expectRequestTelemetry(audit, {
+      status: "error",
+      durationMs: 20,
+      errorCode: "backend_error",
+      sentenceIndex: 1,
+      playedChunkCount: 1
+    });
+  });
+
+  it.each([
+    "rejected",
+    "done"
+  ] as const)("defers a %s lookahead outcome until the current write updates played count", async (outcome) => {
+    const audit = createStructuredAuditLog();
+    const clock = { value: 0 };
+    const writeGate = createSignalGate();
+    let pullCount = 0;
+    const tts = ttsFromIterator({
+      next: (): Promise<IteratorResult<TtsSynthesisEvent>> => {
+        pullCount += 1;
+        if (pullCount === 1) {
+          clock.value = 10;
+          return Promise.resolve({ done: false, value: chunkEvent(0) });
+        }
+        clock.value = 20;
+        if (outcome === "rejected") {
+          return Promise.reject(new Error("producer failed"));
+        }
+        return Promise.resolve({ done: true, value: undefined });
+      },
+      return: () => new Promise<IteratorResult<TtsSynthesisEvent>>(() => undefined)
+    });
+    const running = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts,
+        playback: recordingPlayback({ onWrite: () => writeGate.promise }),
+        probe: { audit },
+        monotonicNow: () => clock.value
+      })
+    );
+    await vi.waitFor(() => expect(pullCount).toBe(2));
+    await Promise.resolve();
+    expect(
+      audit.entries().find((entry) => entry.attributes["pico.voice.stage"] === "tts_request_wall")
+    ).toBeUndefined();
+    clock.value = 30;
+
+    writeGate.resolve();
+
+    await expect(running).resolves.toEqual({
+      status: "failed",
+      errorCode: "tts_request_failed",
+      playedChunkCount: 1
+    });
+    expectRequestTelemetry(audit, {
+      status: "error",
+      durationMs: 20,
+      errorCode: "tts_request_failed",
+      playedChunkCount: 1
+    });
+  });
+
+  it("emits a producer failure before stalled playback cleanup finishes", async () => {
+    const audit = createStructuredAuditLog();
+    const clock = { value: 0 };
+    const writeGate = createSignalGate();
+    const stopStarted = createSignalGate();
+    const stopGate = createSignalGate();
+    const events = [chunkEvent(0), failedEvent("backend_error", 1)] as const;
+    let eventIndex = 0;
+    const tts = ttsFromIterator({
+      next: () => {
+        clock.value = eventIndex === 0 ? 10 : 20;
+        const value = requireSynthesisEvent(events[eventIndex]);
+        eventIndex += 1;
+        return Promise.resolve({ done: false, value });
+      },
+      return: () => new Promise<IteratorResult<TtsSynthesisEvent>>(() => undefined)
+    });
+    const playback = recordingPlayback({
+      onWrite: () =>
+        writeGate.promise.then(() => {
+          throw new Error("write failed");
+        }),
+      onStop: () => {
+        stopStarted.resolve();
+        return stopGate.promise;
+      }
+    });
+    const running = runTtsPlaybackPipeline(
+      pipelineInput({ tts, playback, probe: { audit }, monotonicNow: () => clock.value })
+    );
+    await vi.waitFor(() => expect(eventIndex).toBe(2));
+    await Promise.resolve();
+    clock.value = 30;
+
+    writeGate.resolve();
+    await stopStarted.promise;
+
+    expectRequestTelemetry(audit, {
+      status: "error",
+      durationMs: 20,
+      errorCode: "backend_error",
+      sentenceIndex: 1,
+      playedChunkCount: 0
+    });
+    stopGate.resolve();
+    await expect(running).resolves.toEqual({
+      status: "failed",
+      errorCode: "playback_write_failed",
+      playedChunkCount: 0
+    });
+  });
+
+  it("emits a cancelled producer terminal before stalled cancellation cleanup finishes", async () => {
+    const audit = createStructuredAuditLog();
+    const clock = { value: 0 };
+    const controller = new AbortController();
+    const writeGate = createSignalGate();
+    const stopStarted = createSignalGate();
+    const stopGate = createSignalGate();
+    const events = [chunkEvent(0), failedEvent("cancelled", 1)] as const;
+    let eventIndex = 0;
+    const tts = ttsFromIterator({
+      next: () => {
+        clock.value = eventIndex === 0 ? 10 : 20;
+        const value = requireSynthesisEvent(events[eventIndex]);
+        eventIndex += 1;
+        return Promise.resolve({ done: false, value });
+      },
+      return: () => new Promise<IteratorResult<TtsSynthesisEvent>>(() => undefined)
+    });
+    const playback = recordingPlayback({
+      onWrite: () => writeGate.promise,
+      onStop: () => {
+        stopStarted.resolve();
+        return stopGate.promise;
+      }
+    });
+    const running = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts,
+        playback,
+        signal: controller.signal,
+        probe: { audit },
+        monotonicNow: () => clock.value
+      })
+    );
+    await vi.waitFor(() => expect(eventIndex).toBe(2));
+    await Promise.resolve();
+    clock.value = 30;
+
+    controller.abort(new Error("cancelled"));
+    await stopStarted.promise;
+
+    expectRequestTelemetry(audit, {
+      status: "skipped",
+      durationMs: 20,
+      errorCode: "cancelled",
+      sentenceIndex: 1,
+      playedChunkCount: 0
+    });
+    stopGate.resolve();
+    await expect(running).resolves.toEqual({ status: "cancelled", playedChunkCount: 0 });
+    writeGate.resolve();
   });
 
   it("records downstream telemetry before cleanup when lookahead is non-terminal", async () => {
@@ -1765,6 +2125,7 @@ function expectRequestTelemetry(
     readonly status: "ok" | "error" | "skipped";
     readonly durationMs: number;
     readonly chunkCount?: number;
+    readonly playedChunkCount?: number;
     readonly errorCode?: string;
     readonly sentenceIndex?: number;
   }
@@ -1777,6 +2138,9 @@ function expectRequestTelemetry(
     "pico.voice.stage_status": expected.status,
     "pico.voice.stage_duration_ms": expected.durationMs,
     ...(expected.chunkCount === undefined ? {} : { "pico.voice.chunk_count": expected.chunkCount }),
+    ...(expected.playedChunkCount === undefined
+      ? {}
+      : { "pico.voice.played_chunk_count": expected.playedChunkCount }),
     ...(expected.errorCode === undefined ? {} : { "pico.voice.error_code": expected.errorCode }),
     ...(expected.sentenceIndex === undefined
       ? {}

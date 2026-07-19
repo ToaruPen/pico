@@ -61,10 +61,20 @@ type PipelineState = {
   pendingPull: Promise<Settlement<TimedPull>> | undefined;
   pendingPullResolvedChunk: boolean;
   pendingPullTelemetry?: Promise<Settlement<void>>;
+  submissionPending: boolean;
+  pendingTerminalRequest?: PendingTerminalRequest;
   iteratorCleanup?: Promise<void>;
   echoReferenceApplied: boolean;
   echoReferencePendingWrite: boolean;
   echoReset?: Promise<"reset" | "unsafe">;
+};
+
+type PendingTerminalRequest = {
+  readonly status: VoiceStageStatus;
+  readonly settledAtMs: number;
+  readonly errorCode?: string;
+  readonly sentenceIndex?: number;
+  readonly chunkCount?: number;
 };
 
 type TimedPull = {
@@ -123,6 +133,7 @@ export async function runTtsPlaybackPipeline(
     playbackSettled: false,
     pendingPull: undefined,
     pendingPullResolvedChunk: false,
+    submissionPending: false,
     echoReferenceApplied: false,
     echoReferencePendingWrite: false
   };
@@ -159,6 +170,8 @@ async function executePipeline(state: PipelineState): Promise<TtsPlaybackPipelin
   state.iterator = iteratorSettlement.value;
   const firstPullPromise = pullNext(iteratorSettlement.value, state.options.monotonicNow);
   state.pendingPull = settle(firstPullPromise);
+  state.pendingPullResolvedChunk = false;
+  observePendingPullTelemetry(state, state.pendingPull);
   const firstPull = await awaitWithAbort(firstPullPromise, state.producerController.signal);
 
   if (isAborted(firstPull)) {
@@ -167,7 +180,11 @@ async function executePipeline(state: PipelineState): Promise<TtsPlaybackPipelin
 
   if (!firstPull.ok) {
     settleFirstChunk(state, "error", "tts_request_failed");
-    settleRequest(state, "error", "tts_request_failed");
+    deferTerminalRequest(state, {
+      status: "error",
+      settledAtMs: state.options.monotonicNow(),
+      errorCode: "tts_request_failed"
+    });
     return failedResult(state, "tts_request_failed");
   }
 
@@ -197,8 +214,9 @@ async function processPull(
     const nextPull = pullNext(iterator, state.options.monotonicNow);
     state.pendingPull = settle(nextPull);
     state.pendingPullResolvedChunk = false;
+    state.submissionPending = true;
     observePendingPullTelemetry(state, state.pendingPull);
-    const submission = await submitChunk(state, chunk);
+    const submission = await submitPendingChunk(state, chunk);
     if (submission !== undefined) {
       return submission;
     }
@@ -213,6 +231,17 @@ async function processPull(
     state.pendingPull = undefined;
     state.pendingPullResolvedChunk = false;
     pull = nextSettlement.value;
+  }
+}
+
+async function submitPendingChunk(
+  state: PipelineState,
+  chunk: TtsAudioChunk
+): Promise<TtsPlaybackPipelineResult | undefined> {
+  try {
+    return await submitChunk(state, chunk);
+  } finally {
+    settlePendingSubmission(state);
   }
 }
 
@@ -398,7 +427,7 @@ async function convergeProducerFailure(
   settledAtMs: number
 ): Promise<TtsPlaybackPipelineResult> {
   settleFirstChunk(state, "error", errorCode, undefined, settledAtMs);
-  settleRequest(state, "error", errorCode, undefined, settledAtMs);
+  deferTerminalRequest(state, { status: "error", settledAtMs, errorCode });
   if (state.session !== undefined) {
     const drained = await finishPlayback(state, state.session);
     if (isAborted(drained)) {
@@ -413,6 +442,7 @@ async function convergeProducerFailure(
 }
 
 async function convergeCancellation(state: PipelineState): Promise<TtsPlaybackPipelineResult> {
+  settlePendingSubmission(state);
   abortProducer(state);
   settleFirstChunk(state, "skipped", "cancelled");
   deferRequest(state, "skipped", "cancelled");
@@ -427,6 +457,7 @@ async function convergePlaybackFailure(
   state: PipelineState,
   errorCode: string
 ): Promise<TtsPlaybackPipelineResult> {
+  settlePendingSubmission(state);
   abortProducer(state);
   deferRequest(state, "error", errorCode);
   await stopAndFlush(state);
@@ -668,13 +699,21 @@ function settleRequestFromPull(
   pull: Settlement<TimedPull>
 ): void {
   if (!pull.ok) {
-    settleRequest(state, "error", "tts_request_failed");
+    deferTerminalRequest(state, {
+      status: "error",
+      settledAtMs: state.options.monotonicNow(),
+      errorCode: "tts_request_failed"
+    });
     return;
   }
 
   const { result, settledAtMs } = pull.value;
   if (result.done) {
-    settleRequest(state, "error", "tts_request_failed", undefined, settledAtMs);
+    deferTerminalRequest(state, {
+      status: "error",
+      settledAtMs,
+      errorCode: "tts_request_failed"
+    });
     return;
   }
   if (result.value.kind === "chunk") {
@@ -692,11 +731,55 @@ function settleTerminalRequest(
   event: Exclude<TtsSynthesisEvent, { readonly kind: "chunk" }>,
   settledAtMs: number
 ): void {
-  if (event.kind === "completed") {
-    settleRequest(state, "ok", undefined, undefined, settledAtMs, event.chunkCount);
+  if (state.requestSettled) {
     return;
   }
-  settleRequest(state, "error", event.failure.reason, event.failure.sentenceIndex, settledAtMs);
+  if (event.kind === "completed") {
+    deferTerminalRequest(state, {
+      status: "ok",
+      settledAtMs,
+      chunkCount: event.chunkCount
+    });
+  } else {
+    deferTerminalRequest(state, {
+      status: event.failure.reason === "cancelled" ? "skipped" : "error",
+      settledAtMs,
+      errorCode: event.failure.reason,
+      sentenceIndex: event.failure.sentenceIndex
+    });
+  }
+}
+
+function deferTerminalRequest(state: PipelineState, terminal: PendingTerminalRequest): void {
+  if (state.requestSettled) {
+    return;
+  }
+  state.pendingTerminalRequest = terminal;
+  settlePendingTerminalRequest(state);
+}
+
+function settlePendingSubmission(state: PipelineState): void {
+  if (!state.submissionPending) {
+    return;
+  }
+  state.submissionPending = false;
+  settlePendingTerminalRequest(state);
+}
+
+function settlePendingTerminalRequest(state: PipelineState): void {
+  const pending = state.pendingTerminalRequest;
+  if (pending === undefined || state.submissionPending || state.requestSettled) {
+    return;
+  }
+  delete state.pendingTerminalRequest;
+  settleRequest(
+    state,
+    pending.status,
+    pending.errorCode,
+    pending.sentenceIndex,
+    pending.settledAtMs,
+    pending.chunkCount
+  );
 }
 
 function getEchoProviderSafetyState(provider: EchoControlProvider): EchoProviderSafetyState {
