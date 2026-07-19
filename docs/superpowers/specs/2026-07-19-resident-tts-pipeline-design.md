@@ -131,8 +131,8 @@ playback sessionの正常完了の両方が成立した時だけ記録する。
 - 最初のchunk前のcancelはTTS requestをabortし、playbackを開始しない。
 - 再生開始後のcancelはTTSとplaybackを同じgeneration signalで停止し、echo controlをflush
   する。
-- 後続発話の合成失敗時は、すでに再生した音声を取り消さない。未再生chunkを破棄し、active
-  playbackを停止し、部分発話失敗として記録する。
+- 後続発話の合成失敗時は、すでにplaybackへ渡した現在chunkだけをdrainして入力を閉じる。
+  未投入chunkは破棄し、現在chunkを文の途中で切らずに部分発話失敗として記録する。
 - 最初のchunkの合成失敗時は、現行どおり音声を一切再生しない。
 - playback失敗時はTTS producerをabortし、後続chunkを生成し続けない。
 - invalidated generationから遅着したchunk、process completion、TTS completionは状態を進めない。
