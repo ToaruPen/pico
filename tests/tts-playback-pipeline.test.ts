@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createStructuredAuditLog } from "../src/modules/audit/index.js";
+import { createStructuredAuditLog, type StructuredAuditLog } from "../src/modules/audit/index.js";
 import {
   createHttpEchoControlProvider,
   type EchoControlProvider,
@@ -567,6 +567,12 @@ describe("TTS playback pipeline", () => {
     );
   });
 
+  it("fails closed when a provider throws during registration invocation", async () => {
+    await expectNonConformingRegistrationToFailClosed(() => {
+      throw new Error("provider contract throw");
+    });
+  });
+
   it("poisons a provider within the safety bound when stop and reset never settle", async () => {
     const controller = new AbortController();
     const pending = new Promise<void>(() => undefined);
@@ -862,6 +868,136 @@ describe("TTS playback pipeline", () => {
     expect(playback.state.writes).toEqual([first.chunk, second.chunk]);
   });
 
+  it.each([
+    ["empty audio", { audio: [] }],
+    ["zero duration", { durationMs: 0 }],
+    ["invalid sample rate", { sampleRateHz: 0 }]
+  ] as const)("rejects a locally malformed TTS chunk with %s without poisoning echo", async (_name, malformed) => {
+    const echo = recordingEcho();
+    const firstPlayback = recordingPlayback();
+
+    await expect(
+      runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0, malformed), completedEvent(1)]),
+          playback: firstPlayback,
+          echoControl: echo.provider
+        })
+      )
+    ).resolves.toEqual({
+      status: "failed",
+      errorCode: "tts_invalid_chunk",
+      playedChunkCount: 0
+    });
+    expect(echo.state.acceptStarts).toBe(0);
+    expect(firstPlayback.state.writes).toHaveLength(0);
+
+    const secondPlayback = recordingPlayback();
+    await expect(
+      runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+          playback: secondPlayback,
+          echoControl: echo.provider
+        })
+      )
+    ).resolves.toEqual({ status: "completed", playedChunkCount: 1, durationMs: 10 });
+    expect(echo.state.acceptStarts).toBe(1);
+    expect(secondPlayback.state.writes).toHaveLength(1);
+  });
+
+  it("converges an active playback session after a later malformed TTS chunk", async () => {
+    const audit = createStructuredAuditLog();
+    const echo = recordingEcho();
+    const playback = recordingPlayback();
+
+    await expect(
+      runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), chunkEvent(1, { durationMs: 0 }), completedEvent(2)]),
+          playback,
+          echoControl: echo.provider,
+          probe: { audit }
+        })
+      )
+    ).resolves.toEqual({
+      status: "failed",
+      errorCode: "tts_invalid_chunk",
+      playedChunkCount: 1
+    });
+    expect(echo.state.acceptStarts).toBe(1);
+    expect(echo.state.flushes).toBe(1);
+    expect(playback.state.writes).toHaveLength(1);
+    expect(playback.state.finishes).toBe(0);
+    expect(playback.state.stops).toBe(1);
+    const playbackEvents = audit
+      .entries()
+      .filter((event) => event.attributes["pico.voice.stage"] === "tts_playback");
+    expect(playbackEvents).toHaveLength(1);
+    expect(playbackEvents[0]?.attributes).toMatchObject({
+      "pico.voice.stage_status": "error",
+      "pico.voice.error_code": "tts_invalid_chunk",
+      "pico.voice.played_chunk_count": 1
+    });
+
+    const nextPlayback = recordingPlayback();
+    await expect(
+      runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+          playback: nextPlayback,
+          echoControl: echo.provider
+        })
+      )
+    ).resolves.toEqual({ status: "completed", playedChunkCount: 1, durationMs: 10 });
+    expect(echo.state.acceptStarts).toBe(2);
+    expect(nextPlayback.state.writes).toHaveLength(1);
+  });
+
+  it("poisons echo when a later malformed chunk cannot reset an applied reference", async () => {
+    const state = { acceptStarts: 0, flushes: 0 };
+    const echoControl = hostileResetEcho(
+      state,
+      () => Promise.resolve({ status: "unsupported" }) as never
+    );
+    const playback = recordingPlayback();
+
+    await expect(
+      runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), chunkEvent(1, { audio: [] }), completedEvent(2)]),
+          playback,
+          echoControl
+        })
+      )
+    ).resolves.toEqual({
+      status: "failed",
+      errorCode: "tts_invalid_chunk",
+      playedChunkCount: 1
+    });
+    expect(state.acceptStarts).toBe(1);
+    expect(state.flushes).toBe(1);
+    expect(playback.state.writes).toHaveLength(1);
+    expect(playback.state.stops).toBe(1);
+
+    const nextPlayback = recordingPlayback();
+    await expect(
+      runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+          playback: nextPlayback,
+          echoControl
+        })
+      )
+    ).resolves.toEqual({
+      status: "failed",
+      errorCode: "echo_control_failed",
+      playedChunkCount: 0
+    });
+    expect(state.acceptStarts).toBe(1);
+    expect(nextPlayback.state.writes).toHaveLength(0);
+  });
+
   it("registers echo references immediately before submitted writes with cumulative offsets", async () => {
     const order: string[] = [];
     const echo = recordingEcho({ onAccept: (frame) => order.push(`echo-${frame.id}`) });
@@ -1016,6 +1152,256 @@ describe("TTS playback pipeline", () => {
       audit.entries().find((event) => event.attributes["pico.voice.stage"] === "tts_request_wall")
         ?.attributes["pico.voice.stage_duration_ms"]
     ).toBe(100);
+  });
+
+  it("keeps completed lookahead telemetry when the current write fails", async () => {
+    const audit = createStructuredAuditLog();
+    const clock = { value: 0 };
+    const writeGate = createSignalGate();
+    const returnGate = createSignalGate();
+    const events = [chunkEvent(0), completedEvent(1)] as const;
+    let eventIndex = 0;
+    const tts = ttsFromIterator({
+      next: () => {
+        clock.value = eventIndex === 0 ? 10 : 20;
+        const value = requireSynthesisEvent(events[eventIndex]);
+        eventIndex += 1;
+        return Promise.resolve({ done: false, value });
+      },
+      return: () => returnGate.promise.then(() => ({ done: true, value: undefined }))
+    });
+    const playback = recordingPlayback({
+      onWrite: () =>
+        writeGate.promise.then(() => {
+          throw new Error("write failed");
+        })
+    });
+    const running = runTtsPlaybackPipeline(
+      pipelineInput({ tts, playback, probe: { audit }, monotonicNow: () => clock.value })
+    );
+    await vi.waitFor(() => expect(eventIndex).toBe(2));
+    await Promise.resolve();
+    clock.value = 30;
+
+    writeGate.resolve();
+
+    await expect(running).resolves.toEqual({
+      status: "failed",
+      errorCode: "playback_write_failed",
+      playedChunkCount: 0
+    });
+    expectRequestTelemetry(audit, {
+      status: "ok",
+      durationMs: 20,
+      chunkCount: 1
+    });
+    returnGate.resolve();
+    await Promise.resolve();
+    expectRequestTelemetry(audit, {
+      status: "ok",
+      durationMs: 20,
+      chunkCount: 1
+    });
+  });
+
+  it("keeps completed lookahead telemetry when the current write is cancelled", async () => {
+    const audit = createStructuredAuditLog();
+    const clock = { value: 0 };
+    const controller = new AbortController();
+    const writeGate = createSignalGate();
+    const returnGate = createSignalGate();
+    const events = [chunkEvent(0), completedEvent(1)] as const;
+    let eventIndex = 0;
+    const tts = ttsFromIterator({
+      next: () => {
+        clock.value = eventIndex === 0 ? 10 : 20;
+        const value = requireSynthesisEvent(events[eventIndex]);
+        eventIndex += 1;
+        return Promise.resolve({ done: false, value });
+      },
+      return: () => returnGate.promise.then(() => ({ done: true, value: undefined }))
+    });
+    const playback = recordingPlayback({ onWrite: () => writeGate.promise });
+    const running = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts,
+        playback,
+        probe: { audit },
+        monotonicNow: () => clock.value,
+        signal: controller.signal
+      })
+    );
+    await vi.waitFor(() => expect(eventIndex).toBe(2));
+    await Promise.resolve();
+    clock.value = 30;
+
+    controller.abort(new Error("cancelled"));
+
+    await expect(running).resolves.toEqual({ status: "cancelled", playedChunkCount: 0 });
+    expectRequestTelemetry(audit, {
+      status: "ok",
+      durationMs: 20,
+      chunkCount: 1
+    });
+    returnGate.resolve();
+    writeGate.resolve();
+    await Promise.resolve();
+    expectRequestTelemetry(audit, {
+      status: "ok",
+      durationMs: 20,
+      chunkCount: 1
+    });
+  });
+
+  it("keeps failed lookahead telemetry when the current write fails", async () => {
+    const audit = createStructuredAuditLog();
+    const clock = { value: 0 };
+    const writeGate = createSignalGate();
+    const returnGate = createSignalGate();
+    const events = [chunkEvent(0), failedEvent("backend_error", 1)] as const;
+    let eventIndex = 0;
+    const tts = ttsFromIterator({
+      next: () => {
+        clock.value = eventIndex === 0 ? 10 : 20;
+        const value = requireSynthesisEvent(events[eventIndex]);
+        eventIndex += 1;
+        return Promise.resolve({ done: false, value });
+      },
+      return: () => returnGate.promise.then(() => ({ done: true, value: undefined }))
+    });
+    const playback = recordingPlayback({
+      onWrite: () =>
+        writeGate.promise.then(() => {
+          throw new Error("write failed");
+        })
+    });
+    const running = runTtsPlaybackPipeline(
+      pipelineInput({ tts, playback, probe: { audit }, monotonicNow: () => clock.value })
+    );
+    await vi.waitFor(() => expect(eventIndex).toBe(2));
+    await Promise.resolve();
+    clock.value = 30;
+
+    writeGate.resolve();
+
+    await expect(running).resolves.toEqual({
+      status: "failed",
+      errorCode: "playback_write_failed",
+      playedChunkCount: 0
+    });
+    expectRequestTelemetry(audit, {
+      status: "error",
+      durationMs: 20,
+      errorCode: "backend_error",
+      sentenceIndex: 1
+    });
+    returnGate.resolve();
+    await Promise.resolve();
+    expectRequestTelemetry(audit, {
+      status: "error",
+      durationMs: 20,
+      errorCode: "backend_error",
+      sentenceIndex: 1
+    });
+  });
+
+  it("records downstream telemetry before cleanup when lookahead is non-terminal", async () => {
+    const audit = createStructuredAuditLog();
+    const clock = { value: 0 };
+    const writeGate = createSignalGate();
+    const returnGate = createSignalGate();
+    const events = [chunkEvent(0), chunkEvent(1)] as const;
+    let eventIndex = 0;
+    const tts = ttsFromIterator({
+      next: () => {
+        clock.value = eventIndex === 0 ? 10 : 20;
+        const value = requireSynthesisEvent(events[eventIndex]);
+        eventIndex += 1;
+        return Promise.resolve({ done: false, value });
+      },
+      return: () => returnGate.promise.then(() => ({ done: true, value: undefined }))
+    });
+    const playback = recordingPlayback({
+      onWrite: () =>
+        writeGate.promise.then(() => {
+          throw new Error("write failed");
+        })
+    });
+    const running = runTtsPlaybackPipeline(
+      pipelineInput({ tts, playback, probe: { audit }, monotonicNow: () => clock.value })
+    );
+    await vi.waitFor(() => expect(eventIndex).toBe(2));
+    await Promise.resolve();
+    clock.value = 30;
+
+    writeGate.resolve();
+
+    await expect(running).resolves.toEqual({
+      status: "failed",
+      errorCode: "playback_write_failed",
+      playedChunkCount: 0
+    });
+    expectRequestTelemetry(audit, {
+      status: "error",
+      durationMs: 30,
+      errorCode: "playback_write_failed"
+    });
+    returnGate.resolve();
+    await Promise.resolve();
+    expectRequestTelemetry(audit, {
+      status: "error",
+      durationMs: 30,
+      errorCode: "playback_write_failed"
+    });
+  });
+
+  it("records cancellation telemetry before cleanup when lookahead is non-terminal", async () => {
+    const audit = createStructuredAuditLog();
+    const clock = { value: 0 };
+    const controller = new AbortController();
+    const writeGate = createSignalGate();
+    const returnGate = createSignalGate();
+    const events = [chunkEvent(0), chunkEvent(1)] as const;
+    let eventIndex = 0;
+    const tts = ttsFromIterator({
+      next: () => {
+        clock.value = eventIndex === 0 ? 10 : 20;
+        const value = requireSynthesisEvent(events[eventIndex]);
+        eventIndex += 1;
+        return Promise.resolve({ done: false, value });
+      },
+      return: () => returnGate.promise.then(() => ({ done: true, value: undefined }))
+    });
+    const playback = recordingPlayback({ onWrite: () => writeGate.promise });
+    const running = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts,
+        playback,
+        probe: { audit },
+        monotonicNow: () => clock.value,
+        signal: controller.signal
+      })
+    );
+    await vi.waitFor(() => expect(eventIndex).toBe(2));
+    await Promise.resolve();
+    clock.value = 30;
+
+    controller.abort(new Error("cancelled"));
+
+    await expect(running).resolves.toEqual({ status: "cancelled", playedChunkCount: 0 });
+    expectRequestTelemetry(audit, {
+      status: "skipped",
+      durationMs: 30,
+      errorCode: "cancelled"
+    });
+    returnGate.resolve();
+    writeGate.resolve();
+    await Promise.resolve();
+    expectRequestTelemetry(audit, {
+      status: "skipped",
+      durationMs: 30,
+      errorCode: "cancelled"
+    });
   });
 
   it("does not wait for an abort-insensitive iterator return after playback failure", async () => {
@@ -1373,6 +1759,31 @@ async function within<T>(promise: Promise<T>, timeoutMs: number): Promise<T | "t
   return result;
 }
 
+function expectRequestTelemetry(
+  audit: StructuredAuditLog,
+  expected: {
+    readonly status: "ok" | "error" | "skipped";
+    readonly durationMs: number;
+    readonly chunkCount?: number;
+    readonly errorCode?: string;
+    readonly sentenceIndex?: number;
+  }
+): void {
+  const events = audit
+    .entries()
+    .filter((event) => event.attributes["pico.voice.stage"] === "tts_request_wall");
+  expect(events).toHaveLength(1);
+  expect(events[0]?.attributes).toMatchObject({
+    "pico.voice.stage_status": expected.status,
+    "pico.voice.stage_duration_ms": expected.durationMs,
+    ...(expected.chunkCount === undefined ? {} : { "pico.voice.chunk_count": expected.chunkCount }),
+    ...(expected.errorCode === undefined ? {} : { "pico.voice.error_code": expected.errorCode }),
+    ...(expected.sentenceIndex === undefined
+      ? {}
+      : { "pico.voice.sentence_index": expected.sentenceIndex })
+  });
+}
+
 function pipelineInput(input: {
   readonly tts: TtsClient;
   readonly playback: VoicePlaybackSink;
@@ -1402,9 +1813,9 @@ function recordingEcho(
   options: { readonly onAccept?: (frame: VoicePcmFrame) => void; readonly acceptError?: Error } = {}
 ): {
   readonly provider: EchoControlProvider;
-  readonly state: { readonly references: VoicePcmFrame[]; flushes: number };
+  readonly state: { readonly references: VoicePcmFrame[]; acceptStarts: number; flushes: number };
 } {
-  const state = { references: [] as VoicePcmFrame[], flushes: 0 };
+  const state = { references: [] as VoicePcmFrame[], acceptStarts: 0, flushes: 0 };
   return {
     provider: {
       describe: () => ({ provider: "half_duplex", mode: "half_duplex" }),
@@ -1416,6 +1827,7 @@ function recordingEcho(
           engine: "test"
         }),
       acceptFarEndReference: (frame) => {
+        state.acceptStarts += 1;
         if (options.acceptError !== undefined) {
           return Promise.resolve({
             status: "definitely_not_applied",

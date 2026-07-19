@@ -4,7 +4,8 @@ import {
   defineVoicePcmFrame,
   ECHO_CONTROL_REGISTRATION_TIMEOUT_MS,
   type EchoControlProvider,
-  type EchoControlRegistrationResult
+  type EchoControlRegistrationResult,
+  type VoicePcmFrame
 } from "../modules/voice/echo-control.js";
 import type { TtsAudioChunk, TtsClient, TtsSynthesisEvent } from "../modules/voice/index.js";
 import type { VoicePlaybackSession, VoicePlaybackSink } from "./voice-playback.js";
@@ -52,8 +53,14 @@ type PipelineState = {
   playbackStartedAtMs?: number;
   playbackSettled: boolean;
   stopSettlement?: Promise<Settlement<void>>;
-  deferredRequest?: { readonly status: VoiceStageStatus; readonly errorCode: string };
+  deferredRequest?: {
+    readonly status: VoiceStageStatus;
+    readonly errorCode: string;
+    readonly settledAtMs: number;
+  };
   pendingPull: Promise<Settlement<TimedPull>> | undefined;
+  pendingPullResolvedChunk: boolean;
+  pendingPullTelemetry?: Promise<Settlement<void>>;
   iteratorCleanup?: Promise<void>;
   echoReferenceApplied: boolean;
   echoReferencePendingWrite: boolean;
@@ -64,6 +71,14 @@ type TimedPull = {
   readonly result: IteratorResult<TtsSynthesisEvent>;
   readonly settledAtMs: number;
 };
+
+type ClassifiedPull =
+  | { readonly chunk: TtsAudioChunk }
+  | { readonly result: TtsPlaybackPipelineResult | Promise<TtsPlaybackPipelineResult> };
+
+type PreparedChunkSubmission =
+  | { readonly frame: VoicePcmFrame }
+  | { readonly result: TtsPlaybackPipelineResult };
 
 type Settlement<T> =
   | { readonly ok: true; readonly value: T }
@@ -107,6 +122,7 @@ export async function runTtsPlaybackPipeline(
     requestSettled: false,
     playbackSettled: false,
     pendingPull: undefined,
+    pendingPullResolvedChunk: false,
     echoReferenceApplied: false,
     echoReferencePendingWrite: false
   };
@@ -171,19 +187,18 @@ async function processPull(
       return convergeCancellation(state);
     }
 
-    if (pull.result.done) {
-      return convergeProducerFailure(state, "tts_request_failed", pull.settledAtMs);
+    const classified = classifyPull(state, pull);
+    if ("result" in classified) {
+      return classified.result;
     }
+    const { chunk } = classified;
 
-    const event = pull.result.value;
-    if (event.kind !== "chunk") {
-      return convergeTerminalEvent(state, event, pull.settledAtMs);
-    }
-
-    settleFirstChunk(state, "ok", undefined, event.chunk.sentenceIndex, pull.settledAtMs);
+    settleFirstChunk(state, "ok", undefined, chunk.sentenceIndex, pull.settledAtMs);
     const nextPull = pullNext(iterator, state.options.monotonicNow);
     state.pendingPull = settle(nextPull);
-    const submission = await submitChunk(state, event.chunk);
+    state.pendingPullResolvedChunk = false;
+    observePendingPullTelemetry(state, state.pendingPull);
+    const submission = await submitChunk(state, chunk);
     if (submission !== undefined) {
       return submission;
     }
@@ -196,22 +211,34 @@ async function processPull(
       return convergeProducerFailure(state, "tts_request_failed", state.options.monotonicNow());
     }
     state.pendingPull = undefined;
+    state.pendingPullResolvedChunk = false;
     pull = nextSettlement.value;
   }
+}
+
+function classifyPull(state: PipelineState, pull: TimedPull): ClassifiedPull {
+  if (pull.result.done) {
+    return { result: convergeProducerFailure(state, "tts_request_failed", pull.settledAtMs) };
+  }
+  const event = pull.result.value;
+  if (event.kind !== "chunk") {
+    return { result: convergeTerminalEvent(state, event, pull.settledAtMs) };
+  }
+  if (!isValidTtsChunk(state, event.chunk)) {
+    return { result: convergeInvalidTtsChunk(state, pull.settledAtMs) };
+  }
+  return { chunk: event.chunk };
 }
 
 async function submitChunk(
   state: PipelineState,
   chunk: TtsAudioChunk
 ): Promise<TtsPlaybackPipelineResult | undefined> {
-  if (state.session === undefined) {
-    const opened = await openPlayback(state, chunk);
-    if (opened !== undefined) {
-      return opened;
-    }
+  const prepared = await prepareChunkSubmission(state, chunk);
+  if ("result" in prepared) {
+    return prepared.result;
   }
-
-  const echoRegistration = registerEchoReference(state, chunk);
+  const echoRegistration = registerEchoReference(state, prepared.frame);
   const echoSettlement = await awaitWithAbort(echoRegistration, state.producerController.signal);
   if (isAborted(echoSettlement)) {
     return convergeCancellation(state);
@@ -239,6 +266,24 @@ async function submitChunk(
   state.playedChunkCount += 1;
   state.playedDurationMs += chunk.durationMs;
   return undefined;
+}
+
+async function prepareChunkSubmission(
+  state: PipelineState,
+  chunk: TtsAudioChunk
+): Promise<PreparedChunkSubmission> {
+  if (state.session === undefined) {
+    const opened = await openPlayback(state, chunk);
+    if (opened !== undefined) {
+      return { result: opened };
+    }
+  }
+
+  const frame = createEchoReferenceFrame(state, chunk);
+  if (frame === undefined) {
+    return { result: await convergePlaybackFailure(state, "tts_invalid_chunk") };
+  }
+  return { frame };
 }
 
 async function openPlayback(
@@ -280,7 +325,7 @@ async function convergeTerminalEvent(
 ): Promise<TtsPlaybackPipelineResult> {
   if (event.kind === "completed") {
     settleFirstChunk(state, "skipped", "empty", undefined, settledAtMs);
-    settleRequest(state, "ok", undefined, undefined, settledAtMs, event.chunkCount);
+    settleTerminalRequest(state, event, settledAtMs);
     if (state.session === undefined) {
       return { status: "empty", playedChunkCount: 0 };
     }
@@ -288,7 +333,7 @@ async function convergeTerminalEvent(
   }
 
   settleFirstChunk(state, "error", event.failure.reason, event.failure.sentenceIndex, settledAtMs);
-  settleRequest(state, "error", event.failure.reason, event.failure.sentenceIndex, settledAtMs);
+  settleTerminalRequest(state, event, settledAtMs);
   if (state.session !== undefined) {
     const drained = await finishPlayback(state, state.session);
     if (isAborted(drained)) {
@@ -300,6 +345,20 @@ async function convergeTerminalEvent(
     settlePlayback(state, "ok");
   }
   return failedResult(state, event.failure.reason, event.failure.sentenceIndex);
+}
+
+async function convergeInvalidTtsChunk(
+  state: PipelineState,
+  settledAtMs: number
+): Promise<TtsPlaybackPipelineResult> {
+  abortProducer(state);
+  settleFirstChunk(state, "error", "tts_invalid_chunk", undefined, settledAtMs);
+  settleRequest(state, "error", "tts_invalid_chunk", undefined, settledAtMs);
+  if (state.session !== undefined) {
+    await stopAndFlush(state);
+    settlePlayback(state, "error", "tts_invalid_chunk");
+  }
+  return failedResult(state, "tts_invalid_chunk");
 }
 
 async function finishCompletedPlayback(state: PipelineState): Promise<TtsPlaybackPipelineResult> {
@@ -436,17 +495,23 @@ function settleRequest(
 
 function deferRequest(state: PipelineState, status: VoiceStageStatus, errorCode: string): void {
   if (!state.requestSettled) {
-    state.deferredRequest = { status, errorCode };
+    state.deferredRequest = { status, errorCode, settledAtMs: state.options.monotonicNow() };
+    if (state.pendingPullResolvedChunk) {
+      settleDeferredRequest(state);
+    }
   }
 }
 
-function settleDeferredRequest(
-  state: PipelineState,
-  settledAtMs: number = state.options.monotonicNow()
-): void {
+function settleDeferredRequest(state: PipelineState, settledAtMs?: number): void {
   const deferred = state.deferredRequest;
   if (deferred !== undefined) {
-    settleRequest(state, deferred.status, deferred.errorCode, undefined, settledAtMs);
+    settleRequest(
+      state,
+      deferred.status,
+      deferred.errorCode,
+      undefined,
+      settledAtMs ?? deferred.settledAtMs
+    );
   }
 }
 
@@ -514,11 +579,43 @@ function pullNext(
   );
 }
 
-async function registerEchoReference(state: PipelineState, chunk: TtsAudioChunk): Promise<void> {
+function isValidTtsChunk(state: PipelineState, chunk: TtsAudioChunk): boolean {
+  return createVoicePcmFrame(state, chunk, state.requestStartedAt) !== undefined;
+}
+
+function createEchoReferenceFrame(
+  state: PipelineState,
+  chunk: TtsAudioChunk
+): VoicePcmFrame | undefined {
   const playbackStartedAt = state.playbackStartedAt;
   if (playbackStartedAt === undefined) {
-    return Promise.reject(new Error("pico TTS playback session has not started"));
+    return undefined;
   }
+  return createVoicePcmFrame(state, chunk, playbackStartedAt);
+}
+
+function createVoicePcmFrame(
+  state: PipelineState,
+  chunk: TtsAudioChunk,
+  playbackStartedAt: string
+): VoicePcmFrame | undefined {
+  try {
+    return defineVoicePcmFrame({
+      id: `tts-${String(chunk.sentenceIndex)}`,
+      direction: "far_end",
+      audio: chunk.audio,
+      encoding: chunk.encoding,
+      sampleRateHz: chunk.sampleRateHz,
+      channels: chunk.channels,
+      capturedAt: addMilliseconds(playbackStartedAt, state.playedDurationMs),
+      durationMs: chunk.durationMs
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function registerEchoReference(state: PipelineState, frame: VoicePcmFrame): Promise<void> {
   const echoControl = state.options.echoControl;
   const providerState = getEchoProviderSafetyState(echoControl);
   const previousRegistration = providerState.pending;
@@ -532,19 +629,7 @@ async function registerEchoReference(state: PipelineState, chunk: TtsAudioChunk)
 
   const registration = settle(
     Promise.resolve().then(() =>
-      echoControl.acceptFarEndReference(
-        defineVoicePcmFrame({
-          id: `tts-${String(chunk.sentenceIndex)}`,
-          direction: "far_end",
-          audio: chunk.audio,
-          encoding: chunk.encoding,
-          sampleRateHz: chunk.sampleRateHz,
-          channels: chunk.channels,
-          capturedAt: addMilliseconds(playbackStartedAt, state.playedDurationMs),
-          durationMs: chunk.durationMs
-        }),
-        state.producerController.signal
-      )
+      echoControl.acceptFarEndReference(frame, state.producerController.signal)
     )
   );
   const outcome = monitorEchoRegistration(state, providerState, registration);
@@ -566,6 +651,52 @@ async function registerEchoReference(state: PipelineState, chunk: TtsAudioChunk)
   if (result.status === "unsafe") {
     throw new Error("pico echo-control provider registration exceeded its safety bound");
   }
+}
+
+function observePendingPullTelemetry(
+  state: PipelineState,
+  pendingPull: Promise<Settlement<TimedPull>>
+): void {
+  state.pendingPullTelemetry = settle(
+    pendingPull.then((pull) => settleRequestFromPull(state, pendingPull, pull))
+  );
+}
+
+function settleRequestFromPull(
+  state: PipelineState,
+  pendingPull: Promise<Settlement<TimedPull>>,
+  pull: Settlement<TimedPull>
+): void {
+  if (!pull.ok) {
+    settleRequest(state, "error", "tts_request_failed");
+    return;
+  }
+
+  const { result, settledAtMs } = pull.value;
+  if (result.done) {
+    settleRequest(state, "error", "tts_request_failed", undefined, settledAtMs);
+    return;
+  }
+  if (result.value.kind === "chunk") {
+    if (state.pendingPull === pendingPull) {
+      state.pendingPullResolvedChunk = true;
+    }
+    settleDeferredRequest(state);
+    return;
+  }
+  settleTerminalRequest(state, result.value, settledAtMs);
+}
+
+function settleTerminalRequest(
+  state: PipelineState,
+  event: Exclude<TtsSynthesisEvent, { readonly kind: "chunk" }>,
+  settledAtMs: number
+): void {
+  if (event.kind === "completed") {
+    settleRequest(state, "ok", undefined, undefined, settledAtMs, event.chunkCount);
+    return;
+  }
+  settleRequest(state, "error", event.failure.reason, event.failure.sentenceIndex, settledAtMs);
 }
 
 function getEchoProviderSafetyState(provider: EchoControlProvider): EchoProviderSafetyState {
@@ -796,7 +927,7 @@ async function cleanUpIterator(state: PipelineState, waitForCleanup: boolean): P
   const cleanup = state.pendingPull.then(async (pull) => {
     const terminalAtMs = terminalPullTime(pull, state.options.monotonicNow);
     await closeIterator(state.iterator);
-    settleDeferredRequest(state, terminalAtMs ?? state.options.monotonicNow());
+    settleDeferredRequest(state, terminalAtMs);
   });
   state.iteratorCleanup = settle(cleanup).then(() => undefined);
 }
