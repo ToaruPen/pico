@@ -114,8 +114,8 @@ describe("resident continuous audio playback", () => {
         "s16le",
         "-ar",
         "24000",
-        "-ac",
-        "1",
+        "-ch_layout",
+        "1c",
         "-i",
         "pipe:0"
       ],

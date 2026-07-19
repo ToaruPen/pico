@@ -427,8 +427,8 @@ function createPlaybackArguments(
         "s16le",
         "-ar",
         String(chunk.sampleRateHz),
-        "-ac",
-        String(chunk.channels),
+        "-ch_layout",
+        `${String(chunk.channels)}c`,
         "-i",
         "pipe:0"
       ]
