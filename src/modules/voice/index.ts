@@ -411,10 +411,10 @@ function consumeTrailingSentenceClosers(
   return { closers, nextIndex: index };
 }
 
-function pushSentenceSegment(segments: string[], text: string): void {
-  const segment = text.trim();
+function pushSentenceSegment(segments: string[], text: string, preserveTrailingWhitespace = false): void {
+  const segment = preserveTrailingWhitespace ? text.trimStart() : text.trim();
 
-  if (segment !== "") {
+  if (segment.trim() !== "") {
     segments.push(segment);
   }
 }
@@ -437,7 +437,9 @@ function splitBoundedSpeechSegment(text: string): readonly string[] {
     }
 
     const end = softIndex < 0 ? MAX_SPEECH_SEGMENT_CODE_POINTS : softIndex + 1;
-    pushSentenceSegment(segments, remaining.splice(0, end).join(""));
+    const selectedBoundary = softIndex < 0 ? undefined : window[softIndex];
+    const preserveTrailingWhitespace = selectedBoundary === " " || selectedBoundary === "　";
+    pushSentenceSegment(segments, remaining.splice(0, end).join(""), preserveTrailingWhitespace);
   }
 
   pushSentenceSegment(segments, remaining.join(""));
