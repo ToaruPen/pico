@@ -130,7 +130,7 @@ type InteractionEndingControl = {
   readonly abortController: AbortController;
   readonly startedAt: string;
   readonly startedAtMs: number;
-  pipelineOwnsCleanup: boolean;
+  cleanupOwner: "resident" | "pipeline";
   cancellation: Promise<void> | undefined;
 };
 
@@ -293,7 +293,7 @@ export function createVoiceResidentRuntime(
       abortController: new AbortController(),
       startedAt: now(),
       startedAtMs: monotonicNow(),
-      pipelineOwnsCleanup: false,
+      cleanupOwner: "resident",
       cancellation: undefined
     };
     activeInteractionEnding = ending;
@@ -652,15 +652,7 @@ async function processCompletedHoldWork(
     }
   });
 
-  if (
-    playback.status === "failed" &&
-    (playback.errorCode === "playback_stop_failed" ||
-      playback.errorCode === "playback_stop_timeout")
-  ) {
-    throw new PlaybackInfrastructureError(
-      `pico resident voice playback infrastructure failed during cancellation: ${playback.errorCode}`
-    );
-  }
+  throwPlaybackInfrastructureError(playback);
 
   settleCompletedTurn(
     playback,
@@ -916,26 +908,57 @@ async function finalizeEndedInteraction(
     return;
   }
 
-  await runInteractionFarewell(ending, options, counters, now);
-  const cancellationResults = await Promise.allSettled([ending.cancellation ?? Promise.resolve()]);
+  const farewellResults = await Promise.allSettled([
+    runInteractionFarewell(ending, options, counters, now)
+  ]);
+  const cancellationBeforeCleanup = ending.cancellation;
+  const cancellationResults = await Promise.allSettled([
+    cancellationBeforeCleanup ?? Promise.resolve()
+  ]);
   const cleanupResults = await Promise.allSettled([
     cancelDeferredAfterInteraction(sessionId, options, deferredAlreadyCancelled),
     Promise.resolve().then(() => options.piAgent.disposeSession?.(sessionId))
   ]);
-  const rejected = findRejected(cleanupResults);
+  const lateCancellationResults = await settleLateInteractionEndingCancellation(
+    ending,
+    cancellationBeforeCleanup
+  );
+  const cleanupRejected = findRejected(cleanupResults);
+
+  removeEndedSessionAfterCleanup(sessionId, options, cleanupRejected);
+
+  const rejected = findRejected([
+    ...farewellResults,
+    ...cleanupResults,
+    ...cancellationResults,
+    ...lateCancellationResults
+  ]);
 
   if (rejected !== undefined) {
     throw asError(rejected.reason);
   }
+}
 
-  if (options.sessionLifecycle.read(sessionId)?.state === "ended") {
+function settleLateInteractionEndingCancellation(
+  ending: InteractionEndingControl,
+  previouslyAwaited: Promise<void> | undefined
+): Promise<readonly PromiseSettledResult<void>[]> {
+  const cancellation = ending.cancellation;
+  return cancellation === undefined || cancellation === previouslyAwaited
+    ? Promise.resolve([])
+    : Promise.allSettled([cancellation]);
+}
+
+function removeEndedSessionAfterCleanup(
+  sessionId: string,
+  options: VoiceResidentRuntimeOptions,
+  cleanupRejected: PromiseRejectedResult | undefined
+): void {
+  if (
+    cleanupRejected === undefined &&
+    options.sessionLifecycle.read(sessionId)?.state === "ended"
+  ) {
     options.sessionLifecycle.remove(sessionId);
-  }
-
-  const cancellationRejected = findRejected(cancellationResults);
-
-  if (cancellationRejected !== undefined) {
-    throw asError(cancellationRejected.reason);
   }
 }
 
@@ -989,26 +1012,32 @@ async function runFarewellPlayback(
   monotonicNow: () => number
 ): Promise<void> {
   const signal = ending.abortController.signal;
-  const result = await runTtsPlaybackPipeline({
-    text,
-    signal,
-    tts: options.tts,
-    playback: options.playback,
-    echoControl: options.echoControl,
-    ...(options.probe === undefined ? {} : { probe: options.probe }),
-    now,
-    monotonicNow,
-    onFirstPlaybackStart: () => {
-      if (signal.aborted) {
-        return false;
+  let result: TtsPlaybackPipelineResult;
+  try {
+    result = await runTtsPlaybackPipeline({
+      text,
+      signal,
+      tts: options.tts,
+      playback: options.playback,
+      echoControl: options.echoControl,
+      ...(options.probe === undefined ? {} : { probe: options.probe }),
+      now,
+      monotonicNow,
+      onFirstPlaybackStart: () => {
+        if (signal.aborted) {
+          return false;
+        }
+        ending.cleanupOwner = "pipeline";
+        return true;
       }
-      ending.pipelineOwnsCleanup = true;
-      return true;
-    }
-  });
+    });
+  } finally {
+    ending.cleanupOwner = "resident";
+  }
 
   if (result.status === "failed") {
     counters.failedTurns += 1;
+    throwPlaybackInfrastructureError(result);
   }
 }
 
@@ -1016,11 +1045,22 @@ function cancelInteractionEndingResources(
   ending: InteractionEndingControl,
   options: VoiceResidentRuntimeOptions
 ): Promise<void> {
-  return ending.pipelineOwnsCleanup
+  return ending.cleanupOwner === "pipeline"
     ? Promise.resolve()
     : Promise.resolve().then(async () => {
         await options.echoControl.flush();
       });
+}
+
+function throwPlaybackInfrastructureError(result: TtsPlaybackPipelineResult): void {
+  if (
+    result.status === "failed" &&
+    (result.errorCode === "playback_stop_failed" || result.errorCode === "playback_stop_timeout")
+  ) {
+    throw new PlaybackInfrastructureError(
+      `pico resident voice playback infrastructure failed during cancellation: ${result.errorCode}`
+    );
+  }
 }
 
 function isAbortRequested(signal: AbortSignal | undefined): boolean {

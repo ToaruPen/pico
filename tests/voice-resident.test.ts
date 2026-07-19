@@ -1230,6 +1230,135 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
+  it("enters error after rejected farewell playback stop and required disposal", async () => {
+    vi.useFakeTimers();
+    const farewellPlaybackGate = createGate<undefined>();
+    const disposalGate = createGate<undefined>();
+    let playbackCount = 0;
+    let stopCount = 0;
+    const driver = createDriver({
+      farewellEnabled: true,
+      sessionDurationMs: 1_000,
+      disposalCompletion: () => disposalGate.promise,
+      playbackCompletion: () => {
+        playbackCount += 1;
+        return playbackCount === 1 ? Promise.resolve() : farewellPlaybackGate.promise;
+      },
+      playbackStopCompletion: () => {
+        stopCount += 1;
+        return stopCount === 1
+          ? Promise.reject(new Error("playback final termination timeout"))
+          : Promise.resolve();
+      }
+    });
+    const completionFailure = driver.runtime.completion.catch((error: unknown) => error);
+
+    await completeHold(driver, "farewell-stop-rejection");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(driver.playedChunks).toHaveLength(2));
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
+
+    expect(driver.runtime.state()).not.toBe("error");
+    expect(driver.playbackStops()).toBe(1);
+    expect(driver.echoFlushes()).toBe(1);
+    disposalGate.resolve(undefined);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("error"));
+    expect(await completionFailure).toEqual(
+      new Error(
+        "pico resident voice playback infrastructure failed during cancellation: playback_stop_failed"
+      )
+    );
+    await expect(driver.press()).resolves.toBe("ignored_busy");
+    expect(driver.playbackOpens()).toBe(2);
+    farewellPlaybackGate.resolve(undefined);
+    await expect(driver.runtime.stop()).rejects.toThrow("playback infrastructure failed");
+  });
+
+  it("enters error after farewell playback stop timeout and required disposal", async () => {
+    vi.useFakeTimers();
+    const farewellPlaybackGate = createGate<undefined>();
+    const disposalGate = createGate<undefined>();
+    let playbackCount = 0;
+    let stopCount = 0;
+    const driver = createDriver({
+      farewellEnabled: true,
+      sessionDurationMs: 1_000,
+      disposalCompletion: () => disposalGate.promise,
+      playbackCompletion: () => {
+        playbackCount += 1;
+        return playbackCount === 1 ? Promise.resolve() : farewellPlaybackGate.promise;
+      },
+      playbackStopCompletion: () => {
+        stopCount += 1;
+        return stopCount === 1 ? new Promise<void>(() => undefined) : Promise.resolve();
+      }
+    });
+    const completionFailure = driver.runtime.completion.catch((error: unknown) => error);
+
+    await completeHold(driver, "farewell-stop-timeout");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(driver.playedChunks).toHaveLength(2));
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    await vi.advanceTimersByTimeAsync(2_099);
+
+    expect(driver.disposedSessions).toEqual([]);
+    expect(driver.runtime.state()).not.toBe("error");
+    await expect(driver.press()).resolves.toBe("ignored_busy");
+    expect(driver.playbackOpens()).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
+    disposalGate.resolve(undefined);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("error"));
+
+    expect(await completionFailure).toEqual(
+      new Error(
+        "pico resident voice playback infrastructure failed during cancellation: playback_stop_timeout"
+      )
+    );
+    expect(driver.playbackStops()).toBe(1);
+    expect(driver.echoFlushes()).toBe(1);
+    await expect(driver.press()).resolves.toBe("ignored_busy");
+    expect(driver.playbackOpens()).toBe(2);
+    farewellPlaybackGate.resolve(undefined);
+    await expect(driver.runtime.stop()).rejects.toThrow("playback infrastructure failed");
+  });
+
+  it("reclaims farewell echo cleanup ownership after pipeline terminal", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    const disposalGate = createGate<undefined>();
+    const flushTerminal = createGate<undefined>();
+    const driver = createDriver({
+      audit,
+      farewellEnabled: true,
+      sessionDurationMs: 1_000,
+      disposalCompletion: () => disposalGate.promise,
+      echoFlush: () => flushTerminal.promise
+    });
+
+    await completeHold(driver, "farewell-terminal-ownership");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
+    expect(driver.playbackOpens()).toBe(2);
+    expect(driver.echoFlushes()).toBe(0);
+
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    await vi.waitFor(() => expect(driver.echoFlushes()).toBe(1));
+    disposalGate.resolve(undefined);
+    await Promise.resolve();
+    expect(voiceStageEvents(audit, "interaction_end")).toHaveLength(0);
+    await expect(driver.press()).resolves.toBe("ignored_busy");
+
+    flushTerminal.resolve(undefined);
+    await vi.waitFor(() => expect(voiceStageEvents(audit, "interaction_end")).toHaveLength(1));
+    expect(driver.echoFlushes()).toBe(1);
+    await expect(driver.press()).resolves.toBe("accepted");
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+    await driver.runtime.stop();
+  });
+
   it("does not start later farewell chunks after interaction ending is cancelled", async () => {
     vi.useFakeTimers();
     const firstFarewellChunkGate = createGate<undefined>();
@@ -1277,7 +1406,7 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
-  it("finishes session cleanup when farewell cancellation cleanup fails", async () => {
+  it("finishes session cleanup before surfacing farewell playback infrastructure failure", async () => {
     vi.useFakeTimers();
     const farewellPlaybackGate = createGate<undefined>();
     let playbackCount = 0;
@@ -1303,8 +1432,11 @@ describe("resident hold-to-talk voice runtime", () => {
     await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
 
     expect(driver.disposedSessions).toEqual(["session-1"]);
-    await expect(driver.runtime.stop()).rejects.toThrow("speaker stop failed");
-    await expect(completionFailure).resolves.toEqual(new Error("speaker stop failed"));
+    const expected = new Error(
+      "pico resident voice playback infrastructure failed during cancellation: playback_stop_failed"
+    );
+    await expect(driver.runtime.stop()).rejects.toThrow(expected.message);
+    await expect(completionFailure).resolves.toEqual(expected);
   });
 
   it("runs normal interaction ending before shared-owner shutdown", async () => {
