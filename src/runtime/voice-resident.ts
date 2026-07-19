@@ -4,7 +4,12 @@ import {
   type EchoControlProvider,
   type VoicePcmFrame
 } from "../modules/voice/echo-control.js";
-import type { SttClient, TtsAudioChunk, TtsClient } from "../modules/voice/index.js";
+import {
+  collectTtsSynthesisEvents,
+  type SttClient,
+  type TtsAudioChunk,
+  type TtsClient
+} from "../modules/voice/index.js";
 import type { DeferredToolDeliverableResult } from "./deferred-tool-coordinator.js";
 import type { ResidentAudioCapture, ResidentCaptureSession } from "./resident-audio-io.js";
 import type { ResidentControlEvent, ResidentControlResult } from "./resident-control.js";
@@ -853,10 +858,12 @@ async function requestTts(
   const startedAtMs = monotonicNow();
 
   try {
-    const result = await options.tts.synthesize({
-      text,
-      ...(signal === undefined ? {} : { signal })
-    });
+    const result = await collectTtsSynthesisEvents(
+      options.tts.synthesize({
+        text,
+        ...(signal === undefined ? {} : { signal })
+      })
+    );
 
     if (isAbortRequested(signal)) {
       recordTtsRequestFailure(

@@ -121,8 +121,22 @@ export type TtsSynthesisFailure = {
 
 export type TtsSynthesisResult = TtsSynthesisSuccess | TtsSynthesisFailure;
 
+export type TtsSynthesisEvent =
+  | { readonly kind: "chunk"; readonly chunk: TtsAudioChunk }
+  | {
+      readonly kind: "completed";
+      readonly chunkCount: number;
+      readonly totalDurationMs: number;
+      readonly source: TtsSynthesisSource;
+    }
+  | { readonly kind: "failed"; readonly failure: TtsSynthesisFailure };
+
 export type TtsClient = {
-  readonly synthesize: (request: TtsSynthesisRequest) => Promise<TtsSynthesisResult>;
+  readonly synthesize: (request: TtsSynthesisRequest) => AsyncIterable<TtsSynthesisEvent>;
+};
+
+export type AivisSpeechTtsClientOptions = {
+  readonly fetch?: typeof fetch;
 };
 
 export type AivisSpeechServiceHealth =
@@ -140,7 +154,7 @@ type SttTranscriptionSource = {
   readonly language: string;
 };
 
-type TtsSynthesisSource = {
+export type TtsSynthesisSource = {
   readonly serviceId: string;
   readonly provider: "aivis-speech";
   readonly speakerId: number;
@@ -254,22 +268,29 @@ export function createAppleSpeechSttClient(
 
 export function createAivisSpeechTtsClient(
   service: AivisSpeechServiceConfig,
-  fetchImplementation: typeof fetch = fetch
+  options: AivisSpeechTtsClientOptions = {}
 ): TtsClient {
+  const fetchImplementation = options.fetch ?? fetch;
+
   return {
-    async synthesize(request) {
+    async *synthesize(request) {
       const source = ttsSynthesisSource(service);
       const sentences = segmentJapaneseSentences(request.text);
-      const chunks: TtsAudioChunk[] = [];
+      let chunkCount = 0;
+      let totalDurationMs = 0;
 
       for (const [sentenceIndex, sentence] of sentences.entries()) {
         if (request.signal?.aborted) {
-          return ttsFailure(
-            service,
-            "cancelled",
-            "pico TTS Aivis Speech request was cancelled",
-            sentenceIndex
-          );
+          yield {
+            kind: "failed",
+            failure: ttsFailure(
+              service,
+              "cancelled",
+              "pico TTS Aivis Speech request was cancelled",
+              sentenceIndex
+            )
+          };
+          return;
         }
 
         const result = await synthesizeSentenceWithAivisSpeech(
@@ -281,20 +302,94 @@ export function createAivisSpeechTtsClient(
         );
 
         if (!result.ok) {
-          return result;
+          yield { kind: "failed", failure: result };
+          return;
         }
 
-        chunks.push(result.chunk);
+        chunkCount += 1;
+        totalDurationMs += result.chunk.durationMs;
+        yield { kind: "chunk", chunk: result.chunk };
       }
 
-      return {
-        ok: true,
-        chunks,
-        totalDurationMs: chunks.reduce((total, chunk) => total + chunk.durationMs, 0),
+      yield {
+        kind: "completed",
+        chunkCount,
+        totalDurationMs,
         source
       };
     }
   };
+}
+
+export async function collectTtsSynthesisEvents(
+  events: AsyncIterable<TtsSynthesisEvent>
+): Promise<TtsSynthesisResult> {
+  const { chunks, terminal } = await readTtsSynthesisEventStream(events);
+
+  if (terminal.kind === "failed") {
+    return terminal.failure;
+  }
+
+  if (terminal.chunkCount !== chunks.length) {
+    throw new Error("pico TTS synthesis completed chunkCount does not match collected chunks");
+  }
+
+  const totalDurationMs = chunks.reduce((total, chunk) => total + chunk.durationMs, 0);
+
+  if (terminal.totalDurationMs !== totalDurationMs) {
+    throw new Error("pico TTS synthesis completed totalDurationMs does not match collected chunks");
+  }
+
+  if (chunks.some((chunk) => !sameTtsSynthesisSource(chunk.source, terminal.source))) {
+    throw new Error("pico TTS synthesis completed source does not match collected chunks");
+  }
+
+  return {
+    ok: true,
+    chunks,
+    totalDurationMs,
+    source: terminal.source
+  };
+}
+
+type TtsSynthesisTerminalEvent = Extract<
+  TtsSynthesisEvent,
+  { readonly kind: "completed" | "failed" }
+>;
+
+async function readTtsSynthesisEventStream(events: AsyncIterable<TtsSynthesisEvent>): Promise<{
+  readonly chunks: TtsAudioChunk[];
+  readonly terminal: TtsSynthesisTerminalEvent;
+}> {
+  const chunks: TtsAudioChunk[] = [];
+  let terminal: TtsSynthesisTerminalEvent | undefined;
+
+  for await (const event of events) {
+    if (event.kind === "chunk") {
+      if (terminal !== undefined) {
+        throw new Error("pico TTS synthesis event stream yielded a chunk after its terminal event");
+      }
+
+      chunks.push(event.chunk);
+      continue;
+    }
+
+    if (terminal !== undefined) {
+      throw new Error("pico TTS synthesis event stream has multiple terminal events");
+    }
+
+    terminal = event;
+  }
+
+  if (terminal === undefined) {
+    throw new Error("pico TTS synthesis event stream is missing a terminal event");
+  }
+
+  return { chunks, terminal };
+}
+
+function sameTtsSynthesisSource(left: TtsSynthesisSource, right: TtsSynthesisSource): boolean {
+  return left.serviceId === right.serviceId && left.speakerId === right.speakerId;
 }
 
 export async function checkAivisSpeechServiceHealth(

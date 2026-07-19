@@ -1133,8 +1133,25 @@ function createDriver(
     }
   };
   const tts: TtsClient = {
-    synthesize(request) {
-      return options.ttsResponse?.(request.signal) ?? Promise.resolve(successfulSynthesis());
+    async *synthesize(request) {
+      const result = await (options.ttsResponse?.(request.signal) ??
+        Promise.resolve(successfulSynthesis()));
+
+      if (!result.ok) {
+        yield { kind: "failed", failure: result };
+        return;
+      }
+
+      for (const chunk of result.chunks) {
+        yield { kind: "chunk", chunk };
+      }
+
+      yield {
+        kind: "completed",
+        chunkCount: result.chunks.length,
+        totalDurationMs: result.totalDurationMs,
+        source: result.source
+      };
     }
   };
   const playback: VoicePlaybackSink = {
