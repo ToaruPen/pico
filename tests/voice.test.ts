@@ -698,6 +698,13 @@ describe("Aivis Speech TTS boundary", () => {
     });
   });
 
+  it("bounds punctuation-free speech without splitting Unicode code points", () => {
+    const softBounded = `${"あ".repeat(118)}、${"い".repeat(10)}`;
+
+    expect(segmentJapaneseSentences(softBounded)).toEqual([`${"あ".repeat(118)}、`, "い".repeat(10)]);
+    expect(segmentJapaneseSentences("😀".repeat(121)).map((part) => Array.from(part).length)).toEqual([120, 1]);
+  });
+
   it("posts audio_query then synthesis requests and returns ordered sentence audio chunks", async () => {
     const recordedRequests: RecordedRequest[] = [];
     const recordingFetch: typeof fetch = (input, init) => {

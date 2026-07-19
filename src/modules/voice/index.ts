@@ -170,6 +170,8 @@ const AIVIS_DEFAULT_VOICE: AivisSpeechVoiceParameters = {
   volumeScale: 1
 };
 const SENTENCE_BOUNDARIES = new Set([".", "。", "！", "？", "!", "?", "…"]);
+const MAX_SPEECH_SEGMENT_CODE_POINTS = 120;
+const SOFT_SPEECH_BOUNDARIES = new Set(["、", ",", "，", ";", "；", ":", "：", " ", "　"]);
 const TRAILING_SENTENCE_CLOSERS = new Set([
   '"',
   "'",
@@ -359,12 +361,9 @@ export function segmentJapaneseSentences(text: string): readonly string[] {
   }
 
   const { complete, residual } = splitCompleteJapaneseSentences(stripped);
+  const candidates = residual.trim() === "" ? complete : [...complete, residual.trim()];
 
-  if (residual.trim() !== "") {
-    return [...complete, residual.trim()];
-  }
-
-  return complete;
+  return candidates.flatMap(splitBoundedSpeechSegment);
 }
 
 export function splitCompleteJapaneseSentences(text: string): {
@@ -418,6 +417,31 @@ function pushSentenceSegment(segments: string[], text: string): void {
   if (segment !== "") {
     segments.push(segment);
   }
+}
+
+function splitBoundedSpeechSegment(text: string): readonly string[] {
+  const remaining = Array.from(text.trim());
+  const segments: string[] = [];
+
+  while (remaining.length > MAX_SPEECH_SEGMENT_CODE_POINTS) {
+    const window = remaining.slice(0, MAX_SPEECH_SEGMENT_CODE_POINTS);
+    let softIndex = -1;
+
+    for (let index = window.length - 1; index >= 0; index -= 1) {
+      const character = window[index];
+
+      if (character !== undefined && SOFT_SPEECH_BOUNDARIES.has(character)) {
+        softIndex = index;
+        break;
+      }
+    }
+
+    const end = softIndex < 0 ? MAX_SPEECH_SEGMENT_CODE_POINTS : softIndex + 1;
+    pushSentenceSegment(segments, remaining.splice(0, end).join(""));
+  }
+
+  pushSentenceSegment(segments, remaining.join(""));
+  return segments;
 }
 
 async function transcribeWithAppleSpeechSidecar(
