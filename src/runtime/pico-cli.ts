@@ -25,7 +25,7 @@ export function createPicoCliPlan(arguments_: readonly string[]): PicoCliPlan {
   if (command === undefined) {
     return {
       kind: "pi",
-      args: ["--extension", "./src/index.ts", "--pico"]
+      args: ["--no-session", "--extension", "./src/index.ts", "--pico"]
     };
   }
 
@@ -70,7 +70,7 @@ export function formatPicoCliHelp(): string {
     "  roster      Manage the local child identity roster.",
     "",
     "Notes:",
-    "  pico delegates production startup to Pi Agent with --pico.",
+    "  pico delegates production startup to Pi Agent with --pico and a non-persistent host session.",
     "  Pico model selection is loaded from YAML, not CLI model arguments."
   ].join("\n");
 }

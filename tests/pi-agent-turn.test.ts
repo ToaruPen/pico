@@ -1,3 +1,4 @@
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
 import { createPiAgentTurnClient } from "../src/runtime/pi-agent-turn.js";
@@ -228,6 +229,145 @@ describe("Pi Agent turn adapter", () => {
     await client.prompt({ sessionId: "session-1", text: "ピコ" });
 
     expect(registeredTools).toEqual(["pico_camera_scene_description_deferred"]);
+  });
+
+  it("registers standard perception tools for a production child session", async () => {
+    const registeredTools: string[] = [];
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      deferredTools: {
+        coordinator: {
+          enqueue: () => ({
+            status: "queued",
+            kind: "camera_scene_description",
+            jobId: "deferred-job-1",
+            sessionId: "session-1"
+          })
+        } as never
+      },
+      perceptionMode: "standard",
+      createResourceLoader: (input) => {
+        for (const factory of input.extensionFactories) {
+          factory({
+            registerTool: (tool: { readonly name: string }) => {
+              registeredTools.push(tool.name);
+            },
+            on: () => undefined
+          } as never);
+        }
+
+        return {
+          reload: () => Promise.resolve()
+        };
+      },
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: () => () => undefined,
+            prompt: () => Promise.resolve(),
+            dispose: () => undefined
+          }
+        })
+    });
+
+    await client.prompt({ sessionId: "session-1", text: "ピコ" });
+
+    expect(registeredTools.sort()).toEqual([
+      "pico_camera_scene_description",
+      "pico_camera_snapshot",
+      "pico_person_detection"
+    ]);
+  });
+
+  it("passes host-selected settings to each child SDK session", async () => {
+    const model = {
+      provider: "openai-codex",
+      id: "gpt-5.6-sol"
+    } as NonNullable<ExtensionContext["model"]>;
+    let sessionInput: unknown;
+    const activeToolNames = ["read", "stackchan_say"];
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      model,
+      thinkingLevel: "high",
+      activeToolNames,
+      perceptionMode: "standard",
+      createResourceLoader: () => ({
+        reload: () => Promise.resolve()
+      }),
+      createAgentSession: (input) => {
+        sessionInput = input;
+
+        return Promise.resolve({
+          session: {
+            ...createSdkToolState(activeToolNames),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: () => () => undefined,
+            prompt: () => Promise.resolve(),
+            dispose: () => undefined
+          }
+        });
+      }
+    });
+
+    await client.prompt({ sessionId: "session-1", text: "ピコ" });
+
+    expect(sessionInput).toMatchObject({
+      cwd: testCwd,
+      model,
+      thinkingLevel: "high",
+      tools: activeToolNames
+    });
+  });
+
+  it("fails closed before binding when Pi reports extension load errors", async () => {
+    let bindCalls = 0;
+    let promptCalls = 0;
+    let disposeCalls = 0;
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      createResourceLoader: () => ({
+        reload: () => Promise.resolve()
+      }),
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => {
+              bindCalls += 1;
+              return Promise.resolve();
+            },
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: () => () => undefined,
+            prompt: () => {
+              promptCalls += 1;
+              return Promise.resolve();
+            },
+            dispose: () => {
+              disposeCalls += 1;
+            }
+          },
+          extensionsResult: {
+            errors: [
+              {
+                path: "/extensions/conflicting-tool.ts",
+                error: 'Tool "stackchan_say" conflicts with another extension'
+              }
+            ]
+          }
+        })
+    });
+
+    await expect(client.prompt({ sessionId: "session-1", text: "ピコ" })).rejects.toThrow(
+      "pico resident Pi Agent extension loading failed (1 error)"
+    );
+    expect(bindCalls).toBe(0);
+    expect(promptCalls).toBe(0);
+    expect(disposeCalls).toBe(1);
   });
 
   it("creates resident SDK sessions with medium thinking level", async () => {

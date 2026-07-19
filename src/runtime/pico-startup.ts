@@ -11,9 +11,18 @@ export type PicoController = {
   readonly stop: () => void | Promise<void>;
 };
 
+export type PicoStartupAgentSettings = {
+  readonly model: NonNullable<ExtensionContext["model"]>;
+  readonly thinkingLevel: ReturnType<ExtensionAPI["getThinkingLevel"]>;
+  readonly activeToolNames: readonly string[];
+};
+
 export type PicoStartupOptions = {
   readonly loadConfig?: () => PicoConfig;
-  readonly createController: (context: ExtensionContext) => PicoController;
+  readonly createController: (
+    context: ExtensionContext,
+    agentSettings: PicoStartupAgentSettings
+  ) => PicoController;
 };
 
 const picoFlag = "pico";
@@ -97,7 +106,14 @@ async function startPico(
   }
 
   pi.setThinkingLevel(modelConfig.thinkingLevel);
-  const controller = options.createController(context);
+  const controller = options.createController(
+    context,
+    Object.freeze({
+      model,
+      thinkingLevel: pi.getThinkingLevel(),
+      activeToolNames: Object.freeze([...pi.getActiveTools()])
+    })
+  );
   setController(controller);
   try {
     await controller.start();

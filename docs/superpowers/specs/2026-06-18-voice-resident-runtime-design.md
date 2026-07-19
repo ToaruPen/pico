@@ -3,8 +3,8 @@
 ## 目的
 
 `pico` に、実利用前提の音声常駐 runtime を追加する。これは実地テスト用
-harness ではなく、施設内で `pico` が待機し、話しかけられたときに Pi の親
-conversation session を通して会話する本体 runtime である。
+harness ではなく、施設内で `pico` が待機し、話しかけられたときに Pi-owned
+in-memory interaction sessionを通して会話する本体 runtime である。
 
 field validation はこの runtime を短時間・明示条件で起動して検証する薄い
 wrapper に留める。
@@ -45,24 +45,25 @@ provider へ自動で切り替えない。
 6. session 開始前の transcript は trigger 判定だけに使い、保存しない。
 7. wake name、greeting、将来の bell/tool event など trusted trigger が成立したら session を開始する。
 8. active interaction 中の accepted utterance は activity timestamp だけを更新する。
-9. 同じ Pi 親 conversation session に turn を渡す。
+9. 同じactive interaction IDのPi in-memory AgentSessionにturnを渡す。
 10. Pi Agent response text を Aivis Speech で synthesize し、`voice.audio` で再生する。
 11. 再生音声は playback 呼び出し前に同じ chunk start timestamp で
     `echoControl.acceptFarEndReference` へ渡す。
 12. configured timed duration で interaction state を ended にする。
 13. 必要な場合だけ farewell turn を完了する。
 14. session-owned deferred tool を cancel する。
-15. bounded direct harness では Pi SDK session を dispose する。
+15. productionとbounded direct harnessの両方でPi SDK interaction sessionをdisposeする。
 16. Pico lifecycle record を削除する。
 
 ## Pi Agent Integration
 
-production では Pi Agent が親 conversation session、model/auth、tool scope、event loop、
-subagent、通常 cancel を所有する。Pico は `pi.sendUserMessage()` と Pi events を使い、
-別の integration session を作らない。CLI per turn は使わない。
+production ではPi Agentがnon-persistent host session、interaction AgentSession、model/auth、
+tool scope、event loop、subagent、通常cancelを所有する。Pico domainはinteraction lifetimeを
+決め、Pi SDK adapterがinteraction IDごとに一つのin-memory AgentSessionをcreate、prompt、
+abort、disposeする。CLI per turnは使わない。
 
-`npm run resident:voice` は低レベルの direct field harness に限り Pi SDK session を
-同一 process 内に作成できる。この bounded harness は production ownership path ではない。
+`npm run resident:voice`は同じPi SDK adapterを使う低レベルのdirect field harnessである。
+このbounded harnessはproduction startup pathではない。
 
 ## Interaction Ending
 
@@ -75,7 +76,7 @@ payload は保持しない。
 1. interaction state を ended にする。
 2. 必要な場合だけ farewell turn を完了する。
 3. session-owned deferred tool を cancel する。
-4. bounded harness では Pi SDK session disposal の完了を待つ。
+4. Pi SDK interaction session disposal の完了を待つ。
 5. Pico lifecycle record を削除する。
 
 Memory extraction、write、acknowledgement、retry、drain はこの順序に含めない。

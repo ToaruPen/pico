@@ -2,15 +2,16 @@ import {
   createAgentSession as createDefaultAgentSession,
   DefaultResourceLoader,
   type ExtensionAPI,
+  type ExtensionContext,
   getAgentDir,
   SessionManager
 } from "@earendil-works/pi-coding-agent";
 
-import { registerPicoExtensionWithRuntime } from "../index.js";
 import type {
   DeferredToolCoordinator,
   DeferredToolDeliverableResult
 } from "./deferred-tool-coordinator.js";
+import { registerPicoExtensionWithRuntime } from "./pico-extension-runtime.js";
 import type { PiAgentTurnClient } from "./voice-resident.js";
 import type { VoiceStageProbe } from "./voice-stage-probe.js";
 
@@ -52,12 +53,21 @@ export type PiAgentSdkSession = {
   readonly abort?: () => Promise<void>;
 };
 
+type PiAgentExtensionLoadResult = {
+  readonly errors: readonly { readonly path: string; readonly error: string }[];
+};
+
 export type PiAgentSessionFactory = (input: {
+  readonly cwd: string;
   readonly resourceLoader: unknown;
   readonly sessionManager: unknown;
-  readonly thinkingLevel?: "low" | "medium" | "high" | "xhigh";
+  readonly model?: NonNullable<ExtensionContext["model"]>;
+  readonly thinkingLevel?: ReturnType<ExtensionAPI["getThinkingLevel"]>;
   readonly tools?: readonly string[];
-}) => Promise<{ readonly session: PiAgentSdkSession }>;
+}) => Promise<{
+  readonly session: PiAgentSdkSession;
+  readonly extensionsResult?: PiAgentExtensionLoadResult;
+}>;
 
 export type PiAgentResourceLoaderFactoryInput = {
   readonly cwd: string;
@@ -72,6 +82,10 @@ export type PiAgentResourceLoader = {
 export type PiAgentTurnClientOptions = {
   readonly cwd: string;
   readonly voiceProbe?: VoiceStageProbe;
+  readonly model?: NonNullable<ExtensionContext["model"]>;
+  readonly thinkingLevel?: ReturnType<ExtensionAPI["getThinkingLevel"]>;
+  readonly activeToolNames?: readonly string[];
+  readonly perceptionMode?: "standard" | "resident_deferred";
   readonly deferredTools?: {
     readonly coordinator: Pick<DeferredToolCoordinator, "enqueue">;
   };
@@ -372,14 +386,17 @@ async function createTurnSession(
   await resourceLoader.reload?.();
 
   const createAgentSession = options.createAgentSession ?? createDefaultPiAgentSession;
-  const { session } = await createAgentSession({
+  const { session, extensionsResult } = await createAgentSession({
+    cwd: options.cwd,
     resourceLoader,
     sessionManager: options.sessionManager ?? SessionManager.inMemory(),
-    thinkingLevel: "medium",
+    ...(options.model === undefined ? {} : { model: options.model }),
+    thinkingLevel: options.thinkingLevel ?? "medium",
     tools: [...requiredToolNames]
   });
 
   try {
+    assertExtensionsLoaded(extensionsResult);
     await session.bindExtensions({ mode: "print" });
     enforceResidentPiAgentTools(session, requiredToolNames);
   } catch (error) {
@@ -390,7 +407,23 @@ async function createTurnSession(
   return session;
 }
 
+function assertExtensionsLoaded(extensionsResult: PiAgentExtensionLoadResult | undefined): void {
+  const errorCount = extensionsResult?.errors.length ?? 0;
+
+  if (errorCount === 0) {
+    return;
+  }
+
+  throw new Error(
+    `pico resident Pi Agent extension loading failed (${String(errorCount)} ${errorCount === 1 ? "error" : "errors"})`
+  );
+}
+
 function requiredResidentPiAgentToolNames(options: PiAgentTurnClientOptions): readonly string[] {
+  if (options.activeToolNames !== undefined) {
+    return options.activeToolNames;
+  }
+
   return options.deferredTools === undefined
     ? residentPiAgentToolNamesWithoutDeferred
     : residentPiAgentToolNames;
@@ -433,23 +466,28 @@ function createTurnResourceLoader(
     options.createResourceLoader?.({
       cwd: options.cwd,
       sessionId,
-      extensionFactories: [
-        (pi) =>
-          registerPicoExtensionWithRuntime(pi, {
-            ...(options.voiceProbe === undefined ? {} : { voiceProbe: options.voiceProbe }),
-            perceptionMode: "resident_deferred",
-            ...(options.deferredTools === undefined
-              ? {}
-              : {
-                  deferredTools: {
-                    sessionId,
-                    coordinator: options.deferredTools.coordinator
-                  }
-                })
-          })
-      ]
+      extensionFactories: [createResidentPicoExtensionFactory(options, sessionId)]
     }) ?? createDefaultResourceLoader(options, sessionId)
   );
+}
+
+function createResidentPicoExtensionFactory(
+  options: PiAgentTurnClientOptions,
+  sessionId: string
+): (pi: ExtensionAPI) => void {
+  return (pi) =>
+    registerPicoExtensionWithRuntime(pi, {
+      ...(options.voiceProbe === undefined ? {} : { voiceProbe: options.voiceProbe }),
+      perceptionMode: options.perceptionMode ?? "resident_deferred",
+      ...(options.deferredTools === undefined
+        ? {}
+        : {
+            deferredTools: {
+              sessionId,
+              coordinator: options.deferredTools.coordinator
+            }
+          })
+    });
 }
 
 function subscribeTextDeltas(
@@ -535,30 +573,18 @@ function createDefaultResourceLoader(
   return new DefaultResourceLoader({
     cwd: options.cwd,
     agentDir: getAgentDir(),
-    extensionFactories: [
-      (pi) =>
-        registerPicoExtensionWithRuntime(pi, {
-          ...(options.voiceProbe === undefined ? {} : { voiceProbe: options.voiceProbe }),
-          perceptionMode: "resident_deferred",
-          ...(options.deferredTools === undefined
-            ? {}
-            : {
-                deferredTools: {
-                  sessionId,
-                  coordinator: options.deferredTools.coordinator
-                }
-              })
-        })
-    ]
+    extensionFactories: [createResidentPicoExtensionFactory(options, sessionId)]
   });
 }
 
 function createDefaultPiAgentSession(input: {
+  readonly cwd: string;
   readonly resourceLoader: unknown;
   readonly sessionManager: unknown;
-  readonly thinkingLevel?: "low" | "medium" | "high" | "xhigh";
+  readonly model?: NonNullable<ExtensionContext["model"]>;
+  readonly thinkingLevel?: ReturnType<ExtensionAPI["getThinkingLevel"]>;
   readonly tools?: readonly string[];
-}): Promise<{ readonly session: PiAgentSdkSession }> {
+}): ReturnType<PiAgentSessionFactory> {
   return createDefaultAgentSession(input as never);
 }
 

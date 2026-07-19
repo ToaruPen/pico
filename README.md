@@ -230,15 +230,20 @@ the resident Pico controller explicitly with either equivalent command:
 
 ```bash
 PICO_CONFIG_PATH=config/pico.local.yaml \
-  node_modules/.bin/pi --extension ./src/index.ts --pico
+  node_modules/.bin/pi --no-session --extension ./src/index.ts --pico
 PICO_CONFIG_PATH=config/pico.local.yaml pico
 ```
 
-`pico` delegates to `pi --pico`; it does not choose a model on the command
-line. The extension reads `pico.model.provider`, `pico.model.id`, and
-`pico.model.thinkingLevel` from YAML and fails startup if that exact model is
-unavailable. Pico uses `pi.sendUserMessage()` and Pi events inside the existing
-parent session; it does not create an integration session.
+`pico` delegates to `pi --no-session --pico`; it does not choose a model on the
+command line. The non-persistent Pi host owns the resident process but does not
+retain a conversation transcript. The extension reads `pico.model.provider`,
+`pico.model.id`, and `pico.model.thinkingLevel` from YAML and fails startup if
+that exact model is unavailable.
+
+Each accepted interaction uses one Pi-owned in-memory `AgentSession`. Turns and
+the timeout farewell reuse that session; Pico then emits its Pi extension
+shutdown lifecycle and disposes it. The next accepted interaction starts with
+an empty Pi context. The Pi host process remains resident throughout.
 
 The direct resident scripts remain low-level field and provider harnesses while
 resident voice integration is validated:
@@ -253,13 +258,13 @@ startup contract.
 
 ### Memory ownership
 
-Pi owns conversation sessions, transcripts, context, and history. Pico's
-process-local `SessionRecord` contains the session ID, active/ended state,
-start/end timestamps, and trusted trigger; the managed lifecycle additionally
-holds the inactivity timer. Farewell, deferred-tool cancellation, and Pi session
-cleanup are end-of-interaction operations, not retained state. Pico does not
-keep conversation entries or create a memory side effect when an interaction
-ends.
+Pi owns the non-persistent host session and each in-memory interaction session,
+including transcript, context, and history. Pico's process-local `SessionRecord`
+contains the session ID, active/ended state, start/end timestamps, and trusted
+trigger; the managed lifecycle additionally holds the inactivity timer.
+Farewell, deferred-tool cancellation, and Pi session cleanup are
+end-of-interaction operations, not retained state. Pico does not keep
+conversation entries or create a memory side effect when an interaction ends.
 
 Durable memory, when enabled, is a separately installed Pi-level plugin. That
 plugin—not Pico—owns provider configuration, extraction, persistence, search,
@@ -285,10 +290,11 @@ the voice resident process:
 PICO_CONFIG_PATH=config/pico.local.yaml pico dev
 ```
 
-This opens kitty by default, starts Pi Agent with `--pico`, and displays Pi's
-interactive output in that terminal window. The Pico wrapper does not duplicate
-that output into a file. Pico persists only output produced by its metadata-only
-log sink under
+This opens kitty by default, starts Pi Agent with `--no-session --pico`, and
+displays Pi's interactive output in that terminal window. The non-persistent
+host follows the same interaction-session lifecycle as the normal `pico`
+command. The Pico wrapper does not duplicate that output into a file. Pico
+persists only output produced by its metadata-only log sink under
 `~/.pico/resident-voice/development/processes/YYYY-MM-DD/<run-id>.log`. Use
 `pico dev --terminal=terminal` to open Terminal.app instead. Stop it from the
 opened terminal with `Ctrl-C`; the development terminal closes after the

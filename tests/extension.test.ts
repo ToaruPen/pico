@@ -141,7 +141,7 @@ describe("pico extension", () => {
     );
   }, 15_000);
 
-  it("registers Pi-hosted resident lifecycle on the default extension", () => {
+  it("keeps the parent extension limited to identity and resident lifecycle", () => {
     const capture = createCapturedExtensionApi();
 
     picoExtension(extensionApiFromCapture(capture) as never);
@@ -151,16 +151,11 @@ describe("pico extension", () => {
       default: false,
       description: "Start Pico"
     });
-    expect([...capture.handlers.keys()].sort()).toEqual(
-      expect.arrayContaining([
-        "agent_start",
-        "agent_settled",
-        "before_agent_start",
-        "message_update",
-        "session_shutdown",
-        "session_start"
-      ])
-    );
+    expect([...capture.handlers.keys()].sort()).toEqual([
+      "before_agent_start",
+      "session_shutdown",
+      "session_start"
+    ]);
   });
 
   it("adds pico identity and module metadata to the Pi system prompt", async () => {

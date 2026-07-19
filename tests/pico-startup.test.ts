@@ -2,7 +2,11 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
 import { definePicoConfig } from "../src/config/index.js";
-import { type PicoController, registerPicoStartup } from "../src/runtime/pico-startup.js";
+import {
+  type PicoController,
+  type PicoStartupAgentSettings,
+  registerPicoStartup
+} from "../src/runtime/pico-startup.js";
 
 type StartupHandler = (event: unknown, context: ExtensionContext) => unknown;
 
@@ -10,6 +14,8 @@ function createStartupHarness(options: {
   readonly pico: boolean;
   readonly setModelResult?: boolean;
   readonly events?: string[];
+  readonly thinkingLevel?: string;
+  readonly activeToolNames?: string[];
 }) {
   const handlers = new Map<string, StartupHandler[]>();
   const registeredFlags = new Map<
@@ -35,6 +41,12 @@ function createStartupHarness(options: {
       },
       setThinkingLevel(level: string): void {
         events.push(`set-thinking:${level}`);
+      },
+      getThinkingLevel(): string {
+        return options.thinkingLevel ?? "medium";
+      },
+      getActiveTools(): string[] {
+        return options.activeToolNames ?? [];
       },
       on(event: string, handler: StartupHandler): void {
         handlers.set(event, [...(handlers.get(event) ?? []), handler]);
@@ -116,11 +128,14 @@ describe("Pico startup", () => {
 
   it("selects the exact YAML model before starting one Pico controller", async () => {
     const events: string[] = [];
-    const harness = createStartupHarness({ pico: true, events });
+    const activeToolNames = ["read", "stackchan_say"];
+    const harness = createStartupHarness({ pico: true, events, activeToolNames });
+    let agentSettings: PicoStartupAgentSettings | undefined;
 
     registerPicoStartup(harness.api as never, {
       loadConfig: configuredPicoModel,
-      createController: () => {
+      createController: (_context, settings) => {
+        agentSettings = settings;
         events.push("create-controller");
         return {
           start: () => {
@@ -136,6 +151,7 @@ describe("Pico startup", () => {
     const context = createContext(events);
     await harness.emit("session_start", { type: "session_start" }, context);
     await harness.emit("session_start", { type: "session_start" }, context);
+    activeToolNames.push("write");
 
     expect(events).toEqual([
       "find-model:openai-codex/gpt-5.6-sol",
@@ -144,6 +160,13 @@ describe("Pico startup", () => {
       "create-controller",
       "start-controller"
     ]);
+    expect(agentSettings).toEqual({
+      model: { provider: "openai-codex", id: "gpt-5.6-sol" },
+      thinkingLevel: "medium",
+      activeToolNames: ["read", "stackchan_say"]
+    });
+    expect(agentSettings).not.toBeUndefined();
+    expect(Object.isFrozen(agentSettings?.activeToolNames)).toBe(true);
   });
 
   it("fails closed without a configured model, a registry match, or authentication", async () => {

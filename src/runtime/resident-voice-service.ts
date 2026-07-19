@@ -1,4 +1,5 @@
 import { loadPicoConfigFromEnvironment } from "../config/index.js";
+import type { PiAgentTurnClientOptions } from "./pi-agent-turn.js";
 import type { PicoController as ResidentVoiceController } from "./pico-startup.js";
 import { acquireResidentSingleInstanceLock } from "./resident-single-instance-lock.js";
 import {
@@ -19,7 +20,7 @@ export type ResidentVoiceServiceControllerOptions = {
 };
 
 export function createResidentVoiceService(options: {
-  readonly piAgent: PiAgentTurnClient;
+  readonly createPiAgent: (options: PiAgentTurnClientOptions) => PiAgentTurnClient;
   readonly onError: (error: Error) => void;
 }): ResidentVoiceController {
   const config = loadPicoConfigFromEnvironment();
@@ -33,7 +34,7 @@ export function createResidentVoiceService(options: {
       runResidentVoiceWithProviders({
         config,
         signal,
-        piAgent: options.piAgent
+        createPiAgent: options.createPiAgent
       }),
     onError: options.onError
   });

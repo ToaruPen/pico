@@ -177,7 +177,7 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
-  it("reuses the Pi parent conversation across separate holds", async () => {
+  it("reuses the active Pi interaction session across separate holds", async () => {
     vi.useFakeTimers();
     const driver = createDriver();
 
@@ -294,7 +294,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
   });
 
-  it("cancels listening without STT, farewell, or parent-session disposal", async () => {
+  it("cancels listening without STT, farewell, or interaction-session disposal", async () => {
     const driver = createDriver();
 
     await driver.press();
@@ -327,7 +327,7 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
-  it("aborts the active Pi turn exactly once and preserves its parent session", async () => {
+  it("aborts the active Pi turn exactly once and preserves its interaction session", async () => {
     vi.useFakeTimers();
     let aborts = 0;
     const piResponse = (signal: AbortSignal | undefined): Promise<{ readonly text: string }> =>

@@ -1,7 +1,9 @@
 # Pi ホスト型アーキテクチャ回復設計
 
 **日付:** 2026-07-12
-**状態:** 一部廃止。Pi ownership と単一session境界は維持する。Memory ownership は
+**状態:** 一部廃止。Pi ownership は維持する。単一親conversation session境界は
+[resident 一時会話セッション設計](./2026-07-19-resident-ephemeral-conversation-session-design.md)で、
+Memory ownership は
 [Pi 所有 memory 責務境界設計](./2026-07-13-pi-owned-memory-boundary-design.md)で置き換えられた。
 **対象:** `pico` resident voice の実行所有権回復
 **起点:** `origin/main` (`fdaf4955a829e4ad485a41153d38a29ce084afe3`)
@@ -10,9 +12,14 @@
 > filteringは廃止する。通常Piはcontrollerなし、`pi --pico`はYAML指定modelでPicoを
 > 起動する。tool visibilityはPi settingsが所有し、Picoで重複実装しない。
 
+> 2026-07-19 decision: 本文中の「既存親sessionへ`pi.sendUserMessage()`する」、
+> 「本番から`createAgentSession()`を呼ばない」、「単一conversation session」という要件は
+> 廃止する。現在の要件は、非保存Pi hostとinteraction単位のPi-owned in-memory
+> `AgentSession`である。
+
 ## 1. 目的
 
-Pico の resident voice を、Pi をホストとする単一セッション構成へ戻す。
+Pico の resident voice を、Pi をホストとする単一プロセス構成へ戻す。
 
 Pi が会話セッション、context/history、モデル、ツール、subagent、イベント、通常キャンセルを所有し、
 Pico は施設固有の音声入出力、呼び掛け判定、状態表示、権限制約だけを所有する。
@@ -82,10 +89,11 @@ Codex の定期 stale-process cleanup が、所有根拠を確認したうえで
 
 ## 4. 設計原則
 
-1. **単一セッション:** 音声入力と対話結果を、起動中の同じ Pi 親 session で処理する。
+1. **単一ホスト:** Pi host processは一つとし、会話contextはinteraction単位のPi-owned
+   in-memory `AgentSession`へ分離する。
 2. **単一所有者:** Pi の機能は Pi が、施設固有機能は Pico が所有する。
-3. **ホスト API 優先:** Pico は `pi.sendUserMessage`、Pi events、`ctx.abort` を使い、
-   内部 session を再生成しない。
+3. **Pi SDK境界:** Pico domainはsession objectを持たず、薄いPi SDK adapterだけが
+   interaction sessionをcreate、prompt、abort、disposeする。
 4. **起動とtool可視性を分離:** 通常Piはcontrollerなしで起動し、Picoだけを`--pico`で
    明示起動する。通常Pi、Pico、subagentのtool可視性はPi設定が所有する。
 5. **復旧情報を最小化:** Pi session にない会話本文やタスク複製を保存しない。
@@ -96,7 +104,7 @@ Codex の定期 stale-process cleanup が、所有根拠を確認したうえで
 
 | 関心事 | Pi 所有 | Pico 所有 |
 |---|---|---|
-| 本番プロセスと親 conversation session | Yes | No |
+| 本番プロセス、非保存host session、interaction AgentSession | Yes | No |
 | model/auth/provider と prompt loop | Yes | No |
 | tool registry と tool execution events | Yes | Pico tool の実装のみ |
 | subagent の生成、進捗、結果、通常 abort | Yes | No |
@@ -109,16 +117,17 @@ Codex の定期 stale-process cleanup が、所有根拠を確認したうえで
 | conversation context/history | Yes | No |
 | durable memory | Pi-level plugin（導入時） | No |
 
-Pico は `createAgentSession()` を resident 本番起動経路から呼ばない。Durable memory が
-必要な場合はPicoと同列のPi-level pluginとして導入し、Picoはprovider、config、tool、
-extraction、retention、lifecycleを所有しない。
+Pico domainは`createAgentSession()`を呼ばない。`src/runtime/pi-agent-turn.ts`のPi integration
+adapterだけがinteraction用AgentSessionを生成する。Durable memory が必要な場合はPicoと
+同列のPi-level pluginとして導入し、Picoはprovider、config、tool、extraction、retention、
+lifecycleを所有しない。
 
 ## 6. 実行フロー
 
 ```mermaid
 flowchart LR
     A["Microphone / VAD / STT"] --> B["Pico controller (--pico)"]
-    B -->|"pi.sendUserMessage"| C["Existing Pi parent session"]
+    B -->|"prompt"| C["Pi-owned in-memory interaction session"]
     C --> D["Pi tool loop"]
     D -->|"subagent tool"| E["Pi-owned worker session"]
     E -->|"progress + result"| C
@@ -139,8 +148,8 @@ flowchart LR
 ### 6.2 音声 turn
 
 1. Pico が音声を文字列化し、呼び掛け・コマンドを判定する。
-2. 通常要求は extension API の `pi.sendUserMessage()` で既存親 session へ渡す。
-3. Pico は、その入力に対応する Pi の message/tool/settled events を観測する。
+2. 通常要求はPi SDK adapterの`prompt()`でactive interaction sessionへ渡す。
+3. adapterは、その入力に対応するPi session eventsを集約する。
 4. 最終 assistant text を一度だけ TTS キューへ渡す。
 5. 応答完了は Pi の settled と Pico の playback 完了を分けて管理する。
 
@@ -149,7 +158,7 @@ user input として扱う。
 
 ### 6.3 cancel と shutdown
 
-- 決定的な音声 cancel は active voice turn がある場合だけ `ctx.abort()` を呼ぶ。
+- 決定的な音声 cancel は active voice turn がある場合だけPi child sessionの`abort()`を呼ぶ。
 - Pi の `agent_settled` までは agent state を終了扱いにしない。
 - Pico は TTS/playback を独立して停止し、echo suppression を解除する。
 - `session_shutdown` では新規入力を閉じ、Pico 所有の録音、タイマー、再生を drain する。
@@ -173,9 +182,9 @@ timerだけをprocess-localに保持し、terminal cleanup後に削除する。
 
 | 候補 | 判定 | 方針 |
 |---|---|---|
-| Pi `sendUserMessage` と session events | exact reuse | resident host adapter の基盤として使う |
+| Pi `sendUserMessage` と parent session events | historical only | resident production pathでは使わない |
 | Pi 同梱 subagent extension | exact reuse with gate | 独自 runner を作らず使う。強制終了ゲートを別途満たす |
-| `src/runtime/pi-agent-turn.ts` | same behavior, wrong owner | embedded session 所有を本番経路から外す。必要な集約規則だけ再評価 |
+| `src/runtime/pi-agent-turn.ts` | exact reuse | Pi-owned interaction sessionの薄いintegration adapterとして使う |
 | `deferred-tool-coordinator` | superficially similar | camera の限定用途を維持し、汎用 task manager にしない |
 | Pi-level memory plugin | separate owner | Picoから直接呼ばず、導入・tool可視性はPi設定へ委ねる |
 | 旧 `TaskRunManager` / `VoiceTurnCoordinator` | rejected duplicate | 移植しない |
@@ -186,11 +195,11 @@ timerだけをprocess-localに保持し、terminal cleanup後に削除する。
 
 ### 10.1 実装する
 
-1. Pico extension 内に、既存 Pi session へ入力しイベントを観測する薄い resident turn
-   boundary を追加する。
+1. Pico extension 内に、interaction単位のPi in-memory sessionへ入力する薄いresident turn
+   boundaryを追加する。
 2. startup-only の `--pico` controller起動とYAML model選択を追加する。
 3. extension の session lifecycle に resident voice controller の start/stop を接続する。
-4. 本番 resident entry から embedded `createPiAgentTurnClient` 所有を外す。
+4. 本番 resident entryはPi integration adapterの`createPiAgentTurnClient`を使う。
 5. Pi のsubagent機構を利用し、agent別tool可視性はPi設定へ委ねる。
 6. `AGENTS.md` と必要な運用文書へ、Pi/Pico 所有権を簡潔に明記する。
 7. Pi の通常 abort と、Codex cleanup が扱う強制終了後の異常残留の境界を、再現可能な
@@ -262,17 +271,17 @@ tool可視性はPi設定が所有し、script、tool、各moduleが独自profile
 
 ### 12.1 構造
 
-- 本番 resident startup path が `createAgentSession` または
-  `createPiAgentTurnClient` を呼ばない。
+- 本番 resident startup path は`createPiAgentTurnClient`だけをPi session integration
+  boundaryとして使い、domain moduleから`createAgentSession`を呼ばない。
 - resident voice は Pico extension の `session_start` から一度だけ開始される。
 - 通常PiはPico controllerを開始せず、Picoだけが`--pico`で音声resourceを所有する。
 - custom subagent runner、second integration session、TaskRun store が存在しない。
 
 ### 12.2 挙動
 
-- 音声由来文字列が既存 Pi 親 session に literal user input として一度だけ入る。
+- 音声由来文字列がactive Pi interaction sessionにliteral user inputとして一度だけ入る。
 - 対応する最終 assistant text が一度だけ TTS に渡る。
-- 同時 voice turn の扱いが決定的で、暗黙の第二 session を作らない。
+- 同時voice turnの扱いが決定的で、interaction IDごとに一つを超えるPi sessionを作らない。
 - cancel は active turn の Pi abort と Pico playback stop をそれぞれ一度だけ行う。
 - shutdown は新規入力を拒否し、Pico resource を残さず drain する。
 - `--pico`不在時はcontrollerを開始せず、Piのtool設定を変更しない。
@@ -281,7 +290,8 @@ tool可視性はPi設定が所有し、script、tool、各moduleが独自profile
 
 - focused tests は Red → Green で追加する。
 - `just check` が通る。
-- production entry に embedded session owner がないことを `rg` と構造テストで確認する。
+- production entryがPi integration adapter以外からAgentSessionを作らないことを`rg`と
+  構造テストで確認する。
 - Pi extension loading と subagent tool 登録を実 SDK で確認する。
 - 通常 abort の収束を実 SDK で確認する。
 - 強制終了後に残り得る process を cleanup が安全に識別できる根拠を確認する。
