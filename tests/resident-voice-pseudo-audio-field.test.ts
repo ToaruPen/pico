@@ -1,3 +1,7 @@
+import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 
@@ -7,8 +11,10 @@ import {
   createResidentVoicePseudoAudioTts,
   evaluateResidentVoicePseudoAudioEvidence,
   formatResidentVoicePseudoAudioHelp,
+  type ResidentVoicePseudoAudioReport,
   readResidentVoicePseudoAudioArguments,
   resolveResidentVoicePseudoAudioAgentSettings,
+  runResidentVoicePseudoAudioCommand,
   withResidentVoicePseudoAudioOwners
 } from "../scripts/field/resident-voice-pseudo-audio.js";
 import { definePicoConfig } from "../src/config/index.js";
@@ -121,6 +127,112 @@ describe("resident voice pseudo-audio field contract", () => {
       ])
     ).toThrow("lowercase SHA-256");
     expect(formatResidentVoicePseudoAudioHelp()).toContain("--expected-transcript-sha256");
+  });
+
+  it("accepts a distinct private metadata report path", () => {
+    expect(
+      readResidentVoicePseudoAudioArguments([
+        "--audio-fixture",
+        "/tmp/pico-ja.wav",
+        "--validation-output",
+        "/tmp/private/events.jsonl",
+        "--report-output",
+        "/tmp/private/report.json"
+      ])
+    ).toMatchObject({ reportOutputPath: "/tmp/private/report.json" });
+    expect(() =>
+      readResidentVoicePseudoAudioArguments([
+        "--audio-fixture",
+        "/tmp/pico-ja.wav",
+        "--validation-output",
+        "/tmp/private/events.jsonl",
+        "--report-output",
+        "/tmp/private/events.jsonl"
+      ])
+    ).toThrow("--report-output must differ");
+    expect(formatResidentVoicePseudoAudioHelp()).toContain("--report-output");
+  });
+
+  it("writes metadata evidence directly without copying shared stdout", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-voice-report-"));
+    const reportOutputPath = join(directory, "report.json");
+    const arguments_ = pseudoAudioArguments(reportOutputPath);
+    const stdout = ["unrelated Pi extension output"];
+    const stderr: string[] = [];
+    const report = pseudoAudioReport("passed");
+
+    const exitCode = await runResidentVoicePseudoAudioCommand(arguments_, {
+      run: () => Promise.resolve(report),
+      writeStdout: (value) => stdout.push(value),
+      writeStderr: (value) => stderr.push(value)
+    });
+
+    const serialized = readFileSync(reportOutputPath, "utf8");
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(serialized)).toEqual(report);
+    expect(statSync(reportOutputPath).mode & 0o777).toBe(0o600);
+    expect(serialized).not.toContain("unrelated Pi extension output");
+    expect(serialized).not.toContain("private transcript");
+    expect(serialized).not.toContain(knownFixtureTranscriptSha256);
+    expect(stdout).toHaveLength(2);
+    expect(stderr).toEqual([]);
+  });
+
+  it("preserves metadata JSON on stdout when no report path is configured", async () => {
+    const arguments_ = readResidentVoicePseudoAudioArguments([
+      "--audio-fixture",
+      "/tmp/pico-ja.wav",
+      "--validation-output",
+      "/tmp/private/events.jsonl"
+    ]);
+    const stdout: string[] = [];
+    const report = pseudoAudioReport("passed");
+
+    const exitCode = await runResidentVoicePseudoAudioCommand(arguments_, {
+      run: () => Promise.resolve(report),
+      writeStdout: (value) => stdout.push(value),
+      writeStderr: () => undefined
+    });
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toEqual([`${JSON.stringify(report, undefined, 2)}\n`]);
+  });
+
+  it("persists failed metadata evidence and returns exit one", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-voice-report-"));
+    const reportOutputPath = join(directory, "report.json");
+    const report = pseudoAudioReport("failed");
+
+    const exitCode = await runResidentVoicePseudoAudioCommand(
+      pseudoAudioArguments(reportOutputPath),
+      {
+        run: () => Promise.resolve(report),
+        writeStdout: () => undefined,
+        writeStderr: () => undefined
+      }
+    );
+
+    expect(exitCode).toBe(1);
+    expect(JSON.parse(readFileSync(reportOutputPath, "utf8"))).toEqual(report);
+  });
+
+  it("closes an empty report artifact and returns exit two after a fatal run error", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-voice-report-"));
+    const reportOutputPath = join(directory, "report.json");
+    const stderr: string[] = [];
+
+    const exitCode = await runResidentVoicePseudoAudioCommand(
+      pseudoAudioArguments(reportOutputPath),
+      {
+        run: () => Promise.reject(new Error("provider exploded")),
+        writeStdout: () => undefined,
+        writeStderr: (value) => stderr.push(value)
+      }
+    );
+
+    expect(exitCode).toBe(2);
+    expect(readFileSync(reportOutputPath, "utf8")).toBe("");
+    expect(stderr).toEqual(["pico pseudo-audio validation failed: provider exploded\n"]);
   });
 
   it("accepts an explicit tool that must succeed during validation", () => {
@@ -604,5 +716,47 @@ function playbackChunk(): TtsAudioChunk {
       provider: "aivis-speech",
       speakerId: 1
     }
+  };
+}
+
+function pseudoAudioArguments(reportOutputPath: string) {
+  return readResidentVoicePseudoAudioArguments([
+    "--audio-fixture",
+    "/tmp/pico-ja.wav",
+    "--validation-output",
+    "/tmp/private/events.jsonl",
+    "--report-output",
+    reportOutputPath
+  ]);
+}
+
+function pseudoAudioReport(status: "passed" | "failed"): ResidentVoicePseudoAudioReport {
+  return {
+    status,
+    audioFixturePath: "/tmp/pico-ja.wav",
+    validationOutputPath: "/tmp/private/events.jsonl",
+    validationEventCount: 4,
+    validation: { staffTranscriptPresent: true, finalPiResponsePresent: true },
+    requiredToolName: "stackchan_get_status",
+    toolExecutions: [{ toolName: "stackchan_get_status", isError: false, durationMs: 12 }],
+    agent: { provider: "openai-codex", id: "gpt-5.6-sol", thinkingLevel: "medium" },
+    runtime: {
+      acceptedHolds: 1,
+      completedTurns: 1,
+      emptyHolds: 0,
+      ignoredBusyTalkPresses: 0,
+      cancelledTurns: 0,
+      lateResultsSuppressed: 0,
+      failedCaptures: 0,
+      failedTurns: 0
+    },
+    playback: { sinkOpenCount: 1 },
+    telemetry: {
+      mode: "in_process",
+      health: { logs: { consecutiveFailures: 0 }, metrics: { consecutiveFailures: 0 } },
+      logRecordCount: 1,
+      metricDataPointCount: 1
+    },
+    stages: []
   };
 }

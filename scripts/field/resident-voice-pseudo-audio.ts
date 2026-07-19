@@ -26,7 +26,9 @@ import {
   requireResidentVoiceEnabled
 } from "../../src/runtime/resident-voice-runner.js";
 import {
+  createPrivateResidentVoiceArtifact,
   createPrivateResidentVoiceValidationSink,
+  type PrivateResidentVoiceArtifact,
   type PrivateResidentVoiceValidationSink,
   type ResidentVoiceValidationEvent,
   type ResidentVoiceValidationSink
@@ -46,6 +48,7 @@ import { createResidentAudioFixtureCapture } from "./resident-audio-fixture.js";
 export type ResidentVoicePseudoAudioArguments = {
   readonly audioFixturePath: string;
   readonly validationOutputPath: string;
+  readonly reportOutputPath?: string;
   readonly requiredToolName?: string;
   readonly expectedTranscriptSha256?: string;
   readonly timeoutMs: number;
@@ -384,6 +387,7 @@ const maximumTimeoutMs = 300_000;
 type MutablePseudoAudioArguments = {
   audioFixturePath?: string;
   validationOutputPath?: string;
+  reportOutputPath?: string;
   requiredToolName?: string;
   expectedTranscriptSha256?: string;
   timeoutMs: number;
@@ -397,6 +401,9 @@ const pseudoAudioArgumentReaders: Readonly<
   },
   "--validation-output": (state, value) => {
     state.validationOutputPath = value;
+  },
+  "--report-output": (state, value) => {
+    state.reportOutputPath = value;
   },
   "--required-tool-name": (state, value) => {
     state.requiredToolName = value;
@@ -445,25 +452,59 @@ function readResidentVoicePseudoAudioArgumentPairs(
 function finalizePseudoAudioArguments(
   parsed: MutablePseudoAudioArguments
 ): ResidentVoicePseudoAudioArguments {
-  if (parsed.audioFixturePath === undefined) {
-    throw invalidArguments("--audio-fixture is required");
-  }
-  if (parsed.validationOutputPath === undefined) {
-    throw invalidArguments("--validation-output is required");
-  }
-  if (parsed.audioFixturePath === parsed.validationOutputPath) {
-    throw invalidArguments("--validation-output must differ from --audio-fixture");
-  }
+  const audioFixturePath = requirePseudoAudioPath(parsed.audioFixturePath, "--audio-fixture");
+  const validationOutputPath = requirePseudoAudioPath(
+    parsed.validationOutputPath,
+    "--validation-output"
+  );
+  requireDistinctPseudoAudioPaths(audioFixturePath, validationOutputPath, parsed.reportOutputPath);
 
   return {
-    audioFixturePath: parsed.audioFixturePath,
-    validationOutputPath: parsed.validationOutputPath,
+    audioFixturePath,
+    validationOutputPath,
+    ...optionalPseudoAudioArguments(parsed),
+    timeoutMs: parsed.timeoutMs,
+    help: false
+  };
+}
+
+function requirePseudoAudioPath(value: string | undefined, flag: string): string {
+  if (value === undefined) {
+    throw invalidArguments(`${flag} is required`);
+  }
+  return value;
+}
+
+function requireDistinctPseudoAudioPaths(
+  audioFixturePath: string,
+  validationOutputPath: string,
+  reportOutputPath: string | undefined
+): void {
+  if (audioFixturePath === validationOutputPath) {
+    throw invalidArguments("--validation-output must differ from --audio-fixture");
+  }
+  if (
+    reportOutputPath !== undefined &&
+    (reportOutputPath === audioFixturePath || reportOutputPath === validationOutputPath)
+  ) {
+    throw invalidArguments(
+      "--report-output must differ from --audio-fixture and --validation-output"
+    );
+  }
+}
+
+function optionalPseudoAudioArguments(
+  parsed: MutablePseudoAudioArguments
+): Pick<
+  ResidentVoicePseudoAudioArguments,
+  "reportOutputPath" | "requiredToolName" | "expectedTranscriptSha256"
+> {
+  return {
+    ...(parsed.reportOutputPath === undefined ? {} : { reportOutputPath: parsed.reportOutputPath }),
     ...(parsed.requiredToolName === undefined ? {} : { requiredToolName: parsed.requiredToolName }),
     ...(parsed.expectedTranscriptSha256 === undefined
       ? {}
-      : { expectedTranscriptSha256: parsed.expectedTranscriptSha256 }),
-    timeoutMs: parsed.timeoutMs,
-    help: false
+      : { expectedTranscriptSha256: parsed.expectedTranscriptSha256 })
   };
 }
 
@@ -484,10 +525,11 @@ function readPseudoAudioTimeout(value: string): number {
 
 export function formatResidentVoicePseudoAudioHelp(): string {
   return [
-    "Usage: npm run field:resident-voice-pseudo-audio -- --audio-fixture path.wav|path.pcm --validation-output path.jsonl [--required-tool-name name] [--expected-transcript-sha256 digest] [--timeout-ms 120000]",
+    "Usage: npm run field:resident-voice-pseudo-audio -- --audio-fixture path.wav|path.pcm --validation-output path.jsonl [--report-output path.json] [--required-tool-name name] [--expected-transcript-sha256 digest] [--timeout-ms 120000]",
     "",
     "Runs one explicit full resident voice turn with finite injected audio.",
     "The validation output is a mode-0600 contentful JSONL artifact containing recognized text, Pi response text, and tool arguments/results.",
+    "When --report-output is set, the metadata-only report is written directly to a separate mode-0600 file instead of shared stdout.",
     "Normal resident logs and OTel remain metadata-only. Delete the validation artifact when it is no longer needed."
   ].join("\n");
 }
@@ -790,8 +832,72 @@ async function withDeadline<T>(operation: Promise<T>, timeoutMs: number, code: s
 
 function invalidArguments(reason: string): Error {
   return new Error(
-    `usage: field:resident-voice-pseudo-audio --audio-fixture path.wav|path.pcm --validation-output path.jsonl [--required-tool-name name] [--expected-transcript-sha256 digest] [--timeout-ms 10000..300000]: ${reason}`
+    `usage: field:resident-voice-pseudo-audio --audio-fixture path.wav|path.pcm --validation-output path.jsonl [--report-output path.json] [--required-tool-name name] [--expected-transcript-sha256 digest] [--timeout-ms 10000..300000]: ${reason}`
   );
+}
+
+export async function runResidentVoicePseudoAudioCommand(
+  arguments_: ResidentVoicePseudoAudioArguments,
+  dependencies: {
+    readonly run?: typeof runResidentVoicePseudoAudio;
+    readonly writeStdout?: (value: string) => void;
+    readonly writeStderr?: (value: string) => void;
+  } = {}
+): Promise<number> {
+  const writeStdout = dependencies.writeStdout ?? ((value) => process.stdout.write(value));
+  const writeStderr = dependencies.writeStderr ?? ((value) => process.stderr.write(value));
+  let reportOutput: ResidentVoicePseudoAudioReportOutput | undefined;
+
+  try {
+    reportOutput = openResidentVoicePseudoAudioReport(arguments_.reportOutputPath);
+    const report = await (dependencies.run ?? runResidentVoicePseudoAudio)(arguments_);
+    writeResidentVoicePseudoAudioReport(report, reportOutput, writeStdout);
+    return residentVoicePseudoAudioReportExitCode(report.status);
+  } catch (error) {
+    writeStderr(`pico pseudo-audio validation failed: ${boundedErrorMessage(error)}\n`);
+    return 2;
+  } finally {
+    reportOutput?.artifact.close();
+  }
+}
+
+type ResidentVoicePseudoAudioReportOutput = {
+  readonly path: string;
+  readonly artifact: PrivateResidentVoiceArtifact;
+};
+
+function openResidentVoicePseudoAudioReport(
+  path: string | undefined
+): ResidentVoicePseudoAudioReportOutput | undefined {
+  if (path === undefined) {
+    return undefined;
+  }
+  return { path, artifact: createPrivateResidentVoiceArtifact({ path }) };
+}
+
+function writeResidentVoicePseudoAudioReport(
+  report: ResidentVoicePseudoAudioReport,
+  output: ResidentVoicePseudoAudioReportOutput | undefined,
+  writeStdout: (value: string) => void
+): void {
+  const serialized = `${JSON.stringify(report, undefined, 2)}\n`;
+  if (output === undefined) {
+    writeStdout(serialized);
+    return;
+  }
+  output.artifact.write(serialized);
+  writeStdout(`pico pseudo-audio ${report.status}; metadata report written to ${output.path}\n`);
+}
+
+function residentVoicePseudoAudioReportExitCode(
+  status: ResidentVoicePseudoAudioReport["status"]
+): number {
+  return status === "passed" ? 0 : 1;
+}
+
+function boundedErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return Buffer.from(message, "utf8").subarray(0, 1_024).toString("utf8");
 }
 
 function isDirectExecution(): boolean {
@@ -799,12 +905,15 @@ function isDirectExecution(): boolean {
 }
 
 if (isDirectExecution()) {
-  const arguments_ = readResidentVoicePseudoAudioArguments(process.argv.slice(2));
-  if (arguments_.help) {
-    process.stdout.write(`${formatResidentVoicePseudoAudioHelp()}\n`);
-  } else {
-    const report = await runResidentVoicePseudoAudio(arguments_);
-    process.stdout.write(`${JSON.stringify(report, undefined, 2)}\n`);
-    process.exitCode = report.status === "passed" ? 0 : 1;
+  try {
+    const arguments_ = readResidentVoicePseudoAudioArguments(process.argv.slice(2));
+    if (arguments_.help) {
+      process.stdout.write(`${formatResidentVoicePseudoAudioHelp()}\n`);
+    } else {
+      process.exitCode = await runResidentVoicePseudoAudioCommand(arguments_);
+    }
+  } catch (error) {
+    process.stderr.write(`pico pseudo-audio validation failed: ${boundedErrorMessage(error)}\n`);
+    process.exitCode = 2;
   }
 }
