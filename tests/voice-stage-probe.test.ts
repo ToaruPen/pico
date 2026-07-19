@@ -24,6 +24,9 @@ describe("voice stage probe", () => {
       interaction_end: { persisted: true, summary: true },
       pi_turn: { persisted: true, summary: true },
       tts_request_wall: { persisted: true, summary: true },
+      tts_time_to_first_chunk: { persisted: true, summary: true },
+      tts_audio_query: { persisted: true, summary: false },
+      tts_synthesize: { persisted: true, summary: false },
       tts_playback: { persisted: true, summary: true },
       camera_capture: { persisted: true, summary: true },
       vlm_scene_description: { persisted: true, summary: true }
@@ -161,6 +164,61 @@ describe("voice stage probe", () => {
     expect(audit.entries()).toEqual([]);
   });
 
+  it("accepts bounded numeric TTS pipeline attributes", () => {
+    const audit = createStructuredAuditLog();
+
+    recordVoiceStageProbe(
+      { audit },
+      {
+        stage: "tts_synthesize",
+        status: "error",
+        startedAt: "2026-06-18T00:00:00.000Z",
+        durationMs: 12,
+        attributes: {
+          "pico.voice.sentence_index": 2,
+          "pico.voice.played_chunk_count": 1
+        }
+      }
+    );
+
+    expect(audit.entries()[0]?.attributes).toMatchObject({
+      "pico.voice.sentence_index": 2,
+      "pico.voice.played_chunk_count": 1
+    });
+  });
+
+  it("rejects non-numeric TTS pipeline attributes", () => {
+    expect(() =>
+      recordVoiceStageProbe(
+        { audit: createStructuredAuditLog() },
+        {
+          stage: "tts_synthesize",
+          status: "error",
+          startedAt: "2026-06-18T00:00:00.000Z",
+          durationMs: 12,
+          attributes: { "pico.voice.played_chunk_count": "1" }
+        }
+      )
+    ).toThrow("pico voice stage probe numeric attribute is invalid");
+  });
+
+  it("rejects TTS body and audio attributes before audit recording", () => {
+    for (const key of ["pico.voice.text", "pico.voice.audio", "pico.voice.http_body"]) {
+      expect(() =>
+        recordVoiceStageProbe(
+          { audit: createStructuredAuditLog() },
+          {
+            stage: "tts_audio_query",
+            status: "ok",
+            startedAt: "2026-06-18T00:00:00.000Z",
+            durationMs: 1,
+            attributes: { [key]: "private" }
+          }
+        )
+      ).toThrow("pico voice stage probe attribute is not allowed");
+    }
+  });
+
   it("rejects unknown stages to keep probe cardinality bounded", () => {
     expect(() =>
       recordVoiceStageProbe(
@@ -189,19 +247,17 @@ describe("voice stage probe", () => {
     ).toThrow("pico voice runtime stage is invalid");
   });
 
-  it("rejects removed TTS stage names", () => {
-    for (const stage of ["tts_synthesize", "tts_audio_duration"]) {
-      expect(() =>
-        recordVoiceStageProbe(
-          { audit: createStructuredAuditLog() },
-          {
-            stage: stage as "stt",
-            status: "ok",
-            startedAt: "2026-06-18T00:00:00.000Z",
-            durationMs: 1
-          }
-        )
-      ).toThrow("pico voice runtime stage is invalid");
-    }
+  it("rejects the removed TTS audio duration stage", () => {
+    expect(() =>
+      recordVoiceStageProbe(
+        { audit: createStructuredAuditLog() },
+        {
+          stage: "tts_audio_duration" as "stt",
+          status: "ok",
+          startedAt: "2026-06-18T00:00:00.000Z",
+          durationMs: 1
+        }
+      )
+    ).toThrow("pico voice runtime stage is invalid");
   });
 });

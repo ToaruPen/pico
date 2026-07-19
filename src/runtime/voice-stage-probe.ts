@@ -20,6 +20,9 @@ export const voiceRuntimeStagePolicies = Object.freeze({
   interaction_end: { persisted: true, summary: true },
   pi_turn: { persisted: true, summary: true },
   tts_request_wall: { persisted: true, summary: true },
+  tts_time_to_first_chunk: { persisted: true, summary: true },
+  tts_audio_query: { persisted: true, summary: false },
+  tts_synthesize: { persisted: true, summary: false },
   tts_playback: { persisted: true, summary: true },
   camera_capture: { persisted: true, summary: true },
   vlm_scene_description: { persisted: true, summary: true }
@@ -56,7 +59,13 @@ const voiceStageAttributeKeys = new Set([
   "pico.voice.frame_bytes",
   "pico.voice.vlm_frame_bytes",
   "pico.voice.queue_depth",
-  "pico.voice.error_code"
+  "pico.voice.error_code",
+  "pico.voice.sentence_index",
+  "pico.voice.played_chunk_count"
+]);
+const numericVoiceStageAttributeKeys = new Set([
+  "pico.voice.sentence_index",
+  "pico.voice.played_chunk_count"
 ]);
 const maxNodeTimeoutMs = 2_147_483_647;
 
@@ -147,6 +156,10 @@ function normalizeVoiceStageAttributes(
   for (const [key, value] of Object.entries(attributes)) {
     if (!voiceStageAttributeKeys.has(key)) {
       throw new Error("pico voice stage probe attribute is not allowed");
+    }
+
+    if (numericVoiceStageAttributeKeys.has(key) && typeof value !== "number") {
+      throw new Error("pico voice stage probe numeric attribute is invalid");
     }
 
     if (typeof value === "number" && !Number.isFinite(value)) {
