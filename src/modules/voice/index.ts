@@ -171,7 +171,7 @@ const AIVIS_DEFAULT_VOICE: AivisSpeechVoiceParameters = {
 };
 const SENTENCE_BOUNDARIES = new Set([".", "。", "！", "？", "!", "?", "…"]);
 const MAX_SPEECH_SEGMENT_CODE_POINTS = 120;
-const SOFT_SPEECH_BOUNDARIES = new Set(["、", ",", "，", ";", "；", ":", "：", " ", "　"]);
+const SOFT_SPEECH_BOUNDARIES = new Set(["、", ",", "，", ";", "；", ":", "：", " ", "\u3000"]);
 const TRAILING_SENTENCE_CLOSERS = new Set([
   '"',
   "'",
@@ -411,7 +411,11 @@ function consumeTrailingSentenceClosers(
   return { closers, nextIndex: index };
 }
 
-function pushSentenceSegment(segments: string[], text: string, preserveTrailingWhitespace = false): void {
+function pushSentenceSegment(
+  segments: string[],
+  text: string,
+  preserveTrailingWhitespace = false
+): void {
   const segment = preserveTrailingWhitespace ? text.trimStart() : text.trim();
 
   if (segment.trim() !== "") {
@@ -438,7 +442,7 @@ function splitBoundedSpeechSegment(text: string): readonly string[] {
 
     const end = softIndex < 0 ? MAX_SPEECH_SEGMENT_CODE_POINTS : softIndex + 1;
     const selectedBoundary = softIndex < 0 ? undefined : window[softIndex];
-    const preserveTrailingWhitespace = selectedBoundary === " " || selectedBoundary === "　";
+    const preserveTrailingWhitespace = selectedBoundary === " " || selectedBoundary === "\u3000";
     pushSentenceSegment(segments, remaining.splice(0, end).join(""), preserveTrailingWhitespace);
   }
 

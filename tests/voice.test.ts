@@ -701,8 +701,13 @@ describe("Aivis Speech TTS boundary", () => {
   it("bounds punctuation-free speech without splitting Unicode code points", () => {
     const softBounded = `${"あ".repeat(118)}、${"い".repeat(10)}`;
 
-    expect(segmentJapaneseSentences(softBounded)).toEqual([`${"あ".repeat(118)}、`, "い".repeat(10)]);
-    expect(segmentJapaneseSentences("😀".repeat(121)).map((part) => Array.from(part).length)).toEqual([120, 1]);
+    expect(segmentJapaneseSentences(softBounded)).toEqual([
+      `${"あ".repeat(118)}、`,
+      "い".repeat(10)
+    ]);
+    expect(
+      segmentJapaneseSentences("😀".repeat(121)).map((part) => Array.from(part).length)
+    ).toEqual([120, 1]);
   });
 
   it("preserves whitespace soft boundaries in bounded speech", () => {
@@ -710,8 +715,34 @@ describe("Aivis Speech TTS boundary", () => {
       `${"あ".repeat(118)} `,
       "い".repeat(10)
     ]);
-    expect(segmentJapaneseSentences(`${"あ".repeat(118)}　${"い".repeat(10)}`)).toEqual([
-      `${"あ".repeat(118)}　`,
+    expect(segmentJapaneseSentences(`${"あ".repeat(118)}\u3000${"い".repeat(10)}`)).toEqual([
+      `${"あ".repeat(118)}\u3000`,
+      "い".repeat(10)
+    ]);
+  });
+
+  it("selects the last soft boundary in a bounded speech window", () => {
+    const speech = `${"あ".repeat(100)}、${"い".repeat(10)},${"う".repeat(20)}`;
+
+    expect(segmentJapaneseSentences(speech)).toEqual([
+      `${"あ".repeat(100)}、${"い".repeat(10)},`,
+      "う".repeat(20)
+    ]);
+  });
+
+  it.each([
+    "、",
+    ",",
+    "，",
+    ";",
+    "；",
+    ":",
+    "：",
+    " ",
+    "\u3000"
+  ])("retains %s as a soft speech boundary", (boundary) => {
+    expect(segmentJapaneseSentences(`${"あ".repeat(119)}${boundary}${"い".repeat(10)}`)).toEqual([
+      `${"あ".repeat(119)}${boundary}`,
       "い".repeat(10)
     ]);
   });
