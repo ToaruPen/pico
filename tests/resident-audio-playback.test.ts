@@ -1,5 +1,5 @@
 import type { ChildProcessByStdio } from "node:child_process";
-import { EventEmitter } from "node:events";
+import { EventEmitter, getEventListeners } from "node:events";
 import { PassThrough, type Readable, type Writable } from "node:stream";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -124,6 +124,70 @@ describe("resident continuous audio playback", () => {
 
     await expect(finishing).resolves.toBeUndefined();
     expect(audioProcess.stdinBytes()).toEqual([1, 0, 2, 0]);
+  });
+
+  it("rejects a queued write and finish with one Error when close wins before stdin end", async () => {
+    const audioProcess = createAudioProcess();
+    const session = createResidentContinuousPlaybackSink(ffplayPlan, () => audioProcess.child).open(
+      chunk(0, [1, 0])
+    );
+    const writing = session.write(chunk(0, [1, 0]));
+    const finishing = session.finish();
+    const failures = Promise.all([operationFailure(writing), operationFailure(finishing)]);
+
+    audioProcess.emitClose(0);
+    const [writeError, finishError] = await failures;
+
+    expect(writeError).toBeInstanceOf(Error);
+    expect(finishError).toBe(writeError);
+    expect(audioProcess.stdinBytes()).toEqual([]);
+  });
+
+  it("rejects backpressure write and finish together when close arrives before drain", async () => {
+    const audioProcess = createAudioProcess();
+    audioProcess.applyBackpressureOnce();
+    const controller = new AbortController();
+    const session = createResidentContinuousPlaybackSink(ffplayPlan, () => audioProcess.child).open(
+      chunk(0, [1, 0]),
+      controller.signal
+    );
+    const writing = session.write(chunk(0, [1, 0]));
+    await vi.waitFor(() => expect(audioProcess.stdin.listenerCount("drain")).toBe(1));
+    const finishing = session.finish();
+    const failures = Promise.all([operationFailure(writing), operationFailure(finishing)]);
+
+    audioProcess.emitClose(0);
+    const outcome = await Promise.race([
+      failures,
+      new Promise<undefined>((resolve) => setImmediate(() => resolve(undefined)))
+    ]);
+
+    expect(outcome).toBeDefined();
+    const [writeError, finishError] = requireFailurePair(outcome);
+    expect(writeError).toBeInstanceOf(Error);
+    expect(finishError).toBe(writeError);
+    expect(audioProcess.stdin.listenerCount("drain")).toBe(0);
+    expect(audioProcess.stdin.listenerCount("error")).toBe(0);
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+  });
+
+  it("ends stdin once after queued writes complete and then finishes on close", async () => {
+    const audioProcess = createAudioProcess();
+    const end = vi.spyOn(audioProcess.stdin, "end");
+    const session = createResidentContinuousPlaybackSink(ffplayPlan, () => audioProcess.child).open(
+      chunk(0, [1, 0])
+    );
+    const firstWrite = session.write(chunk(0, [1, 0]));
+    const secondWrite = session.write(chunk(1, [2, 0]));
+    const finishing = session.finish();
+
+    await Promise.all([firstWrite, secondWrite]);
+    expect(end).toHaveBeenCalledTimes(1);
+    expect(audioProcess.stdinBytes()).toEqual([1, 0, 2, 0]);
+    audioProcess.emitClose(0);
+
+    await expect(finishing).resolves.toBeUndefined();
+    expect(end).toHaveBeenCalledTimes(1);
   });
 
   it("removes backpressure listeners when active playback is cancelled", async () => {
@@ -540,4 +604,18 @@ async function settledAfterImmediate(operation: Promise<void>): Promise<boolean>
 function requireAudioProcess(audioProcess: SpawnedAudioProcess | undefined): SpawnedAudioProcess {
   if (audioProcess === undefined) throw new Error("audio process fixture was exhausted");
   return audioProcess;
+}
+
+function operationFailure(operation: Promise<void>): Promise<Error | undefined> {
+  return operation.then(
+    () => undefined,
+    (error: unknown) => (error instanceof Error ? error : new Error(String(error)))
+  );
+}
+
+function requireFailurePair(
+  pair: readonly [Error | undefined, Error | undefined] | undefined
+): readonly [Error | undefined, Error | undefined] {
+  if (pair === undefined) throw new Error("playback operations did not settle");
+  return pair;
 }

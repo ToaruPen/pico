@@ -97,6 +97,7 @@ class ContinuousPlaybackSession implements VoicePlaybackSession {
   #terminalFailure: Error | undefined;
   #writeTail = idleOperation;
   #pendingWrites = 0;
+  #finishRequested = false;
   #inputEnded = false;
   #childClosed = false;
   #listenersCleaned = false;
@@ -164,7 +165,7 @@ class ContinuousPlaybackSession implements VoicePlaybackSession {
 
   finish(): Promise<void> {
     if (this.#finishOperation !== undefined) return this.#finishOperation;
-    this.#inputEnded = true;
+    this.#finishRequested = true;
     this.#finishOperation =
       this.#pendingWrites === 0
         ? this.#endInputAndWait()
@@ -231,7 +232,7 @@ class ContinuousPlaybackSession implements VoicePlaybackSession {
 
   #writeStateFailure(): Error | undefined {
     if (this.#terminalFailure !== undefined) return this.#terminalFailure;
-    if (this.#inputEnded) {
+    if (this.#finishRequested) {
       return new Error(`pico resident voice ${this.#plan.provider} output input has ended`);
     }
     if (this.#childClosed) {
@@ -252,6 +253,7 @@ class ContinuousPlaybackSession implements VoicePlaybackSession {
 
   #endInputAndWait(): Promise<void> {
     if (this.#childClosed) return this.#terminalOperation;
+    this.#inputEnded = true;
     const inputEnding = new Promise<void>((resolve) => {
       this.#stdin.end();
       resolve();
