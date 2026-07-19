@@ -509,6 +509,251 @@ describe("resident continuous audio playback", () => {
     expect(() => sink.open(chunk(1, [2, 0]))).toThrow("playback sink is closed");
     await expect(sink.stop()).resolves.toBeUndefined();
   });
+
+  it("plays ALSA PCM using the TTS chunk sample format", async () => {
+    const audioProcess = createAudioProcess();
+    const spawn = vi.fn(() => audioProcess.child);
+    const sink = createResidentContinuousPlaybackSink(alsaPlan, spawn);
+    const first = chunk(0, [1, 2, 3, 4], { sampleRateHz: 24_000, channels: 2 });
+    const session = sink.open(first);
+
+    await session.write(first);
+    const finishing = session.finish();
+    audioProcess.emitClose(0);
+    await finishing;
+
+    expect(spawn).toHaveBeenCalledWith(
+      "aplay",
+      ["-q", "-f", "S16_LE", "-r", "24000", "-c", "2", "-t", "raw", "-D", "hw:0,0"],
+      { stdio: ["pipe", "ignore", "inherit"] }
+    );
+    expect(audioProcess.stdinBytes()).toEqual([1, 2, 3, 4]);
+  });
+
+  it("rejects ALSA playback when the PCM stdin stream fails", async () => {
+    const audioProcess = createAudioProcess();
+    const session = createResidentContinuousPlaybackSink(alsaPlan, () => audioProcess.child).open(
+      chunk(0, [1, 2])
+    );
+    const failure = new Error("pipe failed");
+
+    audioProcess.stdin.emit("error", failure);
+    await expect(session.write(chunk(0, [1, 2]))).rejects.toBe(failure);
+    const finishing = session.finish();
+    audioProcess.emitClose(1);
+    await expect(finishing).rejects.toBe(failure);
+  });
+
+  it("retains playback ownership after a PCM stdin failure until the child exits", async () => {
+    const firstProcess = createAudioProcess();
+    const secondProcess = createAudioProcess();
+    const processes = [firstProcess, secondProcess];
+    const spawn = vi.fn(() => requireAudioProcess(processes.shift()).child);
+    const sink = createResidentContinuousPlaybackSink(alsaPlan, spawn);
+    const first = sink.open(chunk(0, [1, 2]));
+    const failure = new Error("pipe failed");
+
+    firstProcess.stdin.emit("error", failure);
+    await expect(first.write(chunk(0, [1, 2]))).rejects.toBe(failure);
+    expect(() => sink.open(chunk(1, [3, 4]))).toThrow("already active");
+
+    const firstFinish = first.finish();
+    firstProcess.emitClose(1);
+    await expect(firstFinish).rejects.toBe(failure);
+
+    const second = sink.open(chunk(1, [3, 4]));
+    const secondFinish = second.finish();
+    secondProcess.emitClose(0);
+    await secondFinish;
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases playback ownership after a spawn failure closes the child", async () => {
+    const failedProcess = createAudioProcess();
+    const nextProcess = createAudioProcess();
+    const processes = [failedProcess, nextProcess];
+    const spawn = vi.fn(() => requireAudioProcess(processes.shift()).child);
+    const sink = createResidentContinuousPlaybackSink(alsaPlan, spawn);
+    const failed = sink.open(chunk(0, [1, 2]));
+    const failure = new Error("spawn aplay EACCES");
+
+    failedProcess.emitError(failure);
+    await expect(failed.write(chunk(0, [1, 2]))).rejects.toBe(failure);
+    expect(() => sink.open(chunk(1, [3, 4]))).toThrow("already active");
+    const failedFinish = failed.finish();
+    failedProcess.emitClose(-13);
+    await expect(failedFinish).rejects.toBe(failure);
+
+    const next = sink.open(chunk(1, [3, 4]));
+    const nextFinish = next.finish();
+    nextProcess.emitClose(0);
+    await nextFinish;
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails before spawning when ALSA playback has an already-aborted signal", () => {
+    const spawn = vi.fn(() => createAudioProcess().child);
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled before playback"));
+    const sink = createResidentContinuousPlaybackSink(alsaPlan, spawn);
+
+    expect(() => sink.open(chunk(0, [1, 2]), controller.signal)).toThrow(
+      "pico resident voice alsa output was aborted before startup"
+    );
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("stops only the current owned playback process and is idempotent", async () => {
+    const firstProcess = createAudioProcess();
+    const secondProcess = createAudioProcess();
+    const processes = [firstProcess, secondProcess];
+    const sink = createResidentContinuousPlaybackSink(
+      alsaPlan,
+      () => requireAudioProcess(processes.shift()).child
+    );
+    const first = sink.open(chunk(0, [1, 2]));
+    const firstFinish = first.finish();
+
+    const firstStop = sink.stop();
+    const secondStop = sink.stop();
+    expect(secondStop).toBe(firstStop);
+    expect(firstProcess.kill).toHaveBeenCalledTimes(1);
+    firstProcess.emitClose(undefined, "SIGTERM");
+    await firstStop;
+    await expect(firstFinish).rejects.toThrow("playback was stopped");
+
+    const second = sink.open(chunk(1, [3, 4]));
+    const secondFinish = second.finish();
+    secondProcess.emitClose(0);
+    await secondFinish;
+    expect(secondProcess.kill).not.toHaveBeenCalled();
+  });
+
+  it("escalates a stalled playback process from SIGTERM to SIGKILL", async () => {
+    vi.useFakeTimers();
+    const audioProcess = createAudioProcess();
+    const sink = createResidentContinuousPlaybackSink(alsaPlan, () => audioProcess.child);
+    const session = sink.open(chunk(0, [1, 2]));
+    const finishing = session.finish();
+    const stopped = sink.stop();
+
+    expect(audioProcess.kill).toHaveBeenCalledWith("SIGTERM");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(audioProcess.kill).toHaveBeenLastCalledWith("SIGKILL");
+    audioProcess.emitClose(undefined, "SIGKILL");
+
+    await stopped;
+    await expect(finishing).rejects.toThrow("playback was stopped");
+  });
+
+  it("releases playback ownership after the final termination timeout", async () => {
+    vi.useFakeTimers();
+    const firstProcess = createAudioProcess();
+    const nextProcess = createAudioProcess();
+    const processes = [firstProcess, nextProcess];
+    const spawn = vi.fn(() => requireAudioProcess(processes.shift()).child);
+    const sink = createResidentContinuousPlaybackSink(alsaPlan, spawn);
+    const first = sink.open(chunk(0, [1, 2]));
+    const finishing = first.finish();
+    const stopped = sink.stop();
+    const stopFailure = operationFailure(stopped);
+    const finishFailure = operationFailure(finishing);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    const stopError = await stopFailure;
+    const finishError = await finishFailure;
+    expect(stopError).toEqual(
+      new Error("pico resident voice alsa output did not stop after SIGKILL")
+    );
+    expect(finishError).toBe(stopError);
+
+    const next = sink.open(chunk(1, [3, 4]));
+    const nextFinish = next.finish();
+    nextProcess.emitClose(0);
+    await nextFinish;
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves a final timeout after playback exits successfully without closing", async () => {
+    vi.useFakeTimers();
+    const audioProcess = createAudioProcess();
+    const sink = createResidentContinuousPlaybackSink(alsaPlan, () => audioProcess.child);
+    const session = sink.open(chunk(0, [1, 2]));
+    const finishing = session.finish();
+
+    audioProcess.emitExit(0);
+    const stopped = sink.stop();
+    const stopFailure = operationFailure(stopped);
+    const finishFailure = operationFailure(finishing);
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    const stopError = await stopFailure;
+    expect(stopError).toEqual(
+      new Error("pico resident voice alsa output did not stop after SIGKILL")
+    );
+    await expect(finishFailure).resolves.toBe(stopError);
+  });
+
+  it("waits for playback close before admitting the next chunk", async () => {
+    const firstProcess = createAudioProcess();
+    const nextProcess = createAudioProcess();
+    const processes = [firstProcess, nextProcess];
+    const spawn = vi.fn(() => requireAudioProcess(processes.shift()).child);
+    const sink = createResidentContinuousPlaybackSink(alsaPlan, spawn);
+    const first = sink.open(chunk(0, [1, 2]));
+    const firstFinish = first.finish();
+
+    firstProcess.emitExit(0);
+    await expect(settledAfterImmediate(firstFinish)).resolves.toBe(false);
+    expect(() => sink.open(chunk(1, [3, 4]))).toThrow("already active");
+    firstProcess.emitClose(0);
+    await firstFinish;
+
+    const next = sink.open(chunk(1, [3, 4]));
+    const nextFinish = next.finish();
+    nextProcess.emitClose(0);
+    await nextFinish;
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves a ffplay final timeout after an exit-only cancellation", async () => {
+    vi.useFakeTimers();
+    const audioProcess = createAudioProcess();
+    const sink = createResidentContinuousPlaybackSink(ffplayPlan, () => audioProcess.child);
+    const session = sink.open(chunk(0, [0, 0, 1, 0]));
+    const finishing = session.finish();
+
+    audioProcess.emitExit(0);
+    const stopped = sink.stop();
+    const stopFailure = operationFailure(stopped);
+    const finishFailure = operationFailure(finishing);
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    const stopError = await stopFailure;
+    expect(stopError).toEqual(
+      new Error("pico resident voice ffplay output did not stop after SIGKILL")
+    );
+    await expect(finishFailure).resolves.toBe(stopError);
+  });
+
+  it("streams ffplay directly without creating a temporary WAV file", async () => {
+    const audioProcess = createAudioProcess();
+    const spawn = vi.fn(() => audioProcess.child);
+    const sink = createResidentContinuousPlaybackSink(ffplayPlan, spawn);
+    const first = chunk(0, [0, 0, 1, 0]);
+    const session = sink.open(first);
+
+    await session.write(first);
+    const finishing = session.finish();
+    audioProcess.emitClose(0);
+    await finishing;
+
+    const calls = spawn.mock.calls as unknown as Array<[string, readonly string[], unknown]>;
+    const arguments_ = calls[0]?.[1];
+    expect(arguments_).toContain("pipe:0");
+    expect(arguments_).not.toEqual(expect.arrayContaining([expect.stringMatching(/\.wav$/u)]));
+    expect(audioProcess.stdinBytes()).toEqual([0, 0, 1, 0]);
+  });
 });
 
 describe("resident playback readiness", () => {
