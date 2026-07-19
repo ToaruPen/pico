@@ -620,23 +620,40 @@ export function createConfiguredTts(
   probe: VoiceStageProbe = {},
   options: AivisSpeechTtsClientOptions = {}
 ) {
+  const callerObserver = options.observeStage;
+  const probeObserver: NonNullable<AivisSpeechTtsClientOptions["observeStage"]> = (observation) => {
+    recordVoiceStageProbe(probe, {
+      stage: observation.stage === "audio_query" ? "tts_audio_query" : "tts_synthesize",
+      status: observation.status,
+      startedAt: observation.startedAt,
+      durationMs: observation.durationMs,
+      attributes: {
+        "pico.voice.sentence_index": observation.sentenceIndex,
+        ...(observation.errorCode === undefined
+          ? {}
+          : { "pico.voice.error_code": observation.errorCode })
+      }
+    });
+  };
+
   return createAivisSpeechTtsClient(buildAivisSpeechService(config), {
     ...options,
     observeStage: (observation) => {
-      recordVoiceStageProbe(probe, {
-        stage: observation.stage === "audio_query" ? "tts_audio_query" : "tts_synthesize",
-        status: observation.status,
-        startedAt: observation.startedAt,
-        durationMs: observation.durationMs,
-        attributes: {
-          "pico.voice.sentence_index": observation.sentenceIndex,
-          ...(observation.errorCode === undefined
-            ? {}
-            : { "pico.voice.error_code": observation.errorCode })
-        }
-      });
+      notifyTtsStageObserver(callerObserver, observation);
+      notifyTtsStageObserver(probeObserver, observation);
     }
   });
+}
+
+function notifyTtsStageObserver(
+  observer: AivisSpeechTtsClientOptions["observeStage"],
+  observation: Parameters<NonNullable<AivisSpeechTtsClientOptions["observeStage"]>>[0]
+): void {
+  try {
+    observer?.(observation);
+  } catch {
+    // Each telemetry consumer is isolated from the provider and from its peers.
+  }
 }
 
 export async function assertResidentVoiceStartupReadiness(

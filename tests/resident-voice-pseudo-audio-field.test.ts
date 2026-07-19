@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createInProcessTelemetryCapture } from "../scripts/field/in-process-telemetry.js";
 import {
+  createResidentVoicePseudoAudioTts,
   formatResidentVoicePseudoAudioHelp,
   readResidentVoicePseudoAudioArguments,
   resolveResidentVoicePseudoAudioAgentSettings,
@@ -11,9 +12,65 @@ import {
 import { definePicoConfig } from "../src/config/index.js";
 import { createStructuredAuditLog } from "../src/modules/audit/index.js";
 import type { PicoTelemetry } from "../src/modules/telemetry/index.js";
+import type { TtsSynthesisEvent } from "../src/modules/voice/index.js";
+import { createResidentVoiceAuditLog } from "../src/runtime/resident-voice-audit-log.js";
 import type { PrivateResidentVoiceValidationSink } from "../src/runtime/resident-voice-validation.js";
 
 describe("resident voice pseudo-audio field contract", () => {
+  it("records Aivis substages through the field audit without exporting content", async () => {
+    const capture = createInProcessTelemetryCapture();
+    const auditEvents: unknown[] = [];
+    const audit = createResidentVoiceAuditLog({
+      stdoutEnabled: false,
+      writeEvent(event) {
+        auditEvents.push(event);
+        capture.telemetry.record(event);
+      }
+    });
+    const tts = createResidentVoicePseudoAudioTts(
+      definePicoConfig({
+        voice: {
+          tts: {
+            aivis: {
+              id: "local-aivis",
+              localBaseUrl: "http://127.0.0.1:10101",
+              speakerId: 1,
+              timeoutMs: 250
+            }
+          }
+        }
+      }),
+      audit,
+      {
+        fetch: (input) =>
+          Promise.resolve(
+            requestPath(input) === "/audio_query"
+              ? new Response(JSON.stringify({ privateQuery: "do-not-export" }))
+              : wavResponse()
+          ),
+        now: () => "2026-07-19T02:00:00.000Z",
+        monotonicNow: () => 0
+      }
+    );
+
+    await collectEvents(tts.synthesize({ text: "field private assistant text。" }));
+    await capture.telemetry.forceFlush();
+
+    expect(
+      auditEvents.map(
+        (event) =>
+          (event as { readonly attributes: Record<string, unknown> }).attributes["pico.voice.stage"]
+      )
+    ).toEqual(["tts_audio_query", "tts_synthesize"]);
+    expect(capture.inspection()).toEqual({ logRecordCount: 2, metricDataPointCount: 4 });
+    const serialized = JSON.stringify(auditEvents);
+    expect(serialized).not.toContain("field private assistant text");
+    expect(serialized).not.toContain("privateQuery");
+    expect(serialized).not.toContain("do-not-export");
+    expect(serialized).not.toContain("UklGR");
+    await capture.telemetry.shutdown();
+  });
+
   it("requires explicit fixture and contentful private-artifact paths", () => {
     expect(
       readResidentVoicePseudoAudioArguments([
@@ -150,4 +207,35 @@ function telemetryWithShutdown(shutdown: () => Promise<void>): PicoTelemetry {
       metrics: { consecutiveFailures: 0 }
     })
   };
+}
+
+async function collectEvents(events: AsyncIterable<TtsSynthesisEvent>): Promise<void> {
+  for await (const event of events) {
+    if (event.kind !== "chunk") return;
+  }
+}
+
+function requestPath(input: RequestInfo | URL): string {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  return new URL(url).pathname;
+}
+
+function wavResponse(): Response {
+  const samples = Buffer.from([1, 0]);
+  const wav = Buffer.alloc(44 + samples.byteLength);
+  wav.write("RIFF", 0, "ascii");
+  wav.writeUInt32LE(wav.byteLength - 8, 4);
+  wav.write("WAVE", 8, "ascii");
+  wav.write("fmt ", 12, "ascii");
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(24_000, 24);
+  wav.writeUInt32LE(48_000, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write("data", 36, "ascii");
+  wav.writeUInt32LE(samples.byteLength, 40);
+  samples.copy(wav, 44);
+  return new Response(wav);
 }

@@ -129,6 +129,63 @@ describe("resident voice TTS telemetry wiring", () => {
     expect(serialized).not.toContain("UklGR");
   });
 
+  it("delivers each provider observation once to both the caller and runner probe", async () => {
+    const audit = createStructuredAuditLog();
+    const callerObservations: unknown[] = [];
+    const tts = createConfiguredTts(
+      residentConfig(),
+      { audit },
+      {
+        fetch: (input) =>
+          Promise.resolve(
+            requestPath(input) === "/audio_query" ? new Response("{}") : wavResponse()
+          ),
+        observeStage: (observation) => {
+          callerObservations.push(observation);
+        }
+      }
+    );
+
+    await collectEvents(tts.synthesize({ text: "一文。" }));
+
+    expect(callerObservations).toHaveLength(2);
+    expect(audit.entries()).toHaveLength(2);
+    expect(callerObservations.map((value) => (value as { stage: string }).stage)).toEqual([
+      "audio_query",
+      "synthesis"
+    ]);
+    expect(audit.entries().map((event) => event.attributes["pico.voice.stage"])).toEqual([
+      "tts_audio_query",
+      "tts_synthesize"
+    ]);
+  });
+
+  it("records the runner probe when the caller observer throws", async () => {
+    const audit = createStructuredAuditLog();
+    let callerObservationCount = 0;
+    const tts = createConfiguredTts(
+      residentConfig(),
+      { audit },
+      {
+        fetch: (input) =>
+          Promise.resolve(
+            requestPath(input) === "/audio_query" ? new Response("{}") : wavResponse()
+          ),
+        observeStage: () => {
+          callerObservationCount += 1;
+          throw new Error("caller telemetry unavailable");
+        }
+      }
+    );
+
+    await expect(collectEvents(tts.synthesize({ text: "一文。" }))).resolves.toMatchObject([
+      { kind: "chunk", chunk: { sentenceIndex: 0 } },
+      { kind: "completed", chunkCount: 1 }
+    ]);
+    expect(callerObservationCount).toBe(2);
+    expect(audit.entries()).toHaveLength(2);
+  });
+
   it("maps provider error and skipped observations with only bounded error attributes", async () => {
     const errorAudit = createStructuredAuditLog();
     const errorTts = createConfiguredTts(
@@ -195,8 +252,44 @@ describe("resident voice TTS telemetry wiring", () => {
     );
   });
 
+  it("keeps provider exception URLs and content out of runner probe serialization", async () => {
+    const audit = createStructuredAuditLog();
+    const callerObservations: unknown[] = [];
+    const privateDiagnostic =
+      "fetch failed /audio_query?text=runner秘密本文&speaker=private-speaker";
+    const tts = createConfiguredTts(
+      residentConfig(),
+      { audit },
+      {
+        fetch: () => Promise.reject(new Error(privateDiagnostic)),
+        observeStage: (observation) => {
+          callerObservations.push(observation);
+        }
+      }
+    );
+
+    const events = await collectEvents(tts.synthesize({ text: "runner秘密本文。" }));
+    const failureMessage = events[0]?.kind === "failed" ? events[0].failure.message : "";
+    const serialized = JSON.stringify({
+      failureMessage,
+      callerObservations,
+      auditEvents: audit.entries()
+    });
+
+    expect(failureMessage).toBe("pico TTS Aivis Speech audio_query request failed");
+    expect(audit.entries()[0]?.attributes).toMatchObject({
+      "pico.voice.stage": "tts_audio_query",
+      "pico.voice.stage_status": "error",
+      "pico.voice.error_code": "backend_error"
+    });
+    expect(serialized).not.toContain("runner秘密本文");
+    expect(serialized).not.toContain("text=");
+    expect(serialized).not.toContain("private-speaker");
+  });
+
   it("contains probe validation failures without changing TTS completion", async () => {
     const audit = createStructuredAuditLog();
+    let callerObservationCount = 0;
     const tts = createConfiguredTts(
       residentConfig(),
       { audit },
@@ -205,7 +298,10 @@ describe("resident voice TTS telemetry wiring", () => {
           Promise.resolve(
             requestPath(input) === "/audio_query" ? new Response("{}") : wavResponse()
           ),
-        now: () => "invalid timestamp"
+        now: () => "invalid timestamp",
+        observeStage: () => {
+          callerObservationCount += 1;
+        }
       }
     );
 
@@ -213,6 +309,7 @@ describe("resident voice TTS telemetry wiring", () => {
       { kind: "chunk", chunk: { sentenceIndex: 0 } },
       { kind: "completed", chunkCount: 1 }
     ]);
+    expect(callerObservationCount).toBe(2);
     expect(audit.entries()).toEqual([]);
   });
 });

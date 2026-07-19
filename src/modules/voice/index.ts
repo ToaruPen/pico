@@ -1296,12 +1296,7 @@ async function runAivisSpeechStage<T>(
       return aivisAbortFailure(service, abortReason, stage, sentenceIndex);
     }
 
-    return ttsFailure(
-      service,
-      "backend_error",
-      aivisRequestErrorMessage(stage, error),
-      sentenceIndex
-    );
+    return ttsFailure(service, "backend_error", aivisRequestErrorMessage(stage), sentenceIndex);
   } finally {
     clearTimeout(timeout);
     signal?.removeEventListener("abort", cancel);
@@ -1580,11 +1575,7 @@ function aivisAbortFailure(
   return ttsFailure(service, reason, "pico TTS Aivis Speech request was cancelled", sentenceIndex);
 }
 
-function aivisRequestErrorMessage(stage: "audio_query" | "synthesis", error: unknown): string {
-  if (error instanceof Error && error.message.trim() !== "") {
-    return `pico TTS Aivis Speech ${stage} request failed: ${error.message}`;
-  }
-
+function aivisRequestErrorMessage(stage: "audio_query" | "synthesis"): string {
   return `pico TTS Aivis Speech ${stage} request failed`;
 }
 

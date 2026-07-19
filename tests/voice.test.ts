@@ -837,6 +837,43 @@ describe("Aivis Speech TTS boundary", () => {
     expect(JSON.stringify(observations)).not.toContain("provider detail must not leak");
   });
 
+  it("redacts arbitrary provider exception details from failures and observations", async () => {
+    const observations: TtsProviderStageObservation[] = [];
+    const privateDiagnostic =
+      "fetch failed http://127.0.0.1/audio_query?text=秘密の本文&speaker=private-speaker";
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: () => Promise.reject(new Error(privateDiagnostic)),
+      now: () => "2026-07-19T00:00:00.000Z",
+      monotonicNow: () => 0,
+      observeStage: (observation) => {
+        observations.push(observation);
+      }
+    });
+
+    const events = await collectEvents(client.synthesize({ text: "秘密の本文。" }));
+
+    expect(events).toMatchObject([
+      {
+        kind: "failed",
+        failure: {
+          reason: "backend_error",
+          message: "pico TTS Aivis Speech audio_query request failed"
+        }
+      }
+    ]);
+    expect(observations).toEqual([
+      expect.objectContaining({
+        stage: "audio_query",
+        status: "error",
+        errorCode: "backend_error"
+      })
+    ]);
+    expect(events[0]?.kind === "failed" ? events[0].failure.message : "").not.toContain(
+      privateDiagnostic
+    );
+    expect(JSON.stringify(observations)).not.toContain(privateDiagnostic);
+  });
+
   it.each([
     {
       name: "synthesis HTTP failure",

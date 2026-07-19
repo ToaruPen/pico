@@ -4,9 +4,10 @@ import { pathToFileURL } from "node:url";
 import { AuthStorage, type ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
 
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config/index.js";
-import type { AuditEvent } from "../../src/modules/audit/index.js";
+import type { AuditEvent, StructuredAuditLog } from "../../src/modules/audit/index.js";
 import { createSessionLifecycle } from "../../src/modules/session/index.js";
 import type { PicoTelemetry, TelemetryHealthSnapshot } from "../../src/modules/telemetry/index.js";
+import type { AivisSpeechTtsClientOptions, TtsClient } from "../../src/modules/voice/index.js";
 import { createPiAgentTurnClient } from "../../src/runtime/pi-agent-turn.js";
 import type { ResidentAudioCapture } from "../../src/runtime/resident-audio-io.js";
 import {
@@ -77,6 +78,14 @@ export type ResidentVoicePseudoAudioReport = {
     readonly errorCode?: string;
   }[];
 };
+
+export function createResidentVoicePseudoAudioTts(
+  config: PicoConfig,
+  audit: StructuredAuditLog,
+  options: AivisSpeechTtsClientOptions = {}
+): TtsClient {
+  return createConfiguredTts(config, { audit }, options);
+}
 
 type ResidentVoicePseudoAudioAgentSettings = {
   readonly model: NonNullable<ExtensionContext["model"]>;
@@ -344,7 +353,7 @@ async function executeResidentVoicePseudoAudio(input: {
       echoControl: createConfiguredEchoControl(config),
       speechActivity: await createConfiguredSpeechActivityGate(config),
       stt: createConfiguredStt(config),
-      tts: createConfiguredTts(config),
+      tts: createResidentVoicePseudoAudioTts(config, audit),
       playback: createResidentContinuousPlaybackSink(createResidentAudioOutputPlan(config)),
       piAgent,
       farewell: { enabled: false },
