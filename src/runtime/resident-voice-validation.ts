@@ -46,6 +46,13 @@ export type PrivateResidentVoiceArtifact = {
   readonly close: () => void;
 };
 
+type PrivateResidentVoiceArtifactWrite = (
+  descriptor: number,
+  buffer: Buffer,
+  offset: number,
+  length: number
+) => number;
+
 const defaultMaximumPayloadBytes = 256 * 1024;
 
 export function createPrivateResidentVoiceArtifact(options: {
@@ -83,7 +90,7 @@ function createPrivateArtifact(path: string, label: string): PrivateResidentVoic
       if (closed) {
         throw new Error(`pico resident voice ${label} is closed`);
       }
-      writeSync(descriptor, content, undefined, "utf8");
+      writePrivateResidentVoiceArtifactContent(descriptor, content);
     },
     close() {
       if (closed) {
@@ -93,6 +100,34 @@ function createPrivateArtifact(path: string, label: string): PrivateResidentVoic
       closeSync(descriptor);
     }
   };
+}
+
+// Exported only as a deterministic seam for short-write handling.
+export function writePrivateResidentVoiceArtifactContent(
+  descriptor: number,
+  content: string,
+  write: PrivateResidentVoiceArtifactWrite = writePrivateArtifactBytes
+): void {
+  const buffer = Buffer.from(content, "utf8");
+  let offset = 0;
+
+  while (offset < buffer.byteLength) {
+    const remaining = buffer.byteLength - offset;
+    const written = write(descriptor, buffer, offset, remaining);
+    if (!Number.isInteger(written) || written <= 0 || written > remaining) {
+      throw new Error("pico resident voice private artifact write made no progress");
+    }
+    offset += written;
+  }
+}
+
+function writePrivateArtifactBytes(
+  descriptor: number,
+  buffer: Buffer,
+  offset: number,
+  length: number
+): number {
+  return writeSync(descriptor, buffer, offset, length);
 }
 
 function requirePrivateArtifactDirectory(path: string, label: string): void {

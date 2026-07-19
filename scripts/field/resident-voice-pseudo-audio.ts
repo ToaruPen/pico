@@ -1,5 +1,6 @@
 #!/usr/bin/env jiti
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { AuthStorage, type ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
@@ -480,12 +481,15 @@ function requireDistinctPseudoAudioPaths(
   validationOutputPath: string,
   reportOutputPath: string | undefined
 ): void {
-  if (audioFixturePath === validationOutputPath) {
+  const resolvedAudioFixturePath = resolve(audioFixturePath);
+  const resolvedValidationOutputPath = resolve(validationOutputPath);
+  if (resolvedAudioFixturePath === resolvedValidationOutputPath) {
     throw invalidArguments("--validation-output must differ from --audio-fixture");
   }
   if (
     reportOutputPath !== undefined &&
-    (reportOutputPath === audioFixturePath || reportOutputPath === validationOutputPath)
+    (resolve(reportOutputPath) === resolvedAudioFixturePath ||
+      resolve(reportOutputPath) === resolvedValidationOutputPath)
   ) {
     throw invalidArguments(
       "--report-output must differ from --audio-fixture and --validation-output"
@@ -601,7 +605,8 @@ function asPseudoAudioError(value: unknown): Error {
 
 // This orchestration is field-only; production resident startup never constructs these sinks.
 export async function runResidentVoicePseudoAudio(
-  arguments_: ResidentVoicePseudoAudioArguments
+  arguments_: ResidentVoicePseudoAudioArguments,
+  reservedValidation?: PrivateResidentVoiceValidationSink
 ): Promise<ResidentVoicePseudoAudioReport> {
   const config = loadPicoConfigFromEnvironment();
   requireResidentVoiceEnabled(config);
@@ -625,6 +630,7 @@ export async function runResidentVoicePseudoAudio(
   return withResidentVoicePseudoAudioOwners({
     telemetry,
     createValidation: () =>
+      reservedValidation ??
       createPrivateResidentVoiceValidationSink({ path: arguments_.validationOutputPath }),
     run: (privateValidation) =>
       executeResidentVoicePseudoAudio({
@@ -846,38 +852,64 @@ export async function runResidentVoicePseudoAudioCommand(
 ): Promise<number> {
   const writeStdout = dependencies.writeStdout ?? ((value) => process.stdout.write(value));
   const writeStderr = dependencies.writeStderr ?? ((value) => process.stderr.write(value));
-  let reportOutput: ResidentVoicePseudoAudioReportOutput | undefined;
 
   try {
-    reportOutput = openResidentVoicePseudoAudioReport(arguments_.reportOutputPath);
-    const report = await (dependencies.run ?? runResidentVoicePseudoAudio)(arguments_);
-    writeResidentVoicePseudoAudioReport(report, reportOutput, writeStdout);
-    return residentVoicePseudoAudioReportExitCode(report.status);
+    return await executeResidentVoicePseudoAudioCommand(
+      arguments_,
+      dependencies.run ?? runResidentVoicePseudoAudio,
+      writeStdout
+    );
   } catch (error) {
     writeStderr(`pico pseudo-audio validation failed: ${boundedErrorMessage(error)}\n`);
     return 2;
-  } finally {
-    reportOutput?.artifact.close();
   }
 }
 
-type ResidentVoicePseudoAudioReportOutput = {
-  readonly path: string;
-  readonly artifact: PrivateResidentVoiceArtifact;
+async function executeResidentVoicePseudoAudioCommand(
+  arguments_: ResidentVoicePseudoAudioArguments,
+  run: typeof runResidentVoicePseudoAudio,
+  writeStdout: (value: string) => void
+): Promise<number> {
+  const privateOutputs = openResidentVoicePseudoAudioPrivateOutputs(arguments_);
+  try {
+    const report = await run(arguments_, privateOutputs?.validation);
+    writeResidentVoicePseudoAudioReport(report, privateOutputs?.report, writeStdout);
+    return residentVoicePseudoAudioReportExitCode(report.status);
+  } finally {
+    privateOutputs?.validation.close();
+    privateOutputs?.report.close();
+  }
+}
+
+type ResidentVoicePseudoAudioPrivateOutputs = {
+  readonly validation: PrivateResidentVoiceValidationSink;
+  readonly report: PrivateResidentVoiceArtifact;
 };
 
-function openResidentVoicePseudoAudioReport(
-  path: string | undefined
-): ResidentVoicePseudoAudioReportOutput | undefined {
-  if (path === undefined) {
+function openResidentVoicePseudoAudioPrivateOutputs(
+  arguments_: ResidentVoicePseudoAudioArguments
+): ResidentVoicePseudoAudioPrivateOutputs | undefined {
+  if (arguments_.reportOutputPath === undefined) {
     return undefined;
   }
-  return { path, artifact: createPrivateResidentVoiceArtifact({ path }) };
+
+  const validation = createPrivateResidentVoiceValidationSink({
+    path: arguments_.validationOutputPath
+  });
+  try {
+    return {
+      validation,
+      report: createPrivateResidentVoiceArtifact({ path: arguments_.reportOutputPath })
+    };
+  } catch (error) {
+    validation.close();
+    throw error;
+  }
 }
 
 function writeResidentVoicePseudoAudioReport(
   report: ResidentVoicePseudoAudioReport,
-  output: ResidentVoicePseudoAudioReportOutput | undefined,
+  output: PrivateResidentVoiceArtifact | undefined,
   writeStdout: (value: string) => void
 ): void {
   const serialized = `${JSON.stringify(report, undefined, 2)}\n`;
@@ -885,8 +917,7 @@ function writeResidentVoicePseudoAudioReport(
     writeStdout(serialized);
     return;
   }
-  output.artifact.write(serialized);
-  writeStdout(`pico pseudo-audio ${report.status}; metadata report written to ${output.path}\n`);
+  output.write(serialized);
 }
 
 function residentVoicePseudoAudioReportExitCode(
@@ -897,7 +928,17 @@ function residentVoicePseudoAudioReportExitCode(
 
 function boundedErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return Buffer.from(message, "utf8").subarray(0, 1_024).toString("utf8");
+  let bounded = "";
+  let byteLength = 0;
+  for (const character of message) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (byteLength + characterBytes > 1_024) {
+      break;
+    }
+    bounded += character;
+    byteLength += characterBytes;
+  }
+  return bounded;
 }
 
 function isDirectExecution(): boolean {

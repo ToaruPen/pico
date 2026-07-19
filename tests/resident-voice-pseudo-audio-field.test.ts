@@ -1,6 +1,6 @@
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
@@ -150,6 +150,16 @@ describe("resident voice pseudo-audio field contract", () => {
         "/tmp/private/events.jsonl"
       ])
     ).toThrow("--report-output must differ");
+    expect(() =>
+      readResidentVoicePseudoAudioArguments([
+        "--audio-fixture",
+        "/tmp/pico-ja.wav",
+        "--validation-output",
+        "/tmp/private/events.jsonl",
+        "--report-output",
+        "/tmp/private/./events.jsonl"
+      ])
+    ).toThrow("--report-output must differ");
     expect(formatResidentVoicePseudoAudioHelp()).toContain("--report-output");
   });
 
@@ -174,8 +184,55 @@ describe("resident voice pseudo-audio field contract", () => {
     expect(serialized).not.toContain("unrelated Pi extension output");
     expect(serialized).not.toContain("private transcript");
     expect(serialized).not.toContain(knownFixtureTranscriptSha256);
-    expect(stdout).toHaveLength(2);
+    expect(stdout).toEqual(["unrelated Pi extension output"]);
     expect(stderr).toEqual([]);
+  });
+
+  it("keeps a passed report exit code when shared stdout is closed", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-voice-report-"));
+    const reportOutputPath = join(directory, "report.json");
+
+    const exitCode = await runResidentVoicePseudoAudioCommand(
+      pseudoAudioArguments(reportOutputPath),
+      {
+        run: () => Promise.resolve(pseudoAudioReport("passed")),
+        writeStdout: () => {
+          throw new Error("stdout closed");
+        },
+        writeStderr: () => undefined
+      }
+    );
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(reportOutputPath, "utf8"))).toMatchObject({ status: "passed" });
+  });
+
+  it("reserves aliased validation and report outputs before running providers", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-voice-output-alias-"));
+    const realDirectory = join(directory, "real");
+    const validationDirectory = join(realDirectory, "private");
+    const aliasedDirectory = join(directory, "alias");
+    mkdirSync(validationDirectory, { recursive: true, mode: 0o700 });
+    symlinkSync(realDirectory, aliasedDirectory, "dir");
+    const validationOutputPath = join(validationDirectory, "evidence.jsonl");
+    const reportOutputPath = join(aliasedDirectory, "private", "evidence.jsonl");
+    const run = vi.fn(() => Promise.resolve(pseudoAudioReport("passed")));
+
+    const exitCode = await runResidentVoicePseudoAudioCommand(
+      readResidentVoicePseudoAudioArguments([
+        "--audio-fixture",
+        "/tmp/pico-ja.wav",
+        "--validation-output",
+        validationOutputPath,
+        "--report-output",
+        reportOutputPath
+      ]),
+      { run, writeStdout: () => undefined, writeStderr: () => undefined }
+    );
+
+    expect(exitCode).toBe(2);
+    expect(run).not.toHaveBeenCalled();
+    expect(readFileSync(validationOutputPath, "utf8")).toBe("");
   });
 
   it("preserves metadata JSON on stdout when no report path is configured", async () => {
@@ -233,6 +290,31 @@ describe("resident voice pseudo-audio field contract", () => {
     expect(exitCode).toBe(2);
     expect(readFileSync(reportOutputPath, "utf8")).toBe("");
     expect(stderr).toEqual(["pico pseudo-audio validation failed: provider exploded\n"]);
+  });
+
+  it("bounds a fatal UTF-8 error message without introducing a replacement character", async () => {
+    const stderr: string[] = [];
+    const message = `${"a".repeat(1_023)}あ`;
+
+    const exitCode = await runResidentVoicePseudoAudioCommand(
+      readResidentVoicePseudoAudioArguments([
+        "--audio-fixture",
+        "/tmp/pico-ja.wav",
+        "--validation-output",
+        "/tmp/private/events.jsonl"
+      ]),
+      {
+        run: () => Promise.reject(new Error(message)),
+        writeStdout: () => undefined,
+        writeStderr: (value) => stderr.push(value)
+      }
+    );
+
+    const prefix = "pico pseudo-audio validation failed: ";
+    const bounded = stderr[0]?.slice(prefix.length, -1) ?? "";
+    expect(exitCode).toBe(2);
+    expect(Buffer.byteLength(bounded, "utf8")).toBeLessThanOrEqual(1_024);
+    expect(bounded).not.toContain("�");
   });
 
   it("accepts an explicit tool that must succeed during validation", () => {
@@ -724,7 +806,7 @@ function pseudoAudioArguments(reportOutputPath: string) {
     "--audio-fixture",
     "/tmp/pico-ja.wav",
     "--validation-output",
-    "/tmp/private/events.jsonl",
+    join(dirname(reportOutputPath), "events.jsonl"),
     "--report-output",
     reportOutputPath
   ]);

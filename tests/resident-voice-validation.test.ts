@@ -14,7 +14,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   createPrivateResidentVoiceArtifact,
-  createPrivateResidentVoiceValidationSink
+  createPrivateResidentVoiceValidationSink,
+  writePrivateResidentVoiceArtifactContent
 } from "../src/runtime/resident-voice-validation.js";
 
 describe("resident voice explicit validation artifact", () => {
@@ -30,6 +31,28 @@ describe("resident voice explicit validation artifact", () => {
     expect(readFileSync(path, "utf8")).toBe('{"status":"passed"}\n');
     expect(() => createPrivateResidentVoiceArtifact({ path })).toThrow(
       "private artifact must not already exist"
+    );
+  });
+
+  it("continues short writes until the complete UTF-8 content is persisted", () => {
+    const chunks: Buffer[] = [];
+
+    writePrivateResidentVoiceArtifactContent(
+      123,
+      '{"status":"成功"}\n',
+      (_descriptor, buffer, offset, length) => {
+        const written = Math.min(2, length);
+        chunks.push(Buffer.from(buffer.subarray(offset, offset + written)));
+        return written;
+      }
+    );
+
+    expect(Buffer.concat(chunks).toString("utf8")).toBe('{"status":"成功"}\n');
+  });
+
+  it("rejects a private artifact write that makes no progress", () => {
+    expect(() => writePrivateResidentVoiceArtifactContent(123, "metadata", () => 0)).toThrow(
+      "private artifact write made no progress"
     );
   });
 
