@@ -810,6 +810,30 @@ voice:
     });
   });
 
+  it("preserves explicit telemetry OTel settings while disabled", () => {
+    expect(
+      definePicoConfig({
+        telemetry: {
+          otel: {
+            enabled: false,
+            serviceName: "pico-disabled",
+            timeoutMs: 7000,
+            metricExportIntervalMs: 11_000,
+            shutdownTimeoutMs: 2000
+          }
+        }
+      }).telemetry
+    ).toEqual({
+      otel: {
+        enabled: false,
+        serviceName: "pico-disabled",
+        timeoutMs: 7000,
+        metricExportIntervalMs: 11_000,
+        shutdownTimeoutMs: 2000
+      }
+    });
+  });
+
   it("rejects invalid telemetry OTel settings", () => {
     const telemetry = (otel: unknown) => ({ telemetry: { otel } });
 

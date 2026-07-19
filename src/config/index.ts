@@ -547,7 +547,6 @@ function defineTelemetrySection(root: Record<string, unknown>): PicoConfig["tele
   };
 }
 
-// Enabled and disabled forms deliberately validate the same explicit fields but return distinct shapes.
 // eslint-disable-next-line complexity
 function defineTelemetryOtelConfig(
   input: Record<string, unknown> | undefined
@@ -568,62 +567,53 @@ function defineTelemetryOtelConfig(
   ]);
   const enabled = readOptionalBoolean(input.enabled, "pico config telemetry.otel.enabled") ?? false;
   const baseUrl = readOptionalTelemetryOtelBaseUrl(input.baseUrl);
-  const timeoutMs =
-    readOptionalBoundedPositiveInteger(
-      input.timeoutMs,
-      "pico config telemetry.otel.timeoutMs",
-      maxNodeTimeoutMs
-    ) ?? 10_000;
-  const metricExportIntervalMs =
-    readOptionalBoundedPositiveInteger(
-      input.metricExportIntervalMs,
-      "pico config telemetry.otel.metricExportIntervalMs",
-      maxNodeTimeoutMs
-    ) ?? 15_000;
+  const configuredTimeoutMs = readOptionalBoundedPositiveInteger(
+    input.timeoutMs,
+    "pico config telemetry.otel.timeoutMs",
+    maxNodeTimeoutMs
+  );
+  const configuredMetricExportIntervalMs = readOptionalBoundedPositiveInteger(
+    input.metricExportIntervalMs,
+    "pico config telemetry.otel.metricExportIntervalMs",
+    maxNodeTimeoutMs
+  );
+  const timeoutMs = configuredTimeoutMs ?? 10_000;
+  const metricExportIntervalMs = configuredMetricExportIntervalMs ?? 15_000;
 
   if (metricExportIntervalMs <= timeoutMs) {
     throw new Error("pico config telemetry.otel.metricExportIntervalMs must exceed timeoutMs");
   }
 
+  const serviceName = readOptionalString(
+    input.serviceName,
+    "pico config telemetry.otel.serviceName"
+  );
+  const shutdownTimeoutMs = readOptionalBoundedPositiveInteger(
+    input.shutdownTimeoutMs,
+    "pico config telemetry.otel.shutdownTimeoutMs",
+    maxNodeTimeoutMs
+  );
+
   if (enabled) {
     return {
       enabled,
       baseUrl: requireString(baseUrl, "pico config telemetry.otel.baseUrl"),
-      serviceName:
-        readOptionalString(input.serviceName, "pico config telemetry.otel.serviceName") ?? "pico",
+      serviceName: serviceName ?? "pico",
       timeoutMs,
       metricExportIntervalMs,
-      shutdownTimeoutMs:
-        readOptionalBoundedPositiveInteger(
-          input.shutdownTimeoutMs,
-          "pico config telemetry.otel.shutdownTimeoutMs",
-          maxNodeTimeoutMs
-        ) ?? 5_000
+      shutdownTimeoutMs: shutdownTimeoutMs ?? 5_000
     };
   }
 
   return {
     enabled,
     ...(baseUrl === undefined ? {} : { baseUrl }),
-    ...optionalStringProperty(input, "serviceName", "pico config telemetry.otel.serviceName"),
-    ...optionalBoundedPositiveIntegerProperty(
-      input,
-      "timeoutMs",
-      "pico config telemetry.otel.timeoutMs",
-      maxNodeTimeoutMs
-    ),
-    ...optionalBoundedPositiveIntegerProperty(
-      input,
-      "metricExportIntervalMs",
-      "pico config telemetry.otel.metricExportIntervalMs",
-      maxNodeTimeoutMs
-    ),
-    ...optionalBoundedPositiveIntegerProperty(
-      input,
-      "shutdownTimeoutMs",
-      "pico config telemetry.otel.shutdownTimeoutMs",
-      maxNodeTimeoutMs
-    )
+    ...(serviceName === undefined ? {} : { serviceName }),
+    ...(configuredTimeoutMs === undefined ? {} : { timeoutMs: configuredTimeoutMs }),
+    ...(configuredMetricExportIntervalMs === undefined
+      ? {}
+      : { metricExportIntervalMs: configuredMetricExportIntervalMs }),
+    ...(shutdownTimeoutMs === undefined ? {} : { shutdownTimeoutMs })
   };
 }
 

@@ -60,12 +60,9 @@ type PipelineState = {
   };
   pendingPull: Promise<Settlement<TimedPull>> | undefined;
   pendingPullResolvedChunk: boolean;
-  pendingPullTelemetry?: Promise<Settlement<void>>;
   submissionPending: boolean;
   pendingTerminalRequest?: PendingTerminalRequest;
-  iteratorCleanup?: Promise<void>;
   echoReferenceApplied: boolean;
-  echoReferencePendingWrite: boolean;
   echoReset?: Promise<"reset" | "unsafe">;
 };
 
@@ -136,8 +133,7 @@ export async function runTtsPlaybackPipeline(
     pendingPull: undefined,
     pendingPullResolvedChunk: false,
     submissionPending: false,
-    echoReferenceApplied: false,
-    echoReferencePendingWrite: false
+    echoReferenceApplied: false
   };
   const execution = await settle(executePipeline(state));
   if (!execution.ok) {
@@ -293,7 +289,6 @@ async function submitChunk(
     return convergePlaybackFailure(state, "playback_write_failed");
   }
 
-  state.echoReferencePendingWrite = false;
   state.playedChunkCount += 1;
   state.playedDurationMs += chunk.durationMs;
   return undefined;
@@ -703,9 +698,9 @@ function observePendingPullTelemetry(
   state: PipelineState,
   pendingPull: Promise<Settlement<TimedPull>>
 ): void {
-  state.pendingPullTelemetry = settle(
-    pendingPull.then((pull) => settleRequestFromPull(state, pendingPull, pull))
-  );
+  pendingPull
+    .then((pull) => settleRequestFromPull(state, pendingPull, pull))
+    .catch(() => undefined);
 }
 
 function settleRequestFromPull(
@@ -869,7 +864,6 @@ async function resolveEchoRegistration(
 async function resolveAppliedEchoRegistration(
   state: PipelineState
 ): Promise<EchoRegistrationOutcome> {
-  state.echoReferencePendingWrite = true;
   state.echoReferenceApplied = true;
   const signal = state.producerController.signal;
   if (!signal.aborted) {
@@ -901,7 +895,6 @@ function resetPendingEchoReference(state: PipelineState): Promise<"reset" | "uns
     ) {
       providerState.unsafe = false;
       state.echoReferenceApplied = false;
-      state.echoReferencePendingWrite = false;
       return "reset";
     }
     return "unsafe";
@@ -1013,12 +1006,11 @@ async function cleanUpIterator(state: PipelineState, waitForCleanup: boolean): P
   if (state.pendingPull === undefined) {
     if (waitForCleanup) {
       const cleanup = settle(closeIterator(state.iterator));
-      state.iteratorCleanup = cleanup.then(() => undefined);
       await settleWithinSafetyBound(cleanup, ITERATOR_CLEANUP_SAFETY_BOUND_MS);
       return;
     }
     const cleanup = closeIterator(state.iterator).then(() => settleDeferredRequest(state));
-    state.iteratorCleanup = settle(cleanup).then(() => undefined);
+    cleanup.catch(() => undefined);
     return;
   }
 
@@ -1027,7 +1019,7 @@ async function cleanUpIterator(state: PipelineState, waitForCleanup: boolean): P
     await closeIterator(state.iterator);
     settleDeferredRequest(state, terminalAtMs);
   });
-  state.iteratorCleanup = settle(cleanup).then(() => undefined);
+  cleanup.catch(() => undefined);
 }
 
 function terminalPullTime(
