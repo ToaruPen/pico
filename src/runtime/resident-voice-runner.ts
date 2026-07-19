@@ -20,6 +20,7 @@ import {
 } from "../modules/voice/echo-control.js";
 import {
   type AivisSpeechServiceConfig,
+  type AivisSpeechTtsClientOptions,
   checkAivisSpeechServiceHealth,
   createAivisSpeechTtsClient,
   createAppleSpeechSttClient,
@@ -31,8 +32,10 @@ import { type MacOSControlBridge, startMacOSControlBridge } from "./macos-contro
 import type { PiAgentTurnClientOptions } from "./pi-agent-turn.js";
 import { createResidentAudioCapture } from "./resident-audio-io.js";
 import {
+  assertResidentPlaybackReadiness,
   createResidentAudioOutputPlan,
-  createResidentContinuousPlaybackSink
+  createResidentContinuousPlaybackSink,
+  type ResidentAudioOutputPlan
 } from "./resident-audio-playback.js";
 import {
   createLoopbackHttpResidentControlServer,
@@ -64,7 +67,17 @@ import {
   type PiAgentTurnClient,
   type VoiceResidentRuntime
 } from "./voice-resident.js";
-import { voiceRuntimeStagePolicy } from "./voice-stage-probe.js";
+import {
+  recordVoiceStageProbe,
+  type VoiceStageProbe,
+  voiceRuntimeStagePolicy
+} from "./voice-stage-probe.js";
+
+export type ResidentVoiceStartupReadinessDependencies = {
+  readonly platform?: NodeJS.Platform;
+  readonly checkAivisHealth?: typeof checkAivisSpeechServiceHealth;
+  readonly assertPlaybackReadiness?: (plan: ResidentAudioOutputPlan) => Promise<void>;
+};
 
 export async function runDirectResidentVoiceHarness(
   createPiAgent: (options: PiAgentTurnClientOptions) => PiAgentTurnClient
@@ -116,10 +129,11 @@ export async function runResidentVoiceWithProviders(input: {
   readonly piAgent?: PiAgentTurnClient;
   readonly createPiAgent?: (options: PiAgentTurnClientOptions) => PiAgentTurnClient;
   readonly createTelemetry?: (options: OpenTelemetryProviderOptions) => PicoTelemetry;
+  readonly startupReadiness?: (config: PicoConfig) => Promise<void>;
 }): Promise<void> {
   const { config, signal } = input;
   requireResidentVoiceEnabled(config);
-  await assertResidentVoiceStartupReadiness(config);
+  await resolveStartupReadiness(input.startupReadiness)(config);
   const stdoutProbeMode = readVoiceProbeStdoutMode(process.env.PICO_VOICE_PROBE_STDOUT);
   const logRunMode = readResidentVoiceLogRunMode(process.env.PICO_RESIDENT_VOICE_LOG_MODE);
   const runId = readResidentVoiceRunId(process.env.PICO_RESIDENT_VOICE_RUN_ID);
@@ -169,7 +183,7 @@ export async function runResidentVoiceWithProviders(input: {
     });
     const deferredTools = createDeferredToolCoordinator();
     const stt = createConfiguredStt(config);
-    const tts = createConfiguredTts(config);
+    const tts = createConfiguredTts(config, configuredVoiceStageProbe(audit));
     const control = requireResidentControlConfig(config);
     const audioCapture = createResidentAudioCapture(config);
     const echoControl = createConfiguredEchoControl(config);
@@ -219,6 +233,16 @@ export async function runResidentVoiceWithProviders(input: {
   } finally {
     await shutdownResidentVoiceTelemetry(telemetry, writeProcessLine);
   }
+}
+
+function resolveStartupReadiness(
+  startupReadiness: ((config: PicoConfig) => Promise<void>) | undefined
+): (config: PicoConfig) => Promise<void> {
+  return startupReadiness ?? assertResidentVoiceStartupReadiness;
+}
+
+function configuredVoiceStageProbe(audit: VoiceStageProbe["audit"]): VoiceStageProbe {
+  return audit === undefined ? {} : { audit };
 }
 
 export function createConfiguredOpenTelemetry(
@@ -591,15 +615,55 @@ export function createConfiguredStt(config: PicoConfig) {
   );
 }
 
-export function createConfiguredTts(config: PicoConfig) {
-  return createAivisSpeechTtsClient(buildAivisSpeechService(config));
+export function createConfiguredTts(
+  config: PicoConfig,
+  probe: VoiceStageProbe = {},
+  options: AivisSpeechTtsClientOptions = {}
+) {
+  return createAivisSpeechTtsClient(buildAivisSpeechService(config), {
+    ...options,
+    observeStage: (observation) => {
+      recordVoiceStageProbe(probe, {
+        stage: observation.stage === "audio_query" ? "tts_audio_query" : "tts_synthesize",
+        status: observation.status,
+        startedAt: observation.startedAt,
+        durationMs: observation.durationMs,
+        attributes: {
+          "pico.voice.sentence_index": observation.sentenceIndex,
+          ...(observation.errorCode === undefined
+            ? {}
+            : { "pico.voice.error_code": observation.errorCode })
+        }
+      });
+    }
+  });
 }
 
-export async function assertResidentVoiceStartupReadiness(config: PicoConfig): Promise<void> {
-  const health = await checkAivisSpeechServiceHealth(buildAivisSpeechService(config));
+export async function assertResidentVoiceStartupReadiness(
+  config: PicoConfig,
+  dependencies: ResidentVoiceStartupReadinessDependencies = {}
+): Promise<void> {
+  const healthCheck = dependencies.checkAivisHealth ?? checkAivisSpeechServiceHealth;
+  const playbackCheck = dependencies.assertPlaybackReadiness ?? assertResidentPlaybackReadiness;
+  const service = buildAivisSpeechService(config);
+  const plan = createResidentAudioOutputPlan(config, dependencies.platform);
+  const [healthResult, playbackResult] = await Promise.allSettled([
+    healthCheck(service),
+    playbackCheck(plan)
+  ]);
+
+  if (healthResult.status === "rejected") {
+    throw healthResult.reason;
+  }
+
+  const health = healthResult.value;
 
   if (!health.ok) {
     throw new Error(`pico resident voice TTS provider is unhealthy: ${health.message}`);
+  }
+
+  if (playbackResult.status === "rejected") {
+    throw playbackResult.reason;
   }
 }
 

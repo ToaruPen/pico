@@ -135,8 +135,27 @@ export type TtsClient = {
   readonly synthesize: (request: TtsSynthesisRequest) => AsyncIterable<TtsSynthesisEvent>;
 };
 
+export type TtsProviderStageObservation = {
+  readonly stage: "audio_query" | "synthesis";
+  readonly sentenceIndex: number;
+  readonly status: "ok" | "error" | "skipped";
+  readonly startedAt: string;
+  readonly durationMs: number;
+  readonly errorCode?: string;
+};
+
 export type AivisSpeechTtsClientOptions = {
   readonly fetch?: typeof fetch;
+  readonly now?: () => string;
+  readonly monotonicNow?: () => number;
+  readonly observeStage?: (observation: TtsProviderStageObservation) => void;
+};
+
+type AivisSpeechTtsRuntime = {
+  readonly fetch: typeof fetch;
+  readonly now: () => string;
+  readonly monotonicNow: () => number;
+  readonly observeStage?: (observation: TtsProviderStageObservation) => void;
 };
 
 export type AivisSpeechServiceHealth =
@@ -186,6 +205,9 @@ const AIVIS_DEFAULT_VOICE: AivisSpeechVoiceParameters = {
 const SENTENCE_BOUNDARIES = new Set([".", "。", "！", "？", "!", "?", "…"]);
 const MAX_SPEECH_SEGMENT_CODE_POINTS = 120;
 const SOFT_SPEECH_BOUNDARIES = new Set(["、", ",", "，", ";", "；", ":", "：", " ", "\u3000"]);
+const MAX_STAGE_DURATION_MS = 2_147_483_647;
+const defaultNow = (): string => new Date().toISOString();
+const defaultMonotonicNow = (): number => performance.now();
 const TRAILING_SENTENCE_CLOSERS = new Set([
   '"',
   "'",
@@ -270,7 +292,12 @@ export function createAivisSpeechTtsClient(
   service: AivisSpeechServiceConfig,
   options: AivisSpeechTtsClientOptions = {}
 ): TtsClient {
-  const fetchImplementation = options.fetch ?? fetch;
+  const runtime: AivisSpeechTtsRuntime = {
+    fetch: options.fetch ?? fetch,
+    now: options.now ?? defaultNow,
+    monotonicNow: options.monotonicNow ?? defaultMonotonicNow,
+    ...(options.observeStage === undefined ? {} : { observeStage: options.observeStage })
+  };
 
   return {
     async *synthesize(request) {
@@ -297,7 +324,7 @@ export function createAivisSpeechTtsClient(
           sentenceIndex,
           sentence,
           service,
-          fetchImplementation,
+          runtime,
           request.signal
         );
 
@@ -997,7 +1024,7 @@ async function synthesizeSentenceWithAivisSpeech(
   sentenceIndex: number,
   text: string,
   service: AivisSpeechServiceConfig,
-  fetchImplementation: typeof fetch,
+  runtime: AivisSpeechTtsRuntime,
   signal: AbortSignal | undefined
 ): Promise<
   | {
@@ -1006,13 +1033,7 @@ async function synthesizeSentenceWithAivisSpeech(
     }
   | TtsSynthesisFailure
 > {
-  const audioQueryResult = await postAivisAudioQuery(
-    sentenceIndex,
-    text,
-    service,
-    fetchImplementation,
-    signal
-  );
+  const audioQueryResult = await postAivisAudioQuery(sentenceIndex, text, service, runtime, signal);
 
   if (!audioQueryResult.ok) {
     return audioQueryResult;
@@ -1023,7 +1044,7 @@ async function synthesizeSentenceWithAivisSpeech(
     text,
     audioQueryResult.payload,
     service,
-    fetchImplementation,
+    runtime,
     signal
   );
 }
@@ -1032,7 +1053,7 @@ async function postAivisAudioQuery(
   sentenceIndex: number,
   text: string,
   service: AivisSpeechServiceConfig,
-  fetchImplementation: typeof fetch,
+  runtime: AivisSpeechTtsRuntime,
   signal: AbortSignal | undefined
 ): Promise<
   | {
@@ -1041,13 +1062,15 @@ async function postAivisAudioQuery(
     }
   | TtsSynthesisFailure
 > {
+  const startedAt = runtime.now();
+  const startedAtMs = runtime.monotonicNow();
   const result = await runAivisSpeechStage(
     sentenceIndex,
     "audio_query",
     service,
     signal,
     async (stageSignal) => {
-      const response = await fetchImplementation(
+      const response = await runtime.fetch(
         buildAivisUrl(service, "/audio_query", { text, speaker: String(service.speakerId) }),
         {
           method: "POST",
@@ -1087,6 +1110,15 @@ async function postAivisAudioQuery(
     }
   );
 
+  observeSettledAivisSpeechStage(
+    runtime,
+    "audio_query",
+    sentenceIndex,
+    startedAt,
+    startedAtMs,
+    result.ok ? result.value : result
+  );
+
   if (!result.ok) {
     return result;
   }
@@ -1099,7 +1131,7 @@ async function postAivisSynthesis(
   text: string,
   audioQueryPayload: Record<string, unknown>,
   service: AivisSpeechServiceConfig,
-  fetchImplementation: typeof fetch,
+  runtime: AivisSpeechTtsRuntime,
   signal: AbortSignal | undefined
 ): Promise<
   | {
@@ -1108,13 +1140,15 @@ async function postAivisSynthesis(
     }
   | TtsSynthesisFailure
 > {
+  const startedAt = runtime.now();
+  const startedAtMs = runtime.monotonicNow();
   const result = await runAivisSpeechStage(
     sentenceIndex,
     "synthesis",
     service,
     signal,
     async (stageSignal) => {
-      const response = await fetchImplementation(
+      const response = await runtime.fetch(
         buildAivisUrl(service, "/synthesis", { speaker: String(service.speakerId) }),
         {
           method: "POST",
@@ -1170,11 +1204,58 @@ async function postAivisSynthesis(
     }
   );
 
+  observeSettledAivisSpeechStage(
+    runtime,
+    "synthesis",
+    sentenceIndex,
+    startedAt,
+    startedAtMs,
+    result.ok ? result.value : result
+  );
+
   if (!result.ok) {
     return result;
   }
 
   return result.value;
+}
+
+function observeSettledAivisSpeechStage(
+  runtime: AivisSpeechTtsRuntime,
+  stage: TtsProviderStageObservation["stage"],
+  sentenceIndex: number,
+  startedAt: string,
+  startedAtMs: number,
+  result: { readonly ok: true } | TtsSynthesisFailure
+): void {
+  const observation: TtsProviderStageObservation = result.ok
+    ? {
+        stage,
+        sentenceIndex,
+        status: "ok",
+        startedAt,
+        durationMs: elapsedSince(startedAtMs, runtime.monotonicNow)
+      }
+    : {
+        stage,
+        sentenceIndex,
+        status: result.reason === "cancelled" ? "skipped" : "error",
+        startedAt,
+        durationMs: elapsedSince(startedAtMs, runtime.monotonicNow),
+        errorCode: result.reason
+      };
+
+  try {
+    runtime.observeStage?.(observation);
+  } catch {
+    // Provider telemetry is best-effort and cannot change TTS settlement.
+  }
+}
+
+function elapsedSince(startedAtMs: number, monotonicNow: () => number): number {
+  const durationMs = monotonicNow() - startedAtMs;
+  if (!Number.isFinite(durationMs)) return 0;
+  return Math.min(MAX_STAGE_DURATION_MS, Math.max(0, durationMs));
 }
 
 async function runAivisSpeechStage<T>(

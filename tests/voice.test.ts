@@ -11,6 +11,7 @@ import {
   segmentJapaneseSentences,
   splitCompleteJapaneseSentences,
   type TtsAudioChunk,
+  type TtsProviderStageObservation,
   type TtsSynthesisEvent,
   type TtsSynthesisFailure,
   type TtsSynthesisSource
@@ -723,6 +724,252 @@ function ttsChunk(sentenceIndex: number, durationMs = 1): TtsAudioChunk {
 }
 
 describe("Aivis Speech TTS boundary", () => {
+  it("observes Aivis substages without exposing provider payloads", async () => {
+    const observations: TtsProviderStageObservation[] = [];
+    const wallClock = ["2026-07-19T00:00:00.000Z", "2026-07-19T00:00:01.000Z"];
+    const monotonicClock = [10, 13, 20, 27];
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: (input) =>
+        Promise.resolve(
+          requestUrl(input).includes("/audio_query")
+            ? buildSidecarResponse({ queryPayload: "must-not-leak" })
+            : new Response(
+                bytesToArrayBuffer(
+                  buildWav(Buffer.from([0x10, 0]), {
+                    sampleRateHz: 24_000,
+                    channels: 1
+                  })
+                )
+              )
+        ),
+      now: () => wallClock.shift() ?? "unexpected wall clock read",
+      monotonicNow: () => monotonicClock.shift() ?? Number.NaN,
+      observeStage: (observation) => {
+        observations.push(observation);
+      }
+    });
+
+    await collectEvents(client.synthesize({ text: "観測対象の本文。" }));
+
+    expect(observations).toEqual([
+      {
+        stage: "audio_query",
+        sentenceIndex: 0,
+        status: "ok",
+        startedAt: "2026-07-19T00:00:00.000Z",
+        durationMs: 3
+      },
+      {
+        stage: "synthesis",
+        sentenceIndex: 0,
+        status: "ok",
+        startedAt: "2026-07-19T00:00:01.000Z",
+        durationMs: 7
+      }
+    ]);
+    const serialized = JSON.stringify(observations);
+    expect(serialized).not.toContain("観測対象の本文");
+    expect(serialized).not.toContain("queryPayload");
+    expect(serialized).not.toContain("must-not-leak");
+    expect(serialized).not.toContain("UklGR");
+  });
+
+  it("observes every multi-sentence Aivis request exactly once in request order", async () => {
+    const observations: TtsProviderStageObservation[] = [];
+    let elapsedMs = 0;
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: (input) =>
+        Promise.resolve(
+          requestUrl(input).includes("/audio_query")
+            ? buildSidecarResponse({})
+            : new Response(
+                bytesToArrayBuffer(
+                  buildWav(Buffer.from([1, 0]), { sampleRateHz: 24_000, channels: 1 })
+                )
+              )
+        ),
+      now: () => "2026-07-19T00:00:00.000Z",
+      monotonicNow: () => elapsedMs++,
+      observeStage: (observation) => {
+        observations.push(observation);
+      }
+    });
+
+    await collectEvents(client.synthesize({ text: "一文目。二文目。" }));
+
+    expect(
+      observations.map(({ stage, sentenceIndex, status }) => ({
+        stage,
+        sentenceIndex,
+        status
+      }))
+    ).toEqual([
+      { stage: "audio_query", sentenceIndex: 0, status: "ok" },
+      { stage: "synthesis", sentenceIndex: 0, status: "ok" },
+      { stage: "audio_query", sentenceIndex: 1, status: "ok" },
+      { stage: "synthesis", sentenceIndex: 1, status: "ok" }
+    ]);
+  });
+
+  it("observes an audio_query error without fabricating a synthesis observation", async () => {
+    const observations: TtsProviderStageObservation[] = [];
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: () => Promise.resolve(new Response("provider detail must not leak", { status: 503 })),
+      now: () => "2026-07-19T00:00:00.000Z",
+      monotonicNow: () => 0,
+      observeStage: (observation) => {
+        observations.push(observation);
+      }
+    });
+
+    await collectEvents(client.synthesize({ text: "失敗する本文。" }));
+
+    expect(observations).toEqual([
+      {
+        stage: "audio_query",
+        sentenceIndex: 0,
+        status: "error",
+        startedAt: "2026-07-19T00:00:00.000Z",
+        durationMs: 0,
+        errorCode: "backend_error"
+      }
+    ]);
+    expect(JSON.stringify(observations)).not.toContain("provider detail must not leak");
+  });
+
+  it.each([
+    {
+      name: "synthesis HTTP failure",
+      synthesisResponse: new Response("provider detail must not leak", { status: 503 }),
+      errorCode: "backend_error"
+    },
+    {
+      name: "malformed synthesis body",
+      synthesisResponse: new Response("not a wav"),
+      errorCode: "invalid_response"
+    }
+  ])("observes $name with a bounded code", async ({ synthesisResponse, errorCode }) => {
+    const observations: TtsProviderStageObservation[] = [];
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: (input) =>
+        Promise.resolve(
+          requestUrl(input).includes("/audio_query") ? buildSidecarResponse({}) : synthesisResponse
+        ),
+      now: () => "2026-07-19T00:00:00.000Z",
+      monotonicNow: () => 0,
+      observeStage: (observation) => {
+        observations.push(observation);
+      }
+    });
+
+    await collectEvents(client.synthesize({ text: "失敗する本文。" }));
+
+    expect(observations).toEqual([
+      expect.objectContaining({ stage: "audio_query", status: "ok" }),
+      expect.objectContaining({
+        stage: "synthesis",
+        status: "error",
+        errorCode
+      })
+    ]);
+  });
+
+  it("observes active cancellation as skipped without changing the event result", async () => {
+    const observations: TtsProviderStageObservation[] = [];
+    const requestStarted = createGate<undefined>();
+    const abortController = new AbortController();
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          requestStarted.resolve(undefined);
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        }),
+      now: () => "2026-07-19T00:00:00.000Z",
+      monotonicNow: () => 0,
+      observeStage: (observation) => {
+        observations.push(observation);
+      }
+    });
+    const events = collectEvents(
+      client.synthesize({ text: "取り消す本文。", signal: abortController.signal })
+    );
+
+    await requestStarted.promise;
+    abortController.abort();
+
+    await expect(events).resolves.toMatchObject([
+      { kind: "failed", failure: { reason: "cancelled" } }
+    ]);
+    expect(observations).toEqual([
+      expect.objectContaining({
+        stage: "audio_query",
+        sentenceIndex: 0,
+        status: "skipped",
+        errorCode: "cancelled"
+      })
+    ]);
+  });
+
+  it("observes a stalled response body timeout as an error exactly once", async () => {
+    vi.useFakeTimers();
+    const observations: TtsProviderStageObservation[] = [];
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: () => Promise.resolve(unresolvedResponse()),
+      now: () => "2026-07-19T00:00:00.000Z",
+      monotonicNow: () => 0,
+      observeStage: (observation) => {
+        observations.push(observation);
+      }
+    });
+
+    try {
+      const events = collectEvents(client.synthesize({ text: "停止する本文。" }));
+      await vi.advanceTimersByTimeAsync(250);
+
+      await expect(events).resolves.toMatchObject([
+        { kind: "failed", failure: { reason: "timeout" } }
+      ]);
+      expect(observations).toEqual([
+        expect.objectContaining({
+          stage: "audio_query",
+          sentenceIndex: 0,
+          status: "error",
+          errorCode: "timeout"
+        })
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("contains observer exceptions without changing or duplicating synthesis events", async () => {
+    let observationCount = 0;
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: (input) =>
+        Promise.resolve(
+          requestUrl(input).includes("/audio_query")
+            ? buildSidecarResponse({})
+            : new Response(
+                bytesToArrayBuffer(
+                  buildWav(Buffer.from([1, 0]), { sampleRateHz: 24_000, channels: 1 })
+                )
+              )
+        ),
+      observeStage: () => {
+        observationCount += 1;
+        throw new Error("telemetry unavailable");
+      }
+    });
+
+    await expect(collectEvents(client.synthesize({ text: "一文だけ。" }))).resolves.toMatchObject([
+      { kind: "chunk", chunk: { sentenceIndex: 0 } },
+      { kind: "completed", chunkCount: 1 }
+    ]);
+    expect(observationCount).toBe(2);
+  });
+
   it("publishes the first chunk before the next sentence synthesis completes", async () => {
     const secondSynthesis = createGate<Response>();
     const requests: string[] = [];
