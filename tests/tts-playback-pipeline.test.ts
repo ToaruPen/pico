@@ -1192,6 +1192,27 @@ describe("TTS playback pipeline", () => {
     expect(JSON.stringify(events)).not.toContain('"audio"');
   });
 
+  it("keeps playback successful when trailing-silence diagnostics reject invalid PCM", async () => {
+    const audit = createStructuredAuditLog();
+    const playback = recordingPlayback();
+
+    await expect(
+      runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), chunkEvent(1, { audio: [1] }), completedEvent(2)]),
+          playback,
+          probe: { audit }
+        })
+      )
+    ).resolves.toEqual({ status: "completed", playedChunkCount: 2, durationMs: 20 });
+
+    const playbackEvent = audit
+      .entries()
+      .find((event) => event.attributes["pico.voice.stage"] === "tts_playback");
+    expect(playbackEvent?.attributes).not.toHaveProperty("pico.voice.trailing_silence_ms");
+    expect(playback.state.writes).toHaveLength(2);
+  });
+
   it("settles failed request telemetry at the producer terminal without delaying the result", async () => {
     const audit = createStructuredAuditLog();
     const clock = { value: 0 };

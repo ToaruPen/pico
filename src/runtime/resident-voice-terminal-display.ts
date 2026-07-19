@@ -135,69 +135,73 @@ export function createResidentVoiceTerminalDisplay(
     // The discriminated union keeps every operator event transition visible in one place.
     // eslint-disable-next-line complexity
     record(event) {
-      switch (event.kind) {
-        case "turn_started":
-          timings.clear();
-          pendingTools.clear();
-          assistantStopReason = undefined;
-          break;
-        case "staff_transcript":
-          appendHistory(`Staff: ${formatOperatorText(event.text, maximumTextBytes)}`);
-          break;
-        case "pi_response": {
-          const stopReason = assistantStopReason;
-          assistantStopReason = undefined;
-          appendHistory(
-            `Pico: ${formatOperatorText(event.text, maximumTextBytes)}${
-              stopReason === undefined ? "" : ` [stop=${stopReason}]`
-            }`
-          );
-          break;
+      try {
+        switch (event.kind) {
+          case "turn_started":
+            timings.clear();
+            pendingTools.clear();
+            assistantStopReason = undefined;
+            break;
+          case "staff_transcript":
+            appendHistory(`Staff: ${formatOperatorText(event.text, maximumTextBytes)}`);
+            break;
+          case "pi_response": {
+            const stopReason = assistantStopReason;
+            assistantStopReason = undefined;
+            appendHistory(
+              `Pico: ${formatOperatorText(event.text, maximumTextBytes)}${
+                stopReason === undefined ? "" : ` [stop=${stopReason}]`
+              }`
+            );
+            break;
+          }
+          case "assistant_settled":
+            assistantStopReason = formatOperatorText(event.stopReason, 128);
+            break;
+          case "tool_execution_start": {
+            evictOldestPendingTool(pendingTools);
+            pendingTools.set(event.toolCallId, {
+              toolName: formatOperatorText(event.toolName, maximumToolNameBytes).trim(),
+              args: formatPayload(event.args, maximumPayloadBytes)
+            });
+            break;
+          }
+          case "tool_execution_end": {
+            const pending = pendingTools.get(event.toolCallId);
+            pendingTools.delete(event.toolCallId);
+            const name = formatOperatorText(
+              pending?.toolName ?? event.toolName,
+              maximumToolNameBytes
+            ).trim();
+            const arguments_ = pending?.args ?? "undefined";
+            const result =
+              "result" in event ? ` ${formatPayload(event.result, maximumPayloadBytes)}` : "";
+            const status = event.errorCode === "cancelled" ? "cancelled" : event.status;
+            const errorCode = event.errorCode === undefined ? "" : ` [${event.errorCode}]`;
+            appendHistory(
+              `Tool: ${name}(${arguments_}) -> ${status} ${formatDuration(
+                event.durationMs
+              )}${errorCode}${result}`
+            );
+            break;
+          }
+          case "stage":
+            timings.set(event.stage, {
+              durationMs: event.durationMs,
+              status: event.status,
+              ...(typeof event.attributes["pico.voice.trailing_silence_ms"] === "number"
+                ? {
+                    trailingSilenceMs: event.attributes["pico.voice.trailing_silence_ms"]
+                  }
+                : {})
+            });
+            break;
         }
-        case "assistant_settled":
-          assistantStopReason = formatOperatorText(event.stopReason, 128);
-          break;
-        case "tool_execution_start": {
-          evictOldestPendingTool(pendingTools);
-          pendingTools.set(event.toolCallId, {
-            toolName: formatOperatorText(event.toolName, maximumToolNameBytes).trim(),
-            args: formatPayload(event.args, maximumPayloadBytes)
-          });
-          break;
-        }
-        case "tool_execution_end": {
-          const pending = pendingTools.get(event.toolCallId);
-          pendingTools.delete(event.toolCallId);
-          const name = formatOperatorText(
-            pending?.toolName ?? event.toolName,
-            maximumToolNameBytes
-          ).trim();
-          const arguments_ = pending?.args ?? "undefined";
-          const result =
-            "result" in event ? ` ${formatPayload(event.result, maximumPayloadBytes)}` : "";
-          const status = event.errorCode === "cancelled" ? "cancelled" : event.status;
-          const errorCode = event.errorCode === undefined ? "" : ` [${event.errorCode}]`;
-          appendHistory(
-            `Tool: ${name}(${arguments_}) -> ${status} ${formatDuration(
-              event.durationMs
-            )}${errorCode}${result}`
-          );
-          break;
-        }
-        case "stage":
-          timings.set(event.stage, {
-            durationMs: event.durationMs,
-            status: event.status,
-            ...(typeof event.attributes["pico.voice.trailing_silence_ms"] === "number"
-              ? {
-                  trailingSilenceMs: event.attributes["pico.voice.trailing_silence_ms"]
-                }
-              : {})
-          });
-          break;
-      }
 
-      render();
+        render();
+      } catch {
+        // Operator visibility is best-effort and cannot own runtime success.
+      }
     }
   };
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-
+import type { ResidentVoiceOperatorEvent } from "../src/runtime/resident-voice-operator.js";
 import {
   createResidentVoiceTerminalDisplay,
   createResidentVoiceTerminalOperator
@@ -319,5 +319,15 @@ describe("resident voice terminal display", () => {
         text: "続行する"
       })
     ).not.toThrow();
+  });
+
+  it("contains malformed operator events so formatting cannot fail the voice runtime", () => {
+    const display = createResidentVoiceTerminalDisplay({ setLines: vi.fn() });
+    const malformedEvent = {
+      kind: "staff_transcript",
+      text: undefined
+    } as unknown as ResidentVoiceOperatorEvent;
+
+    expect(() => display.record(malformedEvent)).not.toThrow();
   });
 });

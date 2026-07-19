@@ -47,7 +47,7 @@ type PipelineState = {
   session?: VoicePlaybackSession;
   playedChunkCount: number;
   playedDurationMs: number;
-  trailingSilenceMs?: number;
+  trailingSilenceMs: number | undefined;
   firstChunkSettled: boolean;
   requestSettled: boolean;
   playbackStartedAt?: string;
@@ -129,6 +129,7 @@ export async function runTtsPlaybackPipeline(
     requestStartedAtMs: options.monotonicNow(),
     playedChunkCount: 0,
     playedDurationMs: 0,
+    trailingSilenceMs: undefined,
     firstChunkSettled: false,
     requestSettled: false,
     playbackSettled: false,
@@ -293,7 +294,7 @@ async function submitChunk(
 
   state.playedChunkCount += 1;
   state.playedDurationMs += chunk.durationMs;
-  state.trailingSilenceMs = measureTrailingPcm16SilenceMs(
+  state.trailingSilenceMs = tryMeasureTrailingPcm16SilenceMs(
     chunk.audio,
     chunk.sampleRateHz,
     chunk.channels
@@ -624,6 +625,18 @@ export function measureTrailingPcm16SilenceMs(
   }
 
   return (silentFrames * 1_000) / sampleRateHz;
+}
+
+function tryMeasureTrailingPcm16SilenceMs(
+  audio: Uint8Array,
+  sampleRateHz: number,
+  channels: number
+): number | undefined {
+  try {
+    return measureTrailingPcm16SilenceMs(audio, sampleRateHz, channels);
+  } catch {
+    return undefined;
+  }
 }
 
 function isValidPcm16Measurement(
