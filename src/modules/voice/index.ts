@@ -389,7 +389,11 @@ async function readTtsSynthesisEventStream(events: AsyncIterable<TtsSynthesisEve
 }
 
 function sameTtsSynthesisSource(left: TtsSynthesisSource, right: TtsSynthesisSource): boolean {
-  return left.serviceId === right.serviceId && left.speakerId === right.speakerId;
+  return (
+    left.serviceId === right.serviceId &&
+    Object.is(left.provider, right.provider) &&
+    left.speakerId === right.speakerId
+  );
 }
 
 export async function checkAivisSpeechServiceHealth(

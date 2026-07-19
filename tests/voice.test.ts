@@ -1052,6 +1052,27 @@ describe("Aivis Speech TTS boundary", () => {
     ).resolves.toBe(failure);
   });
 
+  it("rejects a completed source whose provider differs from collected chunks", async () => {
+    const providerMismatchSource = {
+      ...aivisSource,
+      provider: "other-tts"
+    } as unknown as TtsSynthesisSource;
+
+    await expect(
+      collectTtsSynthesisEvents(
+        eventStream([
+          { kind: "chunk", chunk: ttsChunk(0) },
+          {
+            kind: "completed",
+            chunkCount: 1,
+            totalDurationMs: 1,
+            source: providerMismatchSource
+          }
+        ])
+      )
+    ).rejects.toThrow("pico TTS synthesis completed source does not match collected chunks");
+  });
+
   it.each([
     {
       name: "a missing terminal",
