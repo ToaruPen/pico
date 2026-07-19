@@ -9,8 +9,8 @@ export type PicoConfig = DeepReadonly<{
     model?: PicoAgentModelConfig;
   };
   session: PicoSessionConfig;
-  audit: {
-    otel: PicoAuditOtelConfig;
+  telemetry: {
+    otel: PicoTelemetryOtelConfig;
   };
   camera: {
     tapo?: PicoTapoConfig;
@@ -41,22 +41,19 @@ export type PicoAgentModelConfig = {
 
 export type PicoSessionConfig = {
   readonly enabled: boolean;
-  readonly startTriggers: {
-    readonly wakeNames: readonly string[];
-    readonly greetings: readonly string[];
-    readonly candidateTimeoutMs: number;
-  };
   readonly ending: {
     readonly mode: "timed";
     readonly durationMs: number;
   };
 };
 
-export type PicoAuditOtelConfig = {
+export type PicoTelemetryOtelConfig = {
   readonly enabled: boolean;
-  readonly endpoint?: string;
+  readonly baseUrl?: string;
   readonly serviceName?: string;
   readonly timeoutMs?: number;
+  readonly metricExportIntervalMs?: number;
+  readonly shutdownTimeoutMs?: number;
 };
 
 export type PicoTapoConfig = {
@@ -134,26 +131,108 @@ export type PicoVoiceResidentConfig = {
   readonly audioInput?: PicoResidentAudioInputConfig;
   readonly audioOutput?: PicoResidentAudioOutputConfig;
   readonly singleInstanceLockPath: string;
-  readonly minTriggerConfidence: number;
   readonly shutdownGraceMs: number;
-  readonly activation: PicoVoiceResidentActivationConfig;
+  readonly control?: PicoResidentControlConfig;
   readonly vad: PicoVoiceResidentVadConfig;
-  readonly utteranceWindow: PicoVoiceUtteranceWindowConfig;
 };
 
-export type PicoVoiceResidentActivationConfig =
-  | {
-      readonly mode: "wake_word";
-    }
-  | {
-      readonly mode: "push_to_talk";
-      readonly provider: "loopback_http";
-      readonly host: "127.0.0.1" | "::1";
-      readonly port: number;
-      readonly authTokenPath: string;
-      readonly debounceMs: number;
-      readonly activationWindowMs: number;
-    };
+export type PicoResidentControlConfig = {
+  readonly provider: "loopback_http";
+  readonly host: "127.0.0.1" | "::1";
+  readonly port: number;
+  readonly authTokenPath: string;
+  readonly keyboard: {
+    readonly provider: "macos";
+    readonly talkKey: PicoMacKey;
+    readonly cancelKey: PicoMacKey;
+  };
+};
+
+const picoMacKeys = [
+  "A",
+  "B",
+  "C",
+  "D",
+  "E",
+  "F",
+  "G",
+  "H",
+  "I",
+  "J",
+  "K",
+  "L",
+  "M",
+  "N",
+  "O",
+  "P",
+  "Q",
+  "R",
+  "S",
+  "T",
+  "U",
+  "V",
+  "W",
+  "X",
+  "Y",
+  "Z",
+  "0",
+  "1",
+  "2",
+  "3",
+  "4",
+  "5",
+  "6",
+  "7",
+  "8",
+  "9",
+  "F1",
+  "F2",
+  "F3",
+  "F4",
+  "F5",
+  "F6",
+  "F7",
+  "F8",
+  "F9",
+  "F10",
+  "F11",
+  "F12",
+  "F13",
+  "F14",
+  "F15",
+  "F16",
+  "F17",
+  "F18",
+  "F19",
+  "F20",
+  "Space",
+  "Tab",
+  "Return",
+  "Escape",
+  "Backspace",
+  "Delete",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+  "LeftArrow",
+  "RightArrow",
+  "UpArrow",
+  "DownArrow",
+  "Minus",
+  "Equal",
+  "LeftBracket",
+  "RightBracket",
+  "Backslash",
+  "Semicolon",
+  "Quote",
+  "Comma",
+  "Period",
+  "Slash",
+  "Grave"
+] as const;
+
+export type PicoMacKey = (typeof picoMacKeys)[number];
 
 export type PicoVoiceResidentVadConfig =
   | {
@@ -167,13 +246,6 @@ export type PicoVoiceResidentVadConfig =
       readonly hopSize: 160 | 256;
       readonly threshold: number;
     };
-
-export type PicoVoiceUtteranceWindowConfig = {
-  readonly minSpeechMs: number;
-  readonly silenceMs: number;
-  readonly maxUtteranceMs: number;
-  readonly minRmsDb: number;
-};
 
 export type PicoResidentAudioInputConfig =
   | {
@@ -191,7 +263,7 @@ export type PicoResidentAudioOutputConfig =
       readonly device: string;
     }
   | {
-      readonly provider: "afplay";
+      readonly provider: "ffplay";
       readonly route: "system_default";
     };
 
@@ -265,7 +337,6 @@ export type LoadPicoConfigOptions = {
 
 const defaultConfigPath = "config/pico.local.yaml";
 const maxNodeTimeoutMs = 2_147_483_647;
-const maxVoiceUtteranceWindowMs = 60_000;
 const maxTcpPort = 65_535;
 const maxOllamaImageEdgePixels = 4096;
 const picoThinkingLevels = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -274,17 +345,12 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
   pico: {},
   session: {
     enabled: true,
-    startTriggers: {
-      wakeNames: [],
-      greetings: [],
-      candidateTimeoutMs: 10_000
-    },
     ending: {
       mode: "timed",
       durationMs: 60_000
     }
   },
-  audit: {
+  telemetry: {
     otel: {
       enabled: false
     }
@@ -303,19 +369,9 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
     resident: {
       enabled: false,
       singleInstanceLockPath: "tmp/pico-voice-resident.lock",
-      minTriggerConfidence: 0.5,
       shutdownGraceMs: 5_000,
-      activation: {
-        mode: "wake_word"
-      },
       vad: {
         provider: "energy",
-        minRmsDb: -55
-      },
-      utteranceWindow: {
-        minSpeechMs: 300,
-        silenceMs: 700,
-        maxUtteranceMs: 5_000,
         minRmsDb: -55
       }
     },
@@ -371,10 +427,11 @@ export function loadPicoConfig(options: LoadPicoConfigOptions = {}): PicoConfig 
 
 export function definePicoConfig(input: unknown): PicoConfig {
   const root = input === null || input === undefined ? {} : requireRecord(input, "pico config");
+  rejectRemovedAuditOtel(root);
   requireKnownConfigFields(root, "pico config", [
     "pico",
     "session",
-    "audit",
+    "telemetry",
     "camera",
     "vision",
     "voice"
@@ -383,7 +440,7 @@ export function definePicoConfig(input: unknown): PicoConfig {
   return deepFreeze({
     pico: definePicoSection(root),
     session: defineSessionSection(root),
-    audit: defineAuditSection(root),
+    telemetry: defineTelemetrySection(root),
     camera: defineCameraSection(root),
     vision: defineVisionSection(root),
     voice: defineVoiceSection(root)
@@ -421,40 +478,18 @@ function definePicoSection(root: Record<string, unknown>): PicoConfig["pico"] {
 function defineSessionSection(root: Record<string, unknown>): PicoConfig["session"] {
   const session = readOptionalRecord(root.session, "pico config session");
 
+  if (session !== undefined) {
+    requireKnownConfigFields(session, "pico config session", ["enabled", "ending"]);
+  }
+
   return {
     enabled: defineSessionEnabled(session),
-    startTriggers: defineSessionStartTriggers(session),
     ending: defineSessionEnding(readOptionalRecord(session?.ending, "pico config session.ending"))
   };
 }
 
 function defineSessionEnabled(input: Record<string, unknown> | undefined): boolean {
   return readOptionalBoolean(input?.enabled, "pico config session.enabled") ?? true;
-}
-
-function defineSessionStartTriggers(
-  input: Record<string, unknown> | undefined
-): PicoSessionConfig["startTriggers"] {
-  const startTriggers = readOptionalRecord(
-    input?.startTriggers,
-    "pico config session.startTriggers"
-  );
-
-  return {
-    wakeNames: readOptionalStringList(
-      startTriggers?.wakeNames,
-      "pico config session.startTriggers.wakeNames"
-    ),
-    greetings: readOptionalStringList(
-      startTriggers?.greetings,
-      "pico config session.startTriggers.greetings"
-    ),
-    candidateTimeoutMs:
-      readOptionalPositiveInteger(
-        startTriggers?.candidateTimeoutMs,
-        "pico config session.startTriggers.candidateTimeoutMs"
-      ) ?? 10_000
-  };
 }
 
 function defineSessionEnding(
@@ -490,50 +525,95 @@ function requireThinkingLevel(
   return thinkingLevel as PicoAgentModelConfig["thinkingLevel"];
 }
 
-function defineAuditSection(root: Record<string, unknown>): PicoConfig["audit"] {
+function rejectRemovedAuditOtel(root: Record<string, unknown>): void {
   const audit = readOptionalRecord(root.audit, "pico config audit");
-  const otel = readOptionalRecord(audit?.otel, "pico config audit.otel");
+
+  if (audit?.otel !== undefined) {
+    throw new Error("pico config audit.otel was removed; use telemetry.otel");
+  }
+}
+
+function defineTelemetrySection(root: Record<string, unknown>): PicoConfig["telemetry"] {
+  const telemetry = readOptionalRecord(root.telemetry, "pico config telemetry");
+
+  if (telemetry !== undefined) {
+    requireKnownConfigFields(telemetry, "pico config telemetry", ["otel"]);
+  }
+
+  const otel = readOptionalRecord(telemetry?.otel, "pico config telemetry.otel");
 
   return {
-    otel: defineAuditOtelConfig(otel)
+    otel: defineTelemetryOtelConfig(otel)
   };
 }
 
-function defineAuditOtelConfig(input: Record<string, unknown> | undefined): PicoAuditOtelConfig {
+// eslint-disable-next-line complexity
+function defineTelemetryOtelConfig(
+  input: Record<string, unknown> | undefined
+): PicoTelemetryOtelConfig {
   if (input === undefined) {
     return {
       enabled: false
     };
   }
 
-  const enabled = readOptionalBoolean(input.enabled, "pico config audit.otel.enabled") ?? false;
-  const endpoint = readOptionalAuditOtelEndpoint(input.endpoint);
+  requireKnownConfigFields(input, "pico config telemetry.otel", [
+    "enabled",
+    "baseUrl",
+    "serviceName",
+    "timeoutMs",
+    "metricExportIntervalMs",
+    "shutdownTimeoutMs"
+  ]);
+  const enabled = readOptionalBoolean(input.enabled, "pico config telemetry.otel.enabled") ?? false;
+  const baseUrl = readOptionalTelemetryOtelBaseUrl(input.baseUrl);
+  const configuredTimeoutMs = readOptionalBoundedPositiveInteger(
+    input.timeoutMs,
+    "pico config telemetry.otel.timeoutMs",
+    maxNodeTimeoutMs
+  );
+  const configuredMetricExportIntervalMs = readOptionalBoundedPositiveInteger(
+    input.metricExportIntervalMs,
+    "pico config telemetry.otel.metricExportIntervalMs",
+    maxNodeTimeoutMs
+  );
+  const timeoutMs = configuredTimeoutMs ?? 10_000;
+  const metricExportIntervalMs = configuredMetricExportIntervalMs ?? 15_000;
+
+  if (metricExportIntervalMs <= timeoutMs) {
+    throw new Error("pico config telemetry.otel.metricExportIntervalMs must exceed timeoutMs");
+  }
+
+  const serviceName = readOptionalString(
+    input.serviceName,
+    "pico config telemetry.otel.serviceName"
+  );
+  const shutdownTimeoutMs = readOptionalBoundedPositiveInteger(
+    input.shutdownTimeoutMs,
+    "pico config telemetry.otel.shutdownTimeoutMs",
+    maxNodeTimeoutMs
+  );
 
   if (enabled) {
     return {
       enabled,
-      endpoint: requireString(endpoint, "pico config audit.otel.endpoint"),
-      serviceName:
-        readOptionalString(input.serviceName, "pico config audit.otel.serviceName") ?? "pico",
-      ...optionalBoundedPositiveIntegerProperty(
-        input,
-        "timeoutMs",
-        "pico config audit.otel.timeoutMs",
-        maxNodeTimeoutMs
-      )
+      baseUrl: requireString(baseUrl, "pico config telemetry.otel.baseUrl"),
+      serviceName: serviceName ?? "pico",
+      timeoutMs,
+      metricExportIntervalMs,
+      shutdownTimeoutMs: shutdownTimeoutMs ?? 5_000
     };
   }
 
   return {
     enabled,
-    ...(endpoint === undefined ? {} : { endpoint }),
-    ...optionalStringProperty(input, "serviceName", "pico config audit.otel.serviceName"),
-    ...optionalBoundedPositiveIntegerProperty(
-      input,
-      "timeoutMs",
-      "pico config audit.otel.timeoutMs",
-      maxNodeTimeoutMs
-    )
+    ...(baseUrl === undefined ? {} : { baseUrl }),
+    ...(serviceName === undefined ? {} : { serviceName }),
+    ...(configuredTimeoutMs === undefined ? {} : { timeoutMs: configuredTimeoutMs }),
+    ...(configuredMetricExportIntervalMs === undefined
+      ? {}
+      : { metricExportIntervalMs: configuredMetricExportIntervalMs }),
+    ...(shutdownTimeoutMs === undefined ? {} : { shutdownTimeoutMs })
   };
 }
 
@@ -621,13 +701,17 @@ function defineVoiceResidentConfig(
     input.audioOutput,
     "pico config voice.resident.audioOutput"
   );
-  const utteranceWindow = readOptionalRecord(
-    input.utteranceWindow,
-    "pico config voice.resident.utteranceWindow"
-  );
-  const definedUtteranceWindow = defineVoiceUtteranceWindowConfig(utteranceWindow);
+  requireKnownConfigFields(input, "pico config voice.resident", [
+    "enabled",
+    "audioInput",
+    "audioOutput",
+    "singleInstanceLockPath",
+    "shutdownGraceMs",
+    "control",
+    "vad"
+  ]);
   const vad = readOptionalRecord(input.vad, "pico config voice.resident.vad");
-  const activation = readOptionalRecord(input.activation, "pico config voice.resident.activation");
+  const control = readOptionalRecord(input.control, "pico config voice.resident.control");
 
   requireResidentVoiceAudio(enabled, audioInput, audioOutput);
 
@@ -640,84 +724,93 @@ function defineVoiceResidentConfig(
         input.singleInstanceLockPath,
         "pico config voice.resident.singleInstanceLockPath"
       ) ?? "tmp/pico-voice-resident.lock",
-    minTriggerConfidence:
-      readOptionalConfidenceThreshold(
-        input.minTriggerConfidence,
-        "pico config voice.resident.minTriggerConfidence"
-      ) ?? 0.5,
     shutdownGraceMs:
       readOptionalBoundedPositiveInteger(
         input.shutdownGraceMs,
         "pico config voice.resident.shutdownGraceMs",
         maxNodeTimeoutMs
       ) ?? 5_000,
-    activation: defineVoiceResidentActivationConfig(activation),
-    vad: defineVoiceResidentVadConfig(vad, definedUtteranceWindow),
-    utteranceWindow: definedUtteranceWindow
+    ...(control === undefined ? {} : { control: defineResidentControlConfig(control) }),
+    vad: defineVoiceResidentVadConfig(vad)
   };
 }
 
-function defineVoiceResidentActivationConfig(
-  input: Record<string, unknown> | undefined
-): PicoVoiceResidentActivationConfig {
-  if (input === undefined) {
-    return emptyPicoConfig.voice.resident.activation;
-  }
-
-  const mode = readOptionalString(input.mode, "pico config voice.resident.activation.mode");
-
-  if (mode === undefined) {
-    throw new Error(
-      "pico config voice.resident.activation.mode is required when activation is configured"
-    );
-  }
-
-  if (mode === "wake_word") {
-    return { mode };
-  }
-
-  if (mode !== "push_to_talk") {
-    throw new Error("pico config voice.resident.activation.mode must be wake_word or push_to_talk");
-  }
-
-  const provider = requireString(input.provider, "pico config voice.resident.activation.provider");
+function defineResidentControlConfig(input: Record<string, unknown>): PicoResidentControlConfig {
+  requireKnownConfigFields(input, "pico config voice.resident.control", [
+    "provider",
+    "host",
+    "port",
+    "authTokenPath",
+    "keyboard"
+  ]);
+  const provider = requireString(input.provider, "pico config voice.resident.control.provider");
 
   if (provider !== "loopback_http") {
-    throw new Error("pico config voice.resident.activation.provider must be loopback_http");
+    throw new Error("pico config voice.resident.control.provider must be loopback_http");
+  }
+
+  const keyboard = requireRecord(input.keyboard, "pico config voice.resident.control.keyboard");
+  requireKnownConfigFields(keyboard, "pico config voice.resident.control.keyboard", [
+    "provider",
+    "talkKey",
+    "cancelKey"
+  ]);
+  const keyboardProvider = requireString(
+    keyboard.provider,
+    "pico config voice.resident.control.keyboard.provider"
+  );
+
+  if (keyboardProvider !== "macos") {
+    throw new Error("pico config voice.resident.control.keyboard.provider must be macos");
+  }
+
+  const talkKey = requirePicoMacKey(
+    keyboard.talkKey,
+    "pico config voice.resident.control.keyboard.talkKey"
+  );
+  const cancelKey = requirePicoMacKey(
+    keyboard.cancelKey,
+    "pico config voice.resident.control.keyboard.cancelKey"
+  );
+
+  if (talkKey === cancelKey) {
+    throw new Error("pico config voice.resident.control keyboard keys must be different");
   }
 
   return {
-    mode,
     provider,
-    host: requireLoopbackActivationHost(input.host),
-    port: requireTcpPort(input.port, "pico config voice.resident.activation.port"),
+    host: requireLoopbackControlHost(input.host),
+    port: requireTcpPort(input.port, "pico config voice.resident.control.port"),
     authTokenPath: requireString(
       input.authTokenPath,
-      "pico config voice.resident.activation.authTokenPath"
+      "pico config voice.resident.control.authTokenPath"
     ),
-    debounceMs:
-      readOptionalBoundedPositiveInteger(
-        input.debounceMs,
-        "pico config voice.resident.activation.debounceMs",
-        maxNodeTimeoutMs
-      ) ?? 800,
-    activationWindowMs:
-      readOptionalBoundedPositiveInteger(
-        input.activationWindowMs,
-        "pico config voice.resident.activation.activationWindowMs",
-        maxNodeTimeoutMs
-      ) ?? 8_000
+    keyboard: {
+      provider: keyboardProvider,
+      talkKey,
+      cancelKey
+    }
   };
 }
 
-function requireLoopbackActivationHost(value: unknown): "127.0.0.1" | "::1" {
-  const host = requireString(value, "pico config voice.resident.activation.host");
+function requireLoopbackControlHost(value: unknown): "127.0.0.1" | "::1" {
+  const host = requireString(value, "pico config voice.resident.control.host");
 
   if (host !== "127.0.0.1" && host !== "::1") {
-    throw new Error("pico config voice.resident.activation.host must be 127.0.0.1 or ::1");
+    throw new Error("pico config voice.resident.control.host must be 127.0.0.1 or ::1");
   }
 
   return host;
+}
+
+function requirePicoMacKey(value: unknown, label: string): PicoMacKey {
+  const key = requireString(value, label);
+
+  if (!new Set<string>(picoMacKeys).has(key)) {
+    throw new Error(`${label} is invalid`);
+  }
+
+  return key as PicoMacKey;
 }
 
 function requireTcpPort(value: unknown, label: string): number {
@@ -731,13 +824,12 @@ function requireTcpPort(value: unknown, label: string): number {
 }
 
 function defineVoiceResidentVadConfig(
-  input: Record<string, unknown> | undefined,
-  utteranceWindow: PicoVoiceUtteranceWindowConfig
+  input: Record<string, unknown> | undefined
 ): PicoVoiceResidentVadConfig {
   if (input === undefined) {
     return {
       provider: "energy",
-      minRmsDb: utteranceWindow.minRmsDb
+      minRmsDb: -55
     };
   }
 
@@ -748,8 +840,7 @@ function defineVoiceResidentVadConfig(
     return {
       provider,
       minRmsDb:
-        readOptionalRmsDatabase(input.minRmsDb, "pico config voice.resident.vad.minRmsDb") ??
-        utteranceWindow.minRmsDb
+        readOptionalRmsDatabase(input.minRmsDb, "pico config voice.resident.vad.minRmsDb") ?? -55
     };
   }
 
@@ -808,50 +899,6 @@ function requireAppleSpeechFrameContract(voice: PicoConfig["voice"]): void {
   }
 }
 
-function defineVoiceUtteranceWindowConfig(
-  input: Record<string, unknown> | undefined
-): PicoVoiceUtteranceWindowConfig {
-  const defaults = emptyPicoConfig.voice.resident.utteranceWindow;
-
-  if (input === undefined) {
-    return defaults;
-  }
-
-  const config: PicoVoiceUtteranceWindowConfig = {
-    minSpeechMs:
-      readOptionalBoundedPositiveInteger(
-        input.minSpeechMs,
-        "pico config voice.resident.utteranceWindow.minSpeechMs",
-        maxVoiceUtteranceWindowMs
-      ) ?? defaults.minSpeechMs,
-    silenceMs:
-      readOptionalBoundedPositiveInteger(
-        input.silenceMs,
-        "pico config voice.resident.utteranceWindow.silenceMs",
-        maxVoiceUtteranceWindowMs
-      ) ?? defaults.silenceMs,
-    maxUtteranceMs:
-      readOptionalBoundedPositiveInteger(
-        input.maxUtteranceMs,
-        "pico config voice.resident.utteranceWindow.maxUtteranceMs",
-        maxVoiceUtteranceWindowMs
-      ) ?? defaults.maxUtteranceMs,
-    minRmsDb:
-      readOptionalRmsDatabase(
-        input.minRmsDb,
-        "pico config voice.resident.utteranceWindow.minRmsDb"
-      ) ?? defaults.minRmsDb
-  };
-
-  if (config.maxUtteranceMs < config.minSpeechMs) {
-    throw new Error(
-      "pico config voice.resident.utteranceWindow.maxUtteranceMs must be >= minSpeechMs"
-    );
-  }
-
-  return config;
-}
-
 function requireResidentVoiceAudio(
   enabled: boolean,
   audioInput: Record<string, unknown> | undefined,
@@ -900,7 +947,7 @@ function defineResidentAudioOutput(input: Record<string, unknown>): PicoResident
     };
   }
 
-  if (provider === "afplay") {
+  if (provider === "ffplay") {
     const route = requireString(input.route, "pico config voice.resident.audioOutput.route");
 
     if (route !== "system_default") {
@@ -910,7 +957,7 @@ function defineResidentAudioOutput(input: Record<string, unknown>): PicoResident
     return { provider, route };
   }
 
-  throw new Error("pico config voice.resident.audioOutput.provider must be alsa or afplay");
+  throw new Error("pico config voice.resident.audioOutput.provider must be alsa or ffplay");
 }
 
 function defineVoiceProbeConfig(input: Record<string, unknown> | undefined): PicoVoiceProbeConfig {
@@ -1416,16 +1463,17 @@ function resolveConfigRelativePaths(config: PicoConfig, baseDirectory: string): 
           baseDirectory,
           config.voice.resident.singleInstanceLockPath
         ),
-        activation:
-          config.voice.resident.activation.mode === "push_to_talk"
-            ? {
-                ...config.voice.resident.activation,
+        ...(config.voice.resident.control === undefined
+          ? {}
+          : {
+              control: {
+                ...config.voice.resident.control,
                 authTokenPath: resolveConfigHomeOrRelativePath(
                   baseDirectory,
-                  config.voice.resident.activation.authTokenPath
+                  config.voice.resident.control.authTokenPath
                 )
               }
-            : config.voice.resident.activation,
+            }),
         vad:
           config.voice.resident.vad.provider === "ten_vad"
             ? {
@@ -1621,23 +1669,24 @@ function requireAppleSpeechBaseUrl(value: unknown, label: string): string {
   return localBaseUrl;
 }
 
-function readOptionalAuditOtelEndpoint(value: unknown): string | undefined {
-  const endpoint = readOptionalString(value, "pico config audit.otel.endpoint");
+function readOptionalTelemetryOtelBaseUrl(value: unknown): string | undefined {
+  const baseUrl = readOptionalString(value, "pico config telemetry.otel.baseUrl");
 
-  if (endpoint === undefined) {
+  if (baseUrl === undefined) {
     return undefined;
   }
 
-  if (!URL.canParse(endpoint)) {
-    throw new Error("pico config audit.otel.endpoint must be a valid URL");
+  if (!URL.canParse(baseUrl)) {
+    throw new Error("pico config telemetry.otel.baseUrl must be a valid URL");
   }
 
-  const parsedUrl = new URL(endpoint);
+  const parsedUrl = new URL(baseUrl);
 
-  requireHttpUrl(parsedUrl, "pico config audit.otel.endpoint");
-  requireAuditOtelEndpointShape(parsedUrl);
+  requireHttpUrl(parsedUrl, "pico config telemetry.otel.baseUrl");
+  requireOriginUrl(parsedUrl, "pico config telemetry.otel.baseUrl");
+  requireTelemetryOtelLoopbackHost(parsedUrl.hostname);
 
-  return endpoint;
+  return baseUrl;
 }
 
 function readOptionalEchoControlProviderEndpoint(value: unknown): string | undefined {
@@ -1660,27 +1709,11 @@ function readOptionalEchoControlProviderEndpoint(value: unknown): string | undef
   return endpoint;
 }
 
-function requireAuditOtelEndpointShape(parsedUrl: URL): void {
-  if (parsedUrl.username !== "" || parsedUrl.password !== "") {
-    throw new Error("pico config audit.otel.endpoint must not include credentials");
-  }
-
-  if (parsedUrl.pathname !== "/v1/logs") {
-    throw new Error("pico config audit.otel.endpoint must end with /v1/logs");
-  }
-
-  if (parsedUrl.search !== "" || parsedUrl.hash !== "") {
-    throw new Error("pico config audit.otel.endpoint must not include query or fragment");
-  }
-
-  requireAuditOtelLoopbackHost(parsedUrl.hostname);
-}
-
-function requireAuditOtelLoopbackHost(hostname: string): void {
+function requireTelemetryOtelLoopbackHost(hostname: string): void {
   const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
   if (!loopbackHosts.has(hostname)) {
-    throw new Error("pico config audit.otel.endpoint must use a local Collector URL");
+    throw new Error("pico config telemetry.otel.baseUrl must use a local Collector URL");
   }
 }
 
@@ -1704,28 +1737,6 @@ function readOptionalString(value: unknown, label = "pico config value"): string
   const trimmed = value.trim();
 
   return trimmed === "" ? undefined : trimmed;
-}
-
-function readOptionalStringList(value: unknown, label: string): readonly string[] {
-  if (value === undefined || value === null) {
-    return [];
-  }
-
-  if (!Array.isArray(value)) {
-    throw new Error(`${label} must be a list of strings`);
-  }
-
-  return value
-    .map((item, index) => {
-      const parsed = readOptionalString(item, `${label}.${index}`);
-
-      if (parsed === undefined) {
-        throw new Error(`${label} must be a list of non-empty strings`);
-      }
-
-      return parsed;
-    })
-    .filter((item, index, items) => items.indexOf(item) === index);
 }
 
 function readOptionalBoolean(value: unknown, label: string): boolean | undefined {

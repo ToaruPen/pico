@@ -28,6 +28,5 @@ describe("pico identity", () => {
     expect(prompt).toContain("- Reply in short spoken Japanese");
     expect(prompt).toContain("- Do not use Markdown");
     expect(prompt).toContain("- Avoid bullet lists and visible line breaks");
-    expect(prompt).toContain("- When asked for a wake acknowledgement");
   });
 });

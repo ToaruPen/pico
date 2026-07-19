@@ -78,6 +78,9 @@ describe("resident launchd service", () => {
     expect(service.standardErrorPath).toContain(
       "/Users/monsoon/.pico/resident-voice/normal/processes/"
     );
+    expect(service.macOSControlPackagePath).toBe(
+      "/Users/monsoon/Dev/pico project/sidecars/macos-control"
+    );
     expect(service.standardErrorPath).toMatch(/resident-voice\.err\.log$/);
     expect(service.plist).toContain("<key>RunAtLoad</key>");
     expect(service.plist).toContain("<true/>");
@@ -167,6 +170,20 @@ describe("resident launchd service", () => {
     });
 
     expect(createResidentLaunchdOperationPlan(service, "install", 501)).toEqual([
+      {
+        kind: "command",
+        command: "swift",
+        args: [
+          "build",
+          "-c",
+          "release",
+          "--package-path",
+          "/repo/pico/sidecars/macos-control",
+          "-Xswiftc",
+          "-warnings-as-errors"
+        ],
+        allowedExitCodes: [0]
+      },
       {
         kind: "mkdir",
         path: service.picoDirectory,

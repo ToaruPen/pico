@@ -68,7 +68,7 @@ describe("resident dev terminal", () => {
     expect(session.shellCommand).toContain("printf '\\033]0;%s\\007' 'pico resident voice'");
     expect(session.shellCommand).toContain("[pico] metadata log: %s");
     expect(session.shellCommand).toContain(
-      "node_modules/.bin/pi --extension ./src/index.ts --pico"
+      "node_modules/.bin/pi --no-session --extension ./src/index.ts --pico"
     );
     expect(session.shellCommand).not.toContain("npm run resident:voice");
     expect(session.shellCommand).not.toContain("tee -a");
@@ -110,7 +110,7 @@ describe("resident dev terminal", () => {
       ]
     });
     expect(session.shellCommand).toContain(
-      "node_modules/.bin/pi --extension ./src/index.ts --pico"
+      "node_modules/.bin/pi --no-session --extension ./src/index.ts --pico"
     );
     expect(session.shellCommand).not.toContain("npm run resident:voice");
     expect(session.shellCommand).toContain('exit "$exit_code"');

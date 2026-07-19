@@ -47,7 +47,7 @@ describe("Pi-owned subagent capability", () => {
     }
   });
 
-  it("keeps embedded Pi session creation in the direct field harness only", async () => {
+  it("uses the Pi SDK session adapter for production resident interactions", async () => {
     const [extensionSource, serviceSource, runnerSource, directHarnessSource] = await Promise.all([
       readFile(new URL("../src/index.ts", import.meta.url), "utf8"),
       readFile(new URL("../src/runtime/resident-voice-service.ts", import.meta.url), "utf8"),
@@ -57,9 +57,11 @@ describe("Pi-owned subagent capability", () => {
 
     for (const productionSource of [extensionSource, serviceSource, runnerSource]) {
       expect(productionSource).not.toContain("createAgentSession");
-      expect(productionSource).not.toContain("createPiAgentTurnClient(");
     }
 
+    expect(extensionSource).toContain("createPiAgentTurnClient");
+    expect(extensionSource).not.toContain("createPiHostTurnClient");
+    expect(serviceSource).toContain("createPiAgent");
     expect(directHarnessSource).toContain("createPiAgentTurnClient");
     expect(directHarnessSource).toContain("runDirectResidentVoiceHarness");
   });

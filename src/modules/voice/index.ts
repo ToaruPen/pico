@@ -24,6 +24,7 @@ export type SttTranscriptionRequest = {
   readonly encoding: "pcm16le";
   readonly sampleRateHz: number;
   readonly channels: number;
+  readonly signal?: AbortSignal;
 };
 
 export type SttTranscriptSegment = {
@@ -45,7 +46,7 @@ export type SttTranscriptionSuccess = {
 
 export type SttTranscriptionFailure = {
   readonly ok: false;
-  readonly reason: "invalid_request" | "timeout" | "model_load" | "backend_error";
+  readonly reason: "invalid_request" | "timeout" | "model_load" | "backend_error" | "aborted";
   readonly message: string;
   readonly source: SttTranscriptionSource;
 };
@@ -120,8 +121,43 @@ export type TtsSynthesisFailure = {
 
 export type TtsSynthesisResult = TtsSynthesisSuccess | TtsSynthesisFailure;
 
+export type TtsSynthesisEvent =
+  | { readonly kind: "chunk"; readonly chunk: TtsAudioChunk }
+  | {
+      readonly kind: "completed";
+      readonly chunkCount: number;
+      readonly totalDurationMs: number;
+      readonly source: TtsSynthesisSource;
+    }
+  | { readonly kind: "failed"; readonly failure: TtsSynthesisFailure };
+
 export type TtsClient = {
-  readonly synthesize: (request: TtsSynthesisRequest) => Promise<TtsSynthesisResult>;
+  readonly synthesize: (request: TtsSynthesisRequest) => AsyncIterable<TtsSynthesisEvent>;
+};
+
+export type TtsProviderStageErrorCode = TtsSynthesisFailure["reason"];
+
+export type TtsProviderStageObservation = {
+  readonly stage: "audio_query" | "synthesis";
+  readonly sentenceIndex: number;
+  readonly status: "ok" | "error" | "skipped";
+  readonly startedAt: string;
+  readonly durationMs: number;
+  readonly errorCode?: TtsProviderStageErrorCode;
+};
+
+export type AivisSpeechTtsClientOptions = {
+  readonly fetch?: typeof fetch;
+  readonly now?: () => string;
+  readonly monotonicNow?: () => number;
+  readonly observeStage?: (observation: TtsProviderStageObservation) => void;
+};
+
+type AivisSpeechTtsRuntime = {
+  readonly fetch: typeof fetch;
+  readonly now: () => string;
+  readonly monotonicNow: () => number;
+  readonly observeStage?: (observation: TtsProviderStageObservation) => void;
 };
 
 export type AivisSpeechServiceHealth =
@@ -139,7 +175,7 @@ type SttTranscriptionSource = {
   readonly language: string;
 };
 
-type TtsSynthesisSource = {
+export type TtsSynthesisSource = {
   readonly serviceId: string;
   readonly provider: "aivis-speech";
   readonly speakerId: number;
@@ -169,6 +205,27 @@ const AIVIS_DEFAULT_VOICE: AivisSpeechVoiceParameters = {
   volumeScale: 1
 };
 const SENTENCE_BOUNDARIES = new Set([".", "。", "！", "？", "!", "?", "…"]);
+const MAX_SPEECH_SEGMENT_CODE_POINTS = 120;
+const SOFT_SPEECH_BOUNDARIES = new Set(["、", ",", "，", ";", "；", ":", "：", " ", "\u3000"]);
+const MAX_STAGE_DURATION_MS = 2_147_483_647;
+const TTS_PROVIDER_STAGES = new Set<TtsProviderStageObservation["stage"]>([
+  "audio_query",
+  "synthesis"
+]);
+const TTS_PROVIDER_STAGE_STATUSES = new Set<TtsProviderStageObservation["status"]>([
+  "ok",
+  "error",
+  "skipped"
+]);
+const TTS_PROVIDER_STAGE_ERROR_CODES = new Set<TtsProviderStageErrorCode>([
+  "invalid_request",
+  "timeout",
+  "cancelled",
+  "backend_error",
+  "invalid_response"
+]);
+const defaultNow = (): string => new Date().toISOString();
+const defaultMonotonicNow = (): number => performance.now();
 const TRAILING_SENTENCE_CLOSERS = new Set([
   '"',
   "'",
@@ -251,47 +308,163 @@ export function createAppleSpeechSttClient(
 
 export function createAivisSpeechTtsClient(
   service: AivisSpeechServiceConfig,
-  fetchImplementation: typeof fetch = fetch
+  options: AivisSpeechTtsClientOptions = {}
 ): TtsClient {
+  const runtime: AivisSpeechTtsRuntime = {
+    fetch: options.fetch ?? fetch,
+    now: options.now ?? defaultNow,
+    monotonicNow: options.monotonicNow ?? defaultMonotonicNow,
+    ...(options.observeStage === undefined ? {} : { observeStage: options.observeStage })
+  };
+
   return {
-    async synthesize(request) {
+    async *synthesize(request) {
       const source = ttsSynthesisSource(service);
       const sentences = segmentJapaneseSentences(request.text);
-      const chunks: TtsAudioChunk[] = [];
+      let chunkCount = 0;
+      let totalDurationMs = 0;
 
       for (const [sentenceIndex, sentence] of sentences.entries()) {
         if (request.signal?.aborted) {
-          return ttsFailure(
-            service,
-            "cancelled",
-            "pico TTS Aivis Speech request was cancelled",
-            sentenceIndex
-          );
+          yield {
+            kind: "failed",
+            failure: ttsFailure(
+              service,
+              "cancelled",
+              "pico TTS Aivis Speech request was cancelled",
+              sentenceIndex
+            )
+          };
+          return;
         }
 
         const result = await synthesizeSentenceWithAivisSpeech(
           sentenceIndex,
           sentence,
           service,
-          fetchImplementation,
+          runtime,
           request.signal
         );
 
         if (!result.ok) {
-          return result;
+          yield { kind: "failed", failure: result };
+          return;
         }
 
-        chunks.push(result.chunk);
+        chunkCount += 1;
+        totalDurationMs += result.chunk.durationMs;
+        yield { kind: "chunk", chunk: result.chunk };
       }
 
-      return {
-        ok: true,
-        chunks,
-        totalDurationMs: chunks.reduce((total, chunk) => total + chunk.durationMs, 0),
+      yield {
+        kind: "completed",
+        chunkCount,
+        totalDurationMs,
         source
       };
     }
   };
+}
+
+export function defineTtsProviderStageObservation(input: unknown): TtsProviderStageObservation {
+  const observation = requireRecord(input, "pico TTS provider stage observation must be an object");
+  const stage = requireTtsProviderStage(observation.stage);
+  const sentenceIndex = requireNonNegativeInteger(
+    observation.sentenceIndex,
+    "pico TTS provider stage observation sentenceIndex is invalid"
+  );
+  const status = requireTtsProviderStageStatus(observation.status);
+  const startedAt = requireString(
+    observation.startedAt,
+    "pico TTS provider stage observation startedAt is invalid"
+  );
+  const durationMs = requireTtsProviderStageDuration(observation.durationMs);
+  const errorCode = requireOptionalTtsProviderStageErrorCode(observation.errorCode);
+  requireConsistentTtsProviderStageOutcome(status, errorCode);
+
+  return Object.freeze({
+    stage,
+    sentenceIndex,
+    status,
+    startedAt,
+    durationMs,
+    ...(errorCode === undefined ? {} : { errorCode })
+  });
+}
+
+export async function collectTtsSynthesisEvents(
+  events: AsyncIterable<TtsSynthesisEvent>
+): Promise<TtsSynthesisResult> {
+  const { chunks, terminal } = await readTtsSynthesisEventStream(events);
+
+  if (terminal.kind === "failed") {
+    return terminal.failure;
+  }
+
+  if (terminal.chunkCount !== chunks.length) {
+    throw new Error("pico TTS synthesis completed chunkCount does not match collected chunks");
+  }
+
+  const totalDurationMs = chunks.reduce((total, chunk) => total + chunk.durationMs, 0);
+
+  if (terminal.totalDurationMs !== totalDurationMs) {
+    throw new Error("pico TTS synthesis completed totalDurationMs does not match collected chunks");
+  }
+
+  if (chunks.some((chunk) => !sameTtsSynthesisSource(chunk.source, terminal.source))) {
+    throw new Error("pico TTS synthesis completed source does not match collected chunks");
+  }
+
+  return {
+    ok: true,
+    chunks,
+    totalDurationMs,
+    source: terminal.source
+  };
+}
+
+type TtsSynthesisTerminalEvent = Extract<
+  TtsSynthesisEvent,
+  { readonly kind: "completed" | "failed" }
+>;
+
+async function readTtsSynthesisEventStream(events: AsyncIterable<TtsSynthesisEvent>): Promise<{
+  readonly chunks: TtsAudioChunk[];
+  readonly terminal: TtsSynthesisTerminalEvent;
+}> {
+  const chunks: TtsAudioChunk[] = [];
+  let terminal: TtsSynthesisTerminalEvent | undefined;
+
+  for await (const event of events) {
+    if (event.kind === "chunk") {
+      if (terminal !== undefined) {
+        throw new Error("pico TTS synthesis event stream yielded a chunk after its terminal event");
+      }
+
+      chunks.push(event.chunk);
+      continue;
+    }
+
+    if (terminal !== undefined) {
+      throw new Error("pico TTS synthesis event stream has multiple terminal events");
+    }
+
+    terminal = event;
+  }
+
+  if (terminal === undefined) {
+    throw new Error("pico TTS synthesis event stream is missing a terminal event");
+  }
+
+  return { chunks, terminal };
+}
+
+function sameTtsSynthesisSource(left: TtsSynthesisSource, right: TtsSynthesisSource): boolean {
+  return (
+    left.serviceId === right.serviceId &&
+    Object.is(left.provider, right.provider) &&
+    left.speakerId === right.speakerId
+  );
 }
 
 export async function checkAivisSpeechServiceHealth(
@@ -358,12 +531,9 @@ export function segmentJapaneseSentences(text: string): readonly string[] {
   }
 
   const { complete, residual } = splitCompleteJapaneseSentences(stripped);
+  const candidates = residual.trim() === "" ? complete : [...complete, residual.trim()];
 
-  if (residual.trim() !== "") {
-    return [...complete, residual.trim()];
-  }
-
-  return complete;
+  return candidates.flatMap(splitBoundedSpeechSegment);
 }
 
 export function splitCompleteJapaneseSentences(text: string): {
@@ -411,12 +581,43 @@ function consumeTrailingSentenceClosers(
   return { closers, nextIndex: index };
 }
 
-function pushSentenceSegment(segments: string[], text: string): void {
-  const segment = text.trim();
+function pushSentenceSegment(
+  segments: string[],
+  text: string,
+  preserveTrailingWhitespace = false
+): void {
+  const segment = preserveTrailingWhitespace ? text.trimStart() : text.trim();
 
-  if (segment !== "") {
+  if (segment.trim() !== "") {
     segments.push(segment);
   }
+}
+
+function splitBoundedSpeechSegment(text: string): readonly string[] {
+  const remaining = Array.from(text.trim());
+  const segments: string[] = [];
+
+  while (remaining.length > MAX_SPEECH_SEGMENT_CODE_POINTS) {
+    const window = remaining.slice(0, MAX_SPEECH_SEGMENT_CODE_POINTS);
+    let softIndex = -1;
+
+    for (let index = window.length - 1; index >= 0; index -= 1) {
+      const character = window[index];
+
+      if (character !== undefined && SOFT_SPEECH_BOUNDARIES.has(character)) {
+        softIndex = index;
+        break;
+      }
+    }
+
+    const end = softIndex < 0 ? MAX_SPEECH_SEGMENT_CODE_POINTS : softIndex + 1;
+    const selectedBoundary = softIndex < 0 ? undefined : window[softIndex];
+    const preserveTrailingWhitespace = selectedBoundary === " " || selectedBoundary === "\u3000";
+    pushSentenceSegment(segments, remaining.splice(0, end).join(""), preserveTrailingWhitespace);
+  }
+
+  pushSentenceSegment(segments, remaining.join(""));
+  return segments;
 }
 
 async function transcribeWithAppleSpeechSidecar(
@@ -437,9 +638,28 @@ async function transcribeWithAppleSpeechSidecar(
   }
 
   const abortController = new AbortController();
+  let abortCause: "request" | "timeout" | undefined;
+  const abortFromRequest = (): void => {
+    if (abortCause !== undefined) {
+      return;
+    }
+
+    abortCause = "request";
+    abortController.abort(request.signal?.reason);
+  };
   const timeout = setTimeout(() => {
+    if (abortCause !== undefined) {
+      return;
+    }
+
+    abortCause = "timeout";
     abortController.abort();
   }, sidecar.timeoutMs);
+  request.signal?.addEventListener("abort", abortFromRequest, { once: true });
+
+  if (request.signal?.aborted) {
+    abortFromRequest();
+  }
 
   try {
     const response = await fetchImplementation(buildTranscriptionUrl(sidecar), {
@@ -453,24 +673,42 @@ async function transcribeWithAppleSpeechSidecar(
 
     return await mapAppleSpeechResponse(response, source);
   } catch (error) {
-    if (isAbortError(error)) {
-      return {
-        ok: false,
-        reason: "timeout",
-        message: "pico STT Apple Speech sidecar request timed out",
-        source
-      };
-    }
-
-    return {
-      ok: false,
-      reason: "backend_error",
-      message: sttRequestErrorMessage(error),
-      source
-    };
+    return appleSpeechRequestFailure(error, abortCause, source);
   } finally {
     clearTimeout(timeout);
+    request.signal?.removeEventListener("abort", abortFromRequest);
   }
+}
+
+function appleSpeechRequestFailure(
+  error: unknown,
+  abortCause: "request" | "timeout" | undefined,
+  source: SttTranscriptionSource
+): SttTranscriptionFailure {
+  if (abortCause === "request") {
+    return {
+      ok: false,
+      reason: "aborted",
+      message: "pico STT Apple Speech sidecar request was aborted",
+      source
+    };
+  }
+
+  if (abortCause === "timeout" || isAbortError(error)) {
+    return {
+      ok: false,
+      reason: "timeout",
+      message: "pico STT Apple Speech sidecar request timed out",
+      source
+    };
+  }
+
+  return {
+    ok: false,
+    reason: "backend_error",
+    message: sttRequestErrorMessage(error),
+    source
+  };
 }
 
 async function mapAppleSpeechResponse(
@@ -707,6 +945,68 @@ function requireString(value: unknown, message: string): string {
   return trimmed;
 }
 
+function requireTtsProviderStage(value: unknown): TtsProviderStageObservation["stage"] {
+  if (
+    typeof value === "string" &&
+    TTS_PROVIDER_STAGES.has(value as TtsProviderStageObservation["stage"])
+  ) {
+    return value as TtsProviderStageObservation["stage"];
+  }
+
+  throw new Error("pico TTS provider stage observation stage is invalid");
+}
+
+function requireTtsProviderStageStatus(value: unknown): TtsProviderStageObservation["status"] {
+  if (
+    typeof value === "string" &&
+    TTS_PROVIDER_STAGE_STATUSES.has(value as TtsProviderStageObservation["status"])
+  ) {
+    return value as TtsProviderStageObservation["status"];
+  }
+
+  throw new Error("pico TTS provider stage observation status is invalid");
+}
+
+function requireTtsProviderStageDuration(value: unknown): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    value < 0 ||
+    value > MAX_STAGE_DURATION_MS
+  ) {
+    throw new Error("pico TTS provider stage observation durationMs is invalid");
+  }
+
+  return value;
+}
+
+function requireOptionalTtsProviderStageErrorCode(
+  value: unknown
+): TtsProviderStageErrorCode | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value === "string" &&
+    TTS_PROVIDER_STAGE_ERROR_CODES.has(value as TtsProviderStageErrorCode)
+  ) {
+    return value as TtsProviderStageErrorCode;
+  }
+
+  throw new Error("pico TTS provider stage observation errorCode is invalid");
+}
+
+function requireConsistentTtsProviderStageOutcome(
+  status: TtsProviderStageObservation["status"],
+  errorCode: TtsProviderStageErrorCode | undefined
+): void {
+  const invalidSuccess = status === "ok" && errorCode !== undefined;
+  const invalidSkipped =
+    status === "skipped" && errorCode !== undefined && errorCode !== "cancelled";
+  const invalidError = status === "error" && errorCode === "cancelled";
+  if (invalidSuccess || invalidSkipped || invalidError) {
+    throw new Error("pico TTS provider stage observation outcome is inconsistent");
+  }
+}
+
 function requireAppleSpeechProvider(value: unknown): "apple-speech" {
   if (value === "apple-speech") {
     return value;
@@ -830,7 +1130,7 @@ async function synthesizeSentenceWithAivisSpeech(
   sentenceIndex: number,
   text: string,
   service: AivisSpeechServiceConfig,
-  fetchImplementation: typeof fetch,
+  runtime: AivisSpeechTtsRuntime,
   signal: AbortSignal | undefined
 ): Promise<
   | {
@@ -839,13 +1139,7 @@ async function synthesizeSentenceWithAivisSpeech(
     }
   | TtsSynthesisFailure
 > {
-  const audioQueryResult = await postAivisAudioQuery(
-    sentenceIndex,
-    text,
-    service,
-    fetchImplementation,
-    signal
-  );
+  const audioQueryResult = await postAivisAudioQuery(sentenceIndex, text, service, runtime, signal);
 
   if (!audioQueryResult.ok) {
     return audioQueryResult;
@@ -856,7 +1150,7 @@ async function synthesizeSentenceWithAivisSpeech(
     text,
     audioQueryResult.payload,
     service,
-    fetchImplementation,
+    runtime,
     signal
   );
 }
@@ -865,7 +1159,7 @@ async function postAivisAudioQuery(
   sentenceIndex: number,
   text: string,
   service: AivisSpeechServiceConfig,
-  fetchImplementation: typeof fetch,
+  runtime: AivisSpeechTtsRuntime,
   signal: AbortSignal | undefined
 ): Promise<
   | {
@@ -874,13 +1168,15 @@ async function postAivisAudioQuery(
     }
   | TtsSynthesisFailure
 > {
+  const startedAt = runtime.now();
+  const startedAtMs = runtime.monotonicNow();
   const result = await runAivisSpeechStage(
     sentenceIndex,
     "audio_query",
     service,
     signal,
     async (stageSignal) => {
-      const response = await fetchImplementation(
+      const response = await runtime.fetch(
         buildAivisUrl(service, "/audio_query", { text, speaker: String(service.speakerId) }),
         {
           method: "POST",
@@ -920,6 +1216,15 @@ async function postAivisAudioQuery(
     }
   );
 
+  observeSettledAivisSpeechStage(
+    runtime,
+    "audio_query",
+    sentenceIndex,
+    startedAt,
+    startedAtMs,
+    result.ok ? result.value : result
+  );
+
   if (!result.ok) {
     return result;
   }
@@ -932,7 +1237,7 @@ async function postAivisSynthesis(
   text: string,
   audioQueryPayload: Record<string, unknown>,
   service: AivisSpeechServiceConfig,
-  fetchImplementation: typeof fetch,
+  runtime: AivisSpeechTtsRuntime,
   signal: AbortSignal | undefined
 ): Promise<
   | {
@@ -941,13 +1246,15 @@ async function postAivisSynthesis(
     }
   | TtsSynthesisFailure
 > {
+  const startedAt = runtime.now();
+  const startedAtMs = runtime.monotonicNow();
   const result = await runAivisSpeechStage(
     sentenceIndex,
     "synthesis",
     service,
     signal,
     async (stageSignal) => {
-      const response = await fetchImplementation(
+      const response = await runtime.fetch(
         buildAivisUrl(service, "/synthesis", { speaker: String(service.speakerId) }),
         {
           method: "POST",
@@ -1003,11 +1310,58 @@ async function postAivisSynthesis(
     }
   );
 
+  observeSettledAivisSpeechStage(
+    runtime,
+    "synthesis",
+    sentenceIndex,
+    startedAt,
+    startedAtMs,
+    result.ok ? result.value : result
+  );
+
   if (!result.ok) {
     return result;
   }
 
   return result.value;
+}
+
+function observeSettledAivisSpeechStage(
+  runtime: AivisSpeechTtsRuntime,
+  stage: TtsProviderStageObservation["stage"],
+  sentenceIndex: number,
+  startedAt: string,
+  startedAtMs: number,
+  result: { readonly ok: true } | TtsSynthesisFailure
+): void {
+  const observation = result.ok
+    ? {
+        stage,
+        sentenceIndex,
+        status: "ok",
+        startedAt,
+        durationMs: elapsedSince(startedAtMs, runtime.monotonicNow)
+      }
+    : {
+        stage,
+        sentenceIndex,
+        status: result.reason === "cancelled" ? "skipped" : "error",
+        startedAt,
+        durationMs: elapsedSince(startedAtMs, runtime.monotonicNow),
+        errorCode: result.reason
+      };
+
+  try {
+    runtime.observeStage?.(defineTtsProviderStageObservation(observation));
+  } catch {
+    // Provider telemetry is best-effort and cannot change TTS settlement.
+  }
+}
+
+function elapsedSince(startedAtMs: number, monotonicNow: () => number): number {
+  const durationMs = monotonicNow() - startedAtMs;
+  if (!Number.isFinite(durationMs)) return 0;
+  return Math.min(MAX_STAGE_DURATION_MS, Math.max(0, durationMs));
 }
 
 async function runAivisSpeechStage<T>(
@@ -1048,12 +1402,7 @@ async function runAivisSpeechStage<T>(
       return aivisAbortFailure(service, abortReason, stage, sentenceIndex);
     }
 
-    return ttsFailure(
-      service,
-      "backend_error",
-      aivisRequestErrorMessage(stage, error),
-      sentenceIndex
-    );
+    return ttsFailure(service, "backend_error", aivisRequestErrorMessage(stage), sentenceIndex);
   } finally {
     clearTimeout(timeout);
     signal?.removeEventListener("abort", cancel);
@@ -1332,11 +1681,7 @@ function aivisAbortFailure(
   return ttsFailure(service, reason, "pico TTS Aivis Speech request was cancelled", sentenceIndex);
 }
 
-function aivisRequestErrorMessage(stage: "audio_query" | "synthesis", error: unknown): string {
-  if (error instanceof Error && error.message.trim() !== "") {
-    return `pico TTS Aivis Speech ${stage} request failed: ${error.message}`;
-  }
-
+function aivisRequestErrorMessage(stage: "audio_query" | "synthesis"): string {
   return `pico TTS Aivis Speech ${stage} request failed`;
 }
 

@@ -51,6 +51,20 @@ sections make the command fail.
 just smoke-milestone
 ```
 
+When `telemetry.otel.enabled` is true, run a loopback OpenTelemetry Collector
+before Pico. The tracked example is for `otelcol-contrib` because it uses the
+file and Prometheus exporters:
+
+```bash
+otelcol-contrib --config config/otel-collector.example.yaml
+PICO_CONFIG_PATH=config/pico.local.yaml just smoke-otel-telemetry
+```
+
+The Collector accepts OTLP HTTP only on `127.0.0.1:4318` and exposes Prometheus
+metrics only on `127.0.0.1:9464`. Pico emits metadata-only Logs and Metrics; it
+does not send transcripts, responses, tool arguments, tool results, or resident
+session identifiers to OTel.
+
 Pico smoke provider settings are loaded from `config/pico.local.yaml` by
 default. Copy the tracked example and fill in local-only values, including the
 Tapo camera account credentials created in the Tapo app:
@@ -172,7 +186,11 @@ Configure these sections in `config/pico.local.yaml` as needed:
   explicit `route: system_default` on macOS, and `alsa` plus `alsa` with explicit
   devices on Raspberry Pi / Linux. `smoke:resident-audio-input` records a short
   bounded sample and reports RMS/peak levels only; speak near the resident mic
-  during the capture to verify it clears `voice.resident.utteranceWindow.minRmsDb`.
+  during the capture to verify it clears `voice.resident.vad.minRmsDb` when the
+  energy gate is selected.
+- `voice.resident.control` for the authenticated loopback control server and
+  macOS keyboard bridge. `talkKey` and `cancelKey` are explicit startup-only
+  bindings; the example uses `F13` and `F14` without making them defaults.
 - `camera.tapo` for one Tapo RTSP JPEG frame.
 - `vision.ollama` for `qwen3.5:9b` through the protected local tunnel.
 - `camera.tapo` plus `vision.ollama` for camera-to-VLM scene smoke.
@@ -226,15 +244,20 @@ the resident Pico controller explicitly with either equivalent command:
 
 ```bash
 PICO_CONFIG_PATH=config/pico.local.yaml \
-  node_modules/.bin/pi --extension ./src/index.ts --pico
+  node_modules/.bin/pi --no-session --extension ./src/index.ts --pico
 PICO_CONFIG_PATH=config/pico.local.yaml pico
 ```
 
-`pico` delegates to `pi --pico`; it does not choose a model on the command
-line. The extension reads `pico.model.provider`, `pico.model.id`, and
-`pico.model.thinkingLevel` from YAML and fails startup if that exact model is
-unavailable. Pico uses `pi.sendUserMessage()` and Pi events inside the existing
-parent session; it does not create an integration session.
+`pico` delegates to `pi --no-session --pico`; it does not choose a model on the
+command line. The non-persistent Pi host owns the resident process but does not
+retain a conversation transcript. The extension reads `pico.model.provider`,
+`pico.model.id`, and `pico.model.thinkingLevel` from YAML and fails startup if
+that exact model is unavailable.
+
+Each accepted interaction uses one Pi-owned in-memory `AgentSession`. Turns and
+the timeout farewell reuse that session; Pico then emits its Pi extension
+shutdown lifecycle and disposes it. The next accepted interaction starts with
+an empty Pi context. The Pi host process remains resident throughout.
 
 The direct resident scripts remain low-level field and provider harnesses while
 resident voice integration is validated:
@@ -247,15 +270,38 @@ PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice
 the current terminal for direct field validation. It is not the public pico
 startup contract.
 
+For a repeatable full-turn measurement, inject one finite PCM16LE mono 16 kHz
+WAV or raw PCM fixture through the explicit field harness. This path invokes the
+configured Apple Speech STT, Pi Agent, Aivis Speech TTS, and playback providers:
+
+```bash
+validation_dir="$(mktemp -d /tmp/pico-voice-validation.XXXXXX)"
+PICO_CONFIG_PATH=config/pico.local.yaml \
+  npm run field:resident-voice-pseudo-audio -- \
+  --audio-fixture /tmp/pico-known-ja.wav \
+  --validation-output "$validation_dir/events.jsonl" \
+  --required-tool-name stackchan_get_status
+```
+
+The validation JSONL is intentionally contentful and mode `0600`: it contains
+the recognized transcript, Pi response, and tool names/arguments/results so the
+operator can verify correctness as well as timing. It is never forwarded to
+OTel or normal resident logs. Treat it as sensitive, keep it only for the field
+run, and delete it when validation is complete. Its immediate parent must be a
+real, current-user-owned mode-`0700` directory, and the output file must not
+already exist. If OTel is disabled, the field harness still executes the same
+SDK pipeline with in-process recording exporters and reports their Log/Metric
+counts.
+
 ### Memory ownership
 
-Pi owns conversation sessions, transcripts, context, and history. Pico's
-process-local `SessionRecord` contains the session ID, active/ended state,
-start/end timestamps, and trusted trigger; the managed lifecycle additionally
-holds the inactivity timer. Farewell, deferred-tool cancellation, and Pi session
-cleanup are end-of-interaction operations, not retained state. Pico does not
-keep conversation entries or create a memory side effect when an interaction
-ends.
+Pi owns the non-persistent host session and each in-memory interaction session,
+including transcript, context, and history. Pico's process-local `SessionRecord`
+contains the session ID, active/ended state, start/end timestamps, and trusted
+trigger; the managed lifecycle additionally holds the inactivity timer.
+Farewell, deferred-tool cancellation, and Pi session cleanup are
+end-of-interaction operations, not retained state. Pico does not keep
+conversation entries or create a memory side effect when an interaction ends.
 
 Durable memory, when enabled, is a separately installed Pi-level plugin. That
 plugin—not Pico—owns provider configuration, extraction, persistence, search,
@@ -281,10 +327,11 @@ the voice resident process:
 PICO_CONFIG_PATH=config/pico.local.yaml pico dev
 ```
 
-This opens kitty by default, starts Pi Agent with `--pico`, and displays Pi's
-interactive output in that terminal window. The Pico wrapper does not duplicate
-that output into a file. Pico persists only output produced by its metadata-only
-log sink under
+This opens kitty by default, starts Pi Agent with `--no-session --pico`, and
+displays Pi's interactive output in that terminal window. The non-persistent
+host follows the same interaction-session lifecycle as the normal `pico`
+command. The Pico wrapper does not duplicate that output into a file. Pico
+persists only output produced by its metadata-only log sink under
 `~/.pico/resident-voice/development/processes/YYYY-MM-DD/<run-id>.log`. Use
 `pico dev --terminal=terminal` to open Terminal.app instead. Stop it from the
 opened terminal with `Ctrl-C`; the development terminal closes after the
@@ -293,12 +340,11 @@ Pi-hosted ownership path. The direct resident harness remains available
 separately for bounded field validation.
 
 The development terminal uses concise voice probe logs by default and does not
-support verbose mode. It shows utterance windows, STT completion, trigger
-decisions, session start, Pi Agent turn and response-duration metadata, wake
-acknowledgement input/response events, TTS synthesis/playback, interaction
-ending, and errors. It does not log the wake prompt, staff input, or Pi Agent
-response text. Per-frame successful capture/echo-control events are suppressed
-because they are too high-volume for operator-facing logs. Use
+support verbose mode. It shows admitted STT completion, Pi Agent turn and
+response-duration metadata, TTS synthesis/playback, interaction ending, and
+errors. It does not log staff input or Pi Agent response text. Per-frame
+successful capture/echo-control events are suppressed because they are too
+high-volume for operator-facing logs. Use
 `PICO_VOICE_PROBE_STDOUT=verbose npm run resident:voice` only when debugging the
 frame pipeline directly from a plain terminal, not from `pico dev`.
 
@@ -324,24 +370,28 @@ permissions. Development and normal resident runs are separated:
 Process logs contain stage summaries, durations, and errors. Daily and session
 JSONL files contain metadata-only interaction events with `schemaVersion`,
 `runMode`, `runId`, event kind, timestamp, session ID, and duration where
-relevant. They contain no text field and do not store the wake prompt, staff
-input, or Pi Agent response. Raw audio is not stored continuously; use targeted
-field harnesses for short diagnostic audio artifacts.
+relevant. They contain no text field and do not store staff input or Pi Agent
+responses. Raw audio is never persisted by the resident
+runtime. The bounded hold-to-talk field harness reports aggregate timing,
+frame-count, CPU, and RSS metadata only.
 
-The resident voice process generates a short Pi Agent wake acknowledgement after
-trusted wake-name or greeting triggers. This confirms that pico is listening
-without treating the wake phrase itself as the user's task.
+Resident voice is explicit hold-to-talk. Pressing the configured talk control
+starts microphone capture, releasing it keeps a fixed 250 ms speech tail and
+then submits at most one Pi turn. A separate configured control cancels
+recording, STT, the active Pi turn, TTS, or playback without ending the Pi parent
+conversation. Talk presses while Pico is busy are ignored and never queued.
 
 Background music is not removed by the resident voice runtime. Echo control is
 for pico's own TTS playback reference, so loud music or lyric-heavy audio can
-still degrade STT accuracy, keep an utterance window open, or create false wake
-matches. Validate resident placement with the same background audio expected in
-the room.
+still degrade STT accuracy while the talk control is held. Explicit controls
+prevent that background audio from activating Pico while idle. Validate
+resident placement with the same background audio expected in the room.
 
 On the Mac mini resident host, the public production startup target is Pi Agent
 with the pico extension loaded. The direct LaunchAgent harness below is kept for
 low-level resident voice validation after `smoke:resident-audio-input` proves
-that the configured microphone clears `voice.resident.utteranceWindow.minRmsDb`:
+that the configured microphone clears `voice.resident.vad.minRmsDb` when the
+energy gate is selected:
 
 ```bash
 PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- install
@@ -361,7 +411,20 @@ process stdout/stderr in `processes/resident-voice.out.log` and
 process, event, and session logs under the same normal run mode. `stop` boots
 the KeepAlive service out of the user launchd domain while leaving the plist
 installed; use `install` to bootstrap it again or `uninstall` to remove the
-plist.
+plist. `install` also builds the project-owned macOS control bridge at its stable
+package-relative release path. The bridge requires macOS Input Monitoring
+permission and consumes the two configured controls globally.
+
+Run the bounded control-and-capture field check after stopping the resident
+service:
+
+```bash
+PICO_CONFIG_PATH=config/pico.local.yaml \
+  npm run field:resident-hold-to-talk -- --duration-ms 30000
+```
+
+Use the configured talk and cancel controls during the interval. The command
+does not invoke STT, Pi, TTS, or playback and emits aggregate metadata only.
 
 Normal abort and graceful shutdown are owned by Pi. If a hard kill or power loss
 leaves an orphaned helper, Pico does not maintain a TaskRun database or attempt

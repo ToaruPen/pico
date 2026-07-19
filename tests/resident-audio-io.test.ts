@@ -1,16 +1,11 @@
 import type { ChildProcessByStdio } from "node:child_process";
-import { access } from "node:fs/promises";
-import { dirname } from "node:path";
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 
 import { definePicoConfig } from "../src/config/index.js";
-import type { VoicePcmFrame } from "../src/modules/voice/echo-control.js";
 import {
+  createResidentAudioCapture,
   createResidentAudioInputPlan,
-  createResidentAudioOutputPlan,
-  createResidentPcmFrameSource,
-  createResidentPlaybackSink,
   measurePcm16leAudioLevel,
   measureResidentAudioInputLevel
 } from "../src/runtime/resident-audio-io.js";
@@ -104,7 +99,7 @@ describe("resident audio I/O plans", () => {
     });
   });
 
-  it("builds explicit macOS AVFoundation input and afplay output plans", () => {
+  it("builds an explicit macOS AVFoundation input plan", () => {
     const config = avfoundationResidentAudioConfig({ frameMs: 20 });
 
     expect(createResidentAudioInputPlan(config, "darwin")).toEqual({
@@ -129,14 +124,9 @@ describe("resident audio I/O plans", () => {
       frameByteLength: 640,
       frameIdPrefix: "avfoundation-mic"
     });
-    expect(createResidentAudioOutputPlan(config, "darwin")).toEqual({
-      provider: "afplay",
-      command: "afplay",
-      route: "system_default"
-    });
   });
 
-  it("builds explicit Linux ALSA input and output plans", () => {
+  it("builds an explicit Linux ALSA input plan", () => {
     const config = definePicoConfig({
       voice: {
         resident: {
@@ -164,11 +154,6 @@ describe("resident audio I/O plans", () => {
       args: ["-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "raw", "-D", "hw:1,0"],
       frameByteLength: 320,
       frameIdPrefix: "alsa-mic"
-    });
-    expect(createResidentAudioOutputPlan(config, "linux")).toEqual({
-      provider: "alsa",
-      command: "aplay",
-      device: "hw:0,0"
     });
   });
 
@@ -222,7 +207,7 @@ describe("resident audio I/O plans", () => {
             device: ":0"
           },
           audioOutput: {
-            provider: "afplay",
+            provider: "ffplay",
             route: "system_default"
           }
         }
@@ -231,9 +216,6 @@ describe("resident audio I/O plans", () => {
 
     expect(() => createResidentAudioInputPlan(config, "linux")).toThrow(
       "pico resident voice AVFoundation input requires macOS"
-    );
-    expect(() => createResidentAudioOutputPlan(config, "linux")).toThrow(
-      "pico resident voice afplay output requires macOS"
     );
   });
 
@@ -247,7 +229,7 @@ describe("resident audio I/O plans", () => {
             device: ":0"
           },
           audioOutput: {
-            provider: "afplay",
+            provider: "ffplay",
             route: "system_default"
           }
         },
@@ -261,12 +243,9 @@ describe("resident audio I/O plans", () => {
     const process = createAudioProcess({ stdout: new PassThrough() });
     const spawn = vi.fn(() => process.child);
     const abortController = new AbortController();
-    const iterator: AsyncIterator<VoicePcmFrame> = createResidentPcmFrameSource(
-      config,
-      abortController.signal,
-      spawn,
-      "darwin"
-    )[Symbol.asyncIterator]();
+    const capture = createResidentAudioCapture(config, spawn, "darwin");
+    const session = capture.start(abortController.signal);
+    const iterator = session.frames[Symbol.asyncIterator]();
     const firstFrame = iterator.next();
     const secondFrame = iterator.next();
 
@@ -304,9 +283,10 @@ describe("resident audio I/O plans", () => {
     });
     expect(second.value.audio.byteLength).toBe(320);
 
-    abortController.abort();
+    const stopped = session.stop();
     process.stdout.end();
     process.emitClose(0, undefined);
+    await stopped;
     await iterator.return?.();
 
     expect(spawn).toHaveBeenCalledWith(
@@ -342,7 +322,7 @@ describe("resident audio I/O plans", () => {
             device: ":0"
           },
           audioOutput: {
-            provider: "afplay",
+            provider: "ffplay",
             route: "system_default"
           }
         },
@@ -356,9 +336,8 @@ describe("resident audio I/O plans", () => {
     const process = createAudioProcess({ stdout: new PassThrough() });
     const spawn = vi.fn(() => process.child);
     const abortController = new AbortController();
-    const iterator: AsyncIterator<VoicePcmFrame> = createResidentPcmFrameSource(
+    const capture = createResidentAudioCapture(
       config,
-      abortController.signal,
       spawn,
       "darwin",
       sequenceNow([
@@ -366,7 +345,9 @@ describe("resident audio I/O plans", () => {
         "2026-06-18T00:00:05.000Z",
         "2026-06-18T00:00:10.000Z"
       ])
-    )[Symbol.asyncIterator]();
+    );
+    const session = capture.start(abortController.signal);
+    const iterator = session.frames[Symbol.asyncIterator]();
     try {
       const firstFrame = iterator.next();
       const secondFrame = iterator.next();
@@ -383,9 +364,10 @@ describe("resident audio I/O plans", () => {
       expect(first.value.capturedAt).toBe("2026-06-18T00:00:00.000Z");
       expect(second.value.capturedAt).toBe("2026-06-18T00:00:00.010Z");
     } finally {
-      abortController.abort();
+      const stopped = session.stop();
       process.stdout.end();
       process.emitClose(0, undefined);
+      await stopped;
       await iterator.return?.();
     }
   });
@@ -400,7 +382,7 @@ describe("resident audio I/O plans", () => {
             device: ":0"
           },
           audioOutput: {
-            provider: "afplay",
+            provider: "ffplay",
             route: "system_default"
           }
         },
@@ -414,13 +396,14 @@ describe("resident audio I/O plans", () => {
     const process = createAudioProcess({ stdout: new PassThrough() });
     const spawn = vi.fn(() => process.child);
     const abortController = new AbortController();
-    const iterator: AsyncIterator<VoicePcmFrame> = createResidentPcmFrameSource(
+    const capture = createResidentAudioCapture(
       config,
-      abortController.signal,
       spawn,
       "darwin",
       () => "not-an-iso-timestamp"
-    )[Symbol.asyncIterator]();
+    );
+    const session = capture.start(abortController.signal);
+    const iterator = session.frames[Symbol.asyncIterator]();
     const firstFrame = iterator.next();
 
     process.stdout.write(Buffer.alloc(320, 7));
@@ -429,13 +412,14 @@ describe("resident audio I/O plans", () => {
       "pico resident voice capture clock returned an invalid ISO timestamp"
     );
 
-    abortController.abort();
+    const stopped = session.stop();
     process.stdout.end();
     process.emitClose(0, undefined);
+    await stopped;
     await iterator.return?.();
   });
 
-  it("fails before spawning when the input signal is already aborted", async () => {
+  it("fails before spawning when the input signal is already aborted", () => {
     const config = definePicoConfig({
       voice: {
         resident: {
@@ -445,7 +429,7 @@ describe("resident audio I/O plans", () => {
             device: ":0"
           },
           audioOutput: {
-            provider: "afplay",
+            provider: "ffplay",
             route: "system_default"
           }
         }
@@ -457,154 +441,171 @@ describe("resident audio I/O plans", () => {
 
     abortController.abort();
 
-    const iterator = createResidentPcmFrameSource(config, abortController.signal, spawn, "darwin")[
-      Symbol.asyncIterator
-    ]();
+    const capture = createResidentAudioCapture(config, spawn, "darwin");
 
-    await expect(iterator.next()).rejects.toThrow(
+    expect(() => capture.start(abortController.signal)).toThrow(
       "pico resident voice avfoundation input was aborted before startup"
     );
     expect(spawn).not.toHaveBeenCalled();
   });
 
-  it("plays ALSA PCM using the TTS chunk sample format", async () => {
-    const config = definePicoConfig({
-      voice: {
-        resident: {
-          enabled: true,
-          audioInput: {
-            provider: "alsa",
-            device: "hw:1,0"
-          },
-          audioOutput: {
-            provider: "alsa",
-            device: "hw:0,0"
-          }
-        },
-        echoControl: {
-          sampleRateHz: 16000,
-          channels: 1,
-          frameMs: 10
-        }
-      }
-    });
-    const process = createAudioProcess({ stdin: new PassThrough() });
-    const spawn = vi.fn(() => process.child);
-    const playback = createResidentPlaybackSink(config, spawn, "linux");
-    const done = playback.play(
-      {
-        sentenceIndex: 0,
-        text: "hello",
-        audio: new Uint8Array([1, 2, 3, 4]),
-        encoding: "pcm16le",
-        sampleRateHz: 24000,
-        channels: 2,
-        durationMs: 1,
-        source: {
-          serviceId: "test-aivis",
-          provider: "aivis-speech",
-          speakerId: 1
-        }
-      },
-      "2026-06-20T00:00:00.000Z"
-    );
-
-    process.emitExit(0);
-
-    await expect(done).resolves.toBeUndefined();
-    expect(spawn).toHaveBeenCalledWith(
-      "aplay",
-      ["-q", "-f", "S16_LE", "-r", "24000", "-c", "2", "-t", "raw", "-D", "hw:0,0"],
-      { stdio: ["pipe", "ignore", "inherit"] }
-    );
-  });
-
-  it("rejects ALSA playback when the PCM stdin stream fails", async () => {
-    const config = definePicoConfig({
-      voice: {
-        resident: {
-          enabled: true,
-          audioInput: {
-            provider: "alsa",
-            device: "hw:1,0"
-          },
-          audioOutput: {
-            provider: "alsa",
-            device: "hw:0,0"
-          }
-        }
-      }
-    });
-    const process = createAudioProcess({ stdin: new PassThrough() });
-    const spawn = vi.fn(() => process.child);
-    const done = createResidentPlaybackSink(config, spawn, "linux").play(
-      {
-        sentenceIndex: 0,
-        text: "hello",
-        audio: new Uint8Array([1, 2, 3, 4]),
-        encoding: "pcm16le",
-        sampleRateHz: 24000,
-        channels: 1,
-        durationMs: 1,
-        source: {
-          serviceId: "test-aivis",
-          provider: "aivis-speech",
-          speakerId: 1
-        }
-      },
-      "2026-06-20T00:00:00.000Z"
-    );
-
-    process.stdin.emit("error", new Error("pipe failed"));
-
-    await expect(done).rejects.toThrow("pipe failed");
-  });
-
-  it("removes the afplay temporary directory after playback", async () => {
-    const config = definePicoConfig({
-      voice: {
-        resident: {
-          enabled: true,
-          audioInput: {
-            provider: "avfoundation",
-            device: ":0"
-          },
-          audioOutput: {
-            provider: "afplay",
-            route: "system_default"
-          }
-        }
-      }
-    });
+  it("owns microphone capture only between explicit start and stop", async () => {
+    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
     const process = createAudioProcess({ stdout: new PassThrough() });
     const spawn = vi.fn(() => process.child);
-    const playback = createResidentPlaybackSink(config, spawn, "darwin");
-    const done = playback.play(
-      {
-        sentenceIndex: 0,
-        text: "hello",
-        audio: new Uint8Array([0, 0, 1, 0]),
-        encoding: "pcm16le",
-        sampleRateHz: 16000,
-        channels: 1,
-        durationMs: 1,
-        source: {
-          serviceId: "test-aivis",
-          provider: "aivis-speech",
-          speakerId: 1
-        }
-      },
-      "2026-06-20T00:00:00.000Z"
+    const capture = createResidentAudioCapture(config, spawn, "darwin");
+
+    expect(spawn).not.toHaveBeenCalled();
+
+    const controller = new AbortController();
+    const session = capture.start(controller.signal);
+    const firstFrame = session.frames[Symbol.asyncIterator]().next();
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    process.stdout.write(Buffer.alloc(320, 7));
+    await expect(firstFrame).resolves.toMatchObject({ done: false });
+
+    const stopped = session.stop();
+    expect(process.kill).toHaveBeenCalledTimes(1);
+    expect(process.kill).toHaveBeenCalledWith("SIGTERM");
+    process.stdout.end();
+    process.emitClose(0, "SIGTERM");
+    await expect(stopped).resolves.toBeUndefined();
+    await expect(capture.close()).resolves.toBeUndefined();
+  });
+
+  it("escalates a stalled capture process from SIGTERM to SIGKILL", async () => {
+    vi.useFakeTimers();
+    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const capture = createResidentAudioCapture(
+      config,
+      vi.fn(() => process.child),
+      "darwin"
+    );
+    const session = capture.start(new AbortController().signal);
+    const stopped = session.stop();
+
+    try {
+      expect(process.kill).toHaveBeenCalledWith("SIGTERM");
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(process.kill).toHaveBeenLastCalledWith("SIGKILL");
+    } finally {
+      process.stdout.end();
+      process.emitClose(0, "SIGKILL");
+      await stopped;
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects capture stop when the process remains unsettled after SIGKILL", async () => {
+    vi.useFakeTimers();
+    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const nextProcess = createAudioProcess({ stdout: new PassThrough() });
+    const spawn = vi.fn().mockReturnValueOnce(process.child).mockReturnValueOnce(nextProcess.child);
+    const capture = createResidentAudioCapture(config, spawn, "darwin");
+    const session = capture.start(new AbortController().signal);
+    const collection = (async (): Promise<void> => {
+      for await (const frame of session.frames) {
+        void frame;
+      }
+    })();
+    const stopped = session.stop();
+    const stopFailure = expect(stopped).rejects.toThrow(
+      "pico resident voice avfoundation input did not stop after SIGKILL"
+    );
+    const collectionFailure = expect(collection).rejects.toThrow(
+      "pico resident voice avfoundation input did not stop after SIGKILL"
+    );
+    void stopFailure.catch(() => undefined);
+    void collectionFailure.catch(() => undefined);
+
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      await stopFailure;
+      await collectionFailure;
+      expect(process.listenerCount("close")).toBe(0);
+      expect(process.listenerCount("error")).toBe(0);
+
+      const nextSession = capture.start(new AbortController().signal);
+      expect(spawn).toHaveBeenCalledTimes(2);
+      const nextStopped = nextSession.stop();
+      nextProcess.stdout.end();
+      nextProcess.emitClose(0, "SIGTERM");
+      await nextStopped;
+    } finally {
+      process.emitClose(0, "SIGKILL");
+      await capture.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains an unexpected capture failure that races an explicit stop", async () => {
+    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const capture = createResidentAudioCapture(
+      config,
+      vi.fn(() => process.child),
+      "darwin"
+    );
+    const session = capture.start(new AbortController().signal);
+    const collection = (async (): Promise<void> => {
+      for await (const frame of session.frames) {
+        void frame;
+      }
+    })();
+
+    const stopped = session.stop();
+    process.stdout.end();
+    process.emitClose(1, undefined);
+
+    await expect(stopped).resolves.toBeUndefined();
+    await expect(collection).rejects.toThrow(
+      "pico resident voice avfoundation input exited with code 1 signal undefined"
+    );
+    await expect(capture.close()).resolves.toBeUndefined();
+  });
+
+  it("accepts FFmpeg code 255 after an explicit AVFoundation stop", async () => {
+    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const capture = createResidentAudioCapture(
+      config,
+      vi.fn(() => process.child),
+      "darwin"
+    );
+    const session = capture.start(new AbortController().signal);
+    const collection = (async (): Promise<void> => {
+      for await (const frame of session.frames) {
+        void frame;
+      }
+    })();
+
+    const stopped = session.stop();
+    process.stdout.end();
+    process.emitClose(255, undefined);
+
+    await expect(stopped).resolves.toBeUndefined();
+    await expect(collection).resolves.toBeUndefined();
+    await expect(capture.close()).resolves.toBeUndefined();
+  });
+
+  it("rejects overlapping microphone capture sessions", async () => {
+    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const process = createAudioProcess({ stdout: new PassThrough() });
+    const spawn = vi.fn(() => process.child);
+    const capture = createResidentAudioCapture(config, spawn, "darwin");
+    const first = capture.start(new AbortController().signal);
+
+    expect(() => capture.start(new AbortController().signal)).toThrow(
+      "pico resident voice capture is already active"
     );
 
-    await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
-    const calls = spawn.mock.calls as unknown as Array<[string, readonly string[], unknown]>;
-    const wavPath = calls[0]?.[1][0];
-
-    expect(typeof wavPath).toBe("string");
-    process.emitExit(0);
-    await expect(done).resolves.toBeUndefined();
-    await expect(access(dirname(wavPath as string))).rejects.toThrow();
+    const stopped = first.stop();
+    process.stdout.end();
+    process.emitClose(0, "SIGTERM");
+    await stopped;
   });
 });
 
@@ -617,7 +618,10 @@ function createAudioProcess(streams: {
   readonly stdin: PassThrough;
   readonly kill: ReturnType<typeof vi.fn>;
   readonly emitClose: (code: number, signal: NodeJS.Signals | undefined) => void;
+  readonly emitError: (error: Error) => void;
   readonly emitExit: (code: number) => void;
+  readonly emitExitOnly: (code: number) => void;
+  readonly listenerCount: (event: "close" | "exit" | "error") => number;
 } {
   const stdout = streams.stdout ?? new PassThrough();
   const stdin = streams.stdin ?? new PassThrough();
@@ -635,6 +639,23 @@ function createAudioProcess(streams: {
       listeners[event] = listener as never;
 
       return child;
+    },
+    removeListener(event: "close" | "exit" | "error", listener: (...arguments_: never[]) => void) {
+      if (listeners[event] === listener) {
+        switch (event) {
+          case "close":
+            delete listeners.close;
+            break;
+          case "exit":
+            delete listeners.exit;
+            break;
+          case "error":
+            delete listeners.error;
+            break;
+        }
+      }
+
+      return child;
     }
   } as unknown as ChildProcessByStdio<Writable | null, Readable | null, null>;
 
@@ -644,11 +665,29 @@ function createAudioProcess(streams: {
     stdin,
     kill,
     emitClose(code, signal) {
-      listeners.close?.(code, signal);
+      const listener = listeners.close;
+      delete listeners.close;
+      listener?.(code, signal);
+    },
+    emitError(error) {
+      const listener = listeners.error;
+      delete listeners.error;
+      listener?.(error);
     },
     emitExit(code) {
-      listeners.exit?.(code);
-    }
+      const exitListener = listeners.exit;
+      const closeListener = listeners.close;
+      delete listeners.exit;
+      delete listeners.close;
+      exitListener?.(code);
+      closeListener?.(code, undefined);
+    },
+    emitExitOnly(code) {
+      const listener = listeners.exit;
+      delete listeners.exit;
+      listener?.(code);
+    },
+    listenerCount: (event) => (listeners[event] === undefined ? 0 : 1)
   };
 }
 
@@ -677,7 +716,7 @@ function avfoundationResidentAudioConfig(input: { readonly frameMs: number }) {
           device: ":0"
         },
         audioOutput: {
-          provider: "afplay",
+          provider: "ffplay",
           route: "system_default"
         }
       },

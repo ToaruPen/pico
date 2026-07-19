@@ -360,16 +360,16 @@ vision:
     expectAuditEvidence(report);
   });
 
-  it("reports audit OTel config load failures as audit_otel failures", async () => {
+  it("reports telemetry OTel config load failures as audit_otel failures", async () => {
     const directory = mkdtempSync(join(tmpdir(), "pico-milestone-invalid-audit-config-"));
     const configPath = join(directory, "pico.local.yaml");
     writeFileSync(
       configPath,
       `
-audit:
+telemetry:
   otel:
     enabled: true
-    endpoint: https://otel.example.com/v1/logs
+    baseUrl: https://otel.example.com:4318
 `
     );
 
@@ -382,7 +382,7 @@ audit:
     );
 
     const reason =
-      "pico config load failed: pico config audit.otel.endpoint must use a local Collector URL";
+      "pico config load failed: pico config telemetry.otel.baseUrl must use a local Collector URL";
     expect(report.status).toBe("failed");
     expect(requireSection(report, "audit_otel")).toEqual({
       name: "audit_otel",
@@ -423,8 +423,9 @@ audit:
     expect(auditSection.details).toMatchObject({
       category: "session_lifecycle",
       eventName: "session.started",
-      eventCount: 1,
-      otelRecordCount: 1
+      eventCount: 2,
+      otelRecordCount: 2,
+      metricEventCount: 1
     });
   });
 
@@ -434,12 +435,14 @@ audit:
     writeFileSync(
       configPath,
       `
-audit:
+telemetry:
   otel:
     enabled: true
-    endpoint: http://127.0.0.1:4318/v1/logs
+    baseUrl: http://127.0.0.1:4318
     serviceName: pico-test
     timeoutMs: 500
+    metricExportIntervalMs: 1000
+    shutdownTimeoutMs: 500
 `
     );
     const exportedEvents: string[] = [];
@@ -452,25 +455,28 @@ audit:
       {
         ...configuredSectionDependencies(),
         now: () => occurredAt,
-        createAuditOtelExporter: (config) => {
+        createTelemetry: (config) => {
           expect(config).toMatchObject({
-            endpoint: "http://127.0.0.1:4318/v1/logs",
+            baseUrl: "http://127.0.0.1:4318",
             serviceName: "pico-test",
             timeoutMs: 500
           });
 
           return {
-            export: (event) => {
+            record: (event) => {
               exportedEvents.push(event.name);
               exportedTimestamps.push(event.occurredAt);
-
-              return Promise.resolve();
             },
+            forceFlush: () => Promise.resolve(),
             shutdown: () => {
               shutdownCalled = true;
 
               return Promise.resolve();
-            }
+            },
+            health: () => ({
+              logs: { consecutiveFailures: 0 },
+              metrics: { consecutiveFailures: 0 }
+            })
           };
         }
       }
@@ -480,11 +486,12 @@ audit:
     expect(auditSection.status).toBe("passed");
     expect(auditSection.provider).toBe("structured-audit+otel");
     expect(auditSection.details).toMatchObject({
-      eventCount: 1,
-      exportedOtelRecordCount: 1
+      eventCount: 2,
+      exportedOtelRecordCount: 2,
+      exportedMetricEventCount: 1
     });
-    expect(exportedEvents).toEqual(["session.started"]);
-    expect(exportedTimestamps).toEqual([occurredAt]);
+    expect(exportedEvents).toEqual(["session.started", "voice.runtime.stage"]);
+    expect(exportedTimestamps).toEqual([occurredAt, occurredAt]);
     expect(shutdownCalled).toBe(true);
   });
 
@@ -494,10 +501,10 @@ audit:
     writeFileSync(
       configPath,
       `
-audit:
+telemetry:
   otel:
     enabled: true
-    endpoint: http://127.0.0.1:4318/v1/logs
+    baseUrl: http://127.0.0.1:4318
 `
     );
 
@@ -505,9 +512,14 @@ audit:
       { PICO_CONFIG_PATH: configPath },
       {
         ...configuredSectionDependencies(),
-        createAuditOtelExporter: () => ({
-          export: () => Promise.reject(new Error("collector unavailable")),
-          shutdown: () => Promise.resolve()
+        createTelemetry: () => ({
+          record: () => undefined,
+          forceFlush: () => Promise.resolve(),
+          shutdown: () => Promise.resolve(),
+          health: () => ({
+            logs: { consecutiveFailures: 1 },
+            metrics: { consecutiveFailures: 1 }
+          })
         })
       }
     );
@@ -517,7 +529,7 @@ audit:
       name: "audit_otel",
       status: "failed",
       provider: "structured-audit+otel",
-      reason: "collector unavailable"
+      reason: "telemetry export failed (logs=1 metrics=1)"
     });
   });
 
@@ -527,10 +539,10 @@ audit:
     writeFileSync(
       configPath,
       `
-audit:
+telemetry:
   otel:
     enabled: true
-    endpoint: http://127.0.0.1:4318/v1/logs
+    baseUrl: http://127.0.0.1:4318
 `
     );
 
@@ -538,9 +550,14 @@ audit:
       { PICO_CONFIG_PATH: configPath },
       {
         ...configuredSectionDependencies(),
-        createAuditOtelExporter: () => ({
-          export: () => Promise.reject(new Error("collector unavailable")),
-          shutdown: () => Promise.reject(new Error("shutdown failed"))
+        createTelemetry: () => ({
+          record: () => undefined,
+          forceFlush: () => Promise.resolve(),
+          shutdown: () => Promise.reject(new Error("shutdown failed")),
+          health: () => ({
+            logs: { consecutiveFailures: 1 },
+            metrics: { consecutiveFailures: 1 }
+          })
         })
       }
     );
@@ -550,7 +567,7 @@ audit:
       name: "audit_otel",
       status: "failed",
       provider: "structured-audit+otel",
-      reason: "collector unavailable; shutdown also failed: shutdown failed"
+      reason: "telemetry export failed (logs=1 metrics=1); shutdown also failed: shutdown failed"
     });
   });
 

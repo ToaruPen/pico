@@ -33,9 +33,9 @@ export async function runResidentPiTurnMeasure(): Promise<ResidentPiTurnMeasureR
     }
   });
   const started = lifecycle.start({
-    kind: "wake_name",
-    label: "ピコ",
-    source: "voice"
+    kind: "button_trigger",
+    label: "hold_to_talk",
+    source: "loopback_http"
   });
   const client = createPiAgentTurnClient({
     cwd: process.cwd()

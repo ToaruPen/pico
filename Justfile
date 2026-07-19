@@ -18,6 +18,9 @@ test:
 smoke-milestone:
   npm run smoke:milestone
 
+smoke-otel-telemetry:
+  npm run smoke:otel-telemetry
+
 smoke-camera-vlm-scene:
   npm run smoke:camera-vlm-scene
 
@@ -59,11 +62,11 @@ dev-session:
 resident-voice-dev-terminal:
   npm run resident:voice:dev-terminal
 
-field-voice-echo-pickup:
-  npm run field:voice-echo-pickup
+field-resident-hold-to-talk:
+  npm run field:resident-hold-to-talk
 
-field-resident-voice-deferred-rallies:
-  npm run field:resident-voice-deferred-rallies
+field-resident-voice-pseudo-audio fixture output:
+  npm run field:resident-voice-pseudo-audio -- --audio-fixture {{fixture}} --validation-output {{output}}
 
 ast:
   npm run ast:test
@@ -72,8 +75,14 @@ ast:
 apple-speech-check:
   bash scripts/ci/run-apple-speech-gates.sh
 
+macos-control-check:
+  bash scripts/ci/run-macos-control-gates.sh
+
+macos-control-build:
+  swift build -c release --package-path sidecars/macos-control -Xswiftc -warnings-as-errors
+
 check:
-  if [ "$(uname -s)" = "Darwin" ]; then just apple-speech-check; fi
+  if [ "$(uname -s)" = "Darwin" ]; then just apple-speech-check macos-control-check; fi
   npm run check
 
 ci:

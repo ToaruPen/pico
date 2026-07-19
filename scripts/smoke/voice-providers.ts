@@ -6,6 +6,7 @@ import { loadPicoConfigFromEnvironment, type PicoConfig } from "../../src/config
 import {
   type AivisSpeechServiceConfig,
   type AppleSpeechSidecarConfig,
+  collectTtsSynthesisEvents,
   createAivisSpeechTtsClient,
   createAppleSpeechSttClient,
   defineAivisSpeechService,
@@ -147,7 +148,9 @@ async function runTtsSmoke(plan: TtsSmokePlan): Promise<VoiceSmokeSectionReport>
     };
   }
 
-  const result = await createAivisSpeechTtsClient(plan.service).synthesize({ text: plan.text });
+  const result = await collectTtsSynthesisEvents(
+    createAivisSpeechTtsClient(plan.service).synthesize({ text: plan.text })
+  );
 
   if (!result.ok) {
     return voiceSmokeFailure(

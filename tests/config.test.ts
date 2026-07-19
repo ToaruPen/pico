@@ -138,18 +138,91 @@ describe("pico YAML config", () => {
     ).toThrow("pico config voice.resident.audioOutput is required when resident is enabled");
   });
 
+  it("parses configurable resident hold-to-talk controls", () => {
+    expect(
+      definePicoConfig({
+        voice: {
+          resident: {
+            control: {
+              provider: "loopback_http",
+              host: "127.0.0.1",
+              port: 8781,
+              authTokenPath: "~/.pico/resident-voice/control-token",
+              keyboard: {
+                provider: "macos",
+                talkKey: "F13",
+                cancelKey: "F14"
+              }
+            }
+          }
+        }
+      }).voice.resident.control
+    ).toEqual({
+      provider: "loopback_http",
+      host: "127.0.0.1",
+      port: 8781,
+      authTokenPath: "~/.pico/resident-voice/control-token",
+      keyboard: {
+        provider: "macos",
+        talkKey: "F13",
+        cancelKey: "F14"
+      }
+    });
+  });
+
+  it("rejects invalid resident hold-to-talk controls", () => {
+    const resident = (control: unknown) => ({ voice: { resident: { control } } });
+
+    expect(() =>
+      definePicoConfig(
+        resident({
+          provider: "loopback_http",
+          host: "0.0.0.0",
+          port: 8781,
+          authTokenPath: "token",
+          keyboard: { provider: "macos", talkKey: "F13", cancelKey: "F14" }
+        })
+      )
+    ).toThrow("pico config voice.resident.control.host must be 127.0.0.1 or ::1");
+    expect(() =>
+      definePicoConfig(
+        resident({
+          provider: "loopback_http",
+          host: "127.0.0.1",
+          port: 8781,
+          authTokenPath: "token",
+          keyboard: { provider: "macos", talkKey: "F13", cancelKey: "F13" }
+        })
+      )
+    ).toThrow("pico config voice.resident.control keyboard keys must be different");
+    expect(() =>
+      definePicoConfig(
+        resident({
+          provider: "loopback_http",
+          host: "127.0.0.1",
+          port: 8781,
+          authTokenPath: "token",
+          keyboard: { provider: "macos", talkKey: "Shift", cancelKey: "F14" }
+        })
+      )
+    ).toThrow("pico config voice.resident.control.keyboard.talkKey is invalid");
+    expect(() =>
+      definePicoConfig(
+        resident({
+          provider: "loopback_http",
+          host: "127.0.0.1",
+          port: 8781,
+          authTokenPath: "token",
+          keyboard: { provider: "macos", talkKey: "F21", cancelKey: "F14" }
+        })
+      )
+    ).toThrow("pico config voice.resident.control.keyboard.talkKey is invalid");
+  });
+
   it("loads configured camera, vision, voice, audit, and person detection providers from YAML", () => {
     const path = temporaryConfigFile(`
 session:
   enabled: true
-  startTriggers:
-    wakeNames:
-      - ピコ
-      - pico
-    greetings:
-      - おはよう
-      - こんにちは
-    candidateTimeoutMs: 12000
   ending:
     mode: timed
     durationMs: 90000
@@ -205,30 +278,25 @@ voice:
       provider: avfoundation
       device: ':0'
     audioOutput:
-      provider: afplay
+      provider: ffplay
       route: system_default
     singleInstanceLockPath: tmp/pico-custom-resident.lock
-    minTriggerConfidence: 0.72
     shutdownGraceMs: 3000
-    activation:
-      mode: push_to_talk
+    control:
       provider: loopback_http
       host: 127.0.0.1
       port: 8781
-      authTokenPath: tmp/pico-activation-token
-      debounceMs: 800
-      activationWindowMs: 8000
+      authTokenPath: tmp/pico-control-token
+      keyboard:
+        provider: macos
+        talkKey: F13
+        cancelKey: F14
     vad:
       provider: ten_vad
       jsPath: vendors/ten-vad/ten_vad.js
       wasmPath: vendors/ten-vad/ten_vad.wasm
       hopSize: 160
       threshold: 0.5
-    utteranceWindow:
-      minSpeechMs: 300
-      silenceMs: 700
-      maxUtteranceMs: 5000
-      minRmsDb: -55
   probes:
     enabled: true
   echoControl:
@@ -259,22 +327,19 @@ voice:
       speakerId: 888753760
       timeoutMs: 30000
       text: こんにちは。
-audit:
+telemetry:
   otel:
     enabled: true
-    endpoint: http://127.0.0.1:4318/v1/logs
+    baseUrl: http://127.0.0.1:4318
     serviceName: pico
     timeoutMs: 5000
+    metricExportIntervalMs: 15000
+    shutdownTimeoutMs: 3000
 `);
 
     expect(loadPicoConfig({ path })).toMatchObject({
       session: {
         enabled: true,
-        startTriggers: {
-          wakeNames: ["ピコ", "pico"],
-          greetings: ["おはよう", "こんにちは"],
-          candidateTimeoutMs: 12_000
-        },
         ending: {
           mode: "timed",
           durationMs: 90_000
@@ -337,20 +402,21 @@ audit:
             device: ":0"
           },
           audioOutput: {
-            provider: "afplay",
+            provider: "ffplay",
             route: "system_default"
           },
           singleInstanceLockPath: join(dirname(path), "tmp/pico-custom-resident.lock"),
-          minTriggerConfidence: 0.72,
           shutdownGraceMs: 3000,
-          activation: {
-            mode: "push_to_talk",
+          control: {
             provider: "loopback_http",
             host: "127.0.0.1",
             port: 8781,
-            authTokenPath: join(dirname(path), "tmp/pico-activation-token"),
-            debounceMs: 800,
-            activationWindowMs: 8000
+            authTokenPath: join(dirname(path), "tmp/pico-control-token"),
+            keyboard: {
+              provider: "macos",
+              talkKey: "F13",
+              cancelKey: "F14"
+            }
           },
           vad: {
             provider: "ten_vad",
@@ -358,12 +424,6 @@ audit:
             wasmPath: join(dirname(path), "vendors/ten-vad/ten_vad.wasm"),
             hopSize: 160,
             threshold: 0.5
-          },
-          utteranceWindow: {
-            minSpeechMs: 300,
-            silenceMs: 700,
-            maxUtteranceMs: 5_000,
-            minRmsDb: -55
           }
         },
         probes: {
@@ -401,32 +461,43 @@ audit:
           }
         }
       },
-      audit: {
+      telemetry: {
         otel: {
           enabled: true,
-          endpoint: "http://127.0.0.1:4318/v1/logs",
+          baseUrl: "http://127.0.0.1:4318",
           serviceName: "pico",
-          timeoutMs: 5000
+          timeoutMs: 5000,
+          metricExportIntervalMs: 15_000,
+          shutdownTimeoutMs: 3000
         }
       }
     });
+  });
+
+  it("rejects the removed afplay resident audio output provider", () => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          resident: {
+            enabled: true,
+            audioInput: { provider: "avfoundation", device: ":0" },
+            audioOutput: { provider: "afplay", route: "system_default" }
+          }
+        }
+      })
+    ).toThrow("pico config voice.resident.audioOutput.provider must be alsa or ffplay");
   });
 
   it("defaults session ending to one timed minute", () => {
     expect(definePicoConfig({})).toMatchObject({
       session: {
         enabled: true,
-        startTriggers: {
-          wakeNames: [],
-          greetings: [],
-          candidateTimeoutMs: 10_000
-        },
         ending: {
           mode: "timed",
           durationMs: 60_000
         }
       },
-      audit: {
+      telemetry: {
         otel: {
           enabled: false
         }
@@ -435,11 +506,7 @@ audit:
         resident: {
           enabled: false,
           singleInstanceLockPath: "tmp/pico-voice-resident.lock",
-          minTriggerConfidence: 0.5,
           shutdownGraceMs: 5_000,
-          activation: {
-            mode: "wake_word"
-          },
           vad: {
             provider: "energy",
             minRmsDb: -55
@@ -611,7 +678,7 @@ audit:
     ).toThrow("pico config voice.stt.mlxWhisper was removed; migrate to voice.stt.appleSpeech");
   });
 
-  it("rejects unbounded resident utterance window settings", () => {
+  it("rejects removed resident activation and utterance settings", () => {
     expect(() =>
       definePicoConfig({
         voice: {
@@ -622,61 +689,46 @@ audit:
           }
         }
       })
-    ).toThrow(
-      "pico config voice.resident.utteranceWindow.maxUtteranceMs must be a positive integer <= 60000"
-    );
-  });
-
-  it("rejects remote push-to-talk activation bind hosts", () => {
+    ).toThrow("pico config voice.resident has unknown field utteranceWindow");
     expect(() =>
       definePicoConfig({
         voice: {
           resident: {
             activation: {
-              provider: "loopback_http",
-              host: "127.0.0.1",
-              port: 8781,
-              authTokenPath: "/tmp/pico-activation-token"
+              mode: "wake_word"
             }
           }
         }
       })
-    ).toThrow(
-      "pico config voice.resident.activation.mode is required when activation is configured"
-    );
-
+    ).toThrow("pico config voice.resident has unknown field activation");
     expect(() =>
       definePicoConfig({
         voice: {
           resident: {
-            activation: {
-              mode: "push_to_talk",
-              provider: "loopback_http",
-              host: "0.0.0.0",
-              port: 8781,
-              authTokenPath: "/tmp/pico-activation-token"
-            }
+            minTriggerConfidence: 0.5
           }
         }
       })
-    ).toThrow("pico config voice.resident.activation.host must be 127.0.0.1 or ::1");
+    ).toThrow("pico config voice.resident has unknown field minTriggerConfidence");
   });
 
-  it("expands push-to-talk activation token paths under the user home directory", () => {
+  it("expands resident control token paths under the user home directory", () => {
     const path = temporaryConfigFile(`
 voice:
   resident:
-    activation:
-      mode: push_to_talk
+    control:
       provider: loopback_http
       host: 127.0.0.1
       port: 8781
-      authTokenPath: ~/.pico/resident-voice/activation-token
+      authTokenPath: ~/.pico/resident-voice/control-token
+      keyboard:
+        provider: macos
+        talkKey: F13
+        cancelKey: F14
 `);
 
-    expect(loadPicoConfig({ path }).voice.resident.activation).toMatchObject({
-      mode: "push_to_talk",
-      authTokenPath: join(homedir(), ".pico/resident-voice/activation-token")
+    expect(loadPicoConfig({ path }).voice.resident.control).toMatchObject({
+      authTokenPath: join(homedir(), ".pico/resident-voice/control-token")
     });
   });
 
@@ -727,17 +779,118 @@ voice:
     ).toThrow("pico config voice.echoControl.mode platform_voice_processing is not implemented");
   });
 
-  it("rejects non-local audit OTel Collector endpoints", () => {
+  it("parses telemetry OTel settings and applies disabled defaults", () => {
+    expect(definePicoConfig({}).telemetry).toEqual({
+      otel: {
+        enabled: false
+      }
+    });
+    expect(
+      definePicoConfig({
+        telemetry: {
+          otel: {
+            enabled: true,
+            baseUrl: "http://127.0.0.1:4318",
+            serviceName: "pico-resident",
+            timeoutMs: 10_000,
+            metricExportIntervalMs: 15_000,
+            shutdownTimeoutMs: 5_000
+          }
+        }
+      }).telemetry
+    ).toEqual({
+      otel: {
+        enabled: true,
+        baseUrl: "http://127.0.0.1:4318",
+        serviceName: "pico-resident",
+        timeoutMs: 10_000,
+        metricExportIntervalMs: 15_000,
+        shutdownTimeoutMs: 5_000
+      }
+    });
+  });
+
+  it("preserves explicit telemetry OTel settings while disabled", () => {
+    expect(
+      definePicoConfig({
+        telemetry: {
+          otel: {
+            enabled: false,
+            serviceName: "pico-disabled",
+            timeoutMs: 7000,
+            metricExportIntervalMs: 11_000,
+            shutdownTimeoutMs: 2000
+          }
+        }
+      }).telemetry
+    ).toEqual({
+      otel: {
+        enabled: false,
+        serviceName: "pico-disabled",
+        timeoutMs: 7000,
+        metricExportIntervalMs: 11_000,
+        shutdownTimeoutMs: 2000
+      }
+    });
+  });
+
+  it("rejects invalid telemetry OTel settings", () => {
+    const telemetry = (otel: unknown) => ({ telemetry: { otel } });
+
+    for (const baseUrl of [
+      "https://otel.example.com:4318",
+      ["http://user", "password@127.0.0.1:4318"].join(":"),
+      "http://127.0.0.1:4318/v1/logs",
+      "http://127.0.0.1:4318?signal=logs",
+      "ftp://127.0.0.1:4318"
+    ]) {
+      expect(() =>
+        definePicoConfig(
+          telemetry({
+            enabled: true,
+            baseUrl,
+            timeoutMs: 10_000,
+            metricExportIntervalMs: 15_000
+          })
+        )
+      ).toThrow("pico config telemetry.otel.baseUrl");
+    }
+
+    expect(() =>
+      definePicoConfig(
+        telemetry({
+          enabled: true,
+          baseUrl: "http://127.0.0.1:4318",
+          timeoutMs: 10_000,
+          metricExportIntervalMs: 10_000
+        })
+      )
+    ).toThrow("pico config telemetry.otel.metricExportIntervalMs must exceed timeoutMs");
+  });
+
+  it("rejects the removed audit OTel settings", () => {
     expect(() =>
       definePicoConfig({
         audit: {
           otel: {
-            enabled: true,
-            endpoint: "https://otel.example.com/v1/logs"
+            enabled: false
           }
         }
       })
-    ).toThrow("pico config audit.otel.endpoint must use a local Collector URL");
+    ).toThrow("pico config audit.otel was removed; use telemetry.otel");
+  });
+
+  it("rejects non-local telemetry OTel Collector origins", () => {
+    expect(() =>
+      definePicoConfig({
+        telemetry: {
+          otel: {
+            enabled: true,
+            baseUrl: "https://otel.example.com:4318"
+          }
+        }
+      })
+    ).toThrow("pico config telemetry.otel.baseUrl must use a local Collector URL");
   });
 
   it("uses PICO_CONFIG_PATH as the only config environment selector", () => {

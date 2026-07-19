@@ -1,0 +1,457 @@
+#!/usr/bin/env jiti
+import { performance } from "node:perf_hooks";
+import { pathToFileURL } from "node:url";
+
+import { loadPicoConfigFromEnvironment } from "../../src/config/index.js";
+import { startMacOSControlBridge } from "../../src/runtime/macos-control-bridge.js";
+import {
+  createResidentAudioCapture,
+  type ResidentCaptureSession
+} from "../../src/runtime/resident-audio-io.js";
+import {
+  createLoopbackHttpResidentControlServer,
+  type ResidentControlResult
+} from "../../src/runtime/resident-control.js";
+import {
+  createResidentControlController,
+  type ResidentTurnGeneration
+} from "../../src/runtime/resident-control-controller.js";
+import { createResidentAudioFixtureCapture } from "./resident-audio-fixture.js";
+
+export type ResidentHoldToTalkArguments = {
+  readonly durationMs: number;
+  readonly help: boolean;
+  readonly audioFixturePath?: string;
+};
+
+export type BoundedMetricSummary = {
+  readonly samples: number;
+  readonly minimumMs: number | undefined;
+  readonly maximumMs: number | undefined;
+  readonly meanMs: number | undefined;
+};
+
+export type ResidentHoldToTalkFieldReport = {
+  readonly status: "passed";
+  readonly durationMs: number;
+  readonly outcomes: Readonly<Record<ResidentControlResult, number>>;
+  readonly completedHolds: number;
+  readonly cancelledHolds: number;
+  readonly frameCount: number;
+  readonly captureStartupLatency: BoundedMetricSummary;
+  readonly holdDuration: BoundedMetricSummary;
+  readonly releaseTailDuration: BoundedMetricSummary;
+  readonly cancellationDuration: BoundedMetricSummary;
+  readonly idleSttCalls: 0;
+  readonly cpuUserMicros: number;
+  readonly cpuSystemMicros: number;
+  readonly rssBytes: number;
+};
+
+type ActiveCapture = {
+  readonly generation: ResidentTurnGeneration;
+  readonly session: ResidentCaptureSession;
+  readonly pressedAtMs: number;
+  collection: Promise<void>;
+  frameCount: number;
+  firstFrameAtMs: number | undefined;
+  releasedAtMs: number | undefined;
+  cancelledAtMs: number | undefined;
+  operation: Promise<void> | undefined;
+};
+
+const defaultDurationMs = 30_000;
+const maximumDurationMs = 300_000;
+
+type MutableResidentHoldToTalkArguments = {
+  durationMs: number;
+  audioFixturePath?: string;
+};
+
+const residentHoldToTalkArgumentReaders: Readonly<
+  Record<string, (state: MutableResidentHoldToTalkArguments, value: string) => void>
+> = {
+  "--duration-ms": (state, value) => {
+    state.durationMs = readDuration(value);
+  },
+  "--audio-fixture": (state, value) => {
+    state.audioFixturePath = value;
+  }
+};
+
+export function readResidentHoldToTalkArguments(
+  arguments_: readonly string[]
+): ResidentHoldToTalkArguments {
+  if (arguments_.length === 0) {
+    return { durationMs: defaultDurationMs, help: false };
+  }
+
+  if (arguments_.length === 1 && arguments_[0] === "--help") {
+    return { durationMs: defaultDurationMs, help: true };
+  }
+
+  return readResidentHoldToTalkArgumentPairs(arguments_);
+}
+
+function readResidentHoldToTalkArgumentPairs(
+  arguments_: readonly string[]
+): ResidentHoldToTalkArguments {
+  const parsed: MutableResidentHoldToTalkArguments = { durationMs: defaultDurationMs };
+
+  for (let index = 0; index < arguments_.length; index += 2) {
+    const flag = arguments_[index];
+    const value = arguments_[index + 1];
+    const read = flag === undefined ? undefined : residentHoldToTalkArgumentReaders[flag];
+    if (read === undefined || value === undefined || value.trim() === "") {
+      throw invalidArguments();
+    }
+    read(parsed, value);
+  }
+
+  return {
+    durationMs: parsed.durationMs,
+    help: false,
+    ...(parsed.audioFixturePath === undefined ? {} : { audioFixturePath: parsed.audioFixturePath })
+  };
+}
+
+function readDuration(value: string): number {
+  const durationMs = Number(value);
+
+  if (!Number.isInteger(durationMs) || durationMs <= 0 || durationMs > maximumDurationMs) {
+    throw invalidArguments();
+  }
+
+  return durationMs;
+}
+
+function invalidArguments(): Error {
+  return new Error(
+    "usage: field:resident-hold-to-talk [--duration-ms 1..300000] [--audio-fixture path.wav|path.pcm]"
+  );
+}
+
+export function formatResidentHoldToTalkHelp(): string {
+  return [
+    "Usage: npm run field:resident-hold-to-talk -- [--duration-ms 30000] [--audio-fixture path.wav|path.pcm]",
+    "",
+    "Runs a bounded macOS control-and-capture validation using the configured controls.",
+    "It reports aggregate timing/resource metadata only and does not invoke STT, Pi, TTS, or playback.",
+    "--audio-fixture explicitly replaces microphone frames only for this bounded field validation."
+  ].join("\n");
+}
+
+export function summarizeBoundedMetric(values: readonly number[]): BoundedMetricSummary {
+  if (values.length === 0) {
+    return {
+      samples: 0,
+      minimumMs: undefined,
+      maximumMs: undefined,
+      meanMs: undefined
+    };
+  }
+
+  const rounded = values.map((value) => Math.round(value * 100) / 100);
+
+  return {
+    samples: rounded.length,
+    minimumMs: Math.min(...rounded),
+    maximumMs: Math.max(...rounded),
+    meanMs:
+      Math.round((rounded.reduce((sum, value) => sum + value, 0) / rounded.length) * 100) / 100
+  };
+}
+
+export async function runResidentHoldToTalkFieldValidation(
+  arguments_: ResidentHoldToTalkArguments
+): Promise<ResidentHoldToTalkFieldReport> {
+  const config = loadPicoConfigFromEnvironment();
+  const control = config.voice.resident.control;
+
+  if (!config.voice.resident.enabled || control === undefined) {
+    throw new Error(
+      "pico hold-to-talk field validation requires voice.resident.enabled and voice.resident.control"
+    );
+  }
+
+  const startedAtMs = performance.now();
+  const startedCpu = process.cpuUsage();
+  let durationTimer: ReturnType<typeof setTimeout> | undefined;
+  let unregisterSignals: (() => void) | undefined;
+  let capture: ReturnType<typeof createResidentAudioCapture> | undefined;
+  let controller: ReturnType<typeof createResidentControlController> | undefined;
+  let server: Awaited<ReturnType<typeof createLoopbackHttpResidentControlServer>> | undefined;
+  let bridge: Awaited<ReturnType<typeof startMacOSControlBridge>> | undefined;
+  let active: ActiveCapture | undefined;
+
+  try {
+    const stopController = new AbortController();
+    unregisterSignals = registerStopSignals(stopController);
+    durationTimer = setTimeout(() => stopController.abort(), arguments_.durationMs);
+    const ownedCapture =
+      arguments_.audioFixturePath === undefined
+        ? createResidentAudioCapture(config)
+        : createResidentAudioFixtureCapture({
+            path: arguments_.audioFixturePath,
+            expectedSampleRateHz: config.voice.echoControl.sampleRateHz,
+            expectedChannels: config.voice.echoControl.channels,
+            frameMs: config.voice.echoControl.frameMs
+          });
+    capture = ownedCapture;
+    const outcomes: Record<ResidentControlResult, number> = {
+      accepted: 0,
+      ignored_busy: 0,
+      ignored_stale: 0,
+      noop: 0
+    };
+    const captureStartupLatencies: number[] = [];
+    const holdDurations: number[] = [];
+    const releaseTailDurations: number[] = [];
+    const cancellationDurations: number[] = [];
+    let completedHolds = 0;
+    let completedHoldsWithFrames = 0;
+    let cancelledHolds = 0;
+    let totalFrameCount = 0;
+    let rejectFailure: (error: Error) => void = () => undefined;
+    const failure = new Promise<never>((_resolve, reject) => {
+      rejectFailure = reject;
+    });
+    void failure.catch(() => undefined);
+    const fail = (error: unknown, generationId?: number): void => {
+      controller?.fail(generationId);
+      rejectFailure(error instanceof Error ? error : new Error(String(error)));
+    };
+    const ownedController = createResidentControlController({
+      onListen(generation) {
+        const session = ownedCapture.start(generation.signal);
+        const turn: ActiveCapture = {
+          generation,
+          session,
+          pressedAtMs: performance.now(),
+          collection: Promise.resolve(),
+          frameCount: 0,
+          firstFrameAtMs: undefined,
+          releasedAtMs: undefined,
+          cancelledAtMs: undefined,
+          operation: undefined
+        };
+        turn.collection = collectFrames(turn);
+        void turn.collection.catch((error: unknown) => fail(error, generation.id));
+        active = turn;
+      },
+      onTailReady(generation) {
+        const turn = active;
+
+        if (turn === undefined || turn.generation.id !== generation.id) {
+          return;
+        }
+
+        turn.operation ??= settleCapture(turn, ownedController).catch((error: unknown) => {
+          fail(error, generation.id);
+        });
+      },
+      onCancel(generation) {
+        const turn = active;
+
+        if (turn === undefined || turn.generation.id !== generation.id) {
+          return;
+        }
+
+        turn.cancelledAtMs ??= performance.now();
+        turn.operation ??= settleCapture(turn, ownedController).catch((error: unknown) => {
+          fail(error, generation.id);
+        });
+      }
+    });
+    controller = ownedController;
+    const collectFrames = async (turn: ActiveCapture): Promise<void> => {
+      for await (const frame of turn.session.frames) {
+        void frame;
+        turn.firstFrameAtMs ??= performance.now();
+        turn.frameCount += 1;
+      }
+    };
+    const recordCaptureMetrics = (turn: ActiveCapture): void => {
+      totalFrameCount += turn.frameCount;
+
+      if (turn.firstFrameAtMs !== undefined) {
+        captureStartupLatencies.push(turn.firstFrameAtMs - turn.pressedAtMs);
+      }
+    };
+    const settleCapture = async (
+      turn: ActiveCapture,
+      owner: ReturnType<typeof createResidentControlController>
+    ): Promise<void> => {
+      await turn.session.stop();
+      await turn.collection;
+      const completedAtMs = performance.now();
+      const cancelledAtMs = turn.cancelledAtMs;
+      const claimedTerminalState =
+        cancelledAtMs === undefined
+          ? owner.finish(turn.generation.id, "transcribing")
+          : owner.completeCancellation(turn.generation.id);
+
+      if (claimedTerminalState) {
+        recordCaptureMetrics(turn);
+
+        if (cancelledAtMs === undefined) {
+          if (turn.releasedAtMs !== undefined) {
+            holdDurations.push(turn.releasedAtMs - turn.pressedAtMs);
+            releaseTailDurations.push(completedAtMs - turn.releasedAtMs);
+          }
+
+          completedHolds += 1;
+
+          if (turn.frameCount > 0) {
+            completedHoldsWithFrames += 1;
+          }
+        } else {
+          cancellationDurations.push(completedAtMs - cancelledAtMs);
+          cancelledHolds += 1;
+        }
+      }
+
+      if (active === turn) {
+        active = undefined;
+      }
+    };
+    server = await createLoopbackHttpResidentControlServer({
+      host: control.host,
+      port: control.port,
+      authTokenPath: control.authTokenPath,
+      shutdownTimeoutMs: config.voice.resident.shutdownGraceMs,
+      handle: (event) => {
+        const turn = active;
+
+        try {
+          const outcome = ownedController.handle(event);
+
+          if (event.kind === "talk_released" && outcome === "accepted" && turn !== undefined) {
+            turn.releasedAtMs ??= performance.now();
+          }
+
+          outcomes[outcome] += 1;
+          return outcome;
+        } catch (error) {
+          fail(error, ownedController.generation()?.id);
+          throw error;
+        }
+      },
+      signal: stopController.signal
+    });
+    bridge = await startMacOSControlBridge({ control, signal: stopController.signal });
+    process.stderr.write(
+      `[pico field] ready; use the configured controls for ${String(arguments_.durationMs)} ms\n`
+    );
+    await Promise.race([
+      waitForAbort(stopController.signal),
+      failure,
+      bridge.completion.then(() => {
+        if (!stopController.signal.aborted) {
+          throw new Error("pico macOS control bridge exited during field validation");
+        }
+      })
+    ]);
+
+    requireCompletedAudioCapture(completedHoldsWithFrames);
+
+    const elapsedMs = performance.now() - startedAtMs;
+    const cpu = process.cpuUsage(startedCpu);
+
+    return {
+      status: "passed",
+      durationMs: Math.round(elapsedMs),
+      outcomes: Object.freeze({ ...outcomes }),
+      completedHolds,
+      cancelledHolds,
+      frameCount: totalFrameCount,
+      captureStartupLatency: summarizeBoundedMetric(captureStartupLatencies),
+      holdDuration: summarizeBoundedMetric(holdDurations),
+      releaseTailDuration: summarizeBoundedMetric(releaseTailDurations),
+      cancellationDuration: summarizeBoundedMetric(cancellationDurations),
+      idleSttCalls: 0,
+      cpuUserMicros: cpu.user,
+      cpuSystemMicros: cpu.system,
+      rssBytes: process.memoryUsage().rss
+    };
+  } finally {
+    await closeFieldValidationResources({
+      durationTimer,
+      unregisterSignals,
+      controller,
+      active,
+      bridge,
+      server,
+      capture
+    });
+  }
+}
+
+function requireCompletedAudioCapture(completedHoldsWithFrames: number): void {
+  if (completedHoldsWithFrames === 0) {
+    throw new Error("pico hold-to-talk field validation observed no completed audio capture");
+  }
+}
+
+async function closeFieldValidationResources(input: {
+  readonly durationTimer: ReturnType<typeof setTimeout> | undefined;
+  readonly unregisterSignals: (() => void) | undefined;
+  readonly controller: ReturnType<typeof createResidentControlController> | undefined;
+  readonly active: ActiveCapture | undefined;
+  readonly bridge: Awaited<ReturnType<typeof startMacOSControlBridge>> | undefined;
+  readonly server: Awaited<ReturnType<typeof createLoopbackHttpResidentControlServer>> | undefined;
+  readonly capture: ReturnType<typeof createResidentAudioCapture> | undefined;
+}): Promise<void> {
+  if (input.durationTimer !== undefined) {
+    clearTimeout(input.durationTimer);
+  }
+
+  input.unregisterSignals?.();
+  input.controller?.stop();
+  await closeActiveCapture(input.active);
+  await input.bridge?.close().catch(() => undefined);
+  await input.server?.close();
+  await input.capture?.close();
+}
+
+async function closeActiveCapture(active: ActiveCapture | undefined): Promise<void> {
+  await active?.session.stop();
+  await active?.collection.catch(() => undefined);
+  await active?.operation?.catch(() => undefined);
+}
+
+function registerStopSignals(controller: AbortController): () => void {
+  const stop = (): void => controller.abort();
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+
+  return () => {
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
+  };
+}
+
+function waitForAbort(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) =>
+    signal.addEventListener("abort", () => resolve(), { once: true })
+  );
+}
+
+function isDirectExecution(): boolean {
+  return process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+}
+
+if (isDirectExecution()) {
+  const arguments_ = readResidentHoldToTalkArguments(process.argv.slice(2));
+
+  if (arguments_.help) {
+    process.stdout.write(`${formatResidentHoldToTalkHelp()}\n`);
+  } else {
+    const report = await runResidentHoldToTalkFieldValidation(arguments_);
+    process.stdout.write(`${JSON.stringify(report, undefined, 2)}\n`);
+  }
+}

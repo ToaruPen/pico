@@ -46,7 +46,6 @@ const voiceMetricAttributeKeys = new Set([
   "pico.voice.chunk_count",
   "pico.voice.frame_bytes",
   "pico.voice.vlm_frame_bytes",
-  "pico.voice.triggered",
   "pico.voice.queue_depth",
   "pico.voice.error_code"
 ]);
@@ -172,9 +171,7 @@ function normalizeResidentVoiceEvent(
     kind: event.kind,
     occurredAt: event.occurredAt,
     sessionId: event.sessionId,
-    ...(event.kind === "pi_agent_response" || event.kind === "wake_ack_response"
-      ? { durationMs: event.durationMs }
-      : {})
+    ...(event.kind === "pi_agent_response" ? { durationMs: event.durationMs } : {})
   });
 }
 

@@ -8,18 +8,18 @@ pico:
 
 session:
   enabled: true
-  startTriggers:
-    wakeNames:
-      - ピコ
-      - pico
-    greetings:
-      - おはよう
-      - こんにちは
-      - ただいま
-    candidateTimeoutMs: 10000
   ending:
     mode: timed
     durationMs: 60000
+
+telemetry:
+  otel:
+    enabled: false
+    baseUrl: http://127.0.0.1:4318
+    serviceName: pico
+    timeoutMs: 10000
+    metricExportIntervalMs: 15000
+    shutdownTimeoutMs: 5000
 
 camera:
   tapo:
@@ -78,7 +78,7 @@ voice:
       provider: avfoundation
       device: ':0'
     audioOutput:
-      provider: afplay
+      provider: ffplay
       route: system_default
     # Raspberry Pi / Linux resident runtime:
     # audioInput:
@@ -88,24 +88,17 @@ voice:
     #   provider: alsa
     #   device: hw:0,0
     singleInstanceLockPath: tmp/pico-voice-resident.lock
-    minTriggerConfidence: 0.5
     shutdownGraceMs: 5000
-    activation:
-      # Default wake-word mode. For an 8BitDo Dual Super Buttons workflow, map
-      # the button to a global hotkey in a bridge app and have that hotkey run a
-      # local wrapper so the bearer token never appears in argv. Example wrapper:
-      # token="$(cat "$HOME/.pico/resident-voice/activation-token")"
-      # printf 'header = "Authorization: Bearer %s"\n' "$token" \
-      #   | /usr/bin/curl -fsS -X POST -K - \
-      #       http://127.0.0.1:8781/v1/resident-voice/activate
-      mode: wake_word
-      # mode: push_to_talk
-      # provider: loopback_http
-      # host: 127.0.0.1
-      # port: 8781
-      # authTokenPath: ~/.pico/resident-voice/activation-token
-      # debounceMs: 800
-      # activationWindowMs: 8000
+    control:
+      provider: loopback_http
+      host: 127.0.0.1
+      port: 8781
+      authTokenPath: ~/.pico/resident-voice/control-token
+      keyboard:
+        provider: macos
+        # Examples only. Both bindings are required and may be changed.
+        talkKey: F13
+        cancelKey: F14
     vad:
       provider: energy
       minRmsDb: -55
@@ -114,12 +107,6 @@ voice:
       # wasmPath: vendors/ten-vad/ten_vad.wasm
       # hopSize: 160
       # threshold: 0.5
-    utteranceWindow:
-      minSpeechMs: 300
-      silenceMs: 700
-      maxUtteranceMs: 5000
-      # smoke:resident-audio-input fails below this RMS threshold.
-      minRmsDb: -55
   probes:
     enabled: true
   echoControl:

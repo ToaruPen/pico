@@ -66,10 +66,10 @@ Pi Agent
       └─ transport
 ```
 
-Pi owns the parent conversation session, transcript, context, history, tools,
-and subagents. Durable memory, when enabled, is provided by a separately
-installed Pi-level plugin. Pico does not configure, register, wrap, proxy, or
-call memory providers or tools.
+Pi owns the non-persistent host session, interaction AgentSessions, transcript,
+context, history, tools, and subagents. Durable memory, when enabled, is
+provided by a separately installed Pi-level plugin. Pico does not configure,
+register, wrap, proxy, or call memory providers or tools.
 
 ## Module Responsibilities
 
