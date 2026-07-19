@@ -43,6 +43,30 @@ instructions.
 If a repeated review rule can be expressed structurally, add or update an
 ast-grep rule and test instead of relying on AGENTS.md prose.
 
+## Real-Provider Field Validation
+
+Use this order for resident voice measurements so environment failures do not
+consume a benchmark series or become accepted evidence:
+
+1. Run focused tests and type/lint checks while iterating.
+2. Run `just smoke-voice-providers` for Apple Speech and AivisSpeech
+   reachability. Inspect its JSON and require both sections to have
+   `status: passed`; `skipped` is not a successful preflight and stops the
+   validation ladder even though the generic smoke command exits zero.
+3. Run one strict full-turn pseudo-audio smoke with the canonical fixture hash,
+   required tool, private validation output, and `--report-output`.
+4. Do not benchmark until that metadata report has `status: passed`.
+5. Without changing code, config, or fixture, collect at least three sequential
+   runs. Do not run provider benchmarks concurrently.
+6. Report Pi time-to-first-text separately from Pico stages so model variation
+   is not attributed to Pico.
+7. Run `just check` and Secretlint on the final tree.
+
+Shared raw stdout is not an evidence boundary because Pi-level extensions may
+write to it. Use the field-owned `--report-output` file as authoritative
+metadata evidence. If a diagnostic display pipeline uses `tee`, enable
+`set -o pipefail`; never adopt the raw `tee` output as the report artifact.
+
 ## Runtime Tooling Decisions
 
 - Pi Agent package entry: `package.json` `pi.extensions`.

@@ -11,9 +11,10 @@ import {
   toOpenTelemetryLogRecord
 } from "../../src/modules/audit/index.js";
 import {
-  createOpenTelemetryAuditExporter,
-  type OpenTelemetryAuditExporter
-} from "../../src/modules/audit/otel.js";
+  createOpenTelemetryProvider,
+  type OpenTelemetryProviderOptions,
+  type PicoTelemetry
+} from "../../src/modules/telemetry/index.js";
 import { type CameraVlmSceneSmokeReport, runCameraVlmSceneSmoke } from "./camera-vlm-scene.js";
 import {
   type OllamaVlmSmokeReport,
@@ -79,9 +80,7 @@ export type PicoMilestoneSmokeDependencies = {
   readonly runPersonDetectionSmoke?: (config: PicoConfig) => Promise<PersonDetectionSmokeReport>;
   readonly runOllamaVlmConnectivitySmoke?: (config: PicoConfig) => Promise<OllamaVlmSmokeReport>;
   readonly runCameraVlmSceneSmoke?: (config: PicoConfig) => Promise<CameraVlmSceneSmokeReport>;
-  readonly createAuditOtelExporter?: (
-    config: Required<PicoConfig["audit"]["otel"]>
-  ) => OpenTelemetryAuditExporter;
+  readonly createTelemetry?: (config: OpenTelemetryProviderOptions) => PicoTelemetry;
 };
 
 const repositoryRoot = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
@@ -270,7 +269,7 @@ function auditConfigAwareSection(
 }
 
 function isAuditOtelConfigError(error: unknown): boolean {
-  return errorMessage(error).includes("pico config audit.otel.");
+  return errorMessage(error).includes("pico config telemetry.otel.");
 }
 
 async function runVoiceSections(
@@ -291,17 +290,30 @@ async function runVoiceSections(
 
 async function runAuditSection(
   config?: PicoConfig,
-  dependencies: Pick<PicoMilestoneSmokeDependencies, "createAuditOtelExporter" | "now"> = {}
+  dependencies: Pick<PicoMilestoneSmokeDependencies, "createTelemetry" | "now"> = {}
 ): Promise<PicoMilestoneSmokeSectionReport> {
   try {
     const audit = createStructuredAuditLog();
+    const occurredAt = dependencies.now?.() ?? new Date().toISOString();
     audit.record({
       category: "session_lifecycle",
       name: "session.started",
       severity: "info",
-      occurredAt: dependencies.now?.() ?? new Date().toISOString(),
+      occurredAt,
       summary: "Pico interaction session started.",
       attributes: { source: "milestone_smoke" }
+    });
+    audit.record({
+      category: "transport_event",
+      name: "voice.runtime.stage",
+      severity: "info",
+      occurredAt,
+      summary: "Pico voice runtime stage completed.",
+      attributes: {
+        "pico.voice.stage": "stt",
+        "pico.voice.stage_status": "ok",
+        "pico.voice.stage_duration_ms": 1
+      }
     });
     const auditEntries = audit.entries();
     return await captureSection("audit_otel", auditOtelProviderName(config), async () => {
@@ -323,7 +335,7 @@ async function runAuditSection(
 
 async function buildAuditOtelSection(
   config: PicoConfig | undefined,
-  dependencies: Pick<PicoMilestoneSmokeDependencies, "createAuditOtelExporter">,
+  dependencies: Pick<PicoMilestoneSmokeDependencies, "createTelemetry">,
   auditEntries: readonly AuditEvent[],
   otelRecords: readonly OpenTelemetryAuditLogRecord[],
   firstOtelRecord: OpenTelemetryAuditLogRecord
@@ -332,9 +344,10 @@ async function buildAuditOtelSection(
     category: firstOtelRecord.attributes["pico.audit.category"],
     eventName: firstOtelRecord.attributes["event.name"],
     eventCount: auditEntries.length,
-    otelRecordCount: otelRecords.length
+    otelRecordCount: otelRecords.length,
+    metricEventCount: auditEntries.filter((event) => event.name === "voice.runtime.stage").length
   };
-  const otelConfig = config?.audit.otel;
+  const otelConfig = config?.telemetry.otel;
 
   if (otelConfig?.enabled !== true) {
     return passedStructuredAuditSection(baseDetails);
@@ -357,26 +370,43 @@ function passedStructuredAuditSection(
 function auditOtelProviderName(
   config: PicoConfig | undefined
 ): "structured-audit" | "structured-audit+otel" {
-  return config?.audit.otel.enabled === true ? "structured-audit+otel" : "structured-audit";
+  return config?.telemetry.otel.enabled === true ? "structured-audit+otel" : "structured-audit";
 }
 
 async function exportAuditOtelSection(
-  otelConfig: PicoConfig["audit"]["otel"],
-  dependencies: Pick<PicoMilestoneSmokeDependencies, "createAuditOtelExporter">,
+  otelConfig: PicoConfig["telemetry"]["otel"],
+  dependencies: Pick<PicoMilestoneSmokeDependencies, "createTelemetry">,
   auditEntries: readonly AuditEvent[],
   baseDetails: Record<string, unknown>
 ): Promise<PicoMilestoneSmokeSectionReport> {
   const requiredOtelConfig = {
-    enabled: true,
-    endpoint: requireAuditOtelEndpoint(otelConfig.endpoint),
-    serviceName: otelConfig.serviceName ?? "pico",
-    timeoutMs: otelConfig.timeoutMs ?? 10_000
+    baseUrl: requireTelemetryOtelValue(otelConfig.baseUrl, "baseUrl"),
+    serviceName: requireTelemetryOtelValue(otelConfig.serviceName, "serviceName"),
+    timeoutMs: requireTelemetryOtelValue(otelConfig.timeoutMs, "timeoutMs"),
+    metricExportIntervalMs: requireTelemetryOtelValue(
+      otelConfig.metricExportIntervalMs,
+      "metricExportIntervalMs"
+    ),
+    shutdownTimeoutMs: requireTelemetryOtelValue(otelConfig.shutdownTimeoutMs, "shutdownTimeoutMs")
   } as const;
-  const exporter =
-    dependencies.createAuditOtelExporter?.(requiredOtelConfig) ??
-    createOpenTelemetryAuditExporter(requiredOtelConfig);
+  const telemetry =
+    dependencies.createTelemetry?.(requiredOtelConfig) ??
+    createOpenTelemetryProvider(requiredOtelConfig);
 
-  await exportAuditEvents(exporter, auditEntries);
+  const exportError = await exportTelemetryEvents(telemetry, auditEntries);
+  const shutdownError = await shutdownTelemetrySafely(telemetry);
+
+  if (exportError !== undefined) {
+    if (shutdownError !== undefined) {
+      throw errorWithSecondary(exportError, "shutdown", shutdownError);
+    }
+
+    throw exportError;
+  }
+
+  if (shutdownError !== undefined) {
+    throw shutdownError;
+  }
 
   return {
     name: "audit_otel",
@@ -384,46 +414,40 @@ async function exportAuditOtelSection(
     provider: "structured-audit+otel",
     details: {
       ...baseDetails,
-      endpoint: requiredOtelConfig.endpoint,
-      exportedOtelRecordCount: auditEntries.length
+      baseUrl: requiredOtelConfig.baseUrl,
+      exportedOtelRecordCount: auditEntries.length,
+      exportedMetricEventCount: auditEntries.filter((event) => event.name === "voice.runtime.stage")
+        .length
     }
   };
 }
 
-async function exportAuditEvents(
-  exporter: OpenTelemetryAuditExporter,
+async function exportTelemetryEvents(
+  telemetry: PicoTelemetry,
   auditEntries: readonly AuditEvent[]
-): Promise<void> {
-  let primaryError: Error | undefined;
-
-  try {
-    for (const event of auditEntries) {
-      await exporter.export(event);
-    }
-  } catch (error) {
-    primaryError = toError(error);
-  }
-
-  const shutdownError = await shutdownAuditExporterSafely(exporter);
-
-  if (primaryError !== undefined) {
-    if (shutdownError !== undefined) {
-      throw errorWithSecondary(primaryError, "shutdown", shutdownError);
-    }
-
-    throw primaryError;
-  }
-
-  if (shutdownError !== undefined) {
-    throw shutdownError;
-  }
-}
-
-async function shutdownAuditExporterSafely(
-  exporter: OpenTelemetryAuditExporter
 ): Promise<Error | undefined> {
   try {
-    await exporter.shutdown();
+    for (const event of auditEntries) {
+      telemetry.record(event);
+    }
+    await telemetry.forceFlush();
+  } catch (error) {
+    return toError(error);
+  }
+
+  const health = telemetry.health();
+  if (health.logs.consecutiveFailures > 0 || health.metrics.consecutiveFailures > 0) {
+    return new Error(
+      `telemetry export failed (logs=${String(health.logs.consecutiveFailures)} metrics=${String(health.metrics.consecutiveFailures)})`
+    );
+  }
+
+  return undefined;
+}
+
+async function shutdownTelemetrySafely(telemetry: PicoTelemetry): Promise<Error | undefined> {
+  try {
+    await telemetry.shutdown();
 
     return undefined;
   } catch (error) {
@@ -431,9 +455,9 @@ async function shutdownAuditExporterSafely(
   }
 }
 
-function requireAuditOtelEndpoint(value: string | undefined): string {
+function requireTelemetryOtelValue<T>(value: T | undefined, name: string): T {
   if (value === undefined) {
-    throw new Error("pico milestone smoke audit OTel endpoint is required");
+    throw new Error(`pico milestone smoke telemetry OTel ${name} is required`);
   }
 
   return value;
@@ -461,7 +485,10 @@ function validateAuditOtelRecords(
 }
 
 function assertAuditOtelRecord(record: OpenTelemetryAuditLogRecord): void {
-  if (record.attributes["pico.audit.category"] !== "session_lifecycle") {
+  if (
+    record.attributes["pico.audit.category"] !== "session_lifecycle" &&
+    record.attributes["pico.audit.category"] !== "transport_event"
+  ) {
     throw new Error("pico milestone smoke emitted an unexpected audit OTel category");
   }
 

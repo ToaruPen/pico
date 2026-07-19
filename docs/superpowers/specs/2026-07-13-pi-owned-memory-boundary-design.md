@@ -9,8 +9,8 @@ conversation context、transcript、history、working summary は Pi が所有�
 
 ## 決定
 
-1. Pi core は parent conversation session、transcript、context、history、session persistence、
-   tool registry、subagent context を所有する。
+1. Pi core は non-persistent host session、interaction AgentSession、transcript、context、history、
+   session persistence能力、tool registry、subagent context を所有する。
 2. Durable memory は、必要な環境だけが Pico と同列の Pi-level plugin として導入する。
 3. Pi-level memory plugin は Mem0/Qdrant の設定、抽出、保存、検索、更新、削除、history、
    retention、tool registration、runtime lifecycle を所有する。
@@ -28,7 +28,7 @@ conversation context、transcript、history、working summary は Pi が所有�
 
 | Owner | Responsibilities |
 | --- | --- |
-| Pi core | Conversation session、transcript、context/history、session persistence、tool registry、subagents |
+| Pi core | Host/interaction AgentSession、transcript、context/history、session persistence能力、tool registry、subagents |
 | Pi-level memory plugin | Durable-memory provider、tools、config、extraction、mutation、retention、lifecycle |
 | Pico | Facility audio、address/attention、TTS/echo、facility runtime restrictions |
 | Pi settings | Plugin loading と tool visibility |
@@ -38,7 +38,7 @@ conversation context、transcript、history、working summary は Pi が所有�
 通常の会話経路は次のとおりとする。
 
 ```text
-facility input -> Pico audio/attention -> Pi parent session -> Pico speech output
+facility input -> Pico audio/attention -> Pi in-memory interaction session -> Pico speech output
 ```
 
 Durable memory を利用する場合も、その経路は Pico を通らない。

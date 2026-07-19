@@ -4,6 +4,7 @@ import {
   createStructuredAuditLog,
   type StructuredAuditLog
 } from "../modules/audit/index.js";
+import { voiceRuntimeStagePolicy } from "./voice-stage-probe.js";
 
 export type ResidentVoiceAuditLogOptions = {
   readonly stdoutEnabled: boolean;
@@ -14,6 +15,20 @@ export type ResidentVoiceAuditLogOptions = {
 
 export type ResidentVoiceAuditLogStdoutMode = "summary" | "verbose";
 
+export function createAuditEventFanout(
+  writers: readonly ((event: AuditEvent) => void)[]
+): (event: AuditEvent) => void {
+  return (event) => {
+    for (const writer of writers) {
+      try {
+        writer(event);
+      } catch {
+        // Audit sinks are independent; one failure must not suppress the others.
+      }
+    }
+  };
+}
+
 const voiceStageAttributeNames = {
   stage: "pico.voice.stage",
   status: "pico.voice.stage_status",
@@ -23,17 +38,6 @@ const voiceStageAttributeNames = {
   chunkCount: "pico.voice.chunk_count",
   errorCode: "pico.voice.error_code"
 } as const;
-const summaryVoiceStages = new Set([
-  "stt",
-  "session_start",
-  "pi_turn",
-  "tts_request_wall",
-  "tts_audio_duration",
-  "tts_synthesize",
-  "tts_playback",
-  "camera_capture",
-  "vlm_scene_description"
-]);
 
 export function createResidentVoiceAuditLog(
   options: ResidentVoiceAuditLogOptions
@@ -101,13 +105,8 @@ function shouldMirrorResidentVoiceEvent(
   }
 
   const stage = event.attributes[voiceStageAttributeNames.stage];
-  const status = event.attributes[voiceStageAttributeNames.status];
 
-  if (status === "error") {
-    return true;
-  }
-
-  return typeof stage === "string" && summaryVoiceStages.has(stage);
+  return voiceRuntimeStagePolicy(stage)?.summary === true;
 }
 
 function optionalAttribute(

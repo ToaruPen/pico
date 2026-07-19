@@ -58,12 +58,26 @@ export type EchoControlProviderHealth =
       readonly message: string;
     };
 
+export const ECHO_CONTROL_REGISTRATION_TIMEOUT_MS = 1_000;
+
+export type EchoControlRegistrationResult =
+  | { readonly status: "applied" }
+  | { readonly status: "definitely_not_applied"; readonly error: Error }
+  | { readonly status: "indeterminate"; readonly error: Error };
+
+export type EchoControlResetResult =
+  | { readonly status: "reset" }
+  | { readonly status: "unsupported" };
+
 export type EchoControlProvider = {
   readonly describe: () => EchoControlProviderMetadata;
   readonly checkHealth: () => Promise<EchoControlProviderHealth>;
-  readonly acceptFarEndReference: (frame: VoicePcmFrame) => Promise<void>;
+  readonly acceptFarEndReference: (
+    frame: VoicePcmFrame,
+    signal: AbortSignal
+  ) => Promise<EchoControlRegistrationResult>;
   readonly processNearEnd: (frame: VoicePcmFrame) => Promise<EchoControlResult>;
-  readonly flush: () => Promise<void>;
+  readonly flush: () => Promise<EchoControlResetResult>;
 };
 
 export type HalfDuplexEchoControlOptions = {
@@ -117,17 +131,26 @@ export function createHalfDuplexEchoControl(
         engine: "half-duplex-safety"
       });
     },
-    acceptFarEndReference(frame) {
-      const farEnd = defineVoicePcmFrame(frame);
-      requireVoiceFrameDirection(farEnd, "far_end");
-      mutedUntil = Date.parse(farEnd.capturedAt) + farEnd.durationMs + tailMuteMs;
-      recordVoiceAudit(options.audit, "voice.listen.suspended_for_tts", {
-        "pico.voice.echo_control.provider": "half_duplex",
-        "pico.voice.frame.duration_ms": farEnd.durationMs,
-        "pico.voice.frame.sample_rate_hz": farEnd.sampleRateHz,
-        "pico.voice.frame.channels": farEnd.channels
+    acceptFarEndReference(frame, signal) {
+      return Promise.resolve().then(() => {
+        try {
+          signal.throwIfAborted();
+          const farEnd = defineVoicePcmFrame(frame);
+          requireVoiceFrameDirection(farEnd, "far_end");
+          signal.throwIfAborted();
+          recordVoiceAudit(options.audit, "voice.listen.suspended_for_tts", {
+            "pico.voice.echo_control.provider": "half_duplex",
+            "pico.voice.frame.duration_ms": farEnd.durationMs,
+            "pico.voice.frame.sample_rate_hz": farEnd.sampleRateHz,
+            "pico.voice.frame.channels": farEnd.channels
+          });
+          signal.throwIfAborted();
+          mutedUntil = Date.parse(farEnd.capturedAt) + farEnd.durationMs + tailMuteMs;
+          return { status: "applied" };
+        } catch (error) {
+          return { status: "definitely_not_applied", error: requireError(error) };
+        }
       });
-      return Promise.resolve();
     },
     processNearEnd(frame) {
       const nearEnd = defineVoicePcmFrame(frame);
@@ -161,7 +184,7 @@ export function createHalfDuplexEchoControl(
     },
     flush() {
       recordResumeIfNeeded(options.audit);
-      return Promise.resolve();
+      return Promise.resolve({ status: "reset" });
     }
   };
 
@@ -183,6 +206,7 @@ export function createHttpEchoControlProvider(
 ): EchoControlProvider {
   const providerEndpoint = requireLocalProviderEndpoint(options.providerEndpoint);
   const fetchImplementation = options.fetchImplementation ?? fetch;
+  let unsafeRegistrationError: Error | undefined;
 
   return {
     describe() {
@@ -198,16 +222,56 @@ export function createHttpEchoControlProvider(
         fetchImplementation
       });
     },
-    async acceptFarEndReference(frame) {
-      const farEnd = defineVoicePcmFrame(frame);
-      requireVoiceFrameDirection(farEnd, "far_end");
-      await postEchoControlFrame(providerEndpoint, "/v1/echo-control/far-end", farEnd, {
-        provider: options.provider,
-        mode: options.mode,
-        fetchImplementation
-      });
+    async acceptFarEndReference(frame, signal) {
+      if (unsafeRegistrationError !== undefined) {
+        return { status: "indeterminate", error: unsafeRegistrationError };
+      }
+      let farEnd: VoicePcmFrame;
+      try {
+        signal.throwIfAborted();
+        farEnd = defineVoicePcmFrame(frame);
+        requireVoiceFrameDirection(farEnd, "far_end");
+        signal.throwIfAborted();
+      } catch (error) {
+        return { status: "definitely_not_applied", error: requireError(error) };
+      }
+      const requestController = new AbortController();
+      const forwardAbort = (): void => requestController.abort(signal.reason);
+      signal.addEventListener("abort", forwardAbort, { once: true });
+      const timeoutError = new Error(
+        `pico echo-control far-end registration timed out after ${String(ECHO_CONTROL_REGISTRATION_TIMEOUT_MS)} ms`
+      );
+      const timeout = setTimeout(() => {
+        requestController.abort(timeoutError);
+      }, ECHO_CONTROL_REGISTRATION_TIMEOUT_MS);
+      try {
+        await postEchoControlFrame(providerEndpoint, "/v1/echo-control/far-end", farEnd, {
+          provider: options.provider,
+          mode: options.mode,
+          fetchImplementation,
+          signal: requestController.signal
+        });
+        return { status: "applied" };
+      } catch (error) {
+        const failure =
+          requestController.signal.reason === timeoutError
+            ? timeoutError
+            : signal.reason instanceof Error
+              ? signal.reason
+              : error instanceof Error
+                ? error
+                : new Error("pico echo-control far-end registration outcome is indeterminate");
+        unsafeRegistrationError = new Error(failure.message, { cause: error });
+        return { status: "indeterminate", error: unsafeRegistrationError };
+      } finally {
+        clearTimeout(timeout);
+        signal.removeEventListener("abort", forwardAbort);
+      }
     },
     async processNearEnd(frame) {
+      if (unsafeRegistrationError !== undefined) {
+        throw unsafeRegistrationError;
+      }
       const nearEnd = defineVoicePcmFrame(frame);
       requireVoiceFrameDirection(nearEnd, "near_end");
       const response = await postEchoControlFrame(
@@ -248,7 +312,7 @@ export function createHttpEchoControlProvider(
       };
     },
     flush() {
-      return Promise.resolve();
+      return Promise.resolve({ status: "unsupported" });
     }
   };
 }
@@ -311,6 +375,7 @@ async function postEchoControlFrame(
     readonly provider: Exclude<EchoControlProviderKind, "half_duplex">;
     readonly mode: "aec" | "platform_voice_processing";
     readonly fetchImplementation: typeof fetch;
+    readonly signal?: AbortSignal;
   }
 ): Promise<HttpEchoControlResponse> {
   const response = await options.fetchImplementation(new URL(path, providerEndpoint), {
@@ -331,7 +396,8 @@ async function postEchoControlFrame(
         durationMs: frame.durationMs,
         audioBase64: Buffer.from(frame.audio).toString("base64")
       }
-    })
+    }),
+    ...(options.signal === undefined ? {} : { signal: options.signal })
   });
 
   if (!response.ok) {
@@ -460,6 +526,12 @@ function requireText(value: unknown, message: string): string {
   }
 
   return value.trim();
+}
+
+function requireError(value: unknown): Error {
+  return value instanceof Error
+    ? value
+    : new Error("pico echo-control registration failed", { cause: value });
 }
 
 function requireIsoText(value: unknown, message: string): string {

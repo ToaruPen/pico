@@ -1,14 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  collectTtsSynthesisEvents,
   createAivisSpeechTtsClient,
   createAppleSpeechSttClient,
   defineAivisSpeechService,
   defineAppleSpeechSidecar,
+  defineTtsProviderStageObservation,
   parseAppleSpeechSidecarResponse,
   type SttTranscriptionRequest,
   segmentJapaneseSentences,
-  splitCompleteJapaneseSentences
+  splitCompleteJapaneseSentences,
+  type TtsAudioChunk,
+  type TtsProviderStageObservation,
+  type TtsSynthesisEvent,
+  type TtsSynthesisFailure,
+  type TtsSynthesisSource
 } from "../src/modules/voice/index.js";
 
 const sidecar = defineAppleSpeechSidecar({
@@ -115,6 +122,38 @@ function requestUrl(input: RequestInfo | URL): string {
   }
 
   return input.url;
+}
+
+function createGate<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+
+  return { promise, resolve };
+}
+
+async function collectEvents(
+  events: AsyncIterable<TtsSynthesisEvent>
+): Promise<readonly TtsSynthesisEvent[]> {
+  const collected: TtsSynthesisEvent[] = [];
+
+  for await (const event of events) {
+    collected.push(event);
+  }
+
+  return collected;
+}
+
+async function* eventStream(
+  events: readonly TtsSynthesisEvent[]
+): AsyncIterable<TtsSynthesisEvent> {
+  for (const event of events) {
+    yield await Promise.resolve(event);
+  }
 }
 
 describe("Apple Speech STT sidecar boundary", () => {
@@ -666,7 +705,379 @@ const aivisService = defineAivisSpeechService({
   }
 });
 
+const aivisSource = {
+  serviceId: "local-aivis",
+  provider: "aivis-speech",
+  speakerId: 1
+} as const satisfies TtsSynthesisSource;
+
+function ttsChunk(sentenceIndex: number, durationMs = 1): TtsAudioChunk {
+  return {
+    sentenceIndex,
+    text: `sentence-${sentenceIndex}`,
+    audio: Buffer.from([sentenceIndex + 1, 0]),
+    encoding: "pcm16le",
+    sampleRateHz: 24_000,
+    channels: 1,
+    durationMs,
+    source: aivisSource
+  };
+}
+
 describe("Aivis Speech TTS boundary", () => {
+  it("validates, allowlists, and freezes provider stage observations", () => {
+    const observation = defineTtsProviderStageObservation({
+      stage: "audio_query",
+      sentenceIndex: 0,
+      status: "error",
+      startedAt: "2026-07-19T00:00:00.000Z",
+      durationMs: 3,
+      errorCode: "backend_error",
+      text: "must not survive validation"
+    });
+
+    expect(observation).toEqual({
+      stage: "audio_query",
+      sentenceIndex: 0,
+      status: "error",
+      startedAt: "2026-07-19T00:00:00.000Z",
+      durationMs: 3,
+      errorCode: "backend_error"
+    });
+    expect(Object.isFrozen(observation)).toBe(true);
+    expect(() =>
+      defineTtsProviderStageObservation({
+        stage: "audio_query",
+        sentenceIndex: 0,
+        status: "error",
+        startedAt: "2026-07-19T00:00:00.000Z",
+        durationMs: 3,
+        errorCode: "injected-child-secret"
+      })
+    ).toThrow("pico TTS provider stage observation errorCode is invalid");
+  });
+
+  it("observes Aivis substages without exposing provider payloads", async () => {
+    const observations: TtsProviderStageObservation[] = [];
+    const wallClock = ["2026-07-19T00:00:00.000Z", "2026-07-19T00:00:01.000Z"];
+    const monotonicClock = [10, 13, 20, 27];
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: (input) =>
+        Promise.resolve(
+          requestUrl(input).includes("/audio_query")
+            ? buildSidecarResponse({ queryPayload: "must-not-leak" })
+            : new Response(
+                bytesToArrayBuffer(
+                  buildWav(Buffer.from([0x10, 0]), {
+                    sampleRateHz: 24_000,
+                    channels: 1
+                  })
+                )
+              )
+        ),
+      now: () => wallClock.shift() ?? "unexpected wall clock read",
+      monotonicNow: () => monotonicClock.shift() ?? Number.NaN,
+      observeStage: (observation) => {
+        observations.push(observation);
+      }
+    });
+
+    await collectEvents(client.synthesize({ text: "観測対象の本文。" }));
+
+    expect(observations).toEqual([
+      {
+        stage: "audio_query",
+        sentenceIndex: 0,
+        status: "ok",
+        startedAt: "2026-07-19T00:00:00.000Z",
+        durationMs: 3
+      },
+      {
+        stage: "synthesis",
+        sentenceIndex: 0,
+        status: "ok",
+        startedAt: "2026-07-19T00:00:01.000Z",
+        durationMs: 7
+      }
+    ]);
+    expect(observations.every((observation) => Object.isFrozen(observation))).toBe(true);
+    const serialized = JSON.stringify(observations);
+    expect(serialized).not.toContain("観測対象の本文");
+    expect(serialized).not.toContain("queryPayload");
+    expect(serialized).not.toContain("must-not-leak");
+    expect(serialized).not.toContain("UklGR");
+  });
+
+  it("observes every multi-sentence Aivis request exactly once in request order", async () => {
+    const observations: TtsProviderStageObservation[] = [];
+    let elapsedMs = 0;
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: (input) =>
+        Promise.resolve(
+          requestUrl(input).includes("/audio_query")
+            ? buildSidecarResponse({})
+            : new Response(
+                bytesToArrayBuffer(
+                  buildWav(Buffer.from([1, 0]), { sampleRateHz: 24_000, channels: 1 })
+                )
+              )
+        ),
+      now: () => "2026-07-19T00:00:00.000Z",
+      monotonicNow: () => elapsedMs++,
+      observeStage: (observation) => {
+        observations.push(observation);
+      }
+    });
+
+    await collectEvents(client.synthesize({ text: "一文目。二文目。" }));
+
+    expect(
+      observations.map(({ stage, sentenceIndex, status }) => ({
+        stage,
+        sentenceIndex,
+        status
+      }))
+    ).toEqual([
+      { stage: "audio_query", sentenceIndex: 0, status: "ok" },
+      { stage: "synthesis", sentenceIndex: 0, status: "ok" },
+      { stage: "audio_query", sentenceIndex: 1, status: "ok" },
+      { stage: "synthesis", sentenceIndex: 1, status: "ok" }
+    ]);
+  });
+
+  it("observes an audio_query error without fabricating a synthesis observation", async () => {
+    const observations: TtsProviderStageObservation[] = [];
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: () => Promise.resolve(new Response("provider detail must not leak", { status: 503 })),
+      now: () => "2026-07-19T00:00:00.000Z",
+      monotonicNow: () => 0,
+      observeStage: (observation) => {
+        observations.push(observation);
+      }
+    });
+
+    await collectEvents(client.synthesize({ text: "失敗する本文。" }));
+
+    expect(observations).toEqual([
+      {
+        stage: "audio_query",
+        sentenceIndex: 0,
+        status: "error",
+        startedAt: "2026-07-19T00:00:00.000Z",
+        durationMs: 0,
+        errorCode: "backend_error"
+      }
+    ]);
+    expect(JSON.stringify(observations)).not.toContain("provider detail must not leak");
+  });
+
+  it("redacts arbitrary provider exception details from failures and observations", async () => {
+    const observations: TtsProviderStageObservation[] = [];
+    const privateDiagnostic =
+      "fetch failed http://127.0.0.1/audio_query?text=秘密の本文&speaker=private-speaker";
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: () => Promise.reject(new Error(privateDiagnostic)),
+      now: () => "2026-07-19T00:00:00.000Z",
+      monotonicNow: () => 0,
+      observeStage: (observation) => {
+        observations.push(observation);
+      }
+    });
+
+    const events = await collectEvents(client.synthesize({ text: "秘密の本文。" }));
+
+    expect(events).toMatchObject([
+      {
+        kind: "failed",
+        failure: {
+          reason: "backend_error",
+          message: "pico TTS Aivis Speech audio_query request failed"
+        }
+      }
+    ]);
+    expect(observations).toEqual([
+      expect.objectContaining({
+        stage: "audio_query",
+        status: "error",
+        errorCode: "backend_error"
+      })
+    ]);
+    expect(events[0]?.kind === "failed" ? events[0].failure.message : "").not.toContain(
+      privateDiagnostic
+    );
+    expect(JSON.stringify(observations)).not.toContain(privateDiagnostic);
+  });
+
+  it.each([
+    {
+      name: "synthesis HTTP failure",
+      synthesisResponse: new Response("provider detail must not leak", { status: 503 }),
+      errorCode: "backend_error"
+    },
+    {
+      name: "malformed synthesis body",
+      synthesisResponse: new Response("not a wav"),
+      errorCode: "invalid_response"
+    }
+  ])("observes $name with a bounded code", async ({ synthesisResponse, errorCode }) => {
+    const observations: TtsProviderStageObservation[] = [];
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: (input) =>
+        Promise.resolve(
+          requestUrl(input).includes("/audio_query") ? buildSidecarResponse({}) : synthesisResponse
+        ),
+      now: () => "2026-07-19T00:00:00.000Z",
+      monotonicNow: () => 0,
+      observeStage: (observation) => {
+        observations.push(observation);
+      }
+    });
+
+    await collectEvents(client.synthesize({ text: "失敗する本文。" }));
+
+    expect(observations).toEqual([
+      expect.objectContaining({ stage: "audio_query", status: "ok" }),
+      expect.objectContaining({
+        stage: "synthesis",
+        status: "error",
+        errorCode
+      })
+    ]);
+  });
+
+  it("observes active cancellation as skipped without changing the event result", async () => {
+    const observations: TtsProviderStageObservation[] = [];
+    const requestStarted = createGate<undefined>();
+    const abortController = new AbortController();
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          requestStarted.resolve(undefined);
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        }),
+      now: () => "2026-07-19T00:00:00.000Z",
+      monotonicNow: () => 0,
+      observeStage: (observation) => {
+        observations.push(observation);
+      }
+    });
+    const events = collectEvents(
+      client.synthesize({ text: "取り消す本文。", signal: abortController.signal })
+    );
+
+    await requestStarted.promise;
+    abortController.abort();
+
+    await expect(events).resolves.toMatchObject([
+      { kind: "failed", failure: { reason: "cancelled" } }
+    ]);
+    expect(observations).toEqual([
+      expect.objectContaining({
+        stage: "audio_query",
+        sentenceIndex: 0,
+        status: "skipped",
+        errorCode: "cancelled"
+      })
+    ]);
+  });
+
+  it("observes a stalled response body timeout as an error exactly once", async () => {
+    vi.useFakeTimers();
+    const observations: TtsProviderStageObservation[] = [];
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: () => Promise.resolve(unresolvedResponse()),
+      now: () => "2026-07-19T00:00:00.000Z",
+      monotonicNow: () => 0,
+      observeStage: (observation) => {
+        observations.push(observation);
+      }
+    });
+
+    try {
+      const events = collectEvents(client.synthesize({ text: "停止する本文。" }));
+      await vi.advanceTimersByTimeAsync(250);
+
+      await expect(events).resolves.toMatchObject([
+        { kind: "failed", failure: { reason: "timeout" } }
+      ]);
+      expect(observations).toEqual([
+        expect.objectContaining({
+          stage: "audio_query",
+          sentenceIndex: 0,
+          status: "error",
+          errorCode: "timeout"
+        })
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("contains observer exceptions without changing or duplicating synthesis events", async () => {
+    let observationCount = 0;
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: (input) =>
+        Promise.resolve(
+          requestUrl(input).includes("/audio_query")
+            ? buildSidecarResponse({})
+            : new Response(
+                bytesToArrayBuffer(
+                  buildWav(Buffer.from([1, 0]), { sampleRateHz: 24_000, channels: 1 })
+                )
+              )
+        ),
+      observeStage: () => {
+        observationCount += 1;
+        throw new Error("telemetry unavailable");
+      }
+    });
+
+    await expect(collectEvents(client.synthesize({ text: "一文だけ。" }))).resolves.toMatchObject([
+      { kind: "chunk", chunk: { sentenceIndex: 0 } },
+      { kind: "completed", chunkCount: 1 }
+    ]);
+    expect(observationCount).toBe(2);
+  });
+
+  it("publishes the first chunk before the next sentence synthesis completes", async () => {
+    const secondSynthesis = createGate<Response>();
+    const requests: string[] = [];
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: async (input) => {
+        const url = requestUrl(input);
+        requests.push(url);
+        if (url.includes("/audio_query")) {
+          return buildSidecarResponse({});
+        }
+        if (requests.filter((value) => value.includes("/synthesis")).length === 2) {
+          return secondSynthesis.promise;
+        }
+        return new Response(
+          bytesToArrayBuffer(buildWav(Buffer.from([1, 0]), { sampleRateHz: 24_000, channels: 1 }))
+        );
+      }
+    });
+    const iterator = client.synthesize({ text: "一文目。二文目。" })[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { kind: "chunk", chunk: { sentenceIndex: 0, text: "一文目。" } }
+    });
+    const second = iterator.next();
+    await vi.waitFor(() =>
+      expect(requests.filter((url) => url.includes("/synthesis"))).toHaveLength(2)
+    );
+    secondSynthesis.resolve(
+      new Response(
+        bytesToArrayBuffer(buildWav(Buffer.from([2, 0]), { sampleRateHz: 24_000, channels: 1 }))
+      )
+    );
+    await expect(second).resolves.toMatchObject({
+      value: { kind: "chunk", chunk: { sentenceIndex: 1 } }
+    });
+  });
+
   it("requires the explicit Aivis Speech provider", () => {
     expect(() =>
       defineAivisSpeechService({
@@ -696,6 +1107,55 @@ describe("Aivis Speech TTS boundary", () => {
       complete: ["おかえり。"],
       residual: "今日はどう"
     });
+  });
+
+  it("bounds punctuation-free speech without splitting Unicode code points", () => {
+    const softBounded = `${"あ".repeat(118)}、${"い".repeat(10)}`;
+
+    expect(segmentJapaneseSentences(softBounded)).toEqual([
+      `${"あ".repeat(118)}、`,
+      "い".repeat(10)
+    ]);
+    expect(
+      segmentJapaneseSentences("😀".repeat(121)).map((part) => Array.from(part).length)
+    ).toEqual([120, 1]);
+  });
+
+  it("preserves whitespace soft boundaries in bounded speech", () => {
+    expect(segmentJapaneseSentences(`${"あ".repeat(118)} ${"い".repeat(10)}`)).toEqual([
+      `${"あ".repeat(118)} `,
+      "い".repeat(10)
+    ]);
+    expect(segmentJapaneseSentences(`${"あ".repeat(118)}\u3000${"い".repeat(10)}`)).toEqual([
+      `${"あ".repeat(118)}\u3000`,
+      "い".repeat(10)
+    ]);
+  });
+
+  it("selects the last soft boundary in a bounded speech window", () => {
+    const speech = `${"あ".repeat(100)}、${"い".repeat(10)},${"う".repeat(20)}`;
+
+    expect(segmentJapaneseSentences(speech)).toEqual([
+      `${"あ".repeat(100)}、${"い".repeat(10)},`,
+      "う".repeat(20)
+    ]);
+  });
+
+  it.each([
+    "、",
+    ",",
+    "，",
+    ";",
+    "；",
+    ":",
+    "：",
+    " ",
+    "\u3000"
+  ])("retains %s as a soft speech boundary", (boundary) => {
+    expect(segmentJapaneseSentences(`${"あ".repeat(119)}${boundary}${"い".repeat(10)}`)).toEqual([
+      `${"あ".repeat(119)}${boundary}`,
+      "い".repeat(10)
+    ]);
   });
 
   it("posts audio_query then synthesis requests and returns ordered sentence audio chunks", async () => {
@@ -729,12 +1189,14 @@ describe("Aivis Speech TTS boundary", () => {
 
       throw new Error(`unexpected Aivis Speech path: ${url}`);
     };
-    const client = createAivisSpeechTtsClient(aivisService, recordingFetch);
+    const client = createAivisSpeechTtsClient(aivisService, { fetch: recordingFetch });
 
-    await expect(client.synthesize({ text: "こんにちは。今日は元気？" })).resolves.toEqual({
-      ok: true,
-      chunks: [
-        {
+    await expect(
+      collectEvents(client.synthesize({ text: "こんにちは。今日は元気？" }))
+    ).resolves.toEqual([
+      {
+        kind: "chunk",
+        chunk: {
           sentenceIndex: 0,
           text: "こんにちは。",
           audio: Buffer.from([0x10, 0, 0x20, 0]),
@@ -742,13 +1204,12 @@ describe("Aivis Speech TTS boundary", () => {
           sampleRateHz: 24_000,
           channels: 1,
           durationMs: 1,
-          source: {
-            serviceId: "local-aivis",
-            provider: "aivis-speech",
-            speakerId: 1
-          }
-        },
-        {
+          source: aivisSource
+        }
+      },
+      {
+        kind: "chunk",
+        chunk: {
           sentenceIndex: 1,
           text: "今日は元気？",
           audio: Buffer.from([0x30, 0, 0x40, 0]),
@@ -756,20 +1217,16 @@ describe("Aivis Speech TTS boundary", () => {
           sampleRateHz: 24_000,
           channels: 1,
           durationMs: 1,
-          source: {
-            serviceId: "local-aivis",
-            provider: "aivis-speech",
-            speakerId: 1
-          }
+          source: aivisSource
         }
-      ],
-      totalDurationMs: 2,
-      source: {
-        serviceId: "local-aivis",
-        provider: "aivis-speech",
-        speakerId: 1
+      },
+      {
+        kind: "completed",
+        chunkCount: 2,
+        totalDurationMs: 2,
+        source: aivisSource
       }
-    });
+    ]);
 
     expect(recordedRequests.map((request) => requestUrl(request.input))).toEqual([
       "http://127.0.0.1:10101/audio_query?text=%E3%81%93%E3%82%93%E3%81%AB%E3%81%A1%E3%81%AF%E3%80%82&speaker=1",
@@ -788,6 +1245,211 @@ describe("Aivis Speech TTS boundary", () => {
     );
   });
 
+  it("publishes a failure after a successful first sentence without completing", async () => {
+    let audioQueryCount = 0;
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: (input) => {
+        if (requestUrl(input).includes("/audio_query")) {
+          audioQueryCount += 1;
+          return Promise.resolve(
+            audioQueryCount === 2
+              ? new Response("unavailable", { status: 503 })
+              : buildSidecarResponse({})
+          );
+        }
+
+        return Promise.resolve(
+          new Response(
+            bytesToArrayBuffer(buildWav(Buffer.from([1, 0]), { sampleRateHz: 24_000, channels: 1 }))
+          )
+        );
+      }
+    });
+
+    await expect(
+      collectEvents(client.synthesize({ text: "一文目。二文目。" }))
+    ).resolves.toMatchObject([
+      {
+        kind: "chunk",
+        chunk: { sentenceIndex: 0, text: "一文目。" }
+      },
+      {
+        kind: "failed",
+        failure: {
+          reason: "backend_error",
+          sentenceIndex: 1
+        }
+      }
+    ]);
+  });
+
+  it("never runs more than one Aivis Speech HTTP request concurrently", async () => {
+    let activeRequestCount = 0;
+    let maximumActiveRequestCount = 0;
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: async (input) => {
+        activeRequestCount += 1;
+        maximumActiveRequestCount = Math.max(maximumActiveRequestCount, activeRequestCount);
+        await Promise.resolve();
+        const response = requestUrl(input).includes("/audio_query")
+          ? buildSidecarResponse({})
+          : new Response(
+              bytesToArrayBuffer(
+                buildWav(Buffer.from([1, 0]), { sampleRateHz: 24_000, channels: 1 })
+              )
+            );
+        activeRequestCount -= 1;
+        return response;
+      }
+    });
+
+    await collectEvents(client.synthesize({ text: "一文目。二文目。" }));
+
+    expect(maximumActiveRequestCount).toBe(1);
+    expect(activeRequestCount).toBe(0);
+  });
+
+  it("completes empty input with zero chunks and duration", async () => {
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: () => {
+        throw new Error("empty input should not call Aivis Speech");
+      }
+    });
+
+    await expect(collectEvents(client.synthesize({ text: "  " }))).resolves.toEqual([
+      {
+        kind: "completed",
+        chunkCount: 0,
+        totalDurationMs: 0,
+        source: aivisSource
+      }
+    ]);
+  });
+
+  it("collects a valid event stream into the finite synthesis result", async () => {
+    const firstChunk = ttsChunk(0, 2);
+    const secondChunk = ttsChunk(1, 3);
+
+    await expect(
+      collectTtsSynthesisEvents(
+        eventStream([
+          { kind: "chunk", chunk: firstChunk },
+          { kind: "chunk", chunk: secondChunk },
+          {
+            kind: "completed",
+            chunkCount: 2,
+            totalDurationMs: 5,
+            source: aivisSource
+          }
+        ])
+      )
+    ).resolves.toEqual({
+      ok: true,
+      chunks: [firstChunk, secondChunk],
+      totalDurationMs: 5,
+      source: aivisSource
+    });
+  });
+
+  it("collects a failed event into the finite synthesis failure", async () => {
+    const failure = {
+      ok: false,
+      reason: "backend_error",
+      message: "unavailable",
+      sentenceIndex: 1,
+      source: aivisSource
+    } as const satisfies TtsSynthesisFailure;
+
+    await expect(
+      collectTtsSynthesisEvents(
+        eventStream([
+          { kind: "chunk", chunk: ttsChunk(0) },
+          { kind: "failed", failure }
+        ])
+      )
+    ).resolves.toBe(failure);
+  });
+
+  it("rejects a completed source whose provider differs from collected chunks", async () => {
+    const providerMismatchSource = {
+      ...aivisSource,
+      provider: "other-tts"
+    } as unknown as TtsSynthesisSource;
+
+    await expect(
+      collectTtsSynthesisEvents(
+        eventStream([
+          { kind: "chunk", chunk: ttsChunk(0) },
+          {
+            kind: "completed",
+            chunkCount: 1,
+            totalDurationMs: 1,
+            source: providerMismatchSource
+          }
+        ])
+      )
+    ).rejects.toThrow("pico TTS synthesis completed source does not match collected chunks");
+  });
+
+  it.each([
+    {
+      name: "a missing terminal",
+      events: [{ kind: "chunk", chunk: ttsChunk(0) }],
+      message: "pico TTS synthesis event stream is missing a terminal event"
+    },
+    {
+      name: "duplicate terminals",
+      events: [
+        { kind: "completed", chunkCount: 0, totalDurationMs: 0, source: aivisSource },
+        { kind: "completed", chunkCount: 0, totalDurationMs: 0, source: aivisSource }
+      ],
+      message: "pico TTS synthesis event stream has multiple terminal events"
+    },
+    {
+      name: "a chunk count mismatch",
+      events: [
+        { kind: "chunk", chunk: ttsChunk(0) },
+        { kind: "completed", chunkCount: 0, totalDurationMs: 1, source: aivisSource }
+      ],
+      message: "pico TTS synthesis completed chunkCount does not match collected chunks"
+    },
+    {
+      name: "a duration mismatch",
+      events: [
+        { kind: "chunk", chunk: ttsChunk(0) },
+        { kind: "completed", chunkCount: 1, totalDurationMs: 2, source: aivisSource }
+      ],
+      message: "pico TTS synthesis completed totalDurationMs does not match collected chunks"
+    },
+    {
+      name: "a source mismatch",
+      events: [
+        { kind: "chunk", chunk: ttsChunk(0) },
+        {
+          kind: "completed",
+          chunkCount: 1,
+          totalDurationMs: 1,
+          source: { ...aivisSource, serviceId: "another-aivis" }
+        }
+      ],
+      message: "pico TTS synthesis completed source does not match collected chunks"
+    },
+    {
+      name: "a chunk after the terminal",
+      events: [
+        { kind: "completed", chunkCount: 0, totalDurationMs: 0, source: aivisSource },
+        { kind: "chunk", chunk: ttsChunk(0) }
+      ],
+      message: "pico TTS synthesis event stream yielded a chunk after its terminal event"
+    }
+  ] satisfies readonly {
+    readonly name: string;
+    readonly events: readonly TtsSynthesisEvent[];
+    readonly message: string;
+  }[])("rejects $name", async ({ events, message }) => {
+    await expect(collectTtsSynthesisEvents(eventStream(events))).rejects.toThrow(message);
+  });
+
   it("maps Aivis Speech HTTP failures to structured synthesis failures", async () => {
     const failingFetch: typeof fetch = (input) => {
       if (requestUrl(input).includes("/audio_query")) {
@@ -796,19 +1458,20 @@ describe("Aivis Speech TTS boundary", () => {
 
       throw new Error("synthesis should not run after audio_query failure");
     };
-    const client = createAivisSpeechTtsClient(aivisService, failingFetch);
+    const client = createAivisSpeechTtsClient(aivisService, { fetch: failingFetch });
 
-    await expect(client.synthesize({ text: "こんにちは。" })).resolves.toEqual({
-      ok: false,
-      reason: "backend_error",
-      message: "pico TTS Aivis Speech audio_query request failed with status 503",
-      sentenceIndex: 0,
-      source: {
-        serviceId: "local-aivis",
-        provider: "aivis-speech",
-        speakerId: 1
+    await expect(collectEvents(client.synthesize({ text: "こんにちは。" }))).resolves.toEqual([
+      {
+        kind: "failed",
+        failure: {
+          ok: false,
+          reason: "backend_error",
+          message: "pico TTS Aivis Speech audio_query request failed with status 503",
+          sentenceIndex: 0,
+          source: aivisSource
+        }
       }
-    });
+    ]);
   });
 
   it("maps synthesis HTTP failures to structured synthesis failures", async () => {
@@ -819,19 +1482,20 @@ describe("Aivis Speech TTS boundary", () => {
 
       return Promise.resolve(new Response("unavailable", { status: 503 }));
     };
-    const client = createAivisSpeechTtsClient(aivisService, failingFetch);
+    const client = createAivisSpeechTtsClient(aivisService, { fetch: failingFetch });
 
-    await expect(client.synthesize({ text: "こんにちは。" })).resolves.toEqual({
-      ok: false,
-      reason: "backend_error",
-      message: "pico TTS Aivis Speech synthesis request failed with status 503",
-      sentenceIndex: 0,
-      source: {
-        serviceId: "local-aivis",
-        provider: "aivis-speech",
-        speakerId: 1
+    await expect(collectEvents(client.synthesize({ text: "こんにちは。" }))).resolves.toEqual([
+      {
+        kind: "failed",
+        failure: {
+          ok: false,
+          reason: "backend_error",
+          message: "pico TTS Aivis Speech synthesis request failed with status 503",
+          sentenceIndex: 0,
+          source: aivisSource
+        }
       }
-    });
+    ]);
   });
 
   it("maps malformed WAV responses to structured synthesis failures", async () => {
@@ -842,14 +1506,21 @@ describe("Aivis Speech TTS boundary", () => {
 
       return Promise.resolve(new Response("not a wav"));
     };
-    const client = createAivisSpeechTtsClient(aivisService, malformedFetch);
+    const client = createAivisSpeechTtsClient(aivisService, { fetch: malformedFetch });
 
-    await expect(client.synthesize({ text: "こんにちは。" })).resolves.toMatchObject({
-      ok: false,
-      reason: "invalid_response",
-      message: "pico TTS Aivis Speech WAV response is malformed",
-      sentenceIndex: 0
-    });
+    await expect(collectEvents(client.synthesize({ text: "こんにちは。" }))).resolves.toMatchObject(
+      [
+        {
+          kind: "failed",
+          failure: {
+            ok: false,
+            reason: "invalid_response",
+            message: "pico TTS Aivis Speech WAV response is malformed",
+            sentenceIndex: 0
+          }
+        }
+      ]
+    );
   });
 
   it("maps timeout and caller cancellation to separate synthesis failures", async () => {
@@ -860,52 +1531,71 @@ describe("Aivis Speech TTS boundary", () => {
           reject(new DOMException("aborted", "AbortError"));
         });
       });
-    const timeoutClient = createAivisSpeechTtsClient(aivisService, slowFetch);
+    const timeoutClient = createAivisSpeechTtsClient(aivisService, { fetch: slowFetch });
 
     try {
-      const resultPromise = timeoutClient.synthesize({ text: "こんにちは。" });
+      const resultPromise = collectEvents(timeoutClient.synthesize({ text: "こんにちは。" }));
       await vi.advanceTimersByTimeAsync(250);
 
-      await expect(resultPromise).resolves.toMatchObject({
-        ok: false,
-        reason: "timeout",
-        sentenceIndex: 0
-      });
+      await expect(resultPromise).resolves.toMatchObject([
+        {
+          kind: "failed",
+          failure: {
+            ok: false,
+            reason: "timeout",
+            sentenceIndex: 0
+          }
+        }
+      ]);
     } finally {
       vi.useRealTimers();
     }
 
     const abortController = new AbortController();
     abortController.abort();
-    const cancelledClient = createAivisSpeechTtsClient(aivisService, () => {
-      throw new Error("cancelled request should not call Aivis Speech");
+    const cancelledClient = createAivisSpeechTtsClient(aivisService, {
+      fetch: () => {
+        throw new Error("cancelled request should not call Aivis Speech");
+      }
     });
 
     await expect(
-      cancelledClient.synthesize({ text: "こんにちは。", signal: abortController.signal })
-    ).resolves.toMatchObject({
-      ok: false,
-      reason: "cancelled",
-      sentenceIndex: 0
-    });
+      collectEvents(
+        cancelledClient.synthesize({ text: "こんにちは。", signal: abortController.signal })
+      )
+    ).resolves.toMatchObject([
+      {
+        kind: "failed",
+        failure: {
+          ok: false,
+          reason: "cancelled",
+          sentenceIndex: 0
+        }
+      }
+    ]);
   });
 
   it("keeps timeouts active while reading Aivis Speech response bodies", async () => {
     vi.useFakeTimers();
     const stalledBodyFetch: typeof fetch = () => Promise.resolve(unresolvedResponse());
-    const client = createAivisSpeechTtsClient(aivisService, stalledBodyFetch);
+    const client = createAivisSpeechTtsClient(aivisService, { fetch: stalledBodyFetch });
     const pending = Symbol("pending");
 
     try {
-      const resultPromise = client.synthesize({ text: "こんにちは。" });
+      const resultPromise = collectEvents(client.synthesize({ text: "こんにちは。" }));
 
       await vi.advanceTimersByTimeAsync(250);
 
-      await expect(Promise.race([resultPromise, Promise.resolve(pending)])).resolves.toMatchObject({
-        ok: false,
-        reason: "timeout",
-        sentenceIndex: 0
-      });
+      await expect(Promise.race([resultPromise, Promise.resolve(pending)])).resolves.toMatchObject([
+        {
+          kind: "failed",
+          failure: {
+            ok: false,
+            reason: "timeout",
+            sentenceIndex: 0
+          }
+        }
+      ]);
     } finally {
       vi.useRealTimers();
     }
@@ -914,13 +1604,15 @@ describe("Aivis Speech TTS boundary", () => {
   it("keeps caller cancellation active while reading Aivis Speech response bodies", async () => {
     const abortController = new AbortController();
     const stalledBodyFetch: typeof fetch = () => Promise.resolve(unresolvedResponse());
-    const client = createAivisSpeechTtsClient(aivisService, stalledBodyFetch);
+    const client = createAivisSpeechTtsClient(aivisService, { fetch: stalledBodyFetch });
     const pending = Symbol("pending");
 
-    const resultPromise = client.synthesize({
-      text: "こんにちは。",
-      signal: abortController.signal
-    });
+    const resultPromise = collectEvents(
+      client.synthesize({
+        text: "こんにちは。",
+        signal: abortController.signal
+      })
+    );
     await Promise.resolve();
     await Promise.resolve();
     abortController.abort();
@@ -928,10 +1620,15 @@ describe("Aivis Speech TTS boundary", () => {
       setTimeout(resolve, 0);
     });
 
-    await expect(Promise.race([resultPromise, Promise.resolve(pending)])).resolves.toMatchObject({
-      ok: false,
-      reason: "cancelled",
-      sentenceIndex: 0
-    });
+    await expect(Promise.race([resultPromise, Promise.resolve(pending)])).resolves.toMatchObject([
+      {
+        kind: "failed",
+        failure: {
+          ok: false,
+          reason: "cancelled",
+          sentenceIndex: 0
+        }
+      }
+    ]);
   });
 });

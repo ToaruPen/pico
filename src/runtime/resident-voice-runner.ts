@@ -3,10 +3,16 @@ import { homedir } from "node:os";
 import {
   loadPicoConfigFromEnvironment,
   type PicoConfig,
-  type PicoResidentControlConfig
+  type PicoResidentControlConfig,
+  type PicoTelemetryOtelConfig
 } from "../config/index.js";
 import type { AuditEvent } from "../modules/audit/index.js";
 import { createSessionLifecycle } from "../modules/session/index.js";
+import {
+  createOpenTelemetryProvider,
+  type OpenTelemetryProviderOptions,
+  type PicoTelemetry
+} from "../modules/telemetry/index.js";
 import {
   createHalfDuplexEchoControl,
   createHttpEchoControlProvider,
@@ -14,16 +20,24 @@ import {
 } from "../modules/voice/echo-control.js";
 import {
   type AivisSpeechServiceConfig,
+  type AivisSpeechTtsClientOptions,
   checkAivisSpeechServiceHealth,
   createAivisSpeechTtsClient,
   createAppleSpeechSttClient,
   defineAivisSpeechService,
-  defineAppleSpeechSidecar
+  defineAppleSpeechSidecar,
+  defineTtsProviderStageObservation
 } from "../modules/voice/index.js";
 import { createDeferredToolCoordinator } from "./deferred-tool-coordinator.js";
 import { type MacOSControlBridge, startMacOSControlBridge } from "./macos-control-bridge.js";
 import type { PiAgentTurnClientOptions } from "./pi-agent-turn.js";
-import { createResidentAudioCapture, createResidentPlaybackSink } from "./resident-audio-io.js";
+import { createResidentAudioCapture } from "./resident-audio-io.js";
+import {
+  assertResidentPlaybackReadiness,
+  createResidentAudioOutputPlan,
+  createResidentContinuousPlaybackSink,
+  type ResidentAudioOutputPlan
+} from "./resident-audio-playback.js";
 import {
   createLoopbackHttpResidentControlServer,
   type ResidentControlHandler,
@@ -34,6 +48,7 @@ import {
   registerResidentSingleInstanceLockShutdownCleanup
 } from "./resident-single-instance-lock.js";
 import {
+  createAuditEventFanout,
   createResidentVoiceAuditLog,
   type ResidentVoiceAuditLogStdoutMode
 } from "./resident-voice-audit-log.js";
@@ -53,19 +68,17 @@ import {
   type PiAgentTurnClient,
   type VoiceResidentRuntime
 } from "./voice-resident.js";
+import {
+  recordVoiceStageProbe,
+  type VoiceStageProbe,
+  voiceRuntimeStagePolicy
+} from "./voice-stage-probe.js";
 
-const residentVoiceMetricStages = new Set([
-  "speech_gate",
-  "stt",
-  "session_start",
-  "pi_turn",
-  "tts_request_wall",
-  "tts_audio_duration",
-  "tts_synthesize",
-  "tts_playback",
-  "camera_capture",
-  "vlm_scene_description"
-]);
+export type ResidentVoiceStartupReadinessDependencies = {
+  readonly platform?: NodeJS.Platform;
+  readonly checkAivisHealth?: typeof checkAivisSpeechServiceHealth;
+  readonly assertPlaybackReadiness?: (plan: ResidentAudioOutputPlan) => Promise<void>;
+};
 
 export async function runDirectResidentVoiceHarness(
   createPiAgent: (options: PiAgentTurnClientOptions) => PiAgentTurnClient
@@ -116,10 +129,12 @@ export async function runResidentVoiceWithProviders(input: {
   readonly signal: AbortSignal;
   readonly piAgent?: PiAgentTurnClient;
   readonly createPiAgent?: (options: PiAgentTurnClientOptions) => PiAgentTurnClient;
+  readonly createTelemetry?: (options: OpenTelemetryProviderOptions) => PicoTelemetry;
+  readonly startupReadiness?: (config: PicoConfig) => Promise<void>;
 }): Promise<void> {
   const { config, signal } = input;
   requireResidentVoiceEnabled(config);
-  await assertResidentVoiceStartupReadiness(config);
+  await resolveStartupReadiness(input.startupReadiness)(config);
   const stdoutProbeMode = readVoiceProbeStdoutMode(process.env.PICO_VOICE_PROBE_STDOUT);
   const logRunMode = readResidentVoiceLogRunMode(process.env.PICO_RESIDENT_VOICE_LOG_MODE);
   const runId = readResidentVoiceRunId(process.env.PICO_RESIDENT_VOICE_RUN_ID);
@@ -135,69 +150,153 @@ export async function runResidentVoiceWithProviders(input: {
       process.stdout.write(line);
     }
   };
-  const audit = config.voice.probes.enabled
-    ? createResidentVoiceAuditLog({
-        stdoutEnabled: true,
-        writeStdout: writeProcessLine,
-        writeEvent: (event) => {
-          writeResidentVoiceMetricEvent(fileLog.writeAuditEvent, event);
-        },
-        ...(stdoutProbeMode === undefined ? {} : { stdoutMode: stdoutProbeMode })
-      })
-    : undefined;
-  const sessionLifecycle = createSessionLifecycle({
-    ending: config.session.ending,
-    ...(audit === undefined ? {} : { audit })
-  });
-  const deferredTools = createDeferredToolCoordinator();
-  const stt = createConfiguredStt(config);
-  const tts = createConfiguredTts(config);
-  const control = requireResidentControlConfig(config);
-  const audioCapture = createResidentAudioCapture(config);
-  const echoControl = createConfiguredEchoControl(config);
-  const playback = createResidentPlaybackSink(config);
-  const piAgent = resolveResidentPiAgent(input.piAgent, input.createPiAgent, {
-    cwd: process.cwd(),
-    deferredTools: {
-      coordinator: deferredTools
-    },
-    ...(audit === undefined ? {} : { voiceProbe: { audit } })
-  });
-  const speechActivity = await createConfiguredSpeechActivityGate(config);
+  const telemetry = createConfiguredOpenTelemetry(
+    config.telemetry.otel,
+    input.createTelemetry ?? createOpenTelemetryProvider,
+    writeProcessLine
+  );
 
-  await runResidentControlLifecycle({
-    signal,
-    startServer: async (handle) => {
-      const server = await createLoopbackHttpResidentControlServer({
-        host: control.host,
-        port: control.port,
-        authTokenPath: control.authTokenPath,
-        shutdownTimeoutMs: config.voice.resident.shutdownGraceMs,
-        handle,
-        signal
-      });
-      writeProcessLine(`[pico] resident control: ${server.url}\n`);
+  try {
+    const audit = config.voice.probes.enabled
+      ? createResidentVoiceAuditLog({
+          stdoutEnabled: true,
+          writeStdout: writeProcessLine,
+          writeEvent: createAuditEventFanout([
+            (event) => {
+              writeResidentVoiceMetricEvent(fileLog.writeAuditEvent, event);
+            },
+            ...(telemetry === undefined
+              ? []
+              : [
+                  (event: AuditEvent) => {
+                    if (shouldExportResidentVoiceAuditEvent(event)) {
+                      telemetry.record(event);
+                    }
+                  }
+                ])
+          ]),
+          ...(stdoutProbeMode === undefined ? {} : { stdoutMode: stdoutProbeMode })
+        })
+      : undefined;
+    const sessionLifecycle = createSessionLifecycle({
+      ending: config.session.ending,
+      ...(audit === undefined ? {} : { audit })
+    });
+    const deferredTools = createDeferredToolCoordinator();
+    const stt = createConfiguredStt(config);
+    const tts = createConfiguredTts(config, configuredVoiceStageProbe(audit));
+    const control = requireResidentControlConfig(config);
+    const audioCapture = createResidentAudioCapture(config);
+    const echoControl = createConfiguredEchoControl(config);
+    const playback = createResidentContinuousPlaybackSink(createResidentAudioOutputPlan(config));
+    const piAgent = resolveResidentPiAgent(input.piAgent, input.createPiAgent, {
+      cwd: process.cwd(),
+      deferredTools: {
+        coordinator: deferredTools
+      },
+      ...(audit === undefined ? {} : { voiceProbe: { audit } })
+    });
+    const speechActivity = await createConfiguredSpeechActivityGate(config);
 
-      return server;
-    },
-    createRuntime: () =>
-      createVoiceResidentRuntime({
-        audioCapture,
-        sessionLifecycle,
-        echoControl,
-        speechActivity,
-        stt,
-        tts,
-        playback,
-        piAgent,
-        deferredTools,
-        farewell: { enabled: true },
-        log: createResidentVoiceRuntimeLogSink(logRunMode, fileLog, stdoutProbeMode),
-        ...(audit === undefined ? {} : { probe: { audit } }),
-        signal
-      }),
-    startBridge: () => startMacOSControlBridge({ control, signal })
+    await runResidentControlLifecycle({
+      signal,
+      startServer: async (handle) => {
+        const server = await createLoopbackHttpResidentControlServer({
+          host: control.host,
+          port: control.port,
+          authTokenPath: control.authTokenPath,
+          shutdownTimeoutMs: config.voice.resident.shutdownGraceMs,
+          handle,
+          signal
+        });
+        writeProcessLine(`[pico] resident control: ${server.url}\n`);
+
+        return server;
+      },
+      createRuntime: () =>
+        createVoiceResidentRuntime({
+          audioCapture,
+          sessionLifecycle,
+          echoControl,
+          speechActivity,
+          stt,
+          tts,
+          playback,
+          piAgent,
+          deferredTools,
+          farewell: { enabled: true },
+          log: createResidentVoiceRuntimeLogSink(logRunMode, fileLog, stdoutProbeMode),
+          ...(audit === undefined ? {} : { probe: { audit } }),
+          signal
+        }),
+      startBridge: () => startMacOSControlBridge({ control, signal })
+    });
+  } finally {
+    await shutdownResidentVoiceTelemetry(telemetry, writeProcessLine);
+  }
+}
+
+function resolveStartupReadiness(
+  startupReadiness: ((config: PicoConfig) => Promise<void>) | undefined
+): (config: PicoConfig) => Promise<void> {
+  return startupReadiness ?? assertResidentVoiceStartupReadiness;
+}
+
+function configuredVoiceStageProbe(audit: VoiceStageProbe["audit"]): VoiceStageProbe {
+  return audit === undefined ? {} : { audit };
+}
+
+export function createConfiguredOpenTelemetry(
+  config: PicoTelemetryOtelConfig,
+  createTelemetry: (
+    options: OpenTelemetryProviderOptions
+  ) => PicoTelemetry = createOpenTelemetryProvider,
+  writeProcessLine?: (line: string) => void
+): PicoTelemetry | undefined {
+  if (!config.enabled) {
+    return undefined;
+  }
+
+  return createTelemetry({
+    baseUrl: requireTelemetryConfigValue(config.baseUrl, "baseUrl"),
+    serviceName: requireTelemetryConfigValue(config.serviceName, "serviceName"),
+    timeoutMs: requireTelemetryConfigValue(config.timeoutMs, "timeoutMs"),
+    metricExportIntervalMs: requireTelemetryConfigValue(
+      config.metricExportIntervalMs,
+      "metricExportIntervalMs"
+    ),
+    shutdownTimeoutMs: requireTelemetryConfigValue(config.shutdownTimeoutMs, "shutdownTimeoutMs"),
+    ...(writeProcessLine === undefined
+      ? {}
+      : {
+          onDiagnostic: (diagnostic) => {
+            writeProcessLine(`[pico] telemetry ${diagnostic.phase} failed\n`);
+          }
+        })
   });
+}
+
+export async function shutdownResidentVoiceTelemetry(
+  telemetry: PicoTelemetry | undefined,
+  writeProcessLine: (line: string) => void
+): Promise<void> {
+  if (telemetry === undefined) {
+    return;
+  }
+
+  try {
+    await telemetry.shutdown();
+  } catch {
+    writeProcessLine("[pico] telemetry shutdown failed\n");
+  }
+}
+
+function requireTelemetryConfigValue<T>(value: T | undefined, name: string): T {
+  if (value === undefined) {
+    throw new Error(`pico telemetry OTel ${name} is required when enabled`);
+  }
+
+  return value;
 }
 
 export type ResidentControlLifecycleOptions = {
@@ -374,13 +473,17 @@ function writeResidentVoiceMetricEvent(
 ): void {
   const stage = event.attributes["pico.voice.stage"];
 
-  if (
-    event.name === "voice.runtime.stage" &&
-    typeof stage === "string" &&
-    residentVoiceMetricStages.has(stage)
-  ) {
+  if (event.name === "voice.runtime.stage" && voiceRuntimeStagePolicy(stage)?.persisted === true) {
     writeAuditEvent(event);
   }
+}
+
+function shouldExportResidentVoiceAuditEvent(event: AuditEvent): boolean {
+  if (event.name !== "voice.runtime.stage") {
+    return true;
+  }
+
+  return voiceRuntimeStagePolicy(event.attributes["pico.voice.stage"])?.persisted === true;
 }
 
 function waitForAbort(signal: AbortSignal): Promise<void> {
@@ -445,7 +548,7 @@ function withShutdownGrace<T>(
   });
 }
 
-function createConfiguredEchoControl(config: PicoConfig): EchoControlProvider {
+export function createConfiguredEchoControl(config: PicoConfig): EchoControlProvider {
   const echoControl = config.voice.echoControl;
 
   if (!echoControl.enabled) {
@@ -475,7 +578,7 @@ function createConfiguredEchoControl(config: PicoConfig): EchoControlProvider {
   });
 }
 
-async function createConfiguredSpeechActivityGate(config: PicoConfig) {
+export async function createConfiguredSpeechActivityGate(config: PicoConfig) {
   const vad = config.voice.resident.vad;
 
   if (vad.provider === "energy") {
@@ -492,7 +595,7 @@ async function createConfiguredSpeechActivityGate(config: PicoConfig) {
   });
 }
 
-function createConfiguredStt(config: PicoConfig) {
+export function createConfiguredStt(config: PicoConfig) {
   const appleSpeech = config.voice.stt.appleSpeech;
 
   if (appleSpeech === undefined) {
@@ -513,15 +616,74 @@ function createConfiguredStt(config: PicoConfig) {
   );
 }
 
-function createConfiguredTts(config: PicoConfig) {
-  return createAivisSpeechTtsClient(buildAivisSpeechService(config));
+export function createConfiguredTts(
+  config: PicoConfig,
+  probe: VoiceStageProbe = {},
+  options: AivisSpeechTtsClientOptions = {}
+) {
+  const callerObserver = options.observeStage;
+  const probeObserver: NonNullable<AivisSpeechTtsClientOptions["observeStage"]> = (observation) => {
+    recordVoiceStageProbe(probe, {
+      stage: observation.stage === "audio_query" ? "tts_audio_query" : "tts_synthesize",
+      status: observation.status,
+      startedAt: observation.startedAt,
+      durationMs: observation.durationMs,
+      attributes: {
+        "pico.voice.sentence_index": observation.sentenceIndex,
+        ...(observation.errorCode === undefined
+          ? {}
+          : { "pico.voice.error_code": observation.errorCode })
+      }
+    });
+  };
+
+  return createAivisSpeechTtsClient(buildAivisSpeechService(config), {
+    ...options,
+    observeStage: (observation) => {
+      const trustedObservation = defineTtsProviderStageObservation(observation);
+      const callerObservation = defineTtsProviderStageObservation(observation);
+      notifyTtsStageObserver(probeObserver, trustedObservation);
+      notifyTtsStageObserver(callerObserver, callerObservation);
+    }
+  });
 }
 
-async function assertResidentVoiceStartupReadiness(config: PicoConfig): Promise<void> {
-  const health = await checkAivisSpeechServiceHealth(buildAivisSpeechService(config));
+function notifyTtsStageObserver(
+  observer: AivisSpeechTtsClientOptions["observeStage"],
+  observation: Parameters<NonNullable<AivisSpeechTtsClientOptions["observeStage"]>>[0]
+): void {
+  try {
+    observer?.(observation);
+  } catch {
+    // Each telemetry consumer is isolated from the provider and from its peers.
+  }
+}
+
+export async function assertResidentVoiceStartupReadiness(
+  config: PicoConfig,
+  dependencies: ResidentVoiceStartupReadinessDependencies = {}
+): Promise<void> {
+  const healthCheck = dependencies.checkAivisHealth ?? checkAivisSpeechServiceHealth;
+  const playbackCheck = dependencies.assertPlaybackReadiness ?? assertResidentPlaybackReadiness;
+  const service = buildAivisSpeechService(config);
+  const plan = createResidentAudioOutputPlan(config, dependencies.platform);
+  const [healthResult, playbackResult] = await Promise.allSettled([
+    healthCheck(service),
+    playbackCheck(plan)
+  ]);
+
+  if (healthResult.status === "rejected") {
+    throw healthResult.reason;
+  }
+
+  const health = healthResult.value;
 
   if (!health.ok) {
     throw new Error(`pico resident voice TTS provider is unhealthy: ${health.message}`);
+  }
+
+  if (playbackResult.status === "rejected") {
+    throw playbackResult.reason;
   }
 }
 

@@ -51,6 +51,20 @@ sections make the command fail.
 just smoke-milestone
 ```
 
+When `telemetry.otel.enabled` is true, run a loopback OpenTelemetry Collector
+before Pico. The tracked example is for `otelcol-contrib` because it uses the
+file and Prometheus exporters:
+
+```bash
+otelcol-contrib --config config/otel-collector.example.yaml
+PICO_CONFIG_PATH=config/pico.local.yaml just smoke-otel-telemetry
+```
+
+The Collector accepts OTLP HTTP only on `127.0.0.1:4318` and exposes Prometheus
+metrics only on `127.0.0.1:9464`. Pico emits metadata-only Logs and Metrics; it
+does not send transcripts, responses, tool arguments, tool results, or resident
+session identifiers to OTel.
+
 Pico smoke provider settings are loaded from `config/pico.local.yaml` by
 default. Copy the tracked example and fill in local-only values, including the
 Tapo camera account credentials created in the Tapo app:
@@ -230,15 +244,20 @@ the resident Pico controller explicitly with either equivalent command:
 
 ```bash
 PICO_CONFIG_PATH=config/pico.local.yaml \
-  node_modules/.bin/pi --extension ./src/index.ts --pico
+  node_modules/.bin/pi --no-session --extension ./src/index.ts --pico
 PICO_CONFIG_PATH=config/pico.local.yaml pico
 ```
 
-`pico` delegates to `pi --pico`; it does not choose a model on the command
-line. The extension reads `pico.model.provider`, `pico.model.id`, and
-`pico.model.thinkingLevel` from YAML and fails startup if that exact model is
-unavailable. Pico uses `pi.sendUserMessage()` and Pi events inside the existing
-parent session; it does not create an integration session.
+`pico` delegates to `pi --no-session --pico`; it does not choose a model on the
+command line. The non-persistent Pi host owns the resident process but does not
+retain a conversation transcript. The extension reads `pico.model.provider`,
+`pico.model.id`, and `pico.model.thinkingLevel` from YAML and fails startup if
+that exact model is unavailable.
+
+Each accepted interaction uses one Pi-owned in-memory `AgentSession`. Turns and
+the timeout farewell reuse that session; Pico then emits its Pi extension
+shutdown lifecycle and disposes it. The next accepted interaction starts with
+an empty Pi context. The Pi host process remains resident throughout.
 
 The direct resident scripts remain low-level field and provider harnesses while
 resident voice integration is validated:
@@ -251,15 +270,38 @@ PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice
 the current terminal for direct field validation. It is not the public pico
 startup contract.
 
+For a repeatable full-turn measurement, inject one finite PCM16LE mono 16 kHz
+WAV or raw PCM fixture through the explicit field harness. This path invokes the
+configured Apple Speech STT, Pi Agent, Aivis Speech TTS, and playback providers:
+
+```bash
+validation_dir="$(mktemp -d /tmp/pico-voice-validation.XXXXXX)"
+PICO_CONFIG_PATH=config/pico.local.yaml \
+  npm run field:resident-voice-pseudo-audio -- \
+  --audio-fixture /tmp/pico-known-ja.wav \
+  --validation-output "$validation_dir/events.jsonl" \
+  --required-tool-name stackchan_get_status
+```
+
+The validation JSONL is intentionally contentful and mode `0600`: it contains
+the recognized transcript, Pi response, and tool names/arguments/results so the
+operator can verify correctness as well as timing. It is never forwarded to
+OTel or normal resident logs. Treat it as sensitive, keep it only for the field
+run, and delete it when validation is complete. Its immediate parent must be a
+real, current-user-owned mode-`0700` directory, and the output file must not
+already exist. If OTel is disabled, the field harness still executes the same
+SDK pipeline with in-process recording exporters and reports their Log/Metric
+counts.
+
 ### Memory ownership
 
-Pi owns conversation sessions, transcripts, context, and history. Pico's
-process-local `SessionRecord` contains the session ID, active/ended state,
-start/end timestamps, and trusted trigger; the managed lifecycle additionally
-holds the inactivity timer. Farewell, deferred-tool cancellation, and Pi session
-cleanup are end-of-interaction operations, not retained state. Pico does not
-keep conversation entries or create a memory side effect when an interaction
-ends.
+Pi owns the non-persistent host session and each in-memory interaction session,
+including transcript, context, and history. Pico's process-local `SessionRecord`
+contains the session ID, active/ended state, start/end timestamps, and trusted
+trigger; the managed lifecycle additionally holds the inactivity timer.
+Farewell, deferred-tool cancellation, and Pi session cleanup are
+end-of-interaction operations, not retained state. Pico does not keep
+conversation entries or create a memory side effect when an interaction ends.
 
 Durable memory, when enabled, is a separately installed Pi-level plugin. That
 plugin—not Pico—owns provider configuration, extraction, persistence, search,
@@ -285,10 +327,11 @@ the voice resident process:
 PICO_CONFIG_PATH=config/pico.local.yaml pico dev
 ```
 
-This opens kitty by default, starts Pi Agent with `--pico`, and displays Pi's
-interactive output in that terminal window. The Pico wrapper does not duplicate
-that output into a file. Pico persists only output produced by its metadata-only
-log sink under
+This opens kitty by default, starts Pi Agent with `--no-session --pico`, and
+displays Pi's interactive output in that terminal window. The non-persistent
+host follows the same interaction-session lifecycle as the normal `pico`
+command. The Pico wrapper does not duplicate that output into a file. Pico
+persists only output produced by its metadata-only log sink under
 `~/.pico/resident-voice/development/processes/YYYY-MM-DD/<run-id>.log`. Use
 `pico dev --terminal=terminal` to open Terminal.app instead. Stop it from the
 opened terminal with `Ctrl-C`; the development terminal closes after the

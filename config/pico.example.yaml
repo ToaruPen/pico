@@ -12,6 +12,15 @@ session:
     mode: timed
     durationMs: 60000
 
+telemetry:
+  otel:
+    enabled: false
+    baseUrl: http://127.0.0.1:4318
+    serviceName: pico
+    timeoutMs: 10000
+    metricExportIntervalMs: 15000
+    shutdownTimeoutMs: 5000
+
 camera:
   tapo:
     sourceId: tapo-rtsp
@@ -69,7 +78,7 @@ voice:
       provider: avfoundation
       device: ':0'
     audioOutput:
-      provider: afplay
+      provider: ffplay
       route: system_default
     # Raspberry Pi / Linux resident runtime:
     # audioInput:

@@ -1,8 +1,39 @@
 import { describe, expect, it } from "vitest";
 
-import { createResidentVoiceAuditLog } from "../src/runtime/resident-voice-audit-log.js";
+import {
+  createAuditEventFanout,
+  createResidentVoiceAuditLog
+} from "../src/runtime/resident-voice-audit-log.js";
 
 describe("resident voice audit log", () => {
+  it("fans events out in order and isolates sink failures", () => {
+    const writes: string[] = [];
+    const audit = createResidentVoiceAuditLog({
+      stdoutEnabled: false,
+      writeEvent: createAuditEventFanout([
+        () => {
+          writes.push("first");
+          throw new Error("first sink unavailable");
+        },
+        (event) => {
+          writes.push(event.name);
+        }
+      ])
+    });
+
+    expect(() =>
+      audit.record({
+        category: "session_lifecycle",
+        name: "session.started",
+        severity: "info",
+        occurredAt: "2026-07-19T02:00:00.000Z",
+        summary: "Pico interaction session started.",
+        attributes: {}
+      })
+    ).not.toThrow();
+    expect(writes).toEqual(["first", "session.started"]);
+  });
+
   it("mirrors voice runtime summary stage events to stdout when enabled", () => {
     const writes: string[] = [];
     const audit = createResidentVoiceAuditLog({
@@ -57,6 +88,36 @@ describe("resident voice audit log", () => {
 
     expect(audit.entries()).toHaveLength(1);
     expect(writes).toEqual([]);
+  });
+
+  it("applies the summary stage policy to error events", () => {
+    const writes: string[] = [];
+    const audit = createResidentVoiceAuditLog({
+      stdoutEnabled: true,
+      writeStdout: (line) => {
+        writes.push(line);
+      }
+    });
+
+    for (const stage of ["stt", "echo_control", "unknown_stage"]) {
+      audit.record({
+        category: "transport_event",
+        name: "voice.runtime.stage",
+        severity: "warn",
+        occurredAt: "2026-06-22T00:00:00.000Z",
+        summary: "Pico voice runtime stage failed.",
+        attributes: {
+          "pico.voice.stage": stage,
+          "pico.voice.stage_status": "error",
+          "pico.voice.stage_duration_ms": 123.4,
+          "pico.voice.error_code": "stage_failed"
+        }
+      });
+    }
+
+    expect(writes).toEqual([
+      "[pico voice] 2026-06-22T00:00:00.000Z stage=stt status=error duration_ms=123.4 error=stage_failed\n"
+    ]);
   });
 
   it("mirrors high-volume frame stages only in verbose mode", () => {

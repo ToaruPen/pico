@@ -1,6 +1,6 @@
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../src/config/index.js";
 import { createStructuredAuditLog } from "../src/modules/audit/index.js";
-import { createOpenTelemetryAuditExporter } from "../src/modules/audit/otel.js";
+import { createOpenTelemetryProvider } from "../src/modules/telemetry/index.js";
 import { type RosterCliResult, runRosterCli } from "../src/runtime/roster-cli.js";
 
 try {
@@ -11,26 +11,41 @@ try {
 }
 
 async function main(): Promise<void> {
-  const result = await runWithConfiguredAudit(loadPicoConfigFromEnvironment().audit.otel);
+  const result = await runWithConfiguredAudit(loadPicoConfigFromEnvironment().telemetry.otel);
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
-async function runWithConfiguredAudit(otel: PicoConfig["audit"]["otel"]): Promise<RosterCliResult> {
+async function runWithConfiguredAudit(
+  otel: PicoConfig["telemetry"]["otel"]
+): Promise<RosterCliResult> {
   if (!otel.enabled) {
     return runRosterCli(process.argv.slice(2));
   }
-  if (otel.endpoint === undefined) throw new Error("pico audit OTel endpoint is required");
   const audit = createStructuredAuditLog();
-  const exporter = createOpenTelemetryAuditExporter({
-    endpoint: otel.endpoint,
-    serviceName: otel.serviceName ?? "pico",
-    ...(otel.timeoutMs === undefined ? {} : { timeoutMs: otel.timeoutMs })
+  const telemetry = createOpenTelemetryProvider({
+    baseUrl: requireTelemetryValue(otel.baseUrl, "baseUrl"),
+    serviceName: requireTelemetryValue(otel.serviceName, "serviceName"),
+    timeoutMs: requireTelemetryValue(otel.timeoutMs, "timeoutMs"),
+    metricExportIntervalMs: requireTelemetryValue(
+      otel.metricExportIntervalMs,
+      "metricExportIntervalMs"
+    ),
+    shutdownTimeoutMs: requireTelemetryValue(otel.shutdownTimeoutMs, "shutdownTimeoutMs")
   });
   try {
     const result = await runRosterCli(process.argv.slice(2), { audit });
-    for (const event of audit.entries()) await exporter.export(event);
+    for (const event of audit.entries()) telemetry.record(event);
+    await telemetry.forceFlush();
     return result;
   } finally {
-    await exporter.shutdown();
+    await telemetry.shutdown();
   }
+}
+
+function requireTelemetryValue<T>(value: T | undefined, name: string): T {
+  if (value === undefined) {
+    throw new Error(`pico telemetry OTel ${name} is required when enabled`);
+  }
+
+  return value;
 }

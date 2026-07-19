@@ -14,18 +14,20 @@ responsible decision makers.
 - Source of truth starts in `docs/superpowers/specs/` and
   `docs/superpowers/research/`.
 - Runtime shape is one Pi package with one TypeScript extension.
-- Pi owns the production process, parent conversation session, conversation
-  context and history, model loop, tools, subagents, normal cancellation, and
-  all memory capabilities. Pico owns facility audio, address/attention rules,
-  TTS/echo control, and facility runtime restrictions.
+- Pi owns the production process, non-persistent host session, every interaction
+  AgentSession, conversation context and history, model loop, tools, subagents,
+  normal cancellation, and all memory capabilities. Pico owns interaction
+  timing, facility audio, address/attention rules, TTS/echo control, and
+  facility runtime restrictions.
 - Durable memory, when enabled, is provided by a separately installed Pi-level
   plugin. That plugin owns provider configuration, extraction, persistence,
   retrieval, mutation, retention, and lifecycle. Pico does not register,
   configure, wrap, proxy, or call memory tools or providers, and Pico
   interaction ending has no memory side effect.
-- Normal Pi starts without the resident controller. `pi --pico` starts Pico in
-  the same Pi-owned runtime; the `pico` command is only a convenience alias for
-  that path. Pico's model is selected from YAML at startup.
+- Normal Pi starts without the resident controller. `pi --no-session --pico`
+  starts Pico in a non-persistent Pi-owned host runtime; the `pico` command is
+  only a convenience alias for that path. Pico's model is selected from YAML at
+  startup, and each timed interaction uses one Pi-owned in-memory AgentSession.
 - Tool visibility for normal Pi, Pico, and subagents is owned by Pi settings.
   Do not duplicate those allowlists in Pico runtime profiles or tests.
 - Internal modules are TypeScript modules under `src/`.
@@ -57,9 +59,10 @@ responsible decision makers.
 
 - Production architecture has no mock, stub, fake, backward-compatibility, or
   automatic fallback provider paths.
-- `npm run resident:voice` and its launchd wrapper are direct field harnesses,
-  not production ownership paths. They may embed the Pi SDK only inside that
-  bounded harness.
+- Pi SDK AgentSession creation is confined to `src/runtime/pi-agent-turn.ts`.
+  Production and the direct `npm run resident:voice` field harness share that
+  Pi integration boundary; Pico domain modules do not create or persist
+  AgentSessions.
 - Hard-kill residue is reviewed by the scheduled Codex stale-process cleanup.
   Do not add task auto-resume, a custom worker runner, or a TaskRun store to the
   Pico runtime for process cleanup.

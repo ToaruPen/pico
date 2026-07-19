@@ -13,7 +13,7 @@ is held. Releasing the control closes the utterance, waits for a 250 ms speech
 tail, transcribes that one utterance, and submits exactly one Pi turn.
 
 A separate configured control cancels recording, STT, the active Pi turn, TTS,
-or playback. Cancellation preserves the Pi parent conversation context and
+or playback. Cancellation preserves the active Pi interaction context and
 returns Pico to idle without farewell output.
 
 ## Superseded Behavior
@@ -61,7 +61,7 @@ control producer and will not revive substring matching over general STT.
 5. One completed hold produces at most one Pi turn.
 6. A cancel press is accepted in every active turn state and is idempotent;
    cancelling, error, stopped, and idle treat it as a no-op.
-7. Cancel preserves the Pi parent conversation context, emits no farewell, and
+7. Cancel preserves the active Pi interaction context, emits no farewell, and
    returns to idle after owned work reaches its cancellation terminal state.
    If normal interaction ending has already started, cancel suppresses its
    remaining farewell Pi/TTS/playback work but does not reverse session cleanup.
@@ -233,8 +233,8 @@ audio-reliability design.
 7. The existing speech gate is used only to reject an empty/no-speech hold. It
    does not activate Pico or split one hold into multiple turns.
 8. A non-empty hold is sent to Apple Speech once.
-9. The accepted transcript is sent as one literal user message through the Pi
-   parent session.
+9. The accepted transcript is sent as one literal user message through the
+   active Pi in-memory interaction session.
 10. TTS output is played once unless cancellation invalidates the turn.
 11. Audio is released after STT admission, failure, or cancellation. It is not
     logged, persisted, or attached to Pico interaction state.
@@ -247,15 +247,16 @@ next implementation slice rather than adding idle capture.
 ## Session Semantics
 
 A control activation grants permission for one microphone turn. It does not
-create a second Pi session.
+create more than one Pi session for the active interaction ID.
 
-The Pi parent conversation session remains the owner of context and history
-across multiple hold-to-talk operations. Pico may retain its existing
-interaction identifier and inactivity lifecycle for facility cleanup, but an
-active interaction never grants microphone permission. Every spoken turn still
-requires a new accepted `talk_pressed`.
+The Pi interaction AgentSession owns context and history across hold-to-talk
+operations within one timed interaction. Interaction ending disposes it, so the
+next interaction starts with empty Pi context. Pico retains only its interaction
+identifier and inactivity lifecycle for facility cleanup. An active interaction
+never grants microphone permission; every spoken turn still requires a new
+accepted `talk_pressed`.
 
-Cancel does not end the Pi conversation, dispose the parent session, refresh
+Cancel does not end the Pico interaction, dispose its Pi AgentSession, refresh
 activity as a successful turn, or run farewell. Normal inactivity and shutdown
 continue to own interaction ending.
 
@@ -405,6 +406,22 @@ Probe and logs must not include physical key names, raw audio, transcript text,
 prompt text, completion text, secrets, endpoint query data, or high-cardinality
 generation IDs.
 
+### レイテンシ計測契約
+
+`pico.voice.stage_duration_ms` は、runtime の monotonic clock で測った実際の
+wall-clock 経過時間だけを記録する。`stt`、`pi_turn`、`tts_request_wall`、
+`tts_playback` は、それぞれ provider request または playback の開始から非同期処理が
+settle するまでを計測する。
+
+STT provider が返す発話長と、TTS が生成した音声長は処理時間ではない。これらは
+`pico.voice.utterance_duration_ms` に分離し、stage duration の代わりに使用しない。
+TTS request は `tts_request_wall`、再生は `tts_playback` として記録する。意味が曖昧な
+`tts_synthesize` と、wall-clock stage ではない `tts_audio_duration` は出力しない。
+
+成功、失敗、cancel のいずれでも、settle までに経過した wall-clock 時間を保持する。
+cancel は `skipped`、provider または playback の失敗は `error` とする。この計測にも、
+transcript、prompt、completion、endpoint、model 名、物理キー名、session ID を含めない。
+
 Required counters include:
 
 - idle STT calls;
@@ -481,7 +498,7 @@ Required counters include:
 
 - Propagate the generation abort signal through STT, Pi, and TTS.
 - Add controllable playback and late-result suppression.
-- Preserve the Pi parent conversation after cancellation.
+- Preserve the active Pi interaction session after cancellation.
 
 ### Slice 4: macOS keyboard bridge
 
@@ -517,7 +534,7 @@ Required counters include:
   250 ms release tail.
 - Talk presses while busy are ignored and cannot execute later.
 - Cancel converges from every active turn state without farewell or
-  parent-session disposal; during existing interaction ending it suppresses the
+  interaction-session disposal; during existing interaction ending it suppresses the
   farewell while preserving terminal cleanup.
 - Cancelled or stale async results cannot synthesize or play audio.
 - Configured talk and cancel keys can be changed without modifying TypeScript

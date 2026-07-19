@@ -16,10 +16,12 @@ import {
   createResidentControlController,
   type ResidentTurnGeneration
 } from "../../src/runtime/resident-control-controller.js";
+import { createResidentAudioFixtureCapture } from "./resident-audio-fixture.js";
 
 export type ResidentHoldToTalkArguments = {
   readonly durationMs: number;
   readonly help: boolean;
+  readonly audioFixturePath?: string;
 };
 
 export type BoundedMetricSummary = {
@@ -61,57 +63,81 @@ type ActiveCapture = {
 const defaultDurationMs = 30_000;
 const maximumDurationMs = 300_000;
 
+type MutableResidentHoldToTalkArguments = {
+  durationMs: number;
+  audioFixturePath?: string;
+};
+
+const residentHoldToTalkArgumentReaders: Readonly<
+  Record<string, (state: MutableResidentHoldToTalkArguments, value: string) => void>
+> = {
+  "--duration-ms": (state, value) => {
+    state.durationMs = readDuration(value);
+  },
+  "--audio-fixture": (state, value) => {
+    state.audioFixturePath = value;
+  }
+};
+
 export function readResidentHoldToTalkArguments(
   arguments_: readonly string[]
 ): ResidentHoldToTalkArguments {
-  switch (arguments_.length) {
-    case 0:
-      return { durationMs: defaultDurationMs, help: false };
-    case 1:
-      return readHelpArgument(arguments_[0]);
-    case 2:
-      return readDurationArguments(arguments_[0], arguments_[1]);
-    default:
-      throw invalidArguments();
+  if (arguments_.length === 0) {
+    return { durationMs: defaultDurationMs, help: false };
   }
-}
 
-function readHelpArgument(value: string | undefined): ResidentHoldToTalkArguments {
-  if (value === "--help") {
+  if (arguments_.length === 1 && arguments_[0] === "--help") {
     return { durationMs: defaultDurationMs, help: true };
   }
 
-  throw invalidArguments();
+  return readResidentHoldToTalkArgumentPairs(arguments_);
 }
 
-function readDurationArguments(
-  flag: string | undefined,
-  value: string | undefined
+function readResidentHoldToTalkArgumentPairs(
+  arguments_: readonly string[]
 ): ResidentHoldToTalkArguments {
+  const parsed: MutableResidentHoldToTalkArguments = { durationMs: defaultDurationMs };
+
+  for (let index = 0; index < arguments_.length; index += 2) {
+    const flag = arguments_[index];
+    const value = arguments_[index + 1];
+    const read = flag === undefined ? undefined : residentHoldToTalkArgumentReaders[flag];
+    if (read === undefined || value === undefined || value.trim() === "") {
+      throw invalidArguments();
+    }
+    read(parsed, value);
+  }
+
+  return {
+    durationMs: parsed.durationMs,
+    help: false,
+    ...(parsed.audioFixturePath === undefined ? {} : { audioFixturePath: parsed.audioFixturePath })
+  };
+}
+
+function readDuration(value: string): number {
   const durationMs = Number(value);
 
-  if (
-    flag !== "--duration-ms" ||
-    !Number.isInteger(durationMs) ||
-    durationMs <= 0 ||
-    durationMs > maximumDurationMs
-  ) {
+  if (!Number.isInteger(durationMs) || durationMs <= 0 || durationMs > maximumDurationMs) {
     throw invalidArguments();
   }
 
-  return { durationMs, help: false };
+  return durationMs;
 }
 
 function invalidArguments(): Error {
-  return new Error("usage: field:resident-hold-to-talk [--duration-ms 1..300000]");
+  return new Error(
+    "usage: field:resident-hold-to-talk [--duration-ms 1..300000] [--audio-fixture path.wav|path.pcm]"
+  );
 }
 
 export function formatResidentHoldToTalkHelp(): string {
   return [
-    "Usage: npm run field:resident-hold-to-talk -- [--duration-ms 30000]",
+    "Usage: npm run field:resident-hold-to-talk -- [--duration-ms 30000] [--audio-fixture path.wav|path.pcm]",
     "",
     "Runs a bounded macOS control-and-capture validation using the configured controls.",
-    "It reports aggregate timing/resource metadata only and does not invoke STT, Pi, TTS, or playback."
+    "It reports aggregate timing/resource metadata only and does not invoke STT, Pi, TTS, or playback.",
+    "--audio-fixture explicitly replaces microphone frames only for this bounded field validation."
   ].join("\n");
 }
 
@@ -162,7 +188,15 @@ export async function runResidentHoldToTalkFieldValidation(
     const stopController = new AbortController();
     unregisterSignals = registerStopSignals(stopController);
     durationTimer = setTimeout(() => stopController.abort(), arguments_.durationMs);
-    const ownedCapture = createResidentAudioCapture(config);
+    const ownedCapture =
+      arguments_.audioFixturePath === undefined
+        ? createResidentAudioCapture(config)
+        : createResidentAudioFixtureCapture({
+            path: arguments_.audioFixturePath,
+            expectedSampleRateHz: config.voice.echoControl.sampleRateHz,
+            expectedChannels: config.voice.echoControl.channels,
+            frameMs: config.voice.echoControl.frameMs
+          });
     capture = ownedCapture;
     const outcomes: Record<ResidentControlResult, number> = {
       accepted: 0,

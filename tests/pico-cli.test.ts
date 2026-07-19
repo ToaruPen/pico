@@ -20,10 +20,10 @@ describe("pico cli", () => {
     expect(result.stderr).toContain(join(repoRoot, "scripts/roster.ts"));
   });
 
-  it("loads the local extension before starting Pi with --pico", () => {
+  it("starts the Pi host without persisting its infrastructure session", () => {
     expect(createPicoCliPlan([])).toEqual({
       kind: "pi",
-      args: ["--extension", "./src/index.ts", "--pico"]
+      args: ["--no-session", "--extension", "./src/index.ts", "--pico"]
     });
   });
 
@@ -96,6 +96,7 @@ describe("pico cli", () => {
     expect(help).toContain("pico dev");
     expect(help).toContain("pico roster");
     expect(help).toContain("Pi Agent");
+    expect(help).toContain("non-persistent host session");
 
     for (const command of [
       "foreground",

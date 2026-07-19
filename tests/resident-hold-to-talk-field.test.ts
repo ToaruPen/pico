@@ -18,11 +18,32 @@ describe("resident hold-to-talk field contract", () => {
     );
   });
 
+  it("accepts an explicit finite WAV or PCM fixture without changing the default microphone path", () => {
+    expect(readResidentHoldToTalkArguments(["--audio-fixture", "/tmp/pico-ja.wav"])).toEqual({
+      durationMs: 30_000,
+      help: false,
+      audioFixturePath: "/tmp/pico-ja.wav"
+    });
+    expect(
+      readResidentHoldToTalkArguments([
+        "--duration-ms",
+        "1200",
+        "--audio-fixture",
+        "/tmp/pico-ja.pcm"
+      ])
+    ).toEqual({
+      durationMs: 1_200,
+      help: false,
+      audioFixturePath: "/tmp/pico-ja.pcm"
+    });
+  });
+
   it("documents a metadata-only run without provider work", () => {
     const help = formatResidentHoldToTalkHelp();
 
     expect(help).toContain("aggregate timing/resource metadata only");
     expect(help).toContain("does not invoke STT, Pi, TTS, or playback");
+    expect(help).toContain("--audio-fixture");
   });
 
   it("summarizes samples without retaining per-activation values", () => {

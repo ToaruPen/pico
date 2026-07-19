@@ -145,7 +145,7 @@ function buildResidentDevelopmentTerminalShellCommand(input: {
 
 function buildResidentVoiceRunAndCloseCommand(terminal: ResidentDevelopmentTerminal): string {
   const commands = [
-    "node_modules/.bin/pi --extension ./src/index.ts --pico",
+    "node_modules/.bin/pi --no-session --extension ./src/index.ts --pico",
     "exit_code=$?",
     `printf '\\n[pico] resident voice exited with status %s\\n' "$exit_code"`
   ];

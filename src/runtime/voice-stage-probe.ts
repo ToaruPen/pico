@@ -4,19 +4,32 @@ import type {
   StructuredAuditLog
 } from "../modules/audit/index.js";
 
-export type VoiceRuntimeStage =
-  | "mic_capture"
-  | "echo_control"
-  | "speech_gate"
-  | "stt"
-  | "session_start"
-  | "pi_turn"
-  | "tts_request_wall"
-  | "tts_audio_duration"
-  | "tts_synthesize"
-  | "tts_playback"
-  | "camera_capture"
-  | "vlm_scene_description";
+export const voiceRuntimeStagePolicies = Object.freeze({
+  mic_capture: { persisted: false, summary: false },
+  echo_control: { persisted: false, summary: false },
+  speech_gate: { persisted: true, summary: false },
+  stt: { persisted: true, summary: true },
+  session_start: { persisted: true, summary: true },
+  ptt_release_to_playback_start: { persisted: true, summary: true },
+  pi_time_to_first_text: { persisted: true, summary: true },
+  pi_session_resource_load: { persisted: true, summary: false },
+  pi_session_create: { persisted: true, summary: false },
+  pi_session_bind: { persisted: true, summary: false },
+  pi_tool_execution: { persisted: true, summary: false },
+  pi_session_dispose: { persisted: true, summary: false },
+  interaction_end: { persisted: true, summary: true },
+  pi_turn: { persisted: true, summary: true },
+  tts_request_wall: { persisted: true, summary: true },
+  tts_time_to_first_chunk: { persisted: true, summary: true },
+  tts_audio_query: { persisted: true, summary: false },
+  tts_synthesize: { persisted: true, summary: false },
+  tts_playback: { persisted: true, summary: true },
+  camera_capture: { persisted: true, summary: true },
+  vlm_scene_description: { persisted: true, summary: true }
+} as const);
+
+export type VoiceRuntimeStage = keyof typeof voiceRuntimeStagePolicies;
+export type VoiceRuntimeStagePolicy = (typeof voiceRuntimeStagePolicies)[VoiceRuntimeStage];
 
 export type VoiceStageStatus = "ok" | "error" | "skipped" | "suppressed";
 
@@ -32,20 +45,6 @@ export type VoiceStageProbeInput = {
   readonly attributes?: Readonly<Record<string, AuditAttributeValue>>;
 };
 
-const voiceRuntimeStages = new Set<VoiceRuntimeStage>([
-  "mic_capture",
-  "echo_control",
-  "speech_gate",
-  "stt",
-  "session_start",
-  "pi_turn",
-  "tts_request_wall",
-  "tts_audio_duration",
-  "tts_synthesize",
-  "tts_playback",
-  "camera_capture",
-  "vlm_scene_description"
-]);
 const voiceStageStatuses = new Set<VoiceStageStatus>(["ok", "error", "skipped", "suppressed"]);
 const voiceStageAttributeKeys = new Set([
   "pico.voice.frame_count",
@@ -60,7 +59,13 @@ const voiceStageAttributeKeys = new Set([
   "pico.voice.frame_bytes",
   "pico.voice.vlm_frame_bytes",
   "pico.voice.queue_depth",
-  "pico.voice.error_code"
+  "pico.voice.error_code",
+  "pico.voice.sentence_index",
+  "pico.voice.played_chunk_count"
+]);
+const numericVoiceStageAttributeKeys = new Set([
+  "pico.voice.sentence_index",
+  "pico.voice.played_chunk_count"
 ]);
 const maxNodeTimeoutMs = 2_147_483_647;
 
@@ -97,12 +102,20 @@ export function recordVoiceStageProbe(
   }
 }
 
+export function voiceRuntimeStagePolicy(value: unknown): VoiceRuntimeStagePolicy | undefined {
+  return isVoiceRuntimeStage(value) ? voiceRuntimeStagePolicies[value] : undefined;
+}
+
 function requireVoiceRuntimeStage(value: unknown): VoiceRuntimeStage {
-  if (typeof value === "string" && voiceRuntimeStages.has(value as VoiceRuntimeStage)) {
-    return value as VoiceRuntimeStage;
+  if (isVoiceRuntimeStage(value)) {
+    return value;
   }
 
   throw new Error("pico voice runtime stage is invalid");
+}
+
+function isVoiceRuntimeStage(value: unknown): value is VoiceRuntimeStage {
+  return typeof value === "string" && Object.hasOwn(voiceRuntimeStagePolicies, value);
 }
 
 function requireVoiceStageStatus(value: unknown): VoiceStageStatus {
@@ -143,6 +156,10 @@ function normalizeVoiceStageAttributes(
   for (const [key, value] of Object.entries(attributes)) {
     if (!voiceStageAttributeKeys.has(key)) {
       throw new Error("pico voice stage probe attribute is not allowed");
+    }
+
+    if (numericVoiceStageAttributeKeys.has(key) && typeof value !== "number") {
+      throw new Error("pico voice stage probe numeric attribute is invalid");
     }
 
     if (typeof value === "number" && !Number.isFinite(value)) {

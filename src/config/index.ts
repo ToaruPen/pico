@@ -9,8 +9,8 @@ export type PicoConfig = DeepReadonly<{
     model?: PicoAgentModelConfig;
   };
   session: PicoSessionConfig;
-  audit: {
-    otel: PicoAuditOtelConfig;
+  telemetry: {
+    otel: PicoTelemetryOtelConfig;
   };
   camera: {
     tapo?: PicoTapoConfig;
@@ -47,11 +47,13 @@ export type PicoSessionConfig = {
   };
 };
 
-export type PicoAuditOtelConfig = {
+export type PicoTelemetryOtelConfig = {
   readonly enabled: boolean;
-  readonly endpoint?: string;
+  readonly baseUrl?: string;
   readonly serviceName?: string;
   readonly timeoutMs?: number;
+  readonly metricExportIntervalMs?: number;
+  readonly shutdownTimeoutMs?: number;
 };
 
 export type PicoTapoConfig = {
@@ -261,7 +263,7 @@ export type PicoResidentAudioOutputConfig =
       readonly device: string;
     }
   | {
-      readonly provider: "afplay";
+      readonly provider: "ffplay";
       readonly route: "system_default";
     };
 
@@ -348,7 +350,7 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
       durationMs: 60_000
     }
   },
-  audit: {
+  telemetry: {
     otel: {
       enabled: false
     }
@@ -425,10 +427,11 @@ export function loadPicoConfig(options: LoadPicoConfigOptions = {}): PicoConfig 
 
 export function definePicoConfig(input: unknown): PicoConfig {
   const root = input === null || input === undefined ? {} : requireRecord(input, "pico config");
+  rejectRemovedAuditOtel(root);
   requireKnownConfigFields(root, "pico config", [
     "pico",
     "session",
-    "audit",
+    "telemetry",
     "camera",
     "vision",
     "voice"
@@ -437,7 +440,7 @@ export function definePicoConfig(input: unknown): PicoConfig {
   return deepFreeze({
     pico: definePicoSection(root),
     session: defineSessionSection(root),
-    audit: defineAuditSection(root),
+    telemetry: defineTelemetrySection(root),
     camera: defineCameraSection(root),
     vision: defineVisionSection(root),
     voice: defineVoiceSection(root)
@@ -522,50 +525,95 @@ function requireThinkingLevel(
   return thinkingLevel as PicoAgentModelConfig["thinkingLevel"];
 }
 
-function defineAuditSection(root: Record<string, unknown>): PicoConfig["audit"] {
+function rejectRemovedAuditOtel(root: Record<string, unknown>): void {
   const audit = readOptionalRecord(root.audit, "pico config audit");
-  const otel = readOptionalRecord(audit?.otel, "pico config audit.otel");
+
+  if (audit?.otel !== undefined) {
+    throw new Error("pico config audit.otel was removed; use telemetry.otel");
+  }
+}
+
+function defineTelemetrySection(root: Record<string, unknown>): PicoConfig["telemetry"] {
+  const telemetry = readOptionalRecord(root.telemetry, "pico config telemetry");
+
+  if (telemetry !== undefined) {
+    requireKnownConfigFields(telemetry, "pico config telemetry", ["otel"]);
+  }
+
+  const otel = readOptionalRecord(telemetry?.otel, "pico config telemetry.otel");
 
   return {
-    otel: defineAuditOtelConfig(otel)
+    otel: defineTelemetryOtelConfig(otel)
   };
 }
 
-function defineAuditOtelConfig(input: Record<string, unknown> | undefined): PicoAuditOtelConfig {
+// eslint-disable-next-line complexity
+function defineTelemetryOtelConfig(
+  input: Record<string, unknown> | undefined
+): PicoTelemetryOtelConfig {
   if (input === undefined) {
     return {
       enabled: false
     };
   }
 
-  const enabled = readOptionalBoolean(input.enabled, "pico config audit.otel.enabled") ?? false;
-  const endpoint = readOptionalAuditOtelEndpoint(input.endpoint);
+  requireKnownConfigFields(input, "pico config telemetry.otel", [
+    "enabled",
+    "baseUrl",
+    "serviceName",
+    "timeoutMs",
+    "metricExportIntervalMs",
+    "shutdownTimeoutMs"
+  ]);
+  const enabled = readOptionalBoolean(input.enabled, "pico config telemetry.otel.enabled") ?? false;
+  const baseUrl = readOptionalTelemetryOtelBaseUrl(input.baseUrl);
+  const configuredTimeoutMs = readOptionalBoundedPositiveInteger(
+    input.timeoutMs,
+    "pico config telemetry.otel.timeoutMs",
+    maxNodeTimeoutMs
+  );
+  const configuredMetricExportIntervalMs = readOptionalBoundedPositiveInteger(
+    input.metricExportIntervalMs,
+    "pico config telemetry.otel.metricExportIntervalMs",
+    maxNodeTimeoutMs
+  );
+  const timeoutMs = configuredTimeoutMs ?? 10_000;
+  const metricExportIntervalMs = configuredMetricExportIntervalMs ?? 15_000;
+
+  if (metricExportIntervalMs <= timeoutMs) {
+    throw new Error("pico config telemetry.otel.metricExportIntervalMs must exceed timeoutMs");
+  }
+
+  const serviceName = readOptionalString(
+    input.serviceName,
+    "pico config telemetry.otel.serviceName"
+  );
+  const shutdownTimeoutMs = readOptionalBoundedPositiveInteger(
+    input.shutdownTimeoutMs,
+    "pico config telemetry.otel.shutdownTimeoutMs",
+    maxNodeTimeoutMs
+  );
 
   if (enabled) {
     return {
       enabled,
-      endpoint: requireString(endpoint, "pico config audit.otel.endpoint"),
-      serviceName:
-        readOptionalString(input.serviceName, "pico config audit.otel.serviceName") ?? "pico",
-      ...optionalBoundedPositiveIntegerProperty(
-        input,
-        "timeoutMs",
-        "pico config audit.otel.timeoutMs",
-        maxNodeTimeoutMs
-      )
+      baseUrl: requireString(baseUrl, "pico config telemetry.otel.baseUrl"),
+      serviceName: serviceName ?? "pico",
+      timeoutMs,
+      metricExportIntervalMs,
+      shutdownTimeoutMs: shutdownTimeoutMs ?? 5_000
     };
   }
 
   return {
     enabled,
-    ...(endpoint === undefined ? {} : { endpoint }),
-    ...optionalStringProperty(input, "serviceName", "pico config audit.otel.serviceName"),
-    ...optionalBoundedPositiveIntegerProperty(
-      input,
-      "timeoutMs",
-      "pico config audit.otel.timeoutMs",
-      maxNodeTimeoutMs
-    )
+    ...(baseUrl === undefined ? {} : { baseUrl }),
+    ...(serviceName === undefined ? {} : { serviceName }),
+    ...(configuredTimeoutMs === undefined ? {} : { timeoutMs: configuredTimeoutMs }),
+    ...(configuredMetricExportIntervalMs === undefined
+      ? {}
+      : { metricExportIntervalMs: configuredMetricExportIntervalMs }),
+    ...(shutdownTimeoutMs === undefined ? {} : { shutdownTimeoutMs })
   };
 }
 
@@ -899,7 +947,7 @@ function defineResidentAudioOutput(input: Record<string, unknown>): PicoResident
     };
   }
 
-  if (provider === "afplay") {
+  if (provider === "ffplay") {
     const route = requireString(input.route, "pico config voice.resident.audioOutput.route");
 
     if (route !== "system_default") {
@@ -909,7 +957,7 @@ function defineResidentAudioOutput(input: Record<string, unknown>): PicoResident
     return { provider, route };
   }
 
-  throw new Error("pico config voice.resident.audioOutput.provider must be alsa or afplay");
+  throw new Error("pico config voice.resident.audioOutput.provider must be alsa or ffplay");
 }
 
 function defineVoiceProbeConfig(input: Record<string, unknown> | undefined): PicoVoiceProbeConfig {
@@ -1621,23 +1669,24 @@ function requireAppleSpeechBaseUrl(value: unknown, label: string): string {
   return localBaseUrl;
 }
 
-function readOptionalAuditOtelEndpoint(value: unknown): string | undefined {
-  const endpoint = readOptionalString(value, "pico config audit.otel.endpoint");
+function readOptionalTelemetryOtelBaseUrl(value: unknown): string | undefined {
+  const baseUrl = readOptionalString(value, "pico config telemetry.otel.baseUrl");
 
-  if (endpoint === undefined) {
+  if (baseUrl === undefined) {
     return undefined;
   }
 
-  if (!URL.canParse(endpoint)) {
-    throw new Error("pico config audit.otel.endpoint must be a valid URL");
+  if (!URL.canParse(baseUrl)) {
+    throw new Error("pico config telemetry.otel.baseUrl must be a valid URL");
   }
 
-  const parsedUrl = new URL(endpoint);
+  const parsedUrl = new URL(baseUrl);
 
-  requireHttpUrl(parsedUrl, "pico config audit.otel.endpoint");
-  requireAuditOtelEndpointShape(parsedUrl);
+  requireHttpUrl(parsedUrl, "pico config telemetry.otel.baseUrl");
+  requireOriginUrl(parsedUrl, "pico config telemetry.otel.baseUrl");
+  requireTelemetryOtelLoopbackHost(parsedUrl.hostname);
 
-  return endpoint;
+  return baseUrl;
 }
 
 function readOptionalEchoControlProviderEndpoint(value: unknown): string | undefined {
@@ -1660,27 +1709,11 @@ function readOptionalEchoControlProviderEndpoint(value: unknown): string | undef
   return endpoint;
 }
 
-function requireAuditOtelEndpointShape(parsedUrl: URL): void {
-  if (parsedUrl.username !== "" || parsedUrl.password !== "") {
-    throw new Error("pico config audit.otel.endpoint must not include credentials");
-  }
-
-  if (parsedUrl.pathname !== "/v1/logs") {
-    throw new Error("pico config audit.otel.endpoint must end with /v1/logs");
-  }
-
-  if (parsedUrl.search !== "" || parsedUrl.hash !== "") {
-    throw new Error("pico config audit.otel.endpoint must not include query or fragment");
-  }
-
-  requireAuditOtelLoopbackHost(parsedUrl.hostname);
-}
-
-function requireAuditOtelLoopbackHost(hostname: string): void {
+function requireTelemetryOtelLoopbackHost(hostname: string): void {
   const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
   if (!loopbackHosts.has(hostname)) {
-    throw new Error("pico config audit.otel.endpoint must use a local Collector URL");
+    throw new Error("pico config telemetry.otel.baseUrl must use a local Collector URL");
   }
 }
 
