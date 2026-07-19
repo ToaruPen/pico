@@ -138,6 +138,7 @@ export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAg
           formatPromptForSdkSession(input.text, input.deferredToolResults ?? [])
         );
         throwIfSignalAborted(input.signal);
+        observation.throwIfTerminalFailure();
         observation.settle("skipped", "no_text_delta");
 
         return {
@@ -525,6 +526,7 @@ function createResidentPicoExtensionFactory(
 
 type PromptObservation = {
   readonly accept: (event: unknown) => void;
+  readonly throwIfTerminalFailure: () => void;
   readonly settle: (status: VoiceStageStatus, errorCode: string) => void;
   readonly settleOpenTools: (status: VoiceStageStatus, errorCode: string) => void;
 };
@@ -545,6 +547,7 @@ function createPromptObservation(
   const promptStartedAtMs = monotonicNow();
   const pendingTools = new Map<string, PendingToolExecution>();
   let firstTextSettled = false;
+  let terminalFailure = false;
 
   const settleFirstText = (status: VoiceStageStatus, errorCode?: string): void => {
     if (firstTextSettled) {
@@ -618,6 +621,19 @@ function createPromptObservation(
     );
   };
 
+  const acceptSettledAssistant = (event: unknown): void => {
+    const settledAssistant = readSettledAssistant(event);
+    if (settledAssistant === undefined) {
+      return;
+    }
+
+    terminalFailure = isTerminalAssistantFailure(settledAssistant.stopReason);
+    output.splice(0, output.length);
+    if (!terminalFailure) {
+      output.push(settledAssistant.text);
+    }
+  };
+
   return {
     accept(event) {
       const delta = readTextDelta(event);
@@ -627,16 +643,18 @@ function createPromptObservation(
         }
       }
 
-      const settledAssistantText = readSettledAssistantText(event);
-      if (settledAssistantText !== undefined) {
-        output.splice(0, output.length, settledAssistantText);
-      }
+      acceptSettledAssistant(event);
 
       const toolEvent = readToolExecutionEvent(event);
       if (toolEvent?.kind === "start") {
         acceptToolStart(toolEvent);
       } else if (toolEvent?.kind === "end") {
         acceptToolEnd(toolEvent);
+      }
+    },
+    throwIfTerminalFailure() {
+      if (terminalFailure) {
+        throw new Error("pico resident Pi Agent prompt failed");
       }
     },
     settle(status, errorCode) {
@@ -835,16 +853,21 @@ function readTextDelta(event: unknown): string | undefined {
   return undefined;
 }
 
-function readSettledAssistantText(event: unknown): string | undefined {
+type SettledAssistant = {
+  readonly text: string;
+  readonly stopReason: unknown;
+};
+
+function readSettledAssistant(event: unknown): SettledAssistant | undefined {
   const messages = readSettledAgentEndMessages(event);
   if (messages === undefined) {
     return undefined;
   }
 
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const text = readAssistantMessageText(messages[index]);
-    if (text !== undefined) {
-      return text;
+    const assistant = readAssistantMessage(messages[index]);
+    if (assistant !== undefined) {
+      return assistant;
     }
   }
 
@@ -873,20 +896,31 @@ function readSettledAgentEndMessages(event: unknown): readonly unknown[] | undef
   return candidate.messages as readonly unknown[];
 }
 
-function readAssistantMessageText(message: unknown): string | undefined {
+function readAssistantMessage(message: unknown): SettledAssistant | undefined {
   if (typeof message !== "object" || message === null || Array.isArray(message)) {
     return undefined;
   }
 
-  const assistant = message as { readonly role?: unknown; readonly content?: unknown };
+  const assistant = message as {
+    readonly role?: unknown;
+    readonly content?: unknown;
+    readonly stopReason?: unknown;
+  };
   if (assistant.role !== "assistant" || !Array.isArray(assistant.content)) {
     return undefined;
   }
 
-  return assistant.content
-    .filter(isTextContent)
-    .map((part) => part.text)
-    .join("");
+  return {
+    text: assistant.content
+      .filter(isTextContent)
+      .map((part) => part.text)
+      .join(""),
+    stopReason: assistant.stopReason
+  };
+}
+
+function isTerminalAssistantFailure(stopReason: unknown): boolean {
+  return stopReason === "error" || stopReason === "aborted";
 }
 
 function isTextContent(part: unknown): part is { readonly type: "text"; readonly text: string } {

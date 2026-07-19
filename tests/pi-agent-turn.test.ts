@@ -87,7 +87,8 @@ describe("Pi Agent turn adapter", () => {
                 messages: [
                   {
                     role: "assistant",
-                    content: [{ type: "text", text: "こんにちは。" }]
+                    content: [{ type: "text", text: "こんにちは。" }],
+                    stopReason: "stop"
                   }
                 ],
                 willRetry: false
@@ -152,12 +153,14 @@ describe("Pi Agent turn adapter", () => {
                     content: [
                       { type: "text", text: "確認します。" },
                       { type: "toolCall", id: "tool-call-1", name: "stackchan_get_status" }
-                    ]
+                    ],
+                    stopReason: "toolUse"
                   },
                   { role: "toolResult", content: [{ type: "text", text: "ready" }] },
                   {
                     role: "assistant",
-                    content: [{ type: "text", text: "準備できています。" }]
+                    content: [{ type: "text", text: "準備できています。" }],
+                    stopReason: "stop"
                   }
                 ],
                 willRetry: false
@@ -201,7 +204,8 @@ describe("Pi Agent turn adapter", () => {
                 messages: [
                   {
                     role: "assistant",
-                    content: [{ type: "text", text: "再試行前の途中回答" }]
+                    content: [{ type: "text", text: "再試行前の途中回答" }],
+                    stopReason: "error"
                   }
                 ],
                 willRetry: true
@@ -215,7 +219,8 @@ describe("Pi Agent turn adapter", () => {
                 messages: [
                   {
                     role: "assistant",
-                    content: [{ type: "text", text: "確定回答" }]
+                    content: [{ type: "text", text: "確定回答" }],
+                    stopReason: "stop"
                   }
                 ],
                 willRetry: false
@@ -230,6 +235,57 @@ describe("Pi Agent turn adapter", () => {
     await expect(client.prompt({ sessionId: "session-1", text: "もう一度" })).resolves.toEqual({
       text: "確定回答"
     });
+  });
+
+  it.each([
+    "error",
+    "aborted"
+  ] as const)("rejects terminal %s assistant output instead of returning partial text", async (stopReason) => {
+    let listener: ((event: unknown) => void) | undefined;
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      createResourceLoader: () => ({
+        reload: () => Promise.resolve()
+      }),
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: (inputListener) => {
+              listener = inputListener;
+              return () => undefined;
+            },
+            prompt: () => {
+              listener?.({
+                type: "message_update",
+                assistantMessageEvent: {
+                  type: "text_delta",
+                  delta: "失敗前の部分回答"
+                }
+              });
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "失敗前の部分回答" }],
+                    stopReason
+                  }
+                ],
+                willRetry: false
+              });
+              return Promise.resolve();
+            },
+            dispose: () => undefined
+          }
+        })
+    });
+
+    await expect(client.prompt({ sessionId: "session-1", text: "続けて" })).rejects.toThrow(
+      "pico resident Pi Agent prompt failed"
+    );
   });
 
   it("renders deferred tool results as isolated untrusted context for the SDK prompt", async () => {
@@ -1479,7 +1535,8 @@ describe("Pi Agent turn adapter", () => {
                 messages: [
                   {
                     role: "assistant",
-                    content: [{ type: "text", text: "応答" }]
+                    content: [{ type: "text", text: "応答" }],
+                    stopReason: "stop"
                   }
                 ],
                 willRetry: false
