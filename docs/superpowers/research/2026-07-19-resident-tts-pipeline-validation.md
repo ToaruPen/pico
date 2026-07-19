@@ -3,9 +3,9 @@
 ## 結論
 
 モデルと推論強度を変えずに、Pico側の初回音声生成待ちは短縮された。3回の実provider計測で
-`tts_time_to_first_chunk`の中央値は995.504 msとなり、旧`tts_request_wall` baselineの
-2,762.335 msから1,766.831 ms短い。`ptt_release_to_playback_start`の中央値も
-12,792.912 msから10,519.861 msへ2,273.051 ms短縮し、設計上の1,000 ms改善条件を満たした。
+`tts_time_to_first_chunk`の中央値は937.540 msとなり、旧`tts_request_wall` baselineの
+2,762.335 msから1,824.795 ms短い。`ptt_release_to_playback_start`の中央値も
+12,792.912 msから10,714.631 msへ2,078.281 ms短縮し、設計上の1,000 ms改善条件を満たした。
 
 各runは、既知の日本語transcript、指定toolの正確に1回の正常終了、最終assistant本文の存在、
 1つのplayback process、全chunkの再生、telemetry health failure 0を同時に満たした。本文、
@@ -27,7 +27,8 @@ tool arguments/results、音声データはこの文書へ転載していない�
 最終計測には、以前のbaseline計測と同じ7.043812秒のWAVを用いた。形式はPCM16LE、16 kHz、
 mono、16 bit、サイズは225,480 bytes、SHA-256は
 `58bf16c401321eb799d4d01dfc6ec5ea0261cbb520eab39da3e53835385a68e5`である。
-3回ともApple Speechの認識結果はcanonicalな既知文と完全一致した。
+3回ともApple Speechの認識結果はcanonicalな既知文のSHA-256と完全一致した。field harnessは
+UTF-8の認識結果を内部でhash化して照合し、期待hashも実値もmetadata reportへ出力しない。
 
 計画に例示されていた`/tmp/pico-known-ja.pcm`は、実際には状態確認用とは別の22文字fixtureだった。
 そのままでは既知文との一致も指定toolの選択も成立しないため、成功データには採用していない。
@@ -41,8 +42,9 @@ mono、16 bit、サイズは225,480 bytes、SHA-256は
 umask 077
 npm run field:resident-voice-pseudo-audio -- \
   --audio-fixture /tmp/pico-otel-stackchan-check-20260719.wav \
-  --validation-output /tmp/pico-tts-pipeline-final.HtXB8g/events-N.jsonl \
+  --validation-output /tmp/pico-tts-pipeline-final-v2.xls3fZ/events-N.jsonl \
   --required-tool-name stackchan_get_status \
+  --expected-transcript-sha256 a4704845dc50a8c392ce82e6b9544e88f3a79b65543ed23320bfd147ae23d266 \
   --timeout-ms 120000
 ```
 
@@ -64,7 +66,7 @@ extensionがある。PicoはPi plugin設定を所有しないためextension自�
 - `tts_request_wall`の`chunkCount`と`playedChunkCount`は各runで一致。
 - OpenTelemetry Logs/Metricsのconsecutive failureは0。
 
-chunk数はrun 1が2、run 2が3、run 3が2だった。すべてのchunkは同じ1つのplayback childへ書かれ、
+chunk数はrun 1が2、run 2が2、run 3が3だった。すべてのchunkは同じ1つのplayback childへ書かれ、
 句読点境界でprocessを作り直していない。
 
 ## 計測結果
@@ -73,40 +75,40 @@ chunk数はrun 1が2、run 2が3、run 3が2だった。すべてのchunkは同�
 
 | Stage | Run 1 | Run 2 | Run 3 | Median |
 |---|---:|---:|---:|---:|
-| `stt` | 210.079 | 187.115 | 178.592 | 187.115 |
-| `pi_session_resource_load` | 683.186 | 650.362 | 592.804 | 650.362 |
-| `pi_tool_execution` | 53.150 | 44.265 | 53.098 | 53.098 |
-| `pi_time_to_first_text` | 13,836.941 | 8,968.962 | 9,060.547 | 9,060.547 |
-| `pi_turn` | 13,862.676 | 8,989.046 | 9,082.284 | 9,082.284 |
-| `tts_time_to_first_chunk` | 1,091.418 | 823.023 | 995.504 | 995.504 |
-| `tts_request_wall` | 2,339.357 | 3,260.734 | 2,227.389 | 2,339.357 |
-| `ptt_release_to_playback_start` | 15,425.489 | 10,264.366 | 10,519.861 | 10,519.861 |
-| `tts_playback` | 8,252.691 | 11,565.462 | 8,302.558 | 8,302.558 |
-| `pi_session_dispose` | 10.746 | 10.861 | 9.755 | 10.746 |
-| `interaction_end` | 11.854 | 12.072 | 10.919 | 11.854 |
+| `stt` | 206.034 | 184.635 | 181.279 | 184.635 |
+| `pi_session_resource_load` | 655.220 | 607.388 | 587.317 | 607.388 |
+| `pi_tool_execution` | 64.575 | 47.617 | 53.977 | 53.977 |
+| `pi_time_to_first_text` | 10,258.601 | 8,964.944 | 6,711.933 | 8,964.944 |
+| `pi_turn` | 10,286.250 | 8,985.917 | 6,732.262 | 8,985.917 |
+| `tts_time_to_first_chunk` | 937.540 | 1,279.820 | 583.664 | 937.540 |
+| `tts_request_wall` | 2,251.733 | 2,573.632 | 2,750.371 | 2,573.632 |
+| `ptt_release_to_playback_start` | 11,693.827 | 10,714.631 | 7,762.842 | 10,714.631 |
+| `tts_playback` | 8,209.933 | 9,880.751 | 9,885.533 | 9,880.751 |
+| `pi_session_dispose` | 11.137 | 9.734 | 9.525 | 9.734 |
+| `interaction_end` | 12.440 | 10.794 | 10.540 | 10.794 |
 
-run 1ではPi TTFTが13.837秒まで伸び、release-to-playbackもbaselineより長くなった。それでもPicoの
-first-chunk待ちは1.091秒に収まっている。モデル側の揺れとPico側の短縮を同じ原因として扱うことは
-できない。中央値ではPi TTFTが9.061秒、Pico first-chunkが0.996秒だった。
+run 1ではPi TTFTが10.259秒まで伸びたが、Picoのfirst-chunk待ちは0.938秒に収まった。モデル側の
+揺れとPico側の短縮を同じ原因として扱うことはできない。中央値ではPi TTFTが8.965秒、Pico
+first-chunkが0.938秒だった。
 
 全文合成の完了は、各runでplayback開始後も続いた。`tts_request_wall`からfirst-chunk時間を引いた
-後続合成時間はrun 1で1,247.939 ms、run 2で2,437.711 ms、run 3で1,231.885 msである。一方、
-playback wall timeはそれぞれ8.253秒、11.565秒、8.303秒だった。後続文の合成は第1chunk再生中に
+後続合成時間はrun 1で1,314.193 ms、run 2で1,293.812 ms、run 3で2,166.707 msである。一方、
+playback wall timeはそれぞれ8.210秒、9.881秒、9.886秒だった。後続文の合成は第1chunk再生中に
 収まり、Aivis requestの直列性と1-chunk lookaheadはunit testで別途固定されている。
 
 ## Baseline比較
 
 | 指標 | Baseline | Candidate median | 短縮量 |
 |---|---:|---:|---:|
-| TTS初回待ち | 2,762.335 | 995.504 | 1,766.831 |
-| PTT releaseからplayback開始 | 12,792.912 | 10,519.861 | 2,273.051 |
-| Pi TTFT | 9,442.902 | 9,060.547 | 382.355 |
+| TTS初回待ち | 2,762.335 | 937.540 | 1,824.795 |
+| PTT releaseからplayback開始 | 12,792.912 | 10,714.631 | 2,078.281 |
+| Pi TTFT | 9,442.902 | 8,964.944 | 477.958 |
 
 TTS比較では、baselineの全文`tts_request_wall`とcandidateの`tts_time_to_first_chunk`を比較している。
 これは今回の利用者体感に対応する主指標であり、全文合成コストが消えたという意味ではない。
-candidateの全文`tts_request_wall`中央値は2,339.357 msで、後続chunkの合成は再生と重なっている。
+candidateの全文`tts_request_wall`中央値は2,573.632 msで、後続chunkの合成は再生と重なっている。
 
-release-to-playbackは17.8%、TTS初回待ちは64.0%短縮した。モデルとthinking levelは全runで不変で
+release-to-playbackは16.2%、TTS初回待ちは66.1%短縮した。モデルとthinking levelは全runで不変で
 あり、Piのtool-call判断も維持している。したがって、今回の短縮は推論量の削減ではなく、文単位の
 逐次合成とcontinuous playbackへ待ち時間の配置を変えた結果である。
 
@@ -124,7 +126,7 @@ field harnessの厳格な`passed`判定により、この不完全な診断run�
 
 ## Private artifact
 
-最終証拠は`/tmp/pico-tts-pipeline-final.HtXB8g`に保存した。directory modeは`0700`、
+最終証拠は`/tmp/pico-tts-pipeline-final-v2.xls3fZ`に保存した。directory modeは`0700`、
 `events-*.jsonl`、`report-*.txt`、`stderr-*.txt`はすべて`0600`である。
 
 `events-*.jsonl`だけがtranscript、最終assistant本文、tool arguments/resultsを保持する。
@@ -134,7 +136,7 @@ field harnessの厳格な`passed`判定により、この不完全な診断run�
 ## 残る検証範囲
 
 3runは中央値を示すには足りるが、p95や長時間運用の分散を評価する件数ではない。run 1のPi TTFTは
-13.837秒まで伸びており、推論側の揺れは残る。Picoのfirst-chunk短縮とは切り分けて、将来は同一
+10.259秒まで伸びており、推論側の揺れは残る。Picoのfirst-chunk短縮とは切り分けて、将来は同一
 fixtureの反復数を増やす必要がある。
 
 今回のtelemetryはin-process exporterで確認したため、外部OTLP Collectorまでのnetwork deliveryは
