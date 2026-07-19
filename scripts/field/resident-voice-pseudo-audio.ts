@@ -1,4 +1,5 @@
 #!/usr/bin/env jiti
+import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 import { AuthStorage, type ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
@@ -46,6 +47,7 @@ export type ResidentVoicePseudoAudioArguments = {
   readonly audioFixturePath: string;
   readonly validationOutputPath: string;
   readonly requiredToolName?: string;
+  readonly expectedTranscriptSha256?: string;
   readonly timeoutMs: number;
   readonly help: boolean;
 };
@@ -125,39 +127,34 @@ export function createResidentVoicePseudoAudioPlaybackMeasurement(
   };
 }
 
-const requiredMeasuredStages = new Set([
+const singletonMeasuredStages = new Set([
   "tts_time_to_first_chunk",
-  "tts_audio_query",
-  "tts_synthesize",
   "tts_request_wall",
   "ptt_release_to_playback_start",
   "tts_playback"
 ]);
+const repeatedMeasuredStages = new Set(["tts_audio_query", "tts_synthesize"]);
+const lowercaseSha256Pattern = /^[\da-f]{64}$/u;
 
 // Exported only as a field-harness test seam. It never returns validation content.
 export function evaluateResidentVoicePseudoAudioEvidence(input: {
   readonly validationEvents: readonly ResidentVoiceValidationEvent[];
   readonly auditEvents: readonly AuditEvent[];
   readonly requiredToolName?: string;
+  readonly expectedTranscriptSha256?: string;
   readonly playbackSinkOpenCount: number;
 }): ResidentVoicePseudoAudioEvidence {
-  const validation = {
-    staffTranscriptPresent: input.validationEvents.some(
-      (event) => event.kind === "staff_transcript" && event.text.trim().length > 0
-    ),
-    finalPiResponsePresent: hasNonEmptyFinalPiResponse(input.validationEvents)
-  };
-  const toolExecutions = summarizePairedToolExecutions(input.validationEvents);
+  const validationEvents = input.validationEvents.filter(isResidentVoiceValidationEvent);
+  const validationEventsWellFormed = validationEvents.length === input.validationEvents.length;
+  const validation = summarizeValidationContent(validationEvents, input.expectedTranscriptSha256);
+  const toolExecutions = summarizePairedToolExecutions(validationEvents);
   const stages = summarizeStages(input.auditEvents);
-  const requiredToolSucceeded = didRequiredToolSucceed(
-    input.validationEvents,
-    input.requiredToolName
-  );
-  const requiredStagesSucceeded = [...requiredMeasuredStages].every((requiredStage) => {
-    const matching = stages.filter(({ stage }) => stage === requiredStage);
-    return matching.length > 0 && matching.every(({ status }) => status === "ok");
-  });
+  const requiredToolSucceeded = didRequiredToolSucceed(validationEvents, input.requiredToolName);
+  const requiredStagesSucceeded = measuredStagesSucceeded(stages);
+  const oneSession = new Set(validationEvents.map(({ sessionId }) => sessionId)).size === 1;
   const passed =
+    validationEventsWellFormed &&
+    oneSession &&
     validation.staffTranscriptPresent &&
     validation.finalPiResponsePresent &&
     requiredToolSucceeded &&
@@ -174,15 +171,121 @@ export function evaluateResidentVoicePseudoAudioEvidence(input: {
   };
 }
 
-function hasNonEmptyFinalPiResponse(events: readonly ResidentVoiceValidationEvent[]): boolean {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
-    if (event?.kind === "pi_response") {
-      return event.text.trim().length > 0;
-    }
+function summarizeValidationContent(
+  events: readonly ResidentVoiceValidationEvent[],
+  expectedTranscriptSha256: string | undefined
+): ResidentVoicePseudoAudioEvidence["validation"] {
+  const staffTranscripts = events.filter((event) => event.kind === "staff_transcript");
+  const piResponses = events.filter((event) => event.kind === "pi_response");
+
+  return {
+    staffTranscriptPresent: isExpectedStaffTranscript(staffTranscripts, expectedTranscriptSha256),
+    finalPiResponsePresent: isSingleNonEmptyPiResponse(piResponses)
+  };
+}
+
+function isExpectedStaffTranscript(
+  events: readonly ResidentVoiceValidationEvent[],
+  expectedTranscriptSha256: string | undefined
+): boolean {
+  if (events.length !== 1) {
+    return false;
+  }
+  const event = events[0];
+  if (event?.kind !== "staff_transcript" || event.text.trim().length === 0) {
+    return false;
+  }
+
+  return transcriptMatchesExpectedHash(event.text, expectedTranscriptSha256);
+}
+
+function isSingleNonEmptyPiResponse(events: readonly ResidentVoiceValidationEvent[]): boolean {
+  if (events.length !== 1) {
+    return false;
+  }
+  const event = events[0];
+  return event?.kind === "pi_response" && event.text.trim().length > 0;
+}
+
+function transcriptMatchesExpectedHash(text: string, expected: string | undefined): boolean {
+  if (expected === undefined) {
+    return true;
+  }
+  if (!lowercaseSha256Pattern.test(expected)) {
+    return false;
+  }
+
+  return createHash("sha256").update(text, "utf8").digest("hex") === expected;
+}
+
+function measuredStagesSucceeded(stages: ResidentVoicePseudoAudioReport["stages"]): boolean {
+  const singletonStagesSucceeded = [...singletonMeasuredStages].every((requiredStage) => {
+    const matching = stages.filter(({ stage }) => stage === requiredStage);
+    return matching.length === 1 && matching[0]?.status === "ok";
+  });
+  const repeatedStagesSucceeded = [...repeatedMeasuredStages].every((requiredStage) => {
+    const matching = stages.filter(({ stage }) => stage === requiredStage);
+    return matching.length > 0 && matching.every(({ status }) => status === "ok");
+  });
+
+  return singletonStagesSucceeded && repeatedStagesSucceeded;
+}
+
+function isResidentVoiceValidationEvent(value: unknown): value is ResidentVoiceValidationEvent {
+  if (!isValidationEventRecord(value)) {
+    return false;
+  }
+  if (!hasValidValidationEventIdentity(value)) {
+    return false;
+  }
+
+  return hasValidValidationEventPayload(value);
+}
+
+function hasValidValidationEventPayload(value: Record<string, unknown>): boolean {
+  if (value.kind === "staff_transcript" || value.kind === "pi_response") {
+    return typeof value.text === "string";
+  }
+  if (value.kind === "tool_execution_start") {
+    return hasValidToolIdentity(value) && Object.hasOwn(value, "args");
+  }
+  if (value.kind === "tool_execution_end") {
+    return hasValidToolIdentity(value) && hasValidToolEndDetails(value);
   }
 
   return false;
+}
+
+function isValidationEventRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasValidValidationEventIdentity(value: Record<string, unknown>): boolean {
+  return (
+    typeof value.occurredAt === "string" &&
+    !Number.isNaN(Date.parse(value.occurredAt)) &&
+    typeof value.sessionId === "string" &&
+    value.sessionId.trim().length > 0
+  );
+}
+
+function hasValidToolIdentity(value: Record<string, unknown>): boolean {
+  return (
+    typeof value.toolCallId === "string" &&
+    value.toolCallId.trim().length > 0 &&
+    typeof value.toolName === "string" &&
+    value.toolName.trim().length > 0
+  );
+}
+
+function hasValidToolEndDetails(value: Record<string, unknown>): boolean {
+  return (
+    Object.hasOwn(value, "result") &&
+    typeof value.isError === "boolean" &&
+    typeof value.durationMs === "number" &&
+    Number.isFinite(value.durationMs) &&
+    value.durationMs >= 0
+  );
 }
 
 function summarizePairedToolExecutions(
@@ -218,36 +321,42 @@ function didRequiredToolSucceed(
   events: readonly ResidentVoiceValidationEvent[],
   requiredToolName: string | undefined
 ): boolean {
-  if (requiredToolName === undefined) {
-    return true;
-  }
-  const requiredStarts = events.filter(
+  const starts = events.filter(
     (event): event is Extract<ResidentVoiceValidationEvent, { kind: "tool_execution_start" }> =>
-      event.kind === "tool_execution_start" && event.toolName === requiredToolName
+      event.kind === "tool_execution_start"
   );
-  const requiredEnds = events.filter(
+  const ends = events.filter(
     (event): event is Extract<ResidentVoiceValidationEvent, { kind: "tool_execution_end" }> =>
-      event.kind === "tool_execution_end" && event.toolName === requiredToolName
+      event.kind === "tool_execution_end"
   );
-  const start = requiredStarts[0];
-  const end = requiredEnds[0];
-  if (
-    requiredStarts.length !== 1 ||
-    requiredEnds.length !== 1 ||
-    start === undefined ||
-    end === undefined ||
-    start.toolCallId !== end.toolCallId ||
-    end.isError
-  ) {
+  if (requiredToolName === undefined) {
+    const paired = summarizePairedToolExecutions(events);
+    return (
+      paired.length * 2 === starts.length + ends.length && paired.every(({ isError }) => !isError)
+    );
+  }
+  return requiredToolSucceeded(starts, ends, requiredToolName);
+}
+
+function requiredToolSucceeded(
+  starts: readonly Extract<ResidentVoiceValidationEvent, { kind: "tool_execution_start" }>[],
+  ends: readonly Extract<ResidentVoiceValidationEvent, { kind: "tool_execution_end" }>[],
+  requiredToolName: string
+): boolean {
+  const start = starts[0];
+  const end = ends[0];
+  if (starts.length !== 1 || ends.length !== 1) {
+    return false;
+  }
+  if (start === undefined || end === undefined) {
     return false;
   }
 
   return (
-    events.filter(
-      (event) =>
-        (event.kind === "tool_execution_start" || event.kind === "tool_execution_end") &&
-        event.toolCallId === start.toolCallId
-    ).length === 2
+    start.toolName === requiredToolName &&
+    end.toolName === requiredToolName &&
+    start.toolCallId === end.toolCallId &&
+    !end.isError
   );
 }
 
@@ -276,6 +385,7 @@ type MutablePseudoAudioArguments = {
   audioFixturePath?: string;
   validationOutputPath?: string;
   requiredToolName?: string;
+  expectedTranscriptSha256?: string;
   timeoutMs: number;
 };
 
@@ -290,6 +400,9 @@ const pseudoAudioArgumentReaders: Readonly<
   },
   "--required-tool-name": (state, value) => {
     state.requiredToolName = value;
+  },
+  "--expected-transcript-sha256": (state, value) => {
+    state.expectedTranscriptSha256 = readExpectedTranscriptSha256(value);
   },
   "--timeout-ms": (state, value) => {
     state.timeoutMs = readPseudoAudioTimeout(value);
@@ -346,9 +459,19 @@ function finalizePseudoAudioArguments(
     audioFixturePath: parsed.audioFixturePath,
     validationOutputPath: parsed.validationOutputPath,
     ...(parsed.requiredToolName === undefined ? {} : { requiredToolName: parsed.requiredToolName }),
+    ...(parsed.expectedTranscriptSha256 === undefined
+      ? {}
+      : { expectedTranscriptSha256: parsed.expectedTranscriptSha256 }),
     timeoutMs: parsed.timeoutMs,
     help: false
   };
+}
+
+function readExpectedTranscriptSha256(value: string): string {
+  if (!lowercaseSha256Pattern.test(value)) {
+    throw invalidArguments("--expected-transcript-sha256 must be a lowercase SHA-256 hex digest");
+  }
+  return value;
 }
 
 function readPseudoAudioTimeout(value: string): number {
@@ -361,7 +484,7 @@ function readPseudoAudioTimeout(value: string): number {
 
 export function formatResidentVoicePseudoAudioHelp(): string {
   return [
-    "Usage: npm run field:resident-voice-pseudo-audio -- --audio-fixture path.wav|path.pcm --validation-output path.jsonl [--required-tool-name name] [--timeout-ms 120000]",
+    "Usage: npm run field:resident-voice-pseudo-audio -- --audio-fixture path.wav|path.pcm --validation-output path.jsonl [--required-tool-name name] [--expected-transcript-sha256 digest] [--timeout-ms 120000]",
     "",
     "Runs one explicit full resident voice turn with finite injected audio.",
     "The validation output is a mode-0600 contentful JSONL artifact containing recognized text, Pi response text, and tool arguments/results.",
@@ -542,6 +665,9 @@ async function executeResidentVoicePseudoAudio(input: {
       ...(arguments_.requiredToolName === undefined
         ? {}
         : { requiredToolName: arguments_.requiredToolName }),
+      ...(arguments_.expectedTranscriptSha256 === undefined
+        ? {}
+        : { expectedTranscriptSha256: arguments_.expectedTranscriptSha256 }),
       playbackSinkOpenCount: playbackMeasurement.openCount()
     });
     const passed =
@@ -664,7 +790,7 @@ async function withDeadline<T>(operation: Promise<T>, timeoutMs: number, code: s
 
 function invalidArguments(reason: string): Error {
   return new Error(
-    `usage: field:resident-voice-pseudo-audio --audio-fixture path.wav|path.pcm --validation-output path.jsonl [--required-tool-name name] [--timeout-ms 10000..300000]: ${reason}`
+    `usage: field:resident-voice-pseudo-audio --audio-fixture path.wav|path.pcm --validation-output path.jsonl [--required-tool-name name] [--expected-transcript-sha256 digest] [--timeout-ms 10000..300000]: ${reason}`
   );
 }
 

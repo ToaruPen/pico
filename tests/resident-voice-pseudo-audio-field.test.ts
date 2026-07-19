@@ -99,6 +99,30 @@ describe("resident voice pseudo-audio field contract", () => {
     expect(formatResidentVoicePseudoAudioHelp()).toContain("contentful");
   });
 
+  it("accepts only a lowercase SHA-256 transcript expectation", () => {
+    expect(
+      readResidentVoicePseudoAudioArguments([
+        "--audio-fixture",
+        "/tmp/pico-ja.wav",
+        "--validation-output",
+        "/tmp/pico-validation.jsonl",
+        "--expected-transcript-sha256",
+        knownFixtureTranscriptSha256
+      ])
+    ).toMatchObject({ expectedTranscriptSha256: knownFixtureTranscriptSha256 });
+    expect(() =>
+      readResidentVoicePseudoAudioArguments([
+        "--audio-fixture",
+        "/tmp/pico-ja.wav",
+        "--validation-output",
+        "/tmp/pico-validation.jsonl",
+        "--expected-transcript-sha256",
+        knownFixtureTranscriptSha256.toUpperCase()
+      ])
+    ).toThrow("lowercase SHA-256");
+    expect(formatResidentVoicePseudoAudioHelp()).toContain("--expected-transcript-sha256");
+  });
+
   it("accepts an explicit tool that must succeed during validation", () => {
     expect(
       readResidentVoicePseudoAudioArguments([
@@ -202,11 +226,93 @@ describe("resident voice pseudo-audio field contract", () => {
     ).toBe(false);
   });
 
+  it("fails evidence evaluation when the transcript hash differs", () => {
+    expect(
+      evaluateResidentVoicePseudoAudioEvidence({
+        validationEvents: validValidationEvents(),
+        auditEvents: validStageEvents(),
+        requiredToolName: "stackchan_get_status",
+        expectedTranscriptSha256: "0".repeat(64),
+        playbackSinkOpenCount: 1
+      }).passed
+    ).toBe(false);
+  });
+
+  it("fails evidence evaluation when the one-turn content evidence is duplicated", () => {
+    expect(
+      evaluateResidentVoicePseudoAudioEvidence({
+        validationEvents: [
+          ...validValidationEvents(),
+          validationTextEvent("pi_response", "second private response")
+        ],
+        auditEvents: validStageEvents(),
+        requiredToolName: "stackchan_get_status",
+        playbackSinkOpenCount: 1
+      }).passed
+    ).toBe(false);
+  });
+
+  it("fails evidence evaluation when a singleton stage is duplicated", () => {
+    expect(
+      evaluateResidentVoicePseudoAudioEvidence({
+        validationEvents: validValidationEvents(),
+        auditEvents: [...validStageEvents(), stageEvent("tts_request_wall", "ok")],
+        requiredToolName: "stackchan_get_status",
+        playbackSinkOpenCount: 1
+      }).passed
+    ).toBe(false);
+  });
+
+  it("allows repeated successful per-sentence TTS stages", () => {
+    expect(
+      evaluateResidentVoicePseudoAudioEvidence({
+        validationEvents: validValidationEvents(),
+        auditEvents: [
+          ...validStageEvents(),
+          stageEvent("tts_audio_query", "ok"),
+          stageEvent("tts_synthesize", "ok")
+        ],
+        requiredToolName: "stackchan_get_status",
+        playbackSinkOpenCount: 1
+      }).passed
+    ).toBe(true);
+  });
+
+  it("fails evidence evaluation for an unknown validation event", () => {
+    expect(
+      evaluateResidentVoicePseudoAudioEvidence({
+        validationEvents: [
+          ...validValidationEvents(),
+          { kind: "unknown_private_event", text: "private unknown content" }
+        ] as ResidentVoiceValidationEvent[],
+        auditEvents: validStageEvents(),
+        requiredToolName: "stackchan_get_status",
+        playbackSinkOpenCount: 1
+      }).passed
+    ).toBe(false);
+  });
+
+  it("fails evidence evaluation for extra tool evidence", () => {
+    expect(
+      evaluateResidentVoicePseudoAudioEvidence({
+        validationEvents: [
+          ...validValidationEvents(),
+          toolStartEvent("tool-2", "unexpected_tool"),
+          toolEndEvent("tool-2", false, "unexpected_tool")
+        ],
+        auditEvents: validStageEvents(),
+        requiredToolName: "stackchan_get_status",
+        playbackSinkOpenCount: 1
+      }).passed
+    ).toBe(false);
+  });
+
   it("reports only content presence, paired tool metadata, and allowlisted stage metadata", () => {
     const evidence = evaluateResidentVoicePseudoAudioEvidence({
       validationEvents: validValidationEvents(),
       auditEvents: validStageEvents(),
       requiredToolName: "stackchan_get_status",
+      expectedTranscriptSha256: testTranscriptSha256,
       playbackSinkOpenCount: 1
     });
 
@@ -234,6 +340,7 @@ describe("resident voice pseudo-audio field contract", () => {
     expect(serialized).not.toContain("private-tool-argument");
     expect(serialized).not.toContain("private-tool-result");
     expect(serialized).not.toContain("queue_depth");
+    expect(serialized).not.toContain(testTranscriptSha256);
   });
 
   it("counts field playback sink opens while preserving the playback contract", async () => {
@@ -402,6 +509,10 @@ const requiredStages = [
   "tts_playback"
 ] as const;
 
+const knownFixtureTranscriptSha256 =
+  "a4704845dc50a8c392ce82e6b9544e88f3a79b65543ed23320bfd147ae23d266";
+const testTranscriptSha256 = "7dcbb75cb56aa20b2544693e7e01b1518aa0da68faca3d60365d623d5696e161";
+
 function validValidationEvents(): ResidentVoiceValidationEvent[] {
   return [
     validationTextEvent("staff_transcript", "known private transcript"),
@@ -423,24 +534,31 @@ function validationTextEvent(
   };
 }
 
-function toolStartEvent(toolCallId: string): ResidentVoiceValidationEvent {
+function toolStartEvent(
+  toolCallId: string,
+  toolName = "stackchan_get_status"
+): ResidentVoiceValidationEvent {
   return {
     kind: "tool_execution_start",
     occurredAt: "2026-07-20T00:00:01.000Z",
     sessionId: "session-1",
     toolCallId,
-    toolName: "stackchan_get_status",
+    toolName,
     args: { value: "private-tool-argument" }
   };
 }
 
-function toolEndEvent(toolCallId: string, isError: boolean): ResidentVoiceValidationEvent {
+function toolEndEvent(
+  toolCallId: string,
+  isError: boolean,
+  toolName = "stackchan_get_status"
+): ResidentVoiceValidationEvent {
   return {
     kind: "tool_execution_end",
     occurredAt: "2026-07-20T00:00:01.012Z",
     sessionId: "session-1",
     toolCallId,
-    toolName: "stackchan_get_status",
+    toolName,
     result: { value: "private-tool-result" },
     isError,
     durationMs: 12

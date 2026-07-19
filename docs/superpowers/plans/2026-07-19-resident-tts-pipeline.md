@@ -683,9 +683,10 @@ umask 077
 pico_validation_dir=$(mktemp -d /tmp/pico-tts-pipeline.XXXXXX)
 for pico_run in 1 2 3; do
   npm run field:resident-voice-pseudo-audio -- \
-    --audio-fixture /tmp/pico-known-ja.pcm \
+    --audio-fixture /tmp/pico-otel-stackchan-check-20260719.wav \
     --validation-output "$pico_validation_dir/events-$pico_run.jsonl" \
     --required-tool-name stackchan_get_status \
+    --expected-transcript-sha256 a4704845dc50a8c392ce82e6b9544e88f3a79b65543ed23320bfd147ae23d266 \
     --timeout-ms 120000 | tee "$pico_validation_dir/report-$pico_run.txt"
 done
 ```
