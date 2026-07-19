@@ -674,13 +674,15 @@ describe("TTS playback pipeline", () => {
       })
     );
 
-    await expect(within(firstRunning, 1_250)).resolves.toEqual({
-      status: "cancelled",
-      playedChunkCount: 0
-    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 1_250));
     expect(state.acceptStarts).toBe(1);
     expect(firstPlayback.state.writes).toHaveLength(0);
     expect(secondPlayback.state.writes).toHaveLength(0);
+    await expect(within(firstRunning, 1_250)).resolves.toEqual({
+      status: "failed",
+      errorCode: "playback_stop_timeout",
+      playedChunkCount: 0
+    });
     await expect(within(secondRunning, 1_250)).resolves.toEqual({
       status: "failed",
       errorCode: "echo_control_failed",
@@ -1663,6 +1665,132 @@ describe("TTS playback pipeline", () => {
     stopGate.resolve();
     await expect(running).resolves.toEqual({ status: "cancelled", playedChunkCount: 0 });
     writeGate.resolve();
+  });
+
+  it("waits beyond the echo safety bound for TERM then KILL playback ownership to settle", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const writeGate = createSignalGate();
+    const termGate = createSignalGate();
+    const killTerminal = createSignalGate();
+    const stopPhases: string[] = [];
+    const playback = recordingPlayback({
+      onWrite: () => writeGate.promise,
+      onStop: async () => {
+        stopPhases.push("term");
+        await termGate.promise;
+        stopPhases.push("kill");
+        await killTerminal.promise;
+        stopPhases.push("terminal");
+      }
+    });
+    let settled = false;
+
+    try {
+      const running = runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+          playback,
+          signal: controller.signal
+        })
+      );
+      void running.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        }
+      );
+      await vi.waitFor(() => expect(playback.state.writes).toHaveLength(1));
+
+      controller.abort(new Error("cancelled"));
+      await vi.waitFor(() => expect(stopPhases).toEqual(["term"]));
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(settled).toBe(false);
+
+      termGate.resolve();
+      await vi.waitFor(() => expect(stopPhases).toEqual(["term", "kill"]));
+      expect(settled).toBe(false);
+      killTerminal.resolve();
+
+      await expect(running).resolves.toEqual({ status: "cancelled", playedChunkCount: 0 });
+      expect(stopPhases).toEqual(["term", "kill", "terminal"]);
+      writeGate.resolve();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("classifies a rejected terminal playback stop as infrastructure failure", async () => {
+    const controller = new AbortController();
+    const writeGate = createSignalGate();
+    const playback = recordingPlayback({
+      onWrite: () => writeGate.promise,
+      onStop: () => Promise.reject(new Error("playback final termination timeout"))
+    });
+    const running = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+        playback,
+        signal: controller.signal
+      })
+    );
+    await vi.waitFor(() => expect(playback.state.writes).toHaveLength(1));
+
+    controller.abort(new Error("cancelled"));
+
+    await expect(running).resolves.toEqual({
+      status: "failed",
+      errorCode: "playback_stop_failed",
+      playedChunkCount: 0
+    });
+    writeGate.resolve();
+  });
+
+  it("bounds a malicious playback stop above the production termination contract", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const writeGate = createSignalGate();
+    const playback = recordingPlayback({
+      onWrite: () => writeGate.promise,
+      onStop: () => new Promise<void>(() => undefined)
+    });
+
+    try {
+      const running = runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), completedEvent(1)]),
+          playback,
+          signal: controller.signal
+        })
+      );
+      await vi.waitFor(() => expect(playback.state.writes).toHaveLength(1));
+
+      controller.abort(new Error("cancelled"));
+      await vi.advanceTimersByTimeAsync(2_099);
+      let settled = false;
+      void running.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        }
+      );
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      await expect(running).resolves.toEqual({
+        status: "failed",
+        errorCode: "playback_stop_timeout",
+        playedChunkCount: 0
+      });
+      writeGate.resolve();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("records downstream telemetry before cleanup when lookahead is non-terminal", async () => {

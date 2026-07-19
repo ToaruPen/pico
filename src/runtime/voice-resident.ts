@@ -130,8 +130,11 @@ type InteractionEndingControl = {
   readonly abortController: AbortController;
   readonly startedAt: string;
   readonly startedAtMs: number;
+  pipelineOwnsCleanup: boolean;
   cancellation: Promise<void> | undefined;
 };
+
+class PlaybackInfrastructureError extends Error {}
 
 const defaultNow = (): string => new Date().toISOString();
 const defaultMonotonicNow = (): number => performance.now();
@@ -230,6 +233,10 @@ export function createVoiceResidentRuntime(
         }
       })
         .catch((error: unknown) => {
+          if (error instanceof PlaybackInfrastructureError) {
+            failRuntime(error, generation.id);
+            return;
+          }
           if (!generation.signal.aborted) {
             counters.failedCaptures += 1;
             failRuntime(error, generation.id);
@@ -271,6 +278,8 @@ export function createVoiceResidentRuntime(
     }
 
     ending.abortController.abort(new Error("pico resident interaction ending cancelled"));
+    ending.cancellation ??= cancelInteractionEndingResources(ending, options);
+    void ending.cancellation.catch(() => undefined);
 
     return true;
   };
@@ -284,6 +293,7 @@ export function createVoiceResidentRuntime(
       abortController: new AbortController(),
       startedAt: now(),
       startedAtMs: monotonicNow(),
+      pipelineOwnsCleanup: false,
       cancellation: undefined
     };
     activeInteractionEnding = ending;
@@ -642,6 +652,16 @@ async function processCompletedHoldWork(
     }
   });
 
+  if (
+    playback.status === "failed" &&
+    (playback.errorCode === "playback_stop_failed" ||
+      playback.errorCode === "playback_stop_timeout")
+  ) {
+    throw new PlaybackInfrastructureError(
+      `pico resident voice playback infrastructure failed during cancellation: ${playback.errorCode}`
+    );
+  }
+
   settleCompletedTurn(
     playback,
     turn.generation.id,
@@ -896,7 +916,7 @@ async function finalizeEndedInteraction(
     return;
   }
 
-  await runInteractionFarewell(sessionId, ending.abortController.signal, options, counters, now);
+  await runInteractionFarewell(ending, options, counters, now);
   const cancellationResults = await Promise.allSettled([ending.cancellation ?? Promise.resolve()]);
   const cleanupResults = await Promise.allSettled([
     cancelDeferredAfterInteraction(sessionId, options, deferredAlreadyCancelled),
@@ -934,12 +954,13 @@ function cancelDeferredAfterInteraction(
 }
 
 async function runInteractionFarewell(
-  sessionId: string,
-  signal: AbortSignal,
+  ending: InteractionEndingControl,
   options: VoiceResidentRuntimeOptions,
   counters: RuntimeCounters,
   now: () => string
 ): Promise<void> {
+  const { sessionId } = ending;
+  const signal = ending.abortController.signal;
   if (options.farewell?.enabled !== true || isAbortRequested(signal)) {
     return;
   }
@@ -956,17 +977,18 @@ async function runInteractionFarewell(
     return;
   }
 
-  await runFarewellPlayback(response.text, signal, options, counters, now, monotonicNow);
+  await runFarewellPlayback(response.text, ending, options, counters, now, monotonicNow);
 }
 
 async function runFarewellPlayback(
   text: string,
-  signal: AbortSignal,
+  ending: InteractionEndingControl,
   options: VoiceResidentRuntimeOptions,
   counters: RuntimeCounters,
   now: () => string,
   monotonicNow: () => number
 ): Promise<void> {
+  const signal = ending.abortController.signal;
   const result = await runTtsPlaybackPipeline({
     text,
     signal,
@@ -975,12 +997,30 @@ async function runFarewellPlayback(
     echoControl: options.echoControl,
     ...(options.probe === undefined ? {} : { probe: options.probe }),
     now,
-    monotonicNow
+    monotonicNow,
+    onFirstPlaybackStart: () => {
+      if (signal.aborted) {
+        return false;
+      }
+      ending.pipelineOwnsCleanup = true;
+      return true;
+    }
   });
 
   if (result.status === "failed") {
     counters.failedTurns += 1;
   }
+}
+
+function cancelInteractionEndingResources(
+  ending: InteractionEndingControl,
+  options: VoiceResidentRuntimeOptions
+): Promise<void> {
+  return ending.pipelineOwnsCleanup
+    ? Promise.resolve()
+    : Promise.resolve().then(async () => {
+        await options.echoControl.flush();
+      });
 }
 
 function isAbortRequested(signal: AbortSignal | undefined): boolean {

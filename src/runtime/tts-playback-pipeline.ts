@@ -108,6 +108,8 @@ type EchoRegistrationOutcome =
   | { readonly status: "unsafe" };
 
 const ECHO_PROVIDER_SAFETY_BOUND_MS = ECHO_CONTROL_REGISTRATION_TIMEOUT_MS + 100;
+// The resident sink owns sequential 1,000 ms SIGTERM and SIGKILL windows.
+const PLAYBACK_STOP_SAFETY_BOUND_MS = 2_100;
 const ITERATOR_CLEANUP_SAFETY_BOUND_MS = 100;
 const echoProviderSafetyStates = new WeakMap<EchoControlProvider, EchoProviderSafetyState>();
 
@@ -384,8 +386,10 @@ async function convergeInvalidTtsChunk(
   settleFirstChunk(state, "error", "tts_invalid_chunk", undefined, settledAtMs);
   settleRequest(state, "error", "tts_invalid_chunk", undefined, settledAtMs);
   if (state.session !== undefined) {
-    await stopAndFlush(state);
-    settlePlayback(state, "error", "tts_invalid_chunk");
+    const stopFailure = await stopAndFlush(state);
+    const terminalErrorCode = stopFailure ?? "tts_invalid_chunk";
+    settlePlayback(state, "error", terminalErrorCode);
+    return failedResult(state, terminalErrorCode);
   }
   return failedResult(state, "tts_invalid_chunk");
 }
@@ -447,7 +451,11 @@ async function convergeCancellation(state: PipelineState): Promise<TtsPlaybackPi
   settleFirstChunk(state, "skipped", "cancelled");
   deferRequest(state, "skipped", "cancelled");
   if (state.playbackStartedAt !== undefined) {
-    await stopAndFlush(state);
+    const stopFailure = await stopAndFlush(state);
+    if (stopFailure !== undefined) {
+      settlePlayback(state, "error", stopFailure);
+      return failedResult(state, stopFailure);
+    }
     settlePlayback(state, "skipped", "cancelled");
   }
   return { status: "cancelled", playedChunkCount: state.playedChunkCount };
@@ -460,12 +468,15 @@ async function convergePlaybackFailure(
   settlePendingSubmission(state);
   abortProducer(state);
   deferRequest(state, "error", errorCode);
-  await stopAndFlush(state);
-  settlePlayback(state, "error", errorCode);
-  return failedResult(state, errorCode);
+  const stopFailure = await stopAndFlush(state);
+  const terminalErrorCode = stopFailure ?? errorCode;
+  settlePlayback(state, "error", terminalErrorCode);
+  return failedResult(state, terminalErrorCode);
 }
 
-async function stopAndFlush(state: PipelineState): Promise<void> {
+async function stopAndFlush(
+  state: PipelineState
+): Promise<"playback_stop_failed" | "playback_stop_timeout" | undefined> {
   state.stopSettlement ??= settle(Promise.resolve().then(() => state.options.playback.stop()));
   const echoCleanup =
     state.echoReset ??
@@ -475,10 +486,14 @@ async function stopAndFlush(state: PipelineState): Promise<void> {
           settle(Promise.resolve().then(() => state.options.echoControl.flush())),
           ECHO_PROVIDER_SAFETY_BOUND_MS
         ).then(() => undefined));
-  await Promise.all([
-    settleWithinSafetyBound(state.stopSettlement, ECHO_PROVIDER_SAFETY_BOUND_MS),
+  const [stopSettlement] = await Promise.all([
+    settleWithinSafetyBound(state.stopSettlement, PLAYBACK_STOP_SAFETY_BOUND_MS),
     echoCleanup
   ]);
+  if (stopSettlement === undefined) {
+    return "playback_stop_timeout";
+  }
+  return stopSettlement.ok ? undefined : "playback_stop_failed";
 }
 
 function abortProducer(state: PipelineState): void {
