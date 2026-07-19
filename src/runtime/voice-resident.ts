@@ -130,6 +130,7 @@ type InteractionEndingControl = {
   readonly abortController: AbortController;
   readonly startedAt: string;
   readonly startedAtMs: number;
+  acceptingCancellation: boolean;
   cleanupOwner: "resident" | "pipeline";
   cancellation: Promise<void> | undefined;
 };
@@ -273,12 +274,14 @@ export function createVoiceResidentRuntime(
   const cancelInteractionEnding = (): boolean => {
     const ending = activeInteractionEnding;
 
-    if (ending === undefined || ending.abortController.signal.aborted) {
+    if (ending === undefined || !ending.acceptingCancellation) {
       return false;
     }
 
-    ending.abortController.abort(new Error("pico resident interaction ending cancelled"));
-    ending.cancellation ??= cancelInteractionEndingResources(ending, options);
+    if (ending.cancellation === undefined) {
+      ending.abortController.abort(new Error("pico resident interaction ending cancelled"));
+      ending.cancellation = cancelInteractionEndingResources(ending, options);
+    }
     void ending.cancellation.catch(() => undefined);
 
     return true;
@@ -293,6 +296,7 @@ export function createVoiceResidentRuntime(
       abortController: new AbortController(),
       startedAt: now(),
       startedAtMs: monotonicNow(),
+      acceptingCancellation: true,
       cleanupOwner: "resident",
       cancellation: undefined
     };
@@ -919,8 +923,9 @@ async function finalizeEndedInteraction(
     cancelDeferredAfterInteraction(sessionId, options, deferredAlreadyCancelled),
     Promise.resolve().then(() => options.piAgent.disposeSession?.(sessionId))
   ]);
-  const lateCancellationResults = await settleLateInteractionEndingCancellation(
-    ending,
+  const cancellationAfterCleanup = closeInteractionEndingCancellationAdmission(ending);
+  const lateCancellationResults = await settleFinalInteractionEndingCancellation(
+    cancellationAfterCleanup,
     cancellationBeforeCleanup
   );
   const cleanupRejected = findRejected(cleanupResults);
@@ -939,11 +944,17 @@ async function finalizeEndedInteraction(
   }
 }
 
-function settleLateInteractionEndingCancellation(
-  ending: InteractionEndingControl,
+function closeInteractionEndingCancellationAdmission(
+  ending: InteractionEndingControl
+): Promise<void> | undefined {
+  ending.acceptingCancellation = false;
+  return ending.cancellation;
+}
+
+function settleFinalInteractionEndingCancellation(
+  cancellation: Promise<void> | undefined,
   previouslyAwaited: Promise<void> | undefined
 ): Promise<readonly PromiseSettledResult<void>[]> {
-  const cancellation = ending.cancellation;
   return cancellation === undefined || cancellation === previouslyAwaited
     ? Promise.resolve([])
     : Promise.allSettled([cancellation]);

@@ -1359,6 +1359,66 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
+  it("awaits farewell cancellation admitted as final cleanup settles", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    const flushTerminal = createGate<undefined>();
+    const boundaryCancellations: Array<ReturnType<Driver["cancel"]>> = [];
+    const driver = createDriver({
+      audit,
+      farewellEnabled: true,
+      sessionDurationMs: 1_000,
+      disposalCompletion: async () => {
+        boundaryCancellations.push(driver.cancel(), driver.cancel());
+        await Promise.all(boundaryCancellations);
+      },
+      echoFlush: () => flushTerminal.promise
+    });
+
+    await completeHold(driver, "farewell-pre-close-cancellation");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(boundaryCancellations).toHaveLength(2));
+    await expect(Promise.all(boundaryCancellations)).resolves.toEqual(["accepted", "accepted"]);
+    await vi.waitFor(() => expect(driver.echoFlushes()).toBe(1));
+
+    expect(voiceStageEvents(audit, "interaction_end")).toHaveLength(0);
+    await expect(driver.press()).resolves.toBe("ignored_busy");
+    flushTerminal.resolve(undefined);
+    await vi.waitFor(() => expect(voiceStageEvents(audit, "interaction_end")).toHaveLength(1));
+    expect(driver.echoFlushes()).toBe(1);
+    await driver.runtime.stop();
+  });
+
+  it("closes farewell cancellation admission before releasing the ending generation", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    const flushTerminal = createGate<undefined>();
+    let boundaryCancellation: ReturnType<Driver["cancel"]> | undefined;
+    const driver = createDriver({
+      audit,
+      farewellEnabled: true,
+      sessionDurationMs: 1_000,
+      beforeSessionRemove: () => {
+        boundaryCancellation ??= driver.cancel();
+      },
+      echoFlush: () => flushTerminal.promise
+    });
+
+    await completeHold(driver, "farewell-closed-cancellation-admission");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(boundaryCancellation).toBeDefined());
+    await expect(boundaryCancellation).resolves.toBe("noop");
+    await vi.waitFor(() => expect(voiceStageEvents(audit, "interaction_end")).toHaveLength(1));
+
+    expect(driver.echoFlushes()).toBe(0);
+    await expect(driver.press()).resolves.toBe("accepted");
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    await vi.waitFor(() => expect(driver.echoFlushes()).toBe(1));
+    flushTerminal.resolve(undefined);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+    await driver.runtime.stop();
+  });
+
   it("does not start later farewell chunks after interaction ending is cancelled", async () => {
     vi.useFakeTimers();
     const firstFarewellChunkGate = createGate<undefined>();
@@ -1609,6 +1669,7 @@ function createDriver(
     readonly playbackCompletion?: (signal: AbortSignal | undefined) => Promise<void>;
     readonly playbackStopCompletion?: () => Promise<void>;
     readonly disposalCompletion?: () => Promise<void>;
+    readonly beforeSessionRemove?: (sessionId: string) => void;
     readonly playbackStopError?: Error;
     readonly echoFlush?: () => Promise<void>;
     readonly echoControl?: EchoControlProvider;
@@ -1718,6 +1779,10 @@ function createDriver(
     refreshActivity(sessionId: string) {
       sessionRefreshes.push(sessionId);
       return baseSessionLifecycle.refreshActivity(sessionId);
+    },
+    remove(sessionId: string) {
+      options.beforeSessionRemove?.(sessionId);
+      baseSessionLifecycle.remove(sessionId);
     }
   };
   const echoControl =
