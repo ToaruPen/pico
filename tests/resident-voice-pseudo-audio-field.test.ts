@@ -528,6 +528,9 @@ describe("resident voice pseudo-audio field contract", () => {
       chunkCount: 2,
       playedChunkCount: 2
     });
+    expect(evidence.stages.find(({ stage }) => stage === "tts_playback")).toMatchObject({
+      trailingSilenceMs: 267.6
+    });
     const serialized = JSON.stringify(evidence);
     expect(serialized).not.toContain("known private transcript");
     expect(serialized).not.toContain("private final response");
@@ -777,7 +780,8 @@ function stageEvent(stage: (typeof requiredStages)[number], status: string): Aud
       "pico.voice.sentence_index": 0,
       "pico.voice.chunk_count": 2,
       "pico.voice.played_chunk_count": 2,
-      "pico.voice.queue_depth": 99
+      "pico.voice.queue_depth": 99,
+      ...(stage === "tts_playback" ? { "pico.voice.trailing_silence_ms": 267.6 } : {})
     },
     traceId: undefined,
     spanId: undefined

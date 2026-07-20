@@ -68,6 +68,57 @@ describe("voice stage probe", () => {
     ]);
   });
 
+  it("notifies a best-effort observer with validated stage metadata", () => {
+    const observations: unknown[] = [];
+
+    expect(
+      recordVoiceStageProbe(
+        {
+          observe: (observation) => observations.push(observation)
+        },
+        {
+          stage: "stt",
+          status: "ok",
+          startedAt: "2026-06-18T00:00:00.000Z",
+          durationMs: 12,
+          attributes: { "pico.voice.frame_count": 1 }
+        }
+      )
+    ).toBeUndefined();
+    expect(observations).toEqual([
+      {
+        stage: "stt",
+        status: "ok",
+        startedAt: "2026-06-18T00:00:00.000Z",
+        occurredAt: "2026-06-18T00:00:00.012Z",
+        durationMs: 12,
+        attributes: { "pico.voice.frame_count": 1 }
+      }
+    ]);
+  });
+
+  it("contains observer failures without dropping the audit event", () => {
+    const audit = createStructuredAuditLog();
+
+    expect(() =>
+      recordVoiceStageProbe(
+        {
+          audit,
+          observe: () => {
+            throw new Error("display failed");
+          }
+        },
+        {
+          stage: "stt",
+          status: "ok",
+          startedAt: "2026-06-18T00:00:00.000Z",
+          durationMs: 12
+        }
+      )
+    ).not.toThrow();
+    expect(audit.entries()).toHaveLength(1);
+  });
+
   it("accepts fractional stage durations from provider timing measurements", () => {
     const audit = createStructuredAuditLog();
 
@@ -176,14 +227,16 @@ describe("voice stage probe", () => {
         durationMs: 12,
         attributes: {
           "pico.voice.sentence_index": 2,
-          "pico.voice.played_chunk_count": 1
+          "pico.voice.played_chunk_count": 1,
+          "pico.voice.trailing_silence_ms": 125.5
         }
       }
     );
 
     expect(audit.entries()[0]?.attributes).toMatchObject({
       "pico.voice.sentence_index": 2,
-      "pico.voice.played_chunk_count": 1
+      "pico.voice.played_chunk_count": 1,
+      "pico.voice.trailing_silence_ms": 125.5
     });
   });
 
@@ -196,7 +249,7 @@ describe("voice stage probe", () => {
           status: "error",
           startedAt: "2026-06-18T00:00:00.000Z",
           durationMs: 12,
-          attributes: { "pico.voice.played_chunk_count": "1" }
+          attributes: { "pico.voice.trailing_silence_ms": "1" }
         }
       )
     ).toThrow("pico voice stage probe numeric attribute is invalid");

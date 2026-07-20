@@ -8,6 +8,8 @@ import type { VoicePlaybackSession, VoicePlaybackSink } from "./voice-playback.j
 const processTerminationGraceMs = 1_000;
 const processKillGraceMs = 1_000;
 const idleOperation = Promise.resolve();
+const maximumFinalSilenceMs = 10_000;
+export const residentPlaybackFinalSilenceMs = 300;
 
 export type ResidentAudioOutputPlan =
   | { readonly provider: "alsa"; readonly command: "aplay"; readonly device: string }
@@ -22,6 +24,10 @@ export type PlaybackCommandProbe = (
   arguments_: readonly string[],
   timeoutMs: number
 ) => Promise<void>;
+
+export type ResidentContinuousPlaybackOptions = {
+  readonly finalSilenceMs?: number;
+};
 
 type PlaybackChild = ChildProcessByStdio<Writable, Readable | null, null>;
 type SpawnPlaybackProcess = (
@@ -64,8 +70,10 @@ function requirePlaybackPlatform(
 
 export function createResidentContinuousPlaybackSink(
   plan: ResidentAudioOutputPlan,
-  spawnPlaybackProcess: SpawnPlaybackProcess = spawn
+  spawnPlaybackProcess: SpawnPlaybackProcess = spawn,
+  options: ResidentContinuousPlaybackOptions = {}
 ): VoicePlaybackSink {
+  const finalSilenceMs = requireFinalSilenceMs(options.finalSilenceMs ?? 0);
   let active: ContinuousPlaybackSession | undefined;
   let closed = false;
   let lastStop = idleOperation;
@@ -93,7 +101,14 @@ export function createResidentContinuousPlaybackSink(
       const child = spawnPlaybackProcess(plan.command, createPlaybackArguments(plan, firstChunk), {
         stdio: ["pipe", "ignore", "inherit"]
       });
-      const session = new ContinuousPlaybackSession(plan, firstChunk, child, signal, release);
+      const session = new ContinuousPlaybackSession(
+        plan,
+        firstChunk,
+        child,
+        signal,
+        release,
+        finalSilenceMs
+      );
       active = session;
       lastStop = idleOperation;
       return session;
@@ -115,6 +130,7 @@ class ContinuousPlaybackSession implements VoicePlaybackSession {
   readonly #stdin: Writable;
   readonly #externalSignal: AbortSignal | undefined;
   readonly #release: (session: ContinuousPlaybackSession) => void;
+  readonly #finalSilence: Uint8Array;
   readonly #operationController = new AbortController();
   readonly #closedOperation: Promise<void>;
   #resolveClosed: () => void = () => undefined;
@@ -137,7 +153,8 @@ class ContinuousPlaybackSession implements VoicePlaybackSession {
     firstChunk: TtsAudioChunk,
     child: PlaybackChild,
     externalSignal: AbortSignal | undefined,
-    release: (session: ContinuousPlaybackSession) => void
+    release: (session: ContinuousPlaybackSession) => void,
+    finalSilenceMs: number
   ) {
     this.#plan = plan;
     this.#format = firstChunk;
@@ -145,6 +162,7 @@ class ContinuousPlaybackSession implements VoicePlaybackSession {
     this.#stdin = child.stdin;
     this.#externalSignal = externalSignal;
     this.#release = release;
+    this.#finalSilence = createPcm16Silence(firstChunk, finalSilenceMs);
     this.#closedOperation = new Promise<void>((resolve) => {
       this.#resolveClosed = resolve;
     });
@@ -195,8 +213,8 @@ class ContinuousPlaybackSession implements VoicePlaybackSession {
     this.#finishRequested = true;
     this.#finishOperation =
       this.#pendingWrites === 0
-        ? this.#endInputAndWait()
-        : this.#writeTail.then(() => this.#endInputAndWait());
+        ? this.#writeFinalSilenceAndEnd()
+        : this.#writeTail.then(() => this.#writeFinalSilenceAndEnd());
     return this.#finishOperation;
   }
 
@@ -294,6 +312,18 @@ class ContinuousPlaybackSession implements VoicePlaybackSession {
     );
   }
 
+  async #writeFinalSilenceAndEnd(): Promise<void> {
+    if (this.#finalSilence.byteLength > 0) {
+      try {
+        await this.#writeAudio(this.#finalSilence);
+      } catch (error) {
+        this.#recordFailure(asError(error));
+      }
+    }
+
+    return this.#endInputAndWait();
+  }
+
   #queuedWriteFailure(): Error | undefined {
     if (this.#terminalFailure !== undefined) return this.#terminalFailure;
     if (this.#childClosed) {
@@ -329,6 +359,24 @@ class ContinuousPlaybackSession implements VoicePlaybackSession {
     this.#stdin.removeListener("error", this.#onStdinError);
     this.#externalSignal?.removeEventListener("abort", this.#onExternalAbort);
   }
+}
+
+function requireFinalSilenceMs(value: number): number {
+  if (!Number.isInteger(value) || value < 0 || value > maximumFinalSilenceMs) {
+    throw new Error(
+      `pico resident voice finalSilenceMs must be an integer from 0 to ${String(maximumFinalSilenceMs)}`
+    );
+  }
+
+  return value;
+}
+
+function createPcm16Silence(
+  format: Pick<TtsAudioChunk, "sampleRateHz" | "channels">,
+  durationMs: number
+): Uint8Array {
+  const frames = Math.round((format.sampleRateHz * durationMs) / 1_000);
+  return new Uint8Array(frames * format.channels * 2);
 }
 
 function waitForDrain(

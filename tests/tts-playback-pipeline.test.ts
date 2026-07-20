@@ -12,7 +12,10 @@ import type {
   TtsSynthesisEvent,
   TtsSynthesisFailure
 } from "../src/modules/voice/index.js";
-import { runTtsPlaybackPipeline } from "../src/runtime/tts-playback-pipeline.js";
+import {
+  measureTrailingPcm16SilenceMs,
+  runTtsPlaybackPipeline
+} from "../src/runtime/tts-playback-pipeline.js";
 import type { VoicePlaybackSink } from "../src/runtime/voice-playback.js";
 import type { VoiceStageProbe } from "../src/runtime/voice-stage-probe.js";
 
@@ -23,6 +26,22 @@ const source = {
 } as const;
 
 describe("TTS playback pipeline", () => {
+  it("measures trailing PCM16 silence by complete mono and stereo frames", () => {
+    expect(measureTrailingPcm16SilenceMs(pcm16([100, 0, 0, 0]), 1_000, 1)).toBe(3);
+    expect(measureTrailingPcm16SilenceMs(pcm16([100, -100, 0, 0, 0, 0]), 1_000, 2)).toBe(2);
+    expect(measureTrailingPcm16SilenceMs(pcm16([0, 0, 0]), 1_000, 1)).toBe(3);
+    expect(measureTrailingPcm16SilenceMs(pcm16([0, 17]), 1_000, 1)).toBe(0);
+  });
+
+  it("rejects unaligned PCM16 tail diagnostics", () => {
+    expect(() => measureTrailingPcm16SilenceMs(Uint8Array.from([0]), 24_000, 1)).toThrow(
+      "trailing silence received invalid PCM16 audio"
+    );
+    expect(() => measureTrailingPcm16SilenceMs(Uint8Array.from([0, 0]), 24_000, 2)).toThrow(
+      "trailing silence received invalid PCM16 audio"
+    );
+  });
+
   it("starts the next synthesis before writing the current chunk", async () => {
     const order: string[] = [];
     const secondChunk = createGate<TtsSynthesisEvent>();
@@ -1166,10 +1185,32 @@ describe("TTS playback pipeline", () => {
     ]);
     expect(events[2]?.attributes).toMatchObject({
       "pico.voice.played_chunk_count": 1,
-      "pico.voice.utterance_duration_ms": 10
+      "pico.voice.utterance_duration_ms": 10,
+      "pico.voice.trailing_silence_ms": 1 / 24
     });
     expect(JSON.stringify(events)).not.toContain("private assistant body");
     expect(JSON.stringify(events)).not.toContain('"audio"');
+  });
+
+  it("keeps playback successful when trailing-silence diagnostics reject invalid PCM", async () => {
+    const audit = createStructuredAuditLog();
+    const playback = recordingPlayback();
+
+    await expect(
+      runTtsPlaybackPipeline(
+        pipelineInput({
+          tts: ttsFromArray([chunkEvent(0), chunkEvent(1, { audio: [1] }), completedEvent(2)]),
+          playback,
+          probe: { audit }
+        })
+      )
+    ).resolves.toEqual({ status: "completed", playedChunkCount: 2, durationMs: 20 });
+
+    const playbackEvent = audit
+      .entries()
+      .find((event) => event.attributes["pico.voice.stage"] === "tts_playback");
+    expect(playbackEvent?.attributes).not.toHaveProperty("pico.voice.trailing_silence_ms");
+    expect(playback.state.writes).toHaveLength(2);
   });
 
   it("settles failed request telemetry at the producer terminal without delaying the result", async () => {
@@ -1993,6 +2034,16 @@ function chunkEvent(
       source
     }
   };
+}
+
+function pcm16(samples: readonly number[]): Uint8Array {
+  const audio = new Uint8Array(samples.length * 2);
+  const view = new DataView(audio.buffer);
+
+  for (const [index, sample] of samples.entries()) {
+    view.setInt16(index * 2, sample, true);
+  }
+  return audio;
 }
 
 function failedEvent(

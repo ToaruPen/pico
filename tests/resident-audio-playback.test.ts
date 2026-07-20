@@ -88,6 +88,65 @@ describe("resident audio output plans", () => {
 });
 
 describe("resident continuous audio playback", () => {
+  it("writes one aligned final PCM silence margin before ending ffplay input", async () => {
+    const audioProcess = createAudioProcess();
+    const end = vi.spyOn(audioProcess.stdin, "end");
+    const sink = createResidentContinuousPlaybackSink(ffplayPlan, () => audioProcess.child, {
+      finalSilenceMs: 300
+    });
+    const session = sink.open(chunk(0, [1, 0]));
+
+    await session.write(chunk(0, [1, 0]));
+    expect(audioProcess.stdinBytes()).toEqual([1, 0]);
+
+    const firstFinish = session.finish();
+    const secondFinish = session.finish();
+    await vi.waitFor(() => expect(audioProcess.stdinBytes()).toHaveLength(2 + 14_400));
+    expect(secondFinish).toBe(firstFinish);
+    expect(audioProcess.stdinBytes().slice(2)).toEqual(new Array<number>(14_400).fill(0));
+    expect(end).toHaveBeenCalledTimes(1);
+
+    audioProcess.emitClose(0);
+    await firstFinish;
+  });
+
+  it("waits for final-silence backpressure before ending stdin", async () => {
+    const audioProcess = createAudioProcess();
+    const end = vi.spyOn(audioProcess.stdin, "end");
+    const sink = createResidentContinuousPlaybackSink(ffplayPlan, () => audioProcess.child, {
+      finalSilenceMs: 300
+    });
+    const session = sink.open(chunk(0, [1, 0]));
+
+    await session.write(chunk(0, [1, 0]));
+    audioProcess.applyBackpressureOnce();
+    const finishing = session.finish();
+    await vi.waitFor(() => expect(audioProcess.stdin.listenerCount("drain")).toBe(1));
+    expect(end).not.toHaveBeenCalled();
+
+    audioProcess.stdin.emit("drain");
+    await vi.waitFor(() => expect(end).toHaveBeenCalledTimes(1));
+    audioProcess.emitClose(0);
+    await finishing;
+  });
+
+  it("does not write final silence after playback cancellation", async () => {
+    const audioProcess = createAudioProcess();
+    const sink = createResidentContinuousPlaybackSink(ffplayPlan, () => audioProcess.child, {
+      finalSilenceMs: 300
+    });
+    const session = sink.open(chunk(0, [1, 0]));
+
+    await session.write(chunk(0, [1, 0]));
+    const stopping = sink.stop();
+    const finishing = session.finish();
+    audioProcess.emitClose(undefined, "SIGTERM");
+
+    await stopping;
+    await expect(finishing).rejects.toThrow("playback was stopped");
+    expect(audioProcess.stdinBytes()).toEqual([1, 0]);
+  });
+
   it("writes every sentence to one ffplay process in order", async () => {
     const audioProcess = createAudioProcess();
     const spawn = vi.fn(() => audioProcess.child);

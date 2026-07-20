@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { createStructuredAuditLog } from "../src/modules/audit/index.js";
 import { createPiAgentTurnClient } from "../src/runtime/pi-agent-turn.js";
+import type { ResidentVoiceOperatorEvent } from "../src/runtime/resident-voice-operator.js";
 
 const inactiveExtensionRunner = {
   hasHandlers: () => false,
@@ -1336,12 +1337,7 @@ describe("Pi Agent turn adapter", () => {
   it("rejects an aborted SDK prompt even if the SDK prompt resolves", async () => {
     let abortCalls = 0;
     let markPromptStarted: (() => void) | undefined;
-    let listener:
-      | ((event: {
-          readonly type: "message_update";
-          readonly assistantMessageEvent: { readonly type: "text_delta"; readonly delta: string };
-        }) => void)
-      | undefined;
+    let listener: ((event: unknown) => void) | undefined;
     let releasePrompt: (() => void) | undefined;
     const promptGate = new Promise<void>((resolve) => {
       releasePrompt = resolve;
@@ -1350,8 +1346,10 @@ describe("Pi Agent turn adapter", () => {
       markPromptStarted = resolve;
     });
     const abortController = new AbortController();
+    const operatorEvents: ResidentVoiceOperatorEvent[] = [];
     const client = createPiAgentTurnClient({
       cwd: testCwd,
+      operator: { record: (event) => operatorEvents.push(event) },
       createResourceLoader: () => ({
         reload: () => Promise.resolve()
       }),
@@ -1368,6 +1366,12 @@ describe("Pi Agent turn adapter", () => {
             },
             prompt: async () => {
               markPromptStarted?.();
+              listener?.({
+                type: "tool_execution_start",
+                toolCallId: "pending-tool",
+                toolName: "slow_tool",
+                args: { wait: true }
+              });
               listener?.({
                 type: "message_update",
                 assistantMessageEvent: {
@@ -1398,6 +1402,23 @@ describe("Pi Agent turn adapter", () => {
 
     await expect(prompt).rejects.toThrow("pico resident Pi Agent turn aborted");
     expect(abortCalls).toBe(1);
+    expect(operatorEvents).toHaveLength(2);
+    expect(operatorEvents[0]).toEqual({
+      kind: "tool_execution_start",
+      toolCallId: "pending-tool",
+      toolName: "slow_tool",
+      args: { wait: true }
+    });
+    expect(operatorEvents[1]).toMatchObject({
+      kind: "tool_execution_end",
+      toolCallId: "pending-tool",
+      toolName: "slow_tool",
+      status: "skipped",
+      errorCode: "cancelled"
+    });
+    if (operatorEvents[1]?.kind === "tool_execution_end") {
+      expect(operatorEvents[1].durationMs).toBeGreaterThanOrEqual(0);
+    }
   });
 
   it("cancels immediately while preserving a reusable session initialization", async () => {
@@ -1474,6 +1495,7 @@ describe("Pi Agent turn adapter", () => {
   it("records child setup, TTFT, tool execution, and disposal wall time", async () => {
     const audit = createStructuredAuditLog();
     const validationEvents: unknown[] = [];
+    const operatorEvents: ResidentVoiceOperatorEvent[] = [];
     let elapsedMs = 0;
     let listener: ((event: unknown) => void) | undefined;
     const now = () => new Date(Date.parse("2026-07-19T02:00:00.000Z") + elapsedMs).toISOString();
@@ -1481,6 +1503,7 @@ describe("Pi Agent turn adapter", () => {
       cwd: testCwd,
       voiceProbe: { audit },
       validation: { record: (event) => validationEvents.push(event) },
+      operator: { record: (event) => operatorEvents.push(event) },
       now,
       monotonicNow: () => elapsedMs,
       createResourceLoader: () => ({
@@ -1602,6 +1625,26 @@ describe("Pi Agent turn adapter", () => {
         result: { status: "ready" },
         isError: false,
         durationMs: 350
+      }
+    ]);
+    expect(operatorEvents).toEqual([
+      {
+        kind: "tool_execution_start",
+        toolCallId: "private-tool-call",
+        toolName: "stackchan_get_status",
+        args: { detail: true }
+      },
+      {
+        kind: "tool_execution_end",
+        toolCallId: "private-tool-call",
+        toolName: "stackchan_get_status",
+        status: "ok",
+        result: { status: "ready" },
+        durationMs: 350
+      },
+      {
+        kind: "assistant_settled",
+        stopReason: "stop"
       }
     ]);
   });

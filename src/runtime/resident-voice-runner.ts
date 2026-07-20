@@ -36,7 +36,8 @@ import {
   assertResidentPlaybackReadiness,
   createResidentAudioOutputPlan,
   createResidentContinuousPlaybackSink,
-  type ResidentAudioOutputPlan
+  type ResidentAudioOutputPlan,
+  residentPlaybackFinalSilenceMs
 } from "./resident-audio-playback.js";
 import {
   createLoopbackHttpResidentControlServer,
@@ -59,6 +60,10 @@ import {
   type ResidentVoiceLogRunMode,
   requireResidentVoiceRunId
 } from "./resident-voice-log-files.js";
+import {
+  type ResidentVoiceOperatorSink,
+  recordResidentVoiceOperatorEvent
+} from "./resident-voice-operator.js";
 import {
   createEnergySpeechActivityGate,
   createTenWasmSpeechActivityGate
@@ -131,6 +136,7 @@ export async function runResidentVoiceWithProviders(input: {
   readonly createPiAgent?: (options: PiAgentTurnClientOptions) => PiAgentTurnClient;
   readonly createTelemetry?: (options: OpenTelemetryProviderOptions) => PicoTelemetry;
   readonly startupReadiness?: (config: PicoConfig) => Promise<void>;
+  readonly operator?: ResidentVoiceOperatorSink;
 }): Promise<void> {
   const { config, signal } = input;
   requireResidentVoiceEnabled(config);
@@ -182,19 +188,25 @@ export async function runResidentVoiceWithProviders(input: {
       ending: config.session.ending,
       ...(audit === undefined ? {} : { audit })
     });
+    const stageProbe = createResidentVoiceStageProbe(audit, input.operator);
     const deferredTools = createDeferredToolCoordinator();
     const stt = createConfiguredStt(config);
-    const tts = createConfiguredTts(config, configuredVoiceStageProbe(audit));
+    const tts = createConfiguredTts(config, stageProbe);
     const control = requireResidentControlConfig(config);
     const audioCapture = createResidentAudioCapture(config);
     const echoControl = createConfiguredEchoControl(config);
-    const playback = createResidentContinuousPlaybackSink(createResidentAudioOutputPlan(config));
+    const playback = createResidentContinuousPlaybackSink(
+      createResidentAudioOutputPlan(config),
+      undefined,
+      { finalSilenceMs: residentPlaybackFinalSilenceMs }
+    );
     const piAgent = resolveResidentPiAgent(input.piAgent, input.createPiAgent, {
       cwd: process.cwd(),
       deferredTools: {
         coordinator: deferredTools
       },
-      ...(audit === undefined ? {} : { voiceProbe: { audit } })
+      voiceProbe: stageProbe,
+      ...(input.operator === undefined ? {} : { operator: input.operator })
     });
     const speechActivity = await createConfiguredSpeechActivityGate(config);
 
@@ -226,7 +238,8 @@ export async function runResidentVoiceWithProviders(input: {
           deferredTools,
           farewell: { enabled: true },
           log: createResidentVoiceRuntimeLogSink(logRunMode, fileLog, stdoutProbeMode),
-          ...(audit === undefined ? {} : { probe: { audit } }),
+          probe: stageProbe,
+          ...(input.operator === undefined ? {} : { operator: input.operator }),
           signal
         }),
       startBridge: () => startMacOSControlBridge({ control, signal })
@@ -242,8 +255,26 @@ function resolveStartupReadiness(
   return startupReadiness ?? assertResidentVoiceStartupReadiness;
 }
 
-function configuredVoiceStageProbe(audit: VoiceStageProbe["audit"]): VoiceStageProbe {
-  return audit === undefined ? {} : { audit };
+export function createResidentVoiceStageProbe(
+  audit: VoiceStageProbe["audit"],
+  operator: ResidentVoiceOperatorSink | undefined
+): VoiceStageProbe {
+  return {
+    ...(audit === undefined ? {} : { audit }),
+    ...(operator === undefined
+      ? {}
+      : {
+          observe: (observation) => {
+            recordResidentVoiceOperatorEvent(operator, {
+              kind: "stage",
+              stage: observation.stage,
+              status: observation.status,
+              durationMs: observation.durationMs,
+              attributes: observation.attributes
+            });
+          }
+        })
+  };
 }
 
 export function createConfiguredOpenTelemetry(

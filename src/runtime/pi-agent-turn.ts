@@ -12,6 +12,10 @@ import type {
   DeferredToolDeliverableResult
 } from "./deferred-tool-coordinator.js";
 import { registerPicoExtensionWithRuntime } from "./pico-extension-runtime.js";
+import {
+  type ResidentVoiceOperatorSink,
+  recordResidentVoiceOperatorEvent
+} from "./resident-voice-operator.js";
 import type { ResidentVoiceValidationSink } from "./resident-voice-validation.js";
 import type { PiAgentTurnClient } from "./voice-resident.js";
 import {
@@ -96,6 +100,7 @@ export type PiAgentTurnClientOptions = {
     readonly coordinator: Pick<DeferredToolCoordinator, "enqueue">;
   };
   readonly validation?: ResidentVoiceValidationSink;
+  readonly operator?: ResidentVoiceOperatorSink;
   readonly createAgentSession?: PiAgentSessionFactory;
   readonly createResourceLoader?: (
     input: PiAgentResourceLoaderFactoryInput
@@ -534,6 +539,13 @@ type PromptObservation = {
 type PendingToolExecution = {
   readonly startedAt: string;
   readonly startedAtMs: number;
+  readonly toolName: string;
+};
+
+type CompletedToolExecution = {
+  readonly toolName: string;
+  readonly result: unknown;
+  readonly isError: boolean;
 };
 
 function createPromptObservation(
@@ -565,21 +577,42 @@ function createPromptObservation(
     );
   };
 
-  const settleTool = (toolCallId: string, status: VoiceStageStatus, errorCode?: string): void => {
+  const settleTool = (
+    toolCallId: string,
+    status: VoiceStageStatus,
+    errorCode?: string,
+    completed?: CompletedToolExecution
+  ): void => {
     const pending = pendingTools.get(toolCallId);
     if (pending === undefined) {
       return;
     }
 
+    const occurredAt = now();
+    const durationMs = elapsedSince(pending.startedAtMs, monotonicNow);
     pendingTools.delete(toolCallId);
-    recordPiStage(
-      options,
-      "pi_tool_execution",
+    if (completed !== undefined) {
+      options.validation?.record({
+        kind: "tool_execution_end",
+        occurredAt,
+        sessionId,
+        toolCallId,
+        toolName: completed.toolName,
+        result: completed.result,
+        isError: completed.isError,
+        durationMs
+      });
+    }
+    recordResidentVoiceOperatorEvent(options.operator, {
+      kind: "tool_execution_end",
+      toolCallId,
+      toolName: completed?.toolName ?? pending.toolName,
       status,
-      pending.startedAt,
-      elapsedSince(pending.startedAtMs, monotonicNow),
-      errorCode
-    );
+      durationMs,
+      ...(completed === undefined ? {} : { result: completed.result }),
+      ...(errorCode === undefined ? {} : { errorCode })
+    });
+    recordPiStage(options, "pi_tool_execution", status, pending.startedAt, durationMs, errorCode);
   };
 
   const acceptToolStart = (event: Extract<ToolExecutionEvent, { kind: "start" }>): void => {
@@ -589,7 +622,7 @@ function createPromptObservation(
 
     const startedAt = now();
     const startedAtMs = monotonicNow();
-    pendingTools.set(event.toolCallId, { startedAt, startedAtMs });
+    pendingTools.set(event.toolCallId, { startedAt, startedAtMs, toolName: event.toolName });
     options.validation?.record({
       kind: "tool_execution_start",
       occurredAt: startedAt,
@@ -598,26 +631,24 @@ function createPromptObservation(
       toolName: event.toolName,
       args: event.args
     });
+    recordResidentVoiceOperatorEvent(options.operator, {
+      kind: "tool_execution_start",
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      args: event.args
+    });
   };
 
   const acceptToolEnd = (event: Extract<ToolExecutionEvent, { kind: "end" }>): void => {
-    const pending = pendingTools.get(event.toolCallId);
-    if (pending !== undefined) {
-      options.validation?.record({
-        kind: "tool_execution_end",
-        occurredAt: now(),
-        sessionId,
-        toolCallId: event.toolCallId,
-        toolName: event.toolName,
-        result: event.result,
-        isError: event.isError,
-        durationMs: elapsedSince(pending.startedAtMs, monotonicNow)
-      });
-    }
     settleTool(
       event.toolCallId,
       event.isError ? "error" : "ok",
-      event.isError ? "tool_execution_failed" : undefined
+      event.isError ? "tool_execution_failed" : undefined,
+      {
+        toolName: event.toolName,
+        result: event.result,
+        isError: event.isError
+      }
     );
   };
 
@@ -628,6 +659,10 @@ function createPromptObservation(
     }
 
     terminalFailure = isTerminalAssistantFailure(settledAssistant.stopReason);
+    recordResidentVoiceOperatorEvent(options.operator, {
+      kind: "assistant_settled",
+      stopReason: normalizeStopReason(settledAssistant.stopReason)
+    });
     output.splice(0, output.length);
     if (!terminalFailure) {
       output.push(settledAssistant.text);
@@ -666,6 +701,10 @@ function createPromptObservation(
       }
     }
   };
+}
+
+function normalizeStopReason(stopReason: unknown): string {
+  return typeof stopReason === "string" ? stopReason : "unknown";
 }
 
 type PromptAbortHandle = {

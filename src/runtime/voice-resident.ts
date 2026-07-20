@@ -15,6 +15,10 @@ import {
   type ResidentControlState,
   type ResidentTurnGeneration
 } from "./resident-control-controller.js";
+import {
+  type ResidentVoiceOperatorSink,
+  recordResidentVoiceOperatorEvent
+} from "./resident-voice-operator.js";
 import type { ResidentVoiceValidationSink } from "./resident-voice-validation.js";
 import type { SpeechActivityGate } from "./speech-activity-gate.js";
 import { runTtsPlaybackPipeline, type TtsPlaybackPipelineResult } from "./tts-playback-pipeline.js";
@@ -75,6 +79,7 @@ export type VoiceResidentRuntimeOptions = {
   readonly log?: VoiceResidentLogSink;
   readonly probe?: VoiceStageProbe;
   readonly validation?: ResidentVoiceValidationSink;
+  readonly operator?: ResidentVoiceOperatorSink;
   readonly signal?: AbortSignal;
   readonly now?: () => string;
   readonly monotonicNow?: () => number;
@@ -196,6 +201,12 @@ export function createVoiceResidentRuntime(
   const controller: ResidentControlController = createResidentControlController({
     ...(options.scheduler === undefined ? {} : { scheduler: options.scheduler }),
     onListen(generation) {
+      if (activeSessionId !== undefined) {
+        refreshSession(options.sessionLifecycle, activeSessionId);
+      }
+      recordResidentVoiceOperatorEvent(options.operator, {
+        kind: "turn_started"
+      });
       const capture = options.audioCapture.start(generation.signal);
       const frames: VoicePcmFrame[] = [];
       const frameCollection = collectCaptureFrames(capture.frames, frames, generation.signal);
@@ -581,15 +592,20 @@ async function processCompletedHoldWork(
 
   const sessionId = await ensureActiveSession(options, state);
   const deferredResults = collectDeferredResults(options, sessionId, state.now());
+  const transcriptOccurredAt = state.now();
   options.validation?.record({
     kind: "staff_transcript",
-    occurredAt: state.now(),
+    occurredAt: transcriptOccurredAt,
     sessionId,
+    text: transcript
+  });
+  recordResidentVoiceOperatorEvent(options.operator, {
+    kind: "staff_transcript",
     text: transcript
   });
   recordLog(options.log, {
     kind: "staff_input",
-    occurredAt: state.now(),
+    occurredAt: transcriptOccurredAt,
     sessionId
   });
   const piStartedAt = state.now();
@@ -615,16 +631,21 @@ async function processCompletedHoldWork(
     return;
   }
 
+  const responseOccurredAt = state.now();
   options.validation?.record({
     kind: "pi_response",
-    occurredAt: state.now(),
+    occurredAt: responseOccurredAt,
     sessionId,
+    text: response.text
+  });
+  recordResidentVoiceOperatorEvent(options.operator, {
+    kind: "pi_response",
     text: response.text
   });
 
   recordLog(options.log, {
     kind: "pi_agent_response",
-    occurredAt: state.now(),
+    occurredAt: responseOccurredAt,
     sessionId,
     durationMs: piDurationMs
   });
@@ -824,6 +845,7 @@ async function ensureActiveSession(
   );
 
   if (reusableId !== undefined) {
+    refreshSession(options.sessionLifecycle, reusableId);
     return reusableId;
   }
 

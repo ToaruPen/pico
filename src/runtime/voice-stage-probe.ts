@@ -35,6 +35,7 @@ export type VoiceStageStatus = "ok" | "error" | "skipped" | "suppressed";
 
 export type VoiceStageProbe = {
   readonly audit?: StructuredAuditLog;
+  readonly observe?: (observation: VoiceStageObservation) => void;
 };
 
 export type VoiceStageProbeInput = {
@@ -43,6 +44,11 @@ export type VoiceStageProbeInput = {
   readonly startedAt: string;
   readonly durationMs: number;
   readonly attributes?: Readonly<Record<string, AuditAttributeValue>>;
+};
+
+export type VoiceStageObservation = VoiceStageProbeInput & {
+  readonly occurredAt: string;
+  readonly attributes: Readonly<Record<string, AuditAttributeValue>>;
 };
 
 const voiceStageStatuses = new Set<VoiceStageStatus>(["ok", "error", "skipped", "suppressed"]);
@@ -61,11 +67,13 @@ const voiceStageAttributeKeys = new Set([
   "pico.voice.queue_depth",
   "pico.voice.error_code",
   "pico.voice.sentence_index",
-  "pico.voice.played_chunk_count"
+  "pico.voice.played_chunk_count",
+  "pico.voice.trailing_silence_ms"
 ]);
 const numericVoiceStageAttributeKeys = new Set([
   "pico.voice.sentence_index",
-  "pico.voice.played_chunk_count"
+  "pico.voice.played_chunk_count",
+  "pico.voice.trailing_silence_ms"
 ]);
 const maxNodeTimeoutMs = 2_147_483_647;
 
@@ -82,6 +90,20 @@ export function recordVoiceStageProbe(
   );
   const attributes = normalizeVoiceStageAttributes(input.attributes);
   const occurredAt = new Date(Date.parse(startedAt) + durationMs).toISOString();
+  const observation: VoiceStageObservation = {
+    stage,
+    status,
+    startedAt,
+    occurredAt,
+    durationMs,
+    attributes
+  };
+
+  try {
+    probe.observe?.(observation);
+  } catch {
+    // Best-effort observers cannot alter stage recording or runtime success.
+  }
 
   try {
     return probe.audit?.record({

@@ -93,7 +93,8 @@ describe("resident voice file logs", () => {
         "pico.voice.queue_depth": 1,
         "pico.voice.sample_rate_hz": 16_000,
         "pico.voice.channels": 1,
-        "pico.voice.suppressed_frame_count": 4
+        "pico.voice.suppressed_frame_count": 4,
+        "pico.voice.trailing_silence_ms": 267.6
       }
     });
 
@@ -118,7 +119,8 @@ describe("resident voice file logs", () => {
           "pico.voice.queue_depth": 1,
           "pico.voice.sample_rate_hz": 16_000,
           "pico.voice.channels": 1,
-          "pico.voice.suppressed_frame_count": 4
+          "pico.voice.suppressed_frame_count": 4,
+          "pico.voice.trailing_silence_ms": 267.6
         }
       })}\n`
     );

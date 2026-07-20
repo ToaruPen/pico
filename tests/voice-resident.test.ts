@@ -21,6 +21,7 @@ import type {
   ResidentAudioCapture,
   ResidentCaptureSession
 } from "../src/runtime/resident-audio-io.js";
+import type { ResidentVoiceOperatorEvent } from "../src/runtime/resident-voice-operator.js";
 import type { ResidentVoiceValidationEvent } from "../src/runtime/resident-voice-validation.js";
 import type { VoicePlaybackSession, VoicePlaybackSink } from "../src/runtime/voice-playback.js";
 import {
@@ -415,6 +416,30 @@ describe("resident hold-to-talk voice runtime", () => {
         kind: "pi_response",
         occurredAt: "2026-07-17T00:00:00.000Z",
         sessionId: "session-1",
+        text: "Picoの応答"
+      }
+    ]);
+
+    await driver.runtime.stop();
+  });
+
+  it("publishes recognized and generated text to the non-persistent operator sink", async () => {
+    vi.useFakeTimers();
+    const operatorEvents: ResidentVoiceOperatorEvent[] = [];
+    const driver = createDriver({ operatorEvents });
+
+    await completeHold(driver, "operator-content");
+
+    expect(operatorEvents).toEqual([
+      {
+        kind: "turn_started"
+      },
+      {
+        kind: "staff_transcript",
+        text: "職員の発話"
+      },
+      {
+        kind: "pi_response",
         text: "Picoの応答"
       }
     ]);
@@ -1041,6 +1066,28 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(aborts).toBe(0);
     expect(driver.piRequests).toHaveLength(2);
     expect(driver.playedChunks).toHaveLength(2);
+  });
+
+  it("refreshes inactivity when a second PTT hold is accepted", async () => {
+    vi.useFakeTimers();
+    const driver = createDriver({ sessionDurationMs: 1_000 });
+
+    await completeHold(driver, "first");
+    await vi.advanceTimersByTimeAsync(900);
+
+    await expect(driver.press()).resolves.toBe("accepted");
+    driver.capture.emit(frame("second", [1, 0]));
+    await expect(driver.release()).resolves.toBe("accepted");
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(driver.piRequests.map((request) => request.sessionId)).toEqual([
+      "session-1",
+      "session-1"
+    ]);
+    expect(driver.disposedSessions).toEqual([]);
+
+    await driver.runtime.stop();
   });
 
   it("waits for a listening hold before inactivity farewell and cleanup", async () => {
@@ -1683,6 +1730,7 @@ function createDriver(
     readonly audit?: ReturnType<typeof createStructuredAuditLog>;
     readonly monotonicNow?: () => number;
     readonly validationEvents?: ResidentVoiceValidationEvent[];
+    readonly operatorEvents?: ResidentVoiceOperatorEvent[];
   } = {}
 ) {
   const capture = createControlledCapture();
@@ -1862,6 +1910,7 @@ function createDriver(
         }),
     ...(options.audit === undefined ? {} : { probe: { audit: options.audit } }),
     validation: { record: (event) => options.validationEvents?.push(event) },
+    operator: { record: (event) => options.operatorEvents?.push(event) },
     now: () => "2026-07-17T00:00:00.000Z",
     monotonicNow: options.monotonicNow ?? (() => 0)
   });

@@ -12,12 +12,14 @@ import {
   assertResidentVoiceStartupReadiness,
   createConfiguredOpenTelemetry,
   createConfiguredTts,
+  createResidentVoiceStageProbe,
   requireResidentVoiceEnabled,
   runResidentControlLifecycle,
   runResidentVoiceWithProviders,
   shutdownResidentVoiceTelemetry,
   waitForDirectResidentVoiceRuntime
 } from "../src/runtime/resident-voice-runner.js";
+import { recordVoiceStageProbe } from "../src/runtime/voice-stage-probe.js";
 
 const aivisBaseUrl = "http://127.0.0.1:10101";
 
@@ -88,6 +90,31 @@ function wavResponse(): Response {
 }
 
 describe("resident voice TTS telemetry wiring", () => {
+  it("fans validated stage observations into the operator sink", () => {
+    const events: unknown[] = [];
+    const probe = createResidentVoiceStageProbe(undefined, {
+      record: (event) => events.push(event)
+    });
+
+    recordVoiceStageProbe(probe, {
+      stage: "stt",
+      status: "ok",
+      startedAt: "2026-07-19T00:00:00.000Z",
+      durationMs: 125,
+      attributes: { "pico.voice.utterance_duration_ms": 800 }
+    });
+
+    expect(events).toEqual([
+      {
+        kind: "stage",
+        stage: "stt",
+        status: "ok",
+        durationMs: 125,
+        attributes: { "pico.voice.utterance_duration_ms": 800 }
+      }
+    ]);
+  });
+
   it("maps successful provider observations to allowlisted voice stage probes", async () => {
     const audit = createStructuredAuditLog();
     const wallClock = ["2026-07-19T00:00:00.000Z", "2026-07-19T00:00:01.000Z"];
