@@ -125,8 +125,12 @@ final class ResidentIoOwner: @unchecked Sendable {
       self.recovering = false
       self.recoveryAttempt = 0
       self.recoveryCycle += 1
-      self.invalidateActiveGeneration()
-      self.gate.markUnavailable()
+      do {
+        try self.invalidateCapture()
+      } catch {
+        self.fatal(code: "admission_invalidation_backlog", error: error)
+        return
+      }
       self.assembler.clear()
       self.clearAllGenerationObservations()
       self.activeAudioEngineGeneration = nil
@@ -153,7 +157,7 @@ final class ResidentIoOwner: @unchecked Sendable {
       stopped = true
       healthTimer?.cancel()
       healthTimer = nil
-      gate.markUnavailable()
+      _ = gate.markUnavailable()
       assembler.clear()
       activeAudioEngineGeneration = nil
       audioEngine.stop()
@@ -433,8 +437,12 @@ final class ResidentIoOwner: @unchecked Sendable {
     recovering = true
     recoveryAttempt = 0
     recoveryCycle += 1
-    invalidateActiveGeneration()
-    gate.markUnavailable()
+    do {
+      try invalidateCapture()
+    } catch {
+      fatal(code: "admission_invalidation_backlog", error: error)
+      return
+    }
     assembler.clear()
     clearAllGenerationObservations()
     activeAudioEngineGeneration = nil
@@ -555,7 +563,7 @@ final class ResidentIoOwner: @unchecked Sendable {
     stopped = true
     healthTimer?.cancel()
     healthTimer = nil
-    gate.markUnavailable()
+    _ = gate.markUnavailable()
     assembler.clear()
     audioEngine.stop()
     FileHandle.standardError.write(Data("pico macOS resident I/O: \(error)\n".utf8))
@@ -616,9 +624,15 @@ final class ResidentIoOwner: @unchecked Sendable {
     converterNextHostSeconds = nil
   }
 
-  private func invalidateActiveGeneration() {
-    guard let generation = activeGeneration(gate.state) else { return }
-    writer.write(.cancelGeneration(CancelGenerationMetadata(generation: generation)))
+  private func invalidateCapture() throws {
+    switch gate.markUnavailable() {
+    case .pendingAdmission(let sequence):
+      try admissionTimeouts.expire(sequence: sequence)
+    case .activeGeneration(let generation):
+      writer.write(.cancelGeneration(CancelGenerationMetadata(generation: generation)))
+    case nil:
+      break
+    }
   }
 }
 

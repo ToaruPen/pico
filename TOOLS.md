@@ -19,7 +19,7 @@ instructions.
   macOS keyboard/AVAudioEngine resident I/O sidecar with warnings as errors.
 - `just macos-resident-io-build`: build the production resident I/O executable
   at the path used by the Node managed-child bridge.
-- `just macos-resident-audio-probe --device-uid <uid>`: collect bounded
+- `just macos-resident-audio-probe --duration-seconds 30 --device-uid <uid>`: collect bounded
   pre-implementation/field measurements for callback cadence, common host
   clock alignment, CPU, and configuration notifications. It opens the real
   microphone and must not run while another Pico checkout owns resident audio.

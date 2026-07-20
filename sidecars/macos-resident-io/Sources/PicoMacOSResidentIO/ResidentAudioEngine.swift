@@ -2,6 +2,7 @@
 import AVFoundation
 import CoreAudio
 import Foundation
+import PicoMacOSResidentIOCore
 
 struct ResidentAudioBufferSnapshot: Sendable {
   let engineGeneration: UInt64
@@ -41,7 +42,7 @@ final class ResidentAudioEngine: @unchecked Sendable {
   private let onConfigurationChange: @Sendable (UInt64) -> Void
   private let onFailure: @Sendable (UInt64, Error) -> Void
   private var engine: AVAudioEngine?
-  private var configurationObserver: NSObjectProtocol?
+  private var configurationObservation: ManagedNotificationObservation?
   private var nextGeneration: UInt64 = 1
 
   init(
@@ -75,26 +76,30 @@ final class ResidentAudioEngine: @unchecked Sendable {
     input.installTap(onBus: 0, bufferSize: 4_096, format: nil) { [weak self] buffer, time in
       self?.capture(buffer: buffer, time: time, generation: generation)
     }
-    configurationObserver = NotificationCenter.default.addObserver(
-      forName: .AVAudioEngineConfigurationChange,
-      object: engine,
-      queue: nil
+    let configurationObservation = ManagedNotificationObservation(
+      name: .AVAudioEngineConfigurationChange,
+      object: engine
     ) { [weak self] _ in
       guard let self else { return }
       let callback = self.onConfigurationChange
       self.ownerQueue.async { callback(generation) }
     }
     engine.prepare()
-    try engine.start()
+    do {
+      try engine.start()
+    } catch {
+      input.removeTap(onBus: 0)
+      configurationObservation.cancel()
+      throw error
+    }
+    self.configurationObservation = configurationObservation
     self.engine = engine
     return generation
   }
 
   func stop() {
-    if let configurationObserver {
-      NotificationCenter.default.removeObserver(configurationObserver)
-      self.configurationObserver = nil
-    }
+    configurationObservation?.cancel()
+    configurationObservation = nil
     guard let engine else { return }
     engine.inputNode.removeTap(onBus: 0)
     engine.stop()

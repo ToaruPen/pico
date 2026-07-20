@@ -22,11 +22,11 @@
 
 - [ ] **Step 1: Write a failing Justfile contract test**
 
-Add a test requiring `field-macos-resident-audio-probe` to invoke `xcrun swift` with the repository probe source and a bounded duration argument.
+Add a test requiring `macos-resident-audio-probe` to invoke `xcrun swift` with the repository probe source and forwarded bounded probe arguments.
 
 ```ts
 it("exposes the bounded macOS resident audio probe", () => {
-  expect(justfile).toContain("field-macos-resident-audio-probe duration:");
+  expect(justfile).toContain("macos-resident-audio-probe *args:");
   expect(justfile).toContain("scripts/field/macos-resident-audio-probe.swift");
 });
 ```
@@ -61,8 +61,8 @@ struct ProbeSample: Codable {
 Add:
 
 ```make
-field-macos-resident-audio-probe duration:
-  xcrun swift scripts/field/macos-resident-audio-probe.swift --duration-seconds {{duration}}
+macos-resident-audio-probe *args:
+  xcrun swift scripts/field/macos-resident-audio-probe.swift {{args}}
 ```
 
 - [ ] **Step 4: Run the test and non-microphone validation**
@@ -264,41 +264,37 @@ Run: `swift build --package-path sidecars/macos-resident-io -c release -Xswiftc 
 
 Expected: exit 0 with no warnings.
 
-### Task 5: Add deterministic health and recovery state
+### Task 5: Add integrated health and recovery ownership
 
 **Files:**
-- Create: `sidecars/macos-resident-io/Sources/PicoMacOSResidentIOCore/ResidentAudioHealth.swift`
-- Create: `sidecars/macos-resident-io/Sources/PicoMacOSResidentIO/HealthCoordinator.swift`
-- Create: `sidecars/macos-resident-io/Tests/PicoMacOSResidentIOCoreTests/ResidentAudioHealthTests.swift`
+- Modify: `sidecars/macos-resident-io/Sources/PicoMacOSResidentIO/ResidentIoOwner.swift`
+- Modify: `sidecars/macos-resident-io/Sources/PicoMacOSResidentIOCore/PttSampleGate.swift`
+- Modify: `sidecars/macos-resident-io/Tests/PicoMacOSResidentIOCoreTests/PttSampleGateTests.swift`
+- Modify: `tests/resident-hold-to-talk-field-runtime.test.ts`
 
-- [ ] **Step 1: Write failing transition tests**
+- [ ] **Step 1: Write failing invalidation and field-health tests**
 
-Cover configuration change, unexpected stop, sleep, wake, device removal/reappearance, bounded recovery exhaustion, and active-turn invalidation.
-
-```swift
-@Test func configurationChangeInvalidatesTheTurnBeforeRecovery() throws {
-  var health = ResidentAudioHealth.running(engineGeneration: 4)
-  let effects = try health.handle(.configurationChanged(activeGeneration: 9))
-  #expect(health.state == .recovering)
-  #expect(effects == [.failTurn(9, .configurationChanged), .rebuildEngine])
-}
-```
+Cover pending admission and accepted-generation invalidation, recovery while TTS suppression is active,
+and rejection of field PASS after any recovery, timeout, or engine-stop event.
 
 - [ ] **Step 2: Run tests and verify RED**
 
-Run: `swift test --package-path sidecars/macos-resident-io --filter ResidentAudioHealthTests`
+Run: `just macos-resident-io-check`
 
-Expected: FAIL because health state is absent.
+Run: `npm test -- tests/resident-hold-to-talk-field-runtime.test.ts`
 
-- [ ] **Step 3: Implement state and real notification wiring**
+Expected: the new assertions FAIL against the unintegrated recovery paths.
 
-Observe `AVAudioEngineConfigurationChange`, workspace sleep/wake, and a bounded periodic `engine.isRunning` check. Notification handlers enqueue typed events onto the serial owner and never deallocate the engine synchronously. Recovery reuses only the configured UID and emits a fixed code for every transition.
+- [ ] **Step 3: Implement recovery in the real owner**
+
+Observe `AVAudioEngineConfigurationChange`, workspace sleep/wake, and a bounded periodic
+`engine.isRunning` check directly in `ResidentIoOwner`. Invalidate pending admission or the active
+generation before clearing the gate, reuse only the configured UID, bound recovery attempts, preserve
+TTS suppression, and emit fixed health codes. Do not add an unreferenced parallel health state machine.
 
 - [ ] **Step 4: Run tests and verify GREEN**
 
-Run: `swift test --package-path sidecars/macos-resident-io --filter ResidentAudioHealthTests`
-
-Expected: all targeted tests PASS.
+Run the same focused Swift and Node tests and require them to pass.
 
 ### Task 6: Integrate keyboard, engine, gate, and IPC in the Swift executable
 

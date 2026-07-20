@@ -137,13 +137,37 @@ struct PttSampleGateTests {
       try gate.observePress(sequence: 1, hostSeconds: 1)
     }
 
-    gate.markUnavailable()
+    _ = gate.markUnavailable()
     gate.restoreAvailability()
     #expect(gate.state == .suppressed)
 
     gate.resume()
     #expect(gate.state == .discarding)
     try gate.observePress(sequence: 2, hostSeconds: 2)
+  }
+
+  @Test("recovery reports pending admission and active generation invalidations")
+  func reportsRecoveryInvalidations() throws {
+    var pending = PttSampleGate(capacityFrames: 100, releaseTailSeconds: 0.250)
+    try pending.observePress(sequence: 4, hostSeconds: 1)
+
+    #expect(pending.markUnavailable() == .pendingAdmission(sequence: 4))
+    #expect(pending.state == .unavailable)
+
+    var active = PttSampleGate(capacityFrames: 100, releaseTailSeconds: 0.250)
+    try active.observePress(sequence: 5, hostSeconds: 2)
+    _ = try active.resolveAdmission(sequence: 5, result: .accepted, generation: 12)
+
+    #expect(active.markUnavailable() == .activeGeneration(12))
+    #expect(active.state == .unavailable)
+
+    var failed = PttSampleGate(capacityFrames: 100, releaseTailSeconds: 0.250)
+    try failed.observePress(sequence: 6, hostSeconds: 3)
+    #expect(throws: PttSampleGateError.invalidTimestamp) {
+      try failed.consume(bufferStartingAt: -1, sampleRate: 100, samples: [1])
+    }
+
+    #expect(failed.markUnavailable() == .pendingAdmission(sequence: 6))
   }
 
   @Test("fails closed on overflow, timestamp regression, and mismatched admission")

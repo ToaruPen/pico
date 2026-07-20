@@ -355,7 +355,6 @@ describe("Apple Speech resident streaming STT boundary", () => {
 
   it("cancels without sending finish and never falls back to batch", async () => {
     const socket = new RecordingWebSocket();
-    const fetchSpy = vi.fn<typeof fetch>();
     const client = createAppleSpeechStreamingSttClient(sidecar, {
       webSocketFactory: () => socket
     });
@@ -368,7 +367,6 @@ describe("Apple Speech resident streaming STT boundary", () => {
 
     expect(socket.sent).toHaveLength(1);
     expect(socket.closes.at(-1)).toEqual({ code: 1000, reason: "cancelled" });
-    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("settles an in-flight finalization when cancellation closes the socket", async () => {

@@ -20,6 +20,11 @@ public enum PttSampleGateError: Error, Equatable, Sendable {
   case ringOverflow
 }
 
+public enum PttGateInvalidation: Equatable, Sendable {
+  case pendingAdmission(sequence: UInt64)
+  case activeGeneration(UInt64)
+}
+
 public struct AcceptedPcmSegment: Equatable, Sendable {
   public let generation: UInt64
   public let bufferStartHostSeconds: Double
@@ -65,6 +70,7 @@ public struct PttSampleGate: Sendable {
   private var lastBufferEnd: Double?
   private var lastSampleRate: Double?
   private var suppressionRequested = false
+  private var pendingInvalidation: PttGateInvalidation?
 
   public init(
     capacityFrames: Int,
@@ -81,11 +87,11 @@ public struct PttSampleGate: Sendable {
     guard capacityFrames > 0, reorderingCapacityFrames >= 0,
       releaseTailSeconds.isFinite, releaseTailSeconds >= 0
     else {
-      state = .unavailable
+      failClosed()
       throw PttSampleGateError.invalidConfiguration
     }
     guard hostSeconds.isFinite, hostSeconds >= 0 else {
-      state = .unavailable
+      failClosed()
       throw PttSampleGateError.invalidTimestamp
     }
     guard state == .discarding else { throw PttSampleGateError.invalidTransition }
@@ -102,13 +108,13 @@ public struct PttSampleGate: Sendable {
 
   public mutating func observeRelease(hostSeconds: Double) throws {
     guard hostSeconds.isFinite, hostSeconds >= 0 else {
-      state = .unavailable
+      failClosed()
       throw PttSampleGateError.invalidTimestamp
     }
     switch state {
     case .pendingAdmission(let sequence, let pressedAt, _):
       guard hostSeconds >= pressedAt else {
-        state = .unavailable
+        failClosed()
         throw PttSampleGateError.timestampRegression
       }
       state = .pendingAdmission(
@@ -118,7 +124,7 @@ public struct PttSampleGate: Sendable {
       )
     case .accepting(let generation, let pressedAt):
       guard hostSeconds >= pressedAt else {
-        state = .unavailable
+        failClosed()
         throw PttSampleGateError.timestampRegression
       }
       state = .tailing(generation: generation, cutoff: hostSeconds + releaseTailSeconds)
@@ -200,8 +206,7 @@ public struct PttSampleGate: Sendable {
         )
         if let slice {
           guard pendingFrameCount + slice.samples.count <= capacityFrames else {
-            state = .unavailable
-            clearPending()
+            failClosed()
             throw PttSampleGateError.ringOverflow
           }
           pending.append(slice)
@@ -246,8 +251,7 @@ public struct PttSampleGate: Sendable {
       if error == .timestampRegression || error == .timestampDiscontinuity
         || error == .invalidTimestamp
       {
-        state = .unavailable
-        clearPending()
+        failClosed()
       }
       throw error
     }
@@ -273,18 +277,41 @@ public struct PttSampleGate: Sendable {
     state = .discarding
   }
 
-  public mutating func markUnavailable() {
+  public mutating func markUnavailable() -> PttGateInvalidation? {
+    let invalidation = pendingInvalidation ?? invalidation(for: state)
+    pendingInvalidation = nil
+    clearPending()
+    clearRecent()
+    clearTimeline()
+    state = .unavailable
+    return invalidation
+  }
+
+  public mutating func restoreAvailability() {
+    pendingInvalidation = nil
+    clearPending()
+    clearRecent()
+    clearTimeline()
+    state = suppressionRequested ? .suppressed : .discarding
+  }
+
+  private mutating func failClosed() {
+    pendingInvalidation = pendingInvalidation ?? invalidation(for: state)
     clearPending()
     clearRecent()
     clearTimeline()
     state = .unavailable
   }
 
-  public mutating func restoreAvailability() {
-    clearPending()
-    clearRecent()
-    clearTimeline()
-    state = suppressionRequested ? .suppressed : .discarding
+  private func invalidation(for state: PttGateState) -> PttGateInvalidation? {
+    switch state {
+    case .pendingAdmission(let sequence, _, _):
+      .pendingAdmission(sequence: sequence)
+    case .accepting(let generation, _), .tailing(let generation, _):
+      .activeGeneration(generation)
+    case .discarding, .suppressed, .unavailable:
+      nil
+    }
   }
 
   private mutating func validateBuffer(start: Double, sampleRate: Double) throws {

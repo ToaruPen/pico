@@ -35,7 +35,7 @@
 
 2026-07-20に次を同一treeで実行し、すべてexit 0を確認した。
 
-- `bash scripts/ci/run-macos-resident-io-gates.sh`: Swift Testing 46 testsとwarnings-as-errors release build。
+- `bash scripts/ci/run-macos-resident-io-gates.sh`: Swift Testing 42 testsとwarnings-as-errors release build。
 - `just test`: 73 files、1,004 tests（最終`just check`内で再実行）。
 - `just apple-speech-check`: Swift Testing 59 testsとwarnings-as-errors release build。
 - `just check`: macOSの両Swift gate、typecheck、lint、AST rules、format check、全Vitest。
@@ -58,7 +58,7 @@ AivisSpeechも停止中だったため、認識requestを発生させるprovider
 1. 現在のAVFoundation `:1`に相当するCore Audio device UIDの照合。最初のholdで、連続
    callback host timestampの差とframe durationの残差が現行の0.5 sample tolerance内に
    収まり、`audio_timeline_discontinuity`を誤検出しないことをbenchmark前に確認する。
-2. `just macos-resident-audio-probe -- ...`によるcallback cadence、host clock、CPU/電力、sleep/wake、route/configuration change計測。
+2. `just macos-resident-audio-probe --duration-seconds 30 --device-uid <uid>`によるcallback cadence、host clock、CPU/電力、sleep/wake、route/configuration change計測。
 3. AivisSpeech preflightと、Apple Speechへの実transcription request。
 4. immediate-speech physical PTT、250 ms tail、cancel、busy talk、TTS clear、device抜去/再設定の実マイク確認。
 5. code/config不変の3回連続real-provider run。

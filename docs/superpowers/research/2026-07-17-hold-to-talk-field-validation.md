@@ -60,7 +60,7 @@ SIGTERM cleanupを検証する。
 3. `just macos-resident-io-build`後、統合sidecarのstable release binaryへmacOSの
    Input Monitoringとmicrophone権限を許可する。
 4. 他checkoutのPicoとexclusive microphone/lock所有を確認して調整した後、
-   `just macos-resident-audio-probe --device-uid <uid>`と次のbounded harnessでtalk hold、
+   `just macos-resident-audio-probe --duration-seconds 30 --device-uid <uid>`と次のbounded harnessでtalk hold、
    busy中talk、各stage相当のcancelを確認する。無断で別processを停止しない。
 
    ```bash
