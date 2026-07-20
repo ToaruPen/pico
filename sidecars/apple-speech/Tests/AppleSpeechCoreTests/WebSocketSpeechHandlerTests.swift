@@ -210,21 +210,24 @@ struct WebSocketSpeechHandlerTests {
 
   @Test("continuous PCM remains live across repeated inactivity windows")
   func continuousPcmResetsInactivity() async throws {
+    let clock = ContinuousClock()
+    let startedAt = clock.now
     let session = RecordingStreamingSession(result: makeResult())
     let exchange = try await makeExchange(
       service: RecordingStreamingService(session: session),
-      inactivityTimeout: .milliseconds(20)
+      inactivityTimeout: .milliseconds(500)
     )
     exchange.client.yield(.text(startJSON))
     await exchange.status.waitForTextFrames(1)
 
-    for _ in 0..<5 {
-      try await Task.sleep(for: .milliseconds(10))
+    for _ in 0..<11 {
+      try await Task.sleep(for: .milliseconds(50))
       exchange.client.yield(.binary(Data([0, 0])))
     }
     exchange.client.yield(.text("{\"type\":\"finish\"}"))
 
     let frames = await exchange.server.value
+    #expect(startedAt.duration(to: clock.now) > .milliseconds(500))
     #expect(textPayloads(frames) == [readyJSON, completedJSON])
     #expect(await session.finishCount == 1)
   }
