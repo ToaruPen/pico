@@ -21,7 +21,7 @@ export default function registerPicoExtension(pi: ExtensionAPI): void {
     createController: (context, agentSettings) => {
       const operator = createResidentVoiceTerminalOperator({
         mode: context.mode,
-        setWidget: (key, lines, options) => context.ui.setWidget(key, [...lines], options)
+        setWidget: (key, factory, options) => context.ui.setWidget(key, factory, options)
       });
 
       return createResidentVoiceService({

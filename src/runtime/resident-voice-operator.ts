@@ -1,9 +1,21 @@
 import type { AuditAttributeValue } from "../modules/audit/index.js";
 import type { VoiceRuntimeStage, VoiceStageStatus } from "./voice-stage-probe.js";
 
+export type ResidentVoiceTurnPhase =
+  | "idle"
+  | "listening"
+  | "transcribing"
+  | "processing"
+  | "synthesizing"
+  | "speaking";
+
 export type ResidentVoiceOperatorEvent =
   | {
       readonly kind: "turn_started";
+    }
+  | {
+      readonly kind: "turn_phase";
+      readonly phase: ResidentVoiceTurnPhase;
     }
   | {
       readonly kind: "staff_transcript";

@@ -1,18 +1,60 @@
-import { types } from "node:util";
-
-import type { ResidentVoiceOperatorSink } from "./resident-voice-operator.js";
-import type { VoiceRuntimeStage, VoiceStageStatus } from "./voice-stage-probe.js";
+import type {
+  ResidentVoiceOperatorEvent,
+  ResidentVoiceOperatorSink,
+  ResidentVoiceTurnPhase
+} from "./resident-voice-operator.js";
+import {
+  type ResidentVoiceTerminalTheme,
+  type ResidentVoiceTerminalToolView,
+  type ResidentVoiceTerminalTurnView,
+  type ResidentVoiceTerminalView,
+  renderResidentVoiceTerminal,
+  type StageTimingView
+} from "./resident-voice-terminal-renderer.js";
+import {
+  type VoiceRuntimeStage,
+  type VoiceStageStatus,
+  voiceRuntimeStagePolicies
+} from "./voice-stage-probe.js";
 
 export type ResidentVoiceTerminalDisplayOptions = {
-  readonly setLines: (lines: readonly string[]) => void;
-  readonly maximumHistoryEntries?: number;
-  readonly maximumPayloadBytes?: number;
+  readonly onChange?: () => void;
   readonly maximumTextBytes?: number;
+};
+
+export type ResidentVoiceTerminalDisplay = ResidentVoiceOperatorSink & {
+  readonly render: (width: number, theme: ResidentVoiceTerminalTheme) => string[];
+};
+
+type ResidentVoiceTerminalTui = {
+  readonly requestRender: () => void;
+};
+
+type ResidentVoiceTerminalComponent = {
+  readonly render: (width: number) => string[];
+  readonly invalidate: () => void;
+};
+
+type ResidentVoiceTerminalWidgetFactory = (
+  tui: ResidentVoiceTerminalTui,
+  theme: ResidentVoiceTerminalTheme
+) => ResidentVoiceTerminalComponent;
+
+type MutableTurn = {
+  staffText?: string;
+  picoText?: string;
+  failure?: string;
+  readonly tools: ResidentVoiceTerminalToolView[];
+  readonly timings: Map<VoiceRuntimeStage, StageTimingView>;
 };
 
 type PendingTool = {
   readonly toolName: string;
-  readonly args: string;
+};
+
+type DisplayTurnLifecycle = {
+  active: boolean;
+  phase: ResidentVoiceTurnPhase;
 };
 
 type TextBudget = {
@@ -23,391 +65,288 @@ type TextBudget = {
   replacingUnsafeRun: boolean;
 };
 
-type PayloadBudget = {
-  nodes: number;
-  readonly seen: WeakSet<object>;
-};
-
-type PayloadPrimitive =
-  | string
-  | number
-  | boolean
-  | bigint
-  | undefined
-  | symbol
-  | ((...arguments_: never[]) => unknown);
-
-type StageTiming = {
-  readonly durationMs: number;
-  readonly status: VoiceStageStatus;
-  readonly trailingSilenceMs?: number;
-};
-
-const timingStages = [
-  ["stt", "STT"],
-  ["pi_time_to_first_text", "Pi初字"],
-  ["pi_turn", "Pi"],
-  ["tts_time_to_first_chunk", "TTS初音"],
-  ["tts_playback", "再生"],
-  ["ptt_release_to_playback_start", "PTT→再生"]
-] as const satisfies readonly (readonly [VoiceRuntimeStage, string])[];
-const defaultMaximumHistoryEntries = 8;
-const defaultMaximumPayloadBytes = 2_048;
 const defaultMaximumTextBytes = 4_096;
 const maximumToolNameBytes = 256;
+const maximumStopReasonBytes = 128;
 const maximumPendingTools = 32;
-const maximumPayloadDepth = 6;
-const maximumPayloadNodes = 128;
-const maximumPayloadProperties = 32;
-const maximumPayloadArrayItems = 32;
+const maximumCompletedToolsPerTurn = 32;
+const maximumTurns = 2;
 const residentVoiceWidgetKey = "pico-resident-voice";
+const phases = new Set<ResidentVoiceTurnPhase>([
+  "idle",
+  "listening",
+  "transcribing",
+  "processing",
+  "synthesizing",
+  "speaking"
+]);
+const statuses = new Set<VoiceStageStatus>(["ok", "error", "skipped", "suppressed"]);
+const terminalAssistantFailures = new Set(["error", "aborted"]);
+const stageFailureLabels: Partial<Readonly<Record<VoiceRuntimeStage, string>>> = {
+  stt: "文字起こし失敗",
+  pi_turn: "応答生成失敗",
+  tts_request_wall: "音声準備失敗",
+  tts_time_to_first_chunk: "音声準備失敗",
+  tts_playback: "再生失敗"
+};
 
 export function createResidentVoiceTerminalOperator(input: {
   readonly mode: string;
   readonly setWidget: (
     key: string,
-    lines: readonly string[],
+    factory: ResidentVoiceTerminalWidgetFactory,
     options: { readonly placement: "aboveEditor" }
   ) => void;
 }): ResidentVoiceOperatorSink | undefined {
-  if (input.mode !== "tui") {
-    return undefined;
-  }
+  if (input.mode !== "tui") return undefined;
 
-  return createResidentVoiceTerminalDisplay({
-    setLines: (lines) => {
-      input.setWidget(residentVoiceWidgetKey, lines, { placement: "aboveEditor" });
+  let activeTui: ResidentVoiceTerminalTui | undefined;
+  const display = createResidentVoiceTerminalDisplay({
+    onChange: () => {
+      try {
+        activeTui?.requestRender();
+      } catch {
+        // A TUI refresh failure must not alter the resident voice turn.
+      }
     }
   });
+
+  try {
+    input.setWidget(
+      residentVoiceWidgetKey,
+      (tui, theme) => {
+        activeTui = tui;
+        return {
+          invalidate() {},
+          render(width) {
+            return display.render(width, theme);
+          }
+        };
+      },
+      { placement: "aboveEditor" }
+    );
+  } catch {
+    // Widget registration is best-effort and cannot own runtime success.
+  }
+
+  return display;
 }
 
 export function createResidentVoiceTerminalDisplay(
-  options: ResidentVoiceTerminalDisplayOptions
-): ResidentVoiceOperatorSink {
-  const maximumHistoryEntries = requireBoundedInteger(
-    options.maximumHistoryEntries ?? defaultMaximumHistoryEntries,
-    1,
-    32,
-    "resident voice terminal maximumHistoryEntries"
-  );
-  const maximumPayloadBytes = requireBoundedInteger(
-    options.maximumPayloadBytes ?? defaultMaximumPayloadBytes,
-    32,
-    64 * 1024,
-    "resident voice terminal maximumPayloadBytes"
-  );
+  options: ResidentVoiceTerminalDisplayOptions = {}
+): ResidentVoiceTerminalDisplay {
   const maximumTextBytes = requireBoundedInteger(
     options.maximumTextBytes ?? defaultMaximumTextBytes,
     32,
     64 * 1024,
     "resident voice terminal maximumTextBytes"
   );
-  const history: string[] = [];
+  const turns: MutableTurn[] = [];
   const pendingTools = new Map<string, PendingTool>();
-  const timings = new Map<VoiceRuntimeStage, StageTiming>();
-  let assistantStopReason: string | undefined;
+  const lifecycle: DisplayTurnLifecycle = { active: false, phase: "idle" };
 
-  const render = (): void => {
-    const timingLine = formatTimingLine(timings);
-    const pendingAssistantLine =
-      assistantStopReason === undefined ? [] : [`Pico: [stop=${assistantStopReason}]`];
-    const lines = [
-      "Pico voice",
-      ...history,
-      ...pendingAssistantLine,
-      ...(timingLine === undefined ? [] : [timingLine])
-    ];
-
+  const notifyChange = (): void => {
     try {
-      options.setLines(lines);
+      options.onChange?.();
     } catch {
-      // A TUI refresh failure must not alter the resident voice turn.
-    }
-  };
-  const appendHistory = (line: string): void => {
-    history.push(line);
-    if (history.length > maximumHistoryEntries) {
-      history.splice(0, history.length - maximumHistoryEntries);
+      // Display updates remain best-effort.
     }
   };
 
   return {
-    // The discriminated union keeps every operator event transition visible in one place.
-    // eslint-disable-next-line complexity
     record(event) {
       try {
-        switch (event.kind) {
-          case "turn_started":
-            timings.clear();
-            pendingTools.clear();
-            assistantStopReason = undefined;
-            break;
-          case "staff_transcript":
-            appendHistory(`Staff: ${formatOperatorText(event.text, maximumTextBytes)}`);
-            break;
-          case "pi_response": {
-            const stopReason = assistantStopReason;
-            assistantStopReason = undefined;
-            appendHistory(
-              `Pico: ${formatOperatorText(event.text, maximumTextBytes)}${
-                stopReason === undefined ? "" : ` [stop=${stopReason}]`
-              }`
-            );
-            break;
-          }
-          case "assistant_settled":
-            assistantStopReason = formatOperatorText(event.stopReason, 128);
-            break;
-          case "tool_execution_start": {
-            evictOldestPendingTool(pendingTools);
-            pendingTools.set(event.toolCallId, {
-              toolName: formatOperatorText(event.toolName, maximumToolNameBytes).trim(),
-              args: formatPayload(event.args, maximumPayloadBytes)
-            });
-            break;
-          }
-          case "tool_execution_end": {
-            const pending = pendingTools.get(event.toolCallId);
-            pendingTools.delete(event.toolCallId);
-            const name = formatOperatorText(
-              pending?.toolName ?? event.toolName,
-              maximumToolNameBytes
-            ).trim();
-            const arguments_ = pending?.args ?? "undefined";
-            const result =
-              "result" in event ? ` ${formatPayload(event.result, maximumPayloadBytes)}` : "";
-            const status = event.errorCode === "cancelled" ? "cancelled" : event.status;
-            const errorCode = event.errorCode === undefined ? "" : ` [${event.errorCode}]`;
-            appendHistory(
-              `Tool: ${name}(${arguments_}) -> ${status} ${formatDuration(
-                event.durationMs
-              )}${errorCode}${result}`
-            );
-            break;
-          }
-          case "stage":
-            timings.set(event.stage, {
-              durationMs: event.durationMs,
-              status: event.status,
-              ...(typeof event.attributes["pico.voice.trailing_silence_ms"] === "number"
-                ? {
-                    trailingSilenceMs: event.attributes["pico.voice.trailing_silence_ms"]
-                  }
-                : {})
-            });
-            break;
+        if (applyEvent(event, turns, pendingTools, lifecycle, maximumTextBytes)) {
+          notifyChange();
         }
-
-        render();
       } catch {
-        // Operator visibility is best-effort and cannot own runtime success.
+        // Malformed display events cannot alter the voice runtime.
+      }
+    },
+    render(width, theme) {
+      try {
+        return renderResidentVoiceTerminal(
+          createView(lifecycle.phase, turns, pendingTools),
+          width,
+          theme
+        );
+      } catch {
+        return [];
       }
     }
   };
 }
 
-function formatTimingLine(
-  timings: ReadonlyMap<VoiceRuntimeStage, StageTiming>
-): string | undefined {
-  const values: string[] = [];
-
-  for (const [stage, label] of timingStages) {
-    const timing = timings.get(stage);
-    if (timing === undefined) {
-      continue;
-    }
-    const status = timing.status === "ok" ? "" : ` [${timing.status}]`;
-    values.push(`${label} ${formatDuration(timing.durationMs)}${status}`);
-
-    if (stage === "tts_playback" && timing.trailingSilenceMs !== undefined) {
-      values.push(`合成末尾無音 ${formatDuration(timing.trailingSilenceMs)}`);
-    }
+// The event reducer is intentionally the single mutation boundary for display-only state.
+// eslint-disable-next-line complexity
+function applyEvent(
+  event: ResidentVoiceOperatorEvent,
+  turns: MutableTurn[],
+  pendingTools: Map<string, PendingTool>,
+  lifecycle: DisplayTurnLifecycle,
+  maximumTextBytes: number
+): boolean {
+  if (event.kind === "turn_started") {
+    appendTurn(turns);
+    pendingTools.clear();
+    lifecycle.active = true;
+    return true;
   }
 
-  return values.length === 0 ? undefined : `時間: ${values.join(" | ")}`;
-}
-
-function formatDuration(durationMs: number): string {
-  if (durationMs < 1_000) {
-    return `${String(Math.round(durationMs))} ms`;
+  if (event.kind === "turn_phase") {
+    if (!isPhase(event.phase) || (event.phase !== "idle" && !lifecycle.active)) return false;
+    lifecycle.phase = event.phase;
+    if (event.phase === "idle") {
+      pendingTools.clear();
+      lifecycle.active = false;
+    }
+    return true;
   }
 
-  return `${(Math.round(durationMs / 10) / 100).toFixed(2)} s`;
+  if (!lifecycle.active) return false;
+
+  switch (event.kind) {
+    case "staff_transcript":
+      if (typeof event.text !== "string") return false;
+      currentTurn(turns).staffText = formatOperatorText(event.text, maximumTextBytes);
+      return true;
+    case "pi_response": {
+      if (typeof event.text !== "string") return false;
+      const turn = currentTurn(turns);
+      turn.picoText = formatOperatorText(event.text, maximumTextBytes);
+      delete turn.failure;
+      return true;
+    }
+    case "assistant_settled": {
+      if (typeof event.stopReason !== "string") return false;
+      const turn = currentTurn(turns);
+      if (turn.picoText === undefined && terminalAssistantFailures.has(event.stopReason)) {
+        turn.failure = formatOperatorText(event.stopReason, maximumStopReasonBytes);
+      }
+      return true;
+    }
+    case "tool_execution_start":
+      if (typeof event.toolCallId !== "string" || typeof event.toolName !== "string") return false;
+      evictOldestPendingTool(pendingTools);
+      pendingTools.set(event.toolCallId, {
+        toolName: formatOperatorText(event.toolName, maximumToolNameBytes).trim()
+      });
+      return true;
+    case "tool_execution_end": {
+      if (
+        typeof event.toolCallId !== "string" ||
+        typeof event.toolName !== "string" ||
+        !isStatus(event.status) ||
+        !isDuration(event.durationMs) ||
+        (event.errorCode !== undefined && typeof event.errorCode !== "string")
+      ) {
+        return false;
+      }
+      const pending = pendingTools.get(event.toolCallId);
+      pendingTools.delete(event.toolCallId);
+      const tool: ResidentVoiceTerminalToolView = {
+        name: formatOperatorText(pending?.toolName ?? event.toolName, maximumToolNameBytes).trim(),
+        status: event.errorCode === "cancelled" ? "cancelled" : event.status,
+        durationMs: event.durationMs,
+        ...(event.errorCode === undefined
+          ? {}
+          : { errorCode: formatOperatorText(event.errorCode, maximumStopReasonBytes) })
+      };
+      const tools = currentTurn(turns).tools;
+      tools.push(tool);
+      if (tools.length > maximumCompletedToolsPerTurn) {
+        tools.splice(0, tools.length - maximumCompletedToolsPerTurn);
+      }
+      return true;
+    }
+    case "stage": {
+      if (
+        !isRuntimeStage(event.stage) ||
+        !isStatus(event.status) ||
+        !isDuration(event.durationMs)
+      ) {
+        return false;
+      }
+      const turn = currentTurn(turns);
+      const errorCode = readStageErrorCode(event.attributes);
+      turn.timings.set(event.stage, {
+        durationMs: event.durationMs,
+        status: event.status
+      });
+      const failureLabel = stageFailureLabels[event.stage];
+      if (event.status === "error" && failureLabel !== undefined) {
+        turn.failure = errorCode === undefined ? failureLabel : `${failureLabel}: ${errorCode}`;
+      }
+      return true;
+    }
+  }
 }
 
-function formatPayload(value: unknown, maximumBytes: number): string {
-  const output = createTextBudget(maximumBytes);
-  writePayloadValue(value, output, { nodes: 0, seen: new WeakSet() }, 0);
-  return finishTextBudget(output);
+function createView(
+  phase: ResidentVoiceTurnPhase,
+  turns: readonly MutableTurn[],
+  pendingTools: ReadonlyMap<string, PendingTool>
+): ResidentVoiceTerminalView {
+  const activeToolName = Array.from(pendingTools.values()).at(-1)?.toolName;
+  return {
+    phase,
+    ...(activeToolName === undefined ? {} : { activeToolName }),
+    turns: turns.map(toTurnView)
+  };
+}
+
+function toTurnView(turn: MutableTurn): ResidentVoiceTerminalTurnView {
+  return {
+    ...(turn.staffText === undefined ? {} : { staffText: turn.staffText }),
+    ...(turn.picoText === undefined ? {} : { picoText: turn.picoText }),
+    ...(turn.failure === undefined ? {} : { failure: turn.failure }),
+    tools: turn.tools,
+    timings: turn.timings
+  };
+}
+
+function appendTurn(turns: MutableTurn[]): MutableTurn {
+  const turn: MutableTurn = { tools: [], timings: new Map() };
+  turns.push(turn);
+  if (turns.length > maximumTurns) turns.splice(0, turns.length - maximumTurns);
+  return turn;
+}
+
+function currentTurn(turns: MutableTurn[]): MutableTurn {
+  return turns.at(-1) ?? appendTurn(turns);
+}
+
+function evictOldestPendingTool(pendingTools: Map<string, PendingTool>): void {
+  if (pendingTools.size < maximumPendingTools) return;
+  const oldest = pendingTools.keys().next();
+  if (!oldest.done) pendingTools.delete(oldest.value);
+}
+
+function readStageErrorCode(attributes: Readonly<Record<string, unknown>>): string | undefined {
+  const value = attributes["pico.voice.error_code"];
+  return typeof value === "string" ? formatOperatorText(value, maximumStopReasonBytes) : undefined;
+}
+
+function isPhase(value: unknown): value is ResidentVoiceTurnPhase {
+  return typeof value === "string" && phases.has(value as ResidentVoiceTurnPhase);
+}
+
+function isRuntimeStage(value: unknown): value is VoiceRuntimeStage {
+  return typeof value === "string" && Object.hasOwn(voiceRuntimeStagePolicies, value);
+}
+
+function isStatus(value: unknown): value is VoiceStageStatus {
+  return typeof value === "string" && statuses.has(value as VoiceStageStatus);
+}
+
+function isDuration(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
 function formatOperatorText(value: string, maximumBytes: number): string {
   const output = createTextBudget(maximumBytes);
   appendTerminalText(output, value);
   return finishTextBudget(output);
-}
-
-function writePayloadValue(
-  value: unknown,
-  output: TextBudget,
-  budget: PayloadBudget,
-  depth: number
-): void {
-  if (output.truncated) return;
-  if (value === null) {
-    appendTerminalText(output, "null");
-    return;
-  }
-  if (typeof value === "object") {
-    writePayloadObject(value, output, budget, depth);
-    return;
-  }
-
-  writePayloadPrimitive(value as PayloadPrimitive, output);
-}
-
-function writePayloadPrimitive(value: PayloadPrimitive, output: TextBudget): void {
-  if (typeof value === "string") {
-    writeQuotedString(value, output);
-    return;
-  }
-  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
-    appendTerminalText(output, String(value));
-    return;
-  }
-  if (value === undefined) {
-    appendTerminalText(output, "undefined");
-    return;
-  }
-  appendTerminalText(output, typeof value === "symbol" ? "[symbol]" : "[function]");
-}
-
-function writePayloadObject(
-  value: object,
-  output: TextBudget,
-  budget: PayloadBudget,
-  depth: number
-): void {
-  if (types.isProxy(value)) {
-    appendTerminalText(output, "[Proxy]");
-    return;
-  }
-  if (budget.seen.has(value)) {
-    appendTerminalText(output, "[Circular]");
-    return;
-  }
-  if (depth >= maximumPayloadDepth || budget.nodes >= maximumPayloadNodes) {
-    markTextTruncated(output);
-    return;
-  }
-
-  budget.nodes += 1;
-  budget.seen.add(value);
-  try {
-    if (Array.isArray(value)) {
-      writePayloadArray(value, output, budget, depth);
-      return;
-    }
-    if (isPlainPayloadObject(value)) {
-      writePayloadRecord(value, output, budget, depth);
-      return;
-    }
-    if (value instanceof Uint8Array) {
-      appendTerminalText(output, "[Uint8Array]");
-      return;
-    }
-    appendTerminalText(output, "[object]");
-  } finally {
-    budget.seen.delete(value);
-  }
-}
-
-function writePayloadArray(
-  value: readonly unknown[],
-  output: TextBudget,
-  budget: PayloadBudget,
-  depth: number
-): void {
-  appendTerminalText(output, "[");
-  const itemCount = Math.min(value.length, maximumPayloadArrayItems);
-  for (let index = 0; index < itemCount && !output.truncated; index += 1) {
-    if (index > 0) appendTerminalText(output, ",");
-    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-    writePayloadDescriptor(descriptor, output, budget, depth + 1);
-  }
-  if (value.length > itemCount) markTextTruncated(output);
-  if (!output.truncated) appendTerminalText(output, "]");
-}
-
-function writePayloadRecord(
-  value: Readonly<Record<string, unknown>>,
-  output: TextBudget,
-  budget: PayloadBudget,
-  depth: number
-): void {
-  appendTerminalText(output, "{");
-  let propertyCount = 0;
-
-  for (const property in value) {
-    const descriptor = readEnumerableOwnDescriptor(value, property);
-    if (descriptor === undefined) continue;
-    if (propertyCount >= maximumPayloadProperties) {
-      markTextTruncated(output);
-      break;
-    }
-    if (propertyCount > 0) appendTerminalText(output, ",");
-    writeQuotedString(property, output);
-    appendTerminalText(output, ":");
-    writePayloadDescriptor(descriptor, output, budget, depth + 1);
-    propertyCount += 1;
-    if (output.truncated) break;
-  }
-
-  if (!output.truncated) appendTerminalText(output, "}");
-}
-
-function readEnumerableOwnDescriptor(
-  value: Readonly<Record<string, unknown>>,
-  property: string
-): PropertyDescriptor | undefined {
-  if (!Object.hasOwn(value, property)) return undefined;
-  const descriptor = Object.getOwnPropertyDescriptor(value, property);
-  return descriptor?.enumerable === true ? descriptor : undefined;
-}
-
-function writePayloadDescriptor(
-  descriptor: PropertyDescriptor | undefined,
-  output: TextBudget,
-  budget: PayloadBudget,
-  depth: number
-): void {
-  if (descriptor === undefined) {
-    appendTerminalText(output, "undefined");
-    return;
-  }
-  if (!("value" in descriptor)) {
-    appendTerminalText(output, "[accessor]");
-    return;
-  }
-  writePayloadValue(descriptor.value, output, budget, depth);
-}
-
-function isPlainPayloadObject(value: object): value is Readonly<Record<string, unknown>> {
-  const prototype = Reflect.getPrototypeOf(value);
-  return prototype === null || prototype === Object.prototype;
-}
-
-function writeQuotedString(value: string, output: TextBudget): void {
-  appendTerminalText(output, '"');
-  for (const character of value) {
-    if (output.truncated) return;
-    if (character === '"' || character === "\\") {
-      appendTerminalText(output, `\\${character}`);
-    } else {
-      appendTerminalText(output, character);
-    }
-  }
-  appendTerminalText(output, '"');
 }
 
 function createTextBudget(maximumBytes: number): TextBudget {
@@ -437,15 +376,11 @@ function appendTerminalText(output: TextBudget, value: string): void {
 function appendTerminalCharacter(output: TextBudget, character: string): void {
   const characterBytes = Buffer.byteLength(character, "utf8");
   if (output.byteLength + characterBytes > output.maximumBytes) {
-    markTextTruncated(output);
+    output.truncated = true;
     return;
   }
   output.parts.push(character);
   output.byteLength += characterBytes;
-}
-
-function markTextTruncated(output: TextBudget): void {
-  output.truncated = true;
 }
 
 function finishTextBudget(output: TextBudget): string {
@@ -459,12 +394,6 @@ function finishTextBudget(output: TextBudget): string {
     output.byteLength -= Buffer.byteLength(removed, "utf8");
   }
   return `${output.parts.join("")}${ellipsis}`;
-}
-
-function evictOldestPendingTool(pendingTools: Map<string, PendingTool>): void {
-  if (pendingTools.size < maximumPendingTools) return;
-  const oldest = pendingTools.keys().next();
-  if (!oldest.done) pendingTools.delete(oldest.value);
 }
 
 function isUnsafeTerminalCodePoint(codePoint: number): boolean {
@@ -485,6 +414,5 @@ function requireBoundedInteger(
   if (!Number.isInteger(value) || value < minimum || value > maximum) {
     throw new Error(`${label} must be an integer from ${String(minimum)} to ${String(maximum)}`);
   }
-
   return value;
 }
