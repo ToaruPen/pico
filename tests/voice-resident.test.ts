@@ -8,7 +8,8 @@ import {
   type VoicePcmFrame
 } from "../src/modules/voice/echo-control.js";
 import type {
-  SttClient,
+  ResidentStreamingSttClient,
+  SttTranscriptionRequest,
   SttTranscriptionResult,
   TtsClient,
   TtsSynthesisEvent,
@@ -61,7 +62,7 @@ describe("resident hold-to-talk voice runtime", () => {
     await vi.advanceTimersByTimeAsync(249);
     expect(driver.capture.stops()).toBe(0);
     expect(driver.sttRequests).toEqual([]);
-    await vi.advanceTimersByTimeAsync(1);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
     expect(driver.capture.stops()).toBe(1);
@@ -83,6 +84,56 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
+  it("streams admitted PCM before release without finishing STT early", async () => {
+    const driver = createDriver();
+
+    await driver.press();
+    driver.capture.emit(frame("online", [1, 0]));
+    await vi.waitFor(() => expect(driver.sttWrites).toEqual([new Uint8Array([1, 0])]));
+
+    expect(driver.sttRequests).toEqual([]);
+    expect(driver.runtime.state()).toBe("listening");
+
+    await driver.cancel();
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+    expect(driver.sttCancels()).toBe(1);
+    await driver.runtime.stop();
+  });
+
+  it("keeps ready-wait PCM in the capture channel and preserves its order after ready", async () => {
+    const ready = createGate<undefined>();
+    const driver = createDriver({ sttOpenGate: ready.promise });
+
+    await driver.press();
+    driver.capture.emit(frame("first", [1, 0]));
+    driver.capture.emit(frame("second", [2, 0]));
+    await Promise.resolve();
+    expect(driver.sttWrites).toEqual([]);
+
+    ready.resolve(undefined);
+    await vi.waitFor(() =>
+      expect(driver.sttWrites).toEqual([new Uint8Array([1, 0]), new Uint8Array([2, 0])])
+    );
+
+    await driver.cancel();
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+    await driver.runtime.stop();
+  });
+
+  it("cancels an all-echo-suppressed turn without finishing STT", async () => {
+    vi.useFakeTimers();
+    const driver = createDriver({ echoControl: suppressingEchoControl() });
+
+    await startReleasedHold(driver);
+    await driver.tailComplete();
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(driver.sttWrites).toEqual([]);
+    expect(driver.sttRequests).toEqual([]);
+    expect(driver.sttCancels()).toBe(1);
+    await driver.runtime.stop();
+  });
+
   it("records STT wall time separately from utterance duration", async () => {
     vi.useFakeTimers();
     const audit = createStructuredAuditLog();
@@ -97,7 +148,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("transcribing"));
     monotonicTimeMs = 175;
     sttGate.resolve(successfulTranscript("職員の発話", 1_000));
@@ -130,7 +181,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("synthesizing"));
     monotonicTimeMs = 450;
     ttsGate.resolve(successfulSynthesis(1_200));
@@ -157,6 +208,62 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
+  it("waits for native capture suppression before playback and resumes after playback", async () => {
+    vi.useFakeTimers();
+    const suppressGate = createGate<undefined>();
+    const boundaries: string[] = [];
+    const driver = createDriver({
+      captureBoundary: {
+        async suppress() {
+          boundaries.push("suppress:start");
+          await suppressGate.promise;
+          boundaries.push("suppress:done");
+        },
+        resume() {
+          boundaries.push("resume");
+          return Promise.resolve();
+        }
+      }
+    });
+
+    await startReleasedHold(driver);
+    await driver.tailComplete();
+    await vi.waitFor(() => expect(boundaries).toEqual(["suppress:start"]));
+    expect(driver.playbackOpens()).toBe(0);
+
+    suppressGate.resolve(undefined);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+    expect(driver.playbackOpens()).toBe(1);
+    expect(boundaries).toEqual(["suppress:start", "suppress:done", "resume"]);
+
+    await driver.runtime.stop();
+  });
+
+  it("resumes and fails the runtime when native suppression acknowledgement is uncertain", async () => {
+    vi.useFakeTimers();
+    const boundaries: string[] = [];
+    const driver = createDriver({
+      captureBoundary: {
+        suppress() {
+          boundaries.push("suppress");
+          return Promise.reject(new Error("suppress acknowledgement timed out"));
+        },
+        resume() {
+          boundaries.push("resume");
+          return Promise.resolve();
+        }
+      }
+    });
+
+    await startReleasedHold(driver);
+    const completion = driver.runtime.completion;
+    await driver.tailComplete();
+
+    await expect(completion).rejects.toThrow("playback infrastructure failed");
+    expect(boundaries).toEqual(["suppress", "resume"]);
+    await expect(driver.runtime.stop()).rejects.toThrow("playback infrastructure failed");
+  });
+
   it("starts speaking after the first chunk while the next synthesis remains pending", async () => {
     vi.useFakeTimers();
     const second = createGate<TtsSynthesisEvent>();
@@ -169,7 +276,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
     expect(driver.playedChunks.map((chunk) => chunk.sentenceIndex)).toEqual([0]);
     second.resolve(chunkEvent(1));
@@ -236,7 +343,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
     await expect(driver.cancel()).resolves.toBe("accepted");
     playbackGate.resolve(undefined);
@@ -288,7 +395,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("synthesizing"));
     await expect(driver.cancel()).resolves.toBe("accepted");
     ttsGate.resolve(result());
@@ -318,7 +425,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("synthesizing"));
     monotonicTimeMs = 850;
     ttsGate.resolve(successfulSynthesis());
@@ -340,7 +447,7 @@ describe("resident hold-to-talk voice runtime", () => {
     const driver = createDriver({ audit, speechDetected: false });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
     expect(voiceStageEvent(audit, "ptt_release_to_playback_start")).toMatchObject({
@@ -365,7 +472,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("processing"));
     monotonicTimeMs = 900;
     piGate.reject(new Error("Pi prompt failed"));
@@ -479,7 +586,7 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.press();
     driver.capture.emit(frame("quiet", [0, 0]));
     await driver.release();
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
     expect(driver.sttRequests).toEqual([]);
@@ -514,7 +621,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
     expect(driver.piRequests).toEqual([]);
@@ -526,6 +633,31 @@ describe("resident hold-to-talk voice runtime", () => {
     await expect(driver.runtime.completion).resolves.toMatchObject({
       emptyHolds: 0,
       failedTurns: 1
+    });
+  });
+
+  it("keeps a pre-ready STT failure scoped to the turn after a quick cancel and re-press", async () => {
+    vi.useFakeTimers();
+    const driver = createDriver({
+      sttOpenFailure: (attempt) =>
+        attempt === 2 ? new Error("speech backend is still releasing its lease") : undefined
+    });
+
+    await driver.press();
+    await driver.cancel();
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    await driver.press();
+    driver.capture.emit(frame("busy-turn", [1, 0]));
+    await driver.release();
+    await driver.tailComplete();
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({
+      cancelledTurns: 1,
+      failedTurns: 1,
+      failedCaptures: 0
     });
   });
 
@@ -541,7 +673,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("transcribing"));
     monotonicTimeMs = 275;
     sttGate.reject(new Error("STT request rejected"));
@@ -570,7 +702,7 @@ describe("resident hold-to-talk voice runtime", () => {
     const driver = createDriver({ piResponse: () => piGate.promise });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("processing"));
 
     await expect(driver.press()).resolves.toBe("ignored_busy");
@@ -618,12 +750,12 @@ describe("resident hold-to-talk voice runtime", () => {
 
     await driver.press();
     driver.capture.emit(frame("tail-cancel", [1, 0]));
-    await driver.release();
+    await driver.releaseOnly();
     expect(driver.runtime.state()).toBe("tailing");
     monotonicTimeMs = 175;
     await expect(driver.cancel()).resolves.toBe("accepted");
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
 
     expect(driver.sttRequests).toEqual([]);
     expect(driver.piRequests).toEqual([]);
@@ -656,7 +788,7 @@ describe("resident hold-to-talk voice runtime", () => {
     const driver = createDriver({ piResponse });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("processing"));
     await expect(driver.cancel()).resolves.toBe("accepted");
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
@@ -680,7 +812,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
     monotonicTimeMs = 500;
     await expect(driver.cancel()).resolves.toBe("accepted");
@@ -720,7 +852,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
     await expect(driver.cancel()).resolves.toBe("accepted");
     await vi.waitFor(() => expect(stopPhases).toEqual(["term"]));
@@ -754,7 +886,7 @@ describe("resident hold-to-talk voice runtime", () => {
     const completionFailure = driver.runtime.completion.catch((error: unknown) => error);
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
     await expect(driver.cancel()).resolves.toBe("accepted");
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("error"));
@@ -800,7 +932,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.playedChunks).toHaveLength(1));
     await driver.cancel();
     pendingSynthesis.resolve(completedEvent(1));
@@ -843,14 +975,14 @@ describe("resident hold-to-talk voice runtime", () => {
     cancel = driver.cancel;
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
     expect(driver.playedChunks).toHaveLength(0);
 
     await driver.press();
     driver.capture.emit(frame("poisoned-malformed-next-generation", [1, 0]));
     await driver.release();
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
     expect(registrations).toBe(1);
     expect(driver.playedChunks).toHaveLength(0);
@@ -873,7 +1005,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("transcribing"));
     monotonicTimeMs = 125;
     await expect(driver.cancel()).resolves.toBe("accepted");
@@ -906,7 +1038,7 @@ describe("resident hold-to-talk voice runtime", () => {
     driver.capture.emit(frame("first", [1, 0]));
     driver.capture.emit(frame("second", [2, 0]));
     await driver.release();
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(processedFrameIds).toEqual(["first"]));
 
     await expect(driver.cancel()).resolves.toBe("accepted");
@@ -930,7 +1062,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("synthesizing"));
     monotonicTimeMs = 300;
     await expect(driver.cancel()).resolves.toBe("accepted");
@@ -970,7 +1102,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
     const events = voiceStageEvents(audit, "tts_request_wall");
@@ -1025,7 +1157,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
     expect(driver.playbackStops()).toBe(1);
@@ -1043,7 +1175,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("processing"));
 
     const stopping = driver.runtime.stop();
@@ -1099,7 +1231,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await startReleasedHold(driver);
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("processing"));
     await vi.advanceTimersByTimeAsync(1_000);
     const stateAfterInactivity = driver.runtime.state();
@@ -1124,7 +1256,7 @@ describe("resident hold-to-talk voice runtime", () => {
     await expect(driver.press()).resolves.toBe("accepted");
     driver.capture.emit(frame("second", [1, 0]));
     await expect(driver.release()).resolves.toBe("accepted");
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
     expect(driver.piRequests.map((request) => request.sessionId)).toEqual([
@@ -1150,7 +1282,7 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(driver.runtime.state()).toBe("listening");
 
     await driver.release();
-    await vi.advanceTimersByTimeAsync(250);
+    await driver.tailComplete();
     await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
     await driver.runtime.stop();
 
@@ -1775,6 +1907,8 @@ function createDriver(
     readonly cancelDeferred?: () => void;
     readonly lifecycleEvents?: string[];
     readonly nearEndGate?: Promise<void>;
+    readonly sttOpenGate?: Promise<void>;
+    readonly sttOpenFailure?: (attempt: number) => Error | undefined;
     readonly processedFrameIds?: string[];
     readonly farewellEnabled?: boolean;
     readonly sessionDurationMs?: number;
@@ -1783,10 +1917,15 @@ function createDriver(
     readonly monotonicNow?: () => number;
     readonly validationEvents?: ResidentVoiceValidationEvent[];
     readonly operatorEvents?: ResidentVoiceOperatorEvent[];
+    readonly captureBoundary?: {
+      readonly suppress: () => Promise<void>;
+      readonly resume: () => Promise<void>;
+    };
   } = {}
 ) {
   const capture = createControlledCapture();
-  const sttRequests: Array<Parameters<SttClient["transcribe"]>[0]> = [];
+  const sttRequests: SttTranscriptionRequest[] = [];
+  const sttWrites: Uint8Array[] = [];
   const piRequests: Array<Parameters<PiAgentTurnClient["prompt"]>[0]> = [];
   const playedChunks: Array<Parameters<VoicePlaybackSession["write"]>[0]> = [];
   const disposedSessions: string[] = [];
@@ -1797,13 +1936,45 @@ function createDriver(
   let playbackCloseCount = 0;
   let echoFlushCount = 0;
   let echoFarEndReferenceCount = 0;
-  const stt: SttClient = {
-    warmup: () => Promise.resolve(successfulTranscript("warm")),
-    transcribe(request) {
-      sttRequests.push(request);
-      return (
-        options.sttResponse?.(request.signal) ?? Promise.resolve(successfulTranscript("職員の発話"))
-      );
+  let sttCancelCount = 0;
+  let sttOpenCount = 0;
+  const stt: ResidentStreamingSttClient = {
+    async open(signal) {
+      sttOpenCount += 1;
+      await options.sttOpenGate;
+      signal?.throwIfAborted();
+      const openFailure = options.sttOpenFailure?.(sttOpenCount);
+      if (openFailure !== undefined) throw openFailure;
+      const chunks: Uint8Array[] = [];
+      let cancelled = false;
+      return {
+        write(audio) {
+          const copy = audio.slice();
+          chunks.push(copy);
+          sttWrites.push(copy);
+          return Promise.resolve();
+        },
+        finish() {
+          const request = {
+            audio: joinPcmChunks(chunks),
+            encoding: "pcm16le",
+            sampleRateHz: 16_000,
+            channels: 1,
+            ...(signal === undefined ? {} : { signal })
+          } as const satisfies SttTranscriptionRequest;
+          sttRequests.push(request);
+          return (
+            options.sttResponse?.(signal) ?? Promise.resolve(successfulTranscript("職員の発話"))
+          );
+        },
+        cancel() {
+          if (!cancelled) {
+            cancelled = true;
+            sttCancelCount += 1;
+          }
+          return Promise.resolve();
+        }
+      };
     }
   };
   const piAgent: PiAgentTurnClient = {
@@ -1937,6 +2108,7 @@ function createDriver(
     tts,
     playback,
     piAgent,
+    ...(options.captureBoundary === undefined ? {} : { captureBoundary: options.captureBoundary }),
     ...(options.farewellEnabled === undefined
       ? {}
       : { farewell: { enabled: options.farewellEnabled } }),
@@ -1971,6 +2143,8 @@ function createDriver(
     runtime,
     capture,
     sttRequests,
+    sttWrites,
+    sttCancels: () => sttCancelCount,
     piRequests,
     playedChunks,
     disposedSessions,
@@ -1986,11 +2160,25 @@ function createDriver(
         kind: "talk_pressed",
         occurredAt: "2026-07-17T00:00:00.000Z"
       }),
+    releaseOnly: () =>
+      runtime.handleControl({
+        kind: "talk_released",
+        occurredAt: "2026-07-17T00:00:00.000Z"
+      }),
     release: () =>
       runtime.handleControl({
         kind: "talk_released",
         occurredAt: "2026-07-17T00:00:00.000Z"
       }),
+    tailComplete: async () => {
+      const result = await runtime.handleControl({
+        kind: "tail_complete",
+        generationId: runtime.generationId() ?? -1,
+        occurredAt: "2026-07-17T00:00:00.250Z"
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      return result;
+    },
     cancel: () =>
       runtime.handleControl({
         kind: "cancel_pressed",
@@ -2009,7 +2197,7 @@ async function completeHold(driver: Driver, id: string): Promise<void> {
   await driver.press();
   driver.capture.emit(frame(id, [1, 0]));
   await driver.release();
-  await vi.advanceTimersByTimeAsync(250);
+  await driver.tailComplete();
   await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 }
 
@@ -2262,6 +2450,43 @@ function failingFarEndEchoControl(): EchoControlProvider {
     processNearEnd: (input) => Promise.resolve(passingNearEnd(input)),
     flush: () => Promise.resolve({ status: "reset" })
   };
+}
+
+function suppressingEchoControl(): EchoControlProvider {
+  return {
+    describe: () => ({ provider: "half_duplex", mode: "half_duplex" }),
+    checkHealth: () =>
+      Promise.resolve({
+        ok: true,
+        provider: "half_duplex",
+        mode: "half_duplex",
+        engine: "test"
+      }),
+    acceptFarEndReference: () => Promise.resolve({ status: "applied" }),
+    processNearEnd: (input) =>
+      Promise.resolve({
+        action: "suppress",
+        reason: "far_end_tail_mute",
+        frame: input,
+        diagnostics: {
+          provider: "half_duplex",
+          residualEchoProbability: 1,
+          voiceActivity: false
+        }
+      }),
+    flush: () => Promise.resolve({ status: "reset" })
+  };
+}
+
+function joinPcmChunks(chunks: readonly Uint8Array[]): Uint8Array {
+  const byteLength = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+  const joined = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return joined;
 }
 
 function echoControlPassResponse(): Response {

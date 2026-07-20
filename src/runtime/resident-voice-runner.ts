@@ -23,15 +23,19 @@ import {
   type AivisSpeechTtsClientOptions,
   checkAivisSpeechServiceHealth,
   createAivisSpeechTtsClient,
-  createAppleSpeechSttClient,
+  createAppleSpeechStreamingSttClient,
   defineAivisSpeechService,
   defineAppleSpeechSidecar,
   defineTtsProviderStageObservation
 } from "../modules/voice/index.js";
 import { createDeferredToolCoordinator } from "./deferred-tool-coordinator.js";
-import { type MacOSControlBridge, startMacOSControlBridge } from "./macos-control-bridge.js";
+import {
+  type MacOSResidentIoBridge,
+  type MacOSResidentIoControlEvent,
+  type MacOSResidentIoControlOutcome,
+  startMacOSResidentIoBridge
+} from "./macos-resident-io-bridge.js";
 import type { PiAgentTurnClientOptions } from "./pi-agent-turn.js";
-import { createResidentAudioCapture } from "./resident-audio-io.js";
 import {
   assertResidentPlaybackReadiness,
   createResidentAudioOutputPlan,
@@ -39,11 +43,7 @@ import {
   type ResidentAudioOutputPlan,
   residentPlaybackFinalSilenceMs
 } from "./resident-audio-playback.js";
-import {
-  createLoopbackHttpResidentControlServer,
-  type ResidentControlHandler,
-  type ResidentControlServer
-} from "./resident-control.js";
+import type { ResidentIoTimingStage } from "./resident-io-protocol.js";
 import {
   acquireResidentSingleInstanceLock,
   registerResidentSingleInstanceLockShutdownCleanup
@@ -193,7 +193,7 @@ export async function runResidentVoiceWithProviders(input: {
     const stt = createConfiguredStt(config);
     const tts = createConfiguredTts(config, stageProbe);
     const control = requireResidentControlConfig(config);
-    const audioCapture = createResidentAudioCapture(config);
+    const audioInput = requireMacOSResidentAudioInput(config);
     const echoControl = createConfiguredEchoControl(config);
     const playback = createResidentContinuousPlaybackSink(
       createResidentAudioOutputPlan(config),
@@ -212,22 +212,65 @@ export async function runResidentVoiceWithProviders(input: {
 
     await runResidentControlLifecycle({
       signal,
-      startServer: async (handle) => {
-        const server = await createLoopbackHttpResidentControlServer({
-          host: control.host,
-          port: control.port,
-          authTokenPath: control.authTokenPath,
-          shutdownTimeoutMs: config.voice.resident.shutdownGraceMs,
-          handle,
+      startBridge: (handleControl, handleTailComplete, handleCaptureUnavailable) =>
+        startMacOSResidentIoBridge({
+          input: {
+            deviceUid: audioInput.deviceUid,
+            sampleRateHz: config.voice.echoControl.sampleRateHz,
+            channels: config.voice.echoControl.channels,
+            frameMs: config.voice.echoControl.frameMs,
+            releaseTailMs: 250,
+            talkKey: control.keyboard.talkKey,
+            cancelKey: control.keyboard.cancelKey
+          },
+          handleControl,
+          handleTailComplete,
+          handleCaptureInvalidated: handleCaptureUnavailable,
+          observeHealth: async (event) => {
+            writeProcessLine(
+              `[pico] macOS resident I/O health: ${event.state}/${event.code} restarts=${String(event.restartCount)} dropped=${String(event.droppedFrameCount)}\n`
+            );
+            audit?.record({
+              category: "transport_event",
+              name: "voice.resident_io.health",
+              severity: event.state === "running" ? "info" : "warn",
+              occurredAt: new Date().toISOString(),
+              summary: "Pico macOS resident I/O health changed.",
+              attributes: {
+                "pico.voice.resident_io.state": event.state,
+                "pico.voice.resident_io.code": event.code,
+                "pico.voice.resident_io.restart_count": event.restartCount,
+                "pico.voice.resident_io.dropped_frame_count": event.droppedFrameCount,
+                "pico.voice.resident_io.buffer_cadence_ms": event.bufferCadenceMs,
+                "pico.voice.resident_io.outside_ptt_dropped_frame_count":
+                  event.outsidePttDroppedFrameCount,
+                "pico.voice.resident_io.suppressed_dropped_frame_count":
+                  event.suppressedDroppedFrameCount
+              }
+            });
+            if (event.state !== "running") {
+              await handleCaptureUnavailable();
+            }
+          },
+          observeTiming: (event) => {
+            const occurredAtMs = Date.now();
+            recordVoiceStageProbe(stageProbe, {
+              stage: residentIoVoiceStage(event.stage),
+              status: "ok",
+              startedAt: new Date(Math.max(0, occurredAtMs - event.durationMs)).toISOString(),
+              durationMs: event.durationMs
+            });
+          },
           signal
-        });
-        writeProcessLine(`[pico] resident control: ${server.url}\n`);
-
-        return server;
-      },
-      createRuntime: () =>
-        createVoiceResidentRuntime({
-          audioCapture,
+        }),
+      createRuntime: (bridge) => {
+        writeProcessLine("[pico] macOS resident I/O: ready\n");
+        return createVoiceResidentRuntime({
+          audioCapture: bridge.audioCapture,
+          captureBoundary: {
+            suppress: bridge.suppressCapture,
+            resume: bridge.resumeCapture
+          },
           sessionLifecycle,
           echoControl,
           speechActivity,
@@ -241,12 +284,16 @@ export async function runResidentVoiceWithProviders(input: {
           probe: stageProbe,
           ...(input.operator === undefined ? {} : { operator: input.operator }),
           signal
-        }),
-      startBridge: () => startMacOSControlBridge({ control, signal })
+        });
+      }
     });
   } finally {
     await shutdownResidentVoiceTelemetry(telemetry, writeProcessLine);
   }
+}
+
+function residentIoVoiceStage(stage: ResidentIoTimingStage) {
+  return `resident_${stage}` as const;
 }
 
 function resolveStartupReadiness(
@@ -332,25 +379,60 @@ function requireTelemetryConfigValue<T>(value: T | undefined, name: string): T {
 
 export type ResidentControlLifecycleOptions = {
   readonly signal: AbortSignal;
-  readonly startServer: (handle: ResidentControlHandler) => Promise<ResidentControlServer>;
-  readonly createRuntime: () => VoiceResidentRuntime;
-  readonly startBridge: () => Promise<MacOSControlBridge>;
+  readonly createRuntime: (bridge: MacOSResidentIoBridge) => VoiceResidentRuntime;
+  readonly startBridge: (
+    handleControl: (
+      event: MacOSResidentIoControlEvent
+    ) => MacOSResidentIoControlOutcome | Promise<MacOSResidentIoControlOutcome>,
+    handleTailComplete: (generation: number) => void | Promise<void>,
+    handleCaptureUnavailable: (generation?: number) => void | Promise<void>
+  ) => Promise<MacOSResidentIoBridge>;
+  readonly now?: () => string;
 };
 
 export async function runResidentControlLifecycle(
   options: ResidentControlLifecycleOptions
 ): Promise<void> {
   let runtime: VoiceResidentRuntime | undefined;
-  let bridge: MacOSControlBridge | undefined;
-  const server = await options.startServer((event) =>
-    runtime === undefined ? "ignored_busy" : runtime.handleControl(event)
-  );
+  let bridge: MacOSResidentIoBridge | undefined;
+  const now = options.now ?? (() => new Date().toISOString());
   let lifecycleFailed = false;
   let lifecycleFailure: unknown;
 
   try {
-    runtime = options.createRuntime();
-    bridge = await options.startBridge();
+    bridge = await options.startBridge(
+      async (event) => {
+        if (runtime === undefined) {
+          return { result: "ignored_busy" };
+        }
+        const result = await runtime.handleControl({ kind: event.kind, occurredAt: now() });
+        const generation =
+          event.kind === "talk_pressed" && result === "accepted"
+            ? runtime.generationId()
+            : undefined;
+        return { result, ...(generation === undefined ? {} : { generation }) };
+      },
+      async (generation) => {
+        await runtime?.handleControl({
+          kind: "tail_complete",
+          generationId: generation,
+          occurredAt: now()
+        });
+      },
+      async (generation) => {
+        if (
+          runtime === undefined ||
+          (generation !== undefined && runtime.generationId() !== generation) ||
+          runtime.state() === "idle" ||
+          runtime.state() === "error" ||
+          runtime.state() === "stopped"
+        ) {
+          return;
+        }
+        await runtime.handleControl({ kind: "cancel_pressed", occurredAt: now() });
+      }
+    );
+    runtime = options.createRuntime(bridge);
 
     await Promise.race([
       waitForAbort(options.signal),
@@ -370,7 +452,7 @@ export async function runResidentControlLifecycle(
     lifecycleFailure = error;
   }
 
-  const cleanupFailure = await closeResidentControlOwners(runtime, bridge, server);
+  const cleanupFailure = await closeResidentControlOwners(runtime, bridge);
 
   if (lifecycleFailed) {
     throw lifecycleFailure;
@@ -387,8 +469,7 @@ type ResidentControlCleanupResult =
 
 async function closeResidentControlOwners(
   runtime: VoiceResidentRuntime | undefined,
-  bridge: MacOSControlBridge | undefined,
-  server: ResidentControlServer
+  bridge: MacOSResidentIoBridge | undefined
 ): Promise<ResidentControlCleanupResult> {
   let result: ResidentControlCleanupResult = { failed: false };
   const close = async (operation: (() => Promise<void>) | undefined): Promise<void> => {
@@ -407,7 +488,6 @@ async function closeResidentControlOwners(
 
   await close(runtime === undefined ? undefined : () => runtime.stop());
   await close(bridge === undefined ? undefined : () => bridge.close());
-  await close(() => server.close());
 
   return result;
 }
@@ -442,6 +522,23 @@ function requireResidentControlConfig(config: PicoConfig): PicoResidentControlCo
   }
 
   return control;
+}
+
+function requireMacOSResidentAudioInput(
+  config: PicoConfig
+): Extract<
+  NonNullable<PicoConfig["voice"]["resident"]["audioInput"]>,
+  { provider: "avaudioengine" }
+> {
+  const audioInput = config.voice.resident.audioInput;
+
+  if (audioInput?.provider !== "avaudioengine") {
+    throw new Error(
+      "pico macOS resident I/O requires voice.resident.audioInput.provider=avaudioengine"
+    );
+  }
+
+  return audioInput;
 }
 
 function createResidentVoiceRuntimeLogSink(
@@ -633,7 +730,7 @@ export function createConfiguredStt(config: PicoConfig) {
     throw new Error("pico resident voice requires voice.stt.appleSpeech config");
   }
 
-  return createAppleSpeechSttClient(
+  return createAppleSpeechStreamingSttClient(
     defineAppleSpeechSidecar({
       id: appleSpeech.id ?? "local-apple-speech",
       provider: "apple-speech",

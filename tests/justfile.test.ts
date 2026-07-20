@@ -61,6 +61,16 @@ describe("justfile", () => {
     expect(justfile).toContain("bash scripts/ci/run-apple-speech-gates.sh");
   });
 
+  it("exposes the macOS resident audio measurement probe", () => {
+    const justfile = readFileSync("Justfile", "utf8");
+
+    expect(justfile).toContain("macos-resident-audio-probe *args:");
+    expect(justfile).toContain(
+      "xcrun swift scripts/field/macos-resident-audio-probe.swift {{args}}"
+    );
+    expect(existsSync(resolve("scripts/field/macos-resident-audio-probe.swift"))).toBe(true);
+  });
+
   it("isolates the Apple Speech gate from the operator release build", () => {
     const gate = readFileSync("scripts/ci/run-apple-speech-gates.sh", "utf8");
 
@@ -74,7 +84,7 @@ describe("justfile", () => {
     const justfile = readFileSync("Justfile", "utf8");
     const checkRecipe = justfile.slice(justfile.indexOf("\ncheck:"), justfile.indexOf("\nci:"));
     const appleSpeechGate =
-      'if [ "$(uname -s)" = "Darwin" ]; then just apple-speech-check macos-control-check; fi';
+      'if [ "$(uname -s)" = "Darwin" ]; then just apple-speech-check macos-resident-io-check; fi';
 
     expect(checkRecipe).toContain(appleSpeechGate);
     expect(checkRecipe.indexOf(appleSpeechGate)).toBeLessThan(checkRecipe.indexOf("npm run check"));

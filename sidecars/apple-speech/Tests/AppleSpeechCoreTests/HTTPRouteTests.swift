@@ -124,6 +124,37 @@ struct HTTPRouteTests {
     #expect(try await wrongMethod.bodyData.count < 512)
   }
 
+  @Test("upgrades only the streaming GET route")
+  func upgradesStreamingRoute() async throws {
+    let handler = AppleSpeechHTTPHandler(
+      service: UnreadyService(),
+      streamingService: RouteStreamingService(),
+      admission: TranscriptionAdmission(),
+      registry: StreamingSessionRegistry()
+    )
+    let key = Data(repeating: 7, count: 16).base64EncodedString()
+    let upgrade = HTTPRequest(
+      method: .GET,
+      version: .http11,
+      path: "/v1/transcription-stream",
+      query: [],
+      headers: [
+        .host: "127.0.0.1",
+        .connection: "Upgrade",
+        .upgrade: "websocket",
+        .webSocketKey: key,
+        .webSocketVersion: "13",
+      ],
+      body: Data()
+    )
+
+    let response = try await handler.handleRequest(upgrade)
+
+    #expect(response.statusCode == .switchingProtocols)
+    #expect(response.headers[.connection] == "upgrade")
+    #expect(response.headers[.upgrade] == "websocket")
+  }
+
   private func request(
     method: HTTPMethod,
     path: String,
@@ -181,5 +212,14 @@ private actor CancellingService: AppleSpeechServing {
 
   func transcribe(_ request: ValidatedTranscriptionRequest) async throws -> TranscriptionResult {
     throw CancellationError()
+  }
+}
+
+private actor RouteStreamingService: AppleSpeechStreamingServing {
+  func makeStreamingSession(timeoutMilliseconds: Int) async throws
+    -> any AppleSpeechStreamingSession
+  {
+    Issue.record("route upgrade must not create a streaming session")
+    throw SidecarServiceError.backendError
   }
 }

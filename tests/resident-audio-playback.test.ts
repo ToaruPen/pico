@@ -35,7 +35,7 @@ describe("resident audio output plans", () => {
       voice: {
         resident: {
           enabled: true,
-          audioInput: { provider: "avfoundation", device: ":0" },
+          audioInput: { provider: "avaudioengine", deviceUid: "BuiltInMicrophoneDevice" },
           audioOutput: { provider: "ffplay", route: "system_default" }
         }
       }
@@ -63,7 +63,7 @@ describe("resident audio output plans", () => {
       voice: {
         resident: {
           enabled: true,
-          audioInput: { provider: "avfoundation", device: ":0" },
+          audioInput: { provider: "avaudioengine", deviceUid: "BuiltInMicrophoneDevice" },
           audioOutput: { provider: "ffplay", route: "system_default" }
         }
       }

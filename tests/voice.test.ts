@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   collectTtsSynthesisEvents,
   createAivisSpeechTtsClient,
+  createAppleSpeechStreamingSttClient,
   createAppleSpeechSttClient,
   defineAivisSpeechService,
   defineAppleSpeechSidecar,
@@ -155,6 +156,238 @@ async function* eventStream(
     yield await Promise.resolve(event);
   }
 }
+
+class RecordingWebSocket extends EventTarget {
+  readonly sent: (string | Uint8Array)[] = [];
+  readonly closes: { readonly code?: number; readonly reason?: string }[] = [];
+  binaryType: BinaryType = "blob";
+  bufferedAmount = 0;
+  readyState: number = WebSocket.CONNECTING;
+
+  send(data: string | Uint8Array<ArrayBuffer>): void {
+    if (typeof data === "string") {
+      this.sent.push(data);
+      return;
+    }
+    this.sent.push(data.slice());
+  }
+
+  close(code?: number, reason?: string): void {
+    this.closes.push({
+      ...(code === undefined ? {} : { code }),
+      ...(reason === undefined ? {} : { reason })
+    });
+    this.readyState = WebSocket.CLOSED;
+    this.dispatchEvent(new CloseEvent("close", { code: code ?? 1000, reason: reason ?? "" }));
+  }
+
+  open(): void {
+    this.readyState = WebSocket.OPEN;
+    this.dispatchEvent(new Event("open"));
+  }
+
+  receive(payload: unknown): void {
+    this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(payload) }));
+  }
+}
+
+describe("Apple Speech resident streaming STT boundary", () => {
+  it("coalesces ten millisecond PCM frames and completes one final transcript", async () => {
+    const socket = new RecordingWebSocket();
+    const client = createAppleSpeechStreamingSttClient(sidecar, {
+      webSocketFactory: () => socket
+    });
+
+    const opening = client.open();
+    socket.open();
+    expect(socket.sent).toEqual([
+      JSON.stringify({
+        type: "start",
+        version: 1,
+        provider: "apple-speech",
+        language: "ja-JP",
+        timeoutMs: 250,
+        encoding: "pcm16le",
+        sampleRateHz: 16_000,
+        channels: 1
+      })
+    ]);
+    socket.receive({ type: "ready", version: 1, provider: "apple-speech" });
+    const session = await opening;
+    expect(socket.binaryType).toBe("arraybuffer");
+
+    for (let index = 0; index < 10; index += 1) {
+      await session.write(new Uint8Array(320).fill(index));
+    }
+    expect(socket.sent).toHaveLength(2);
+    expect(socket.sent[1]).toBeInstanceOf(Uint8Array);
+    expect((socket.sent[1] as Uint8Array).byteLength).toBe(3_200);
+
+    await session.write(new Uint8Array([7, 0]));
+    const finishing = session.finish();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(socket.sent[2]).toEqual(new Uint8Array([7, 0]));
+    expect(socket.sent[3]).toBe(JSON.stringify({ type: "finish" }));
+
+    socket.receive({
+      type: "completed",
+      provider: "apple-speech",
+      result: {
+        text: "最終結果",
+        language: "ja-JP",
+        confidence: 0.9,
+        durationMs: 100,
+        segments: []
+      }
+    });
+
+    await expect(finishing).resolves.toMatchObject({ ok: true, text: "最終結果" });
+  });
+
+  it("waits at the secondary bufferedAmount high-water mark", async () => {
+    vi.useFakeTimers();
+    const socket = new RecordingWebSocket();
+    const client = createAppleSpeechStreamingSttClient(sidecar, {
+      webSocketFactory: () => socket
+    });
+    const opening = client.open();
+    socket.open();
+    socket.receive({ type: "ready", version: 1, provider: "apple-speech" });
+    const session = await opening;
+    socket.bufferedAmount = 256 * 1_024 + 1;
+
+    const write = session.write(new Uint8Array(3_200));
+    await vi.advanceTimersByTimeAsync(20);
+    expect(socket.sent).toHaveLength(1);
+
+    socket.bufferedAmount = 0;
+    await vi.advanceTimersByTimeAsync(10);
+    await write;
+    expect(socket.sent).toHaveLength(2);
+    vi.useRealTimers();
+  });
+
+  it("stops a backpressure wait promptly when the session is cancelled", async () => {
+    vi.useFakeTimers();
+    const socket = new RecordingWebSocket();
+    const client = createAppleSpeechStreamingSttClient(sidecar, {
+      webSocketFactory: () => socket
+    });
+    const opening = client.open();
+    socket.open();
+    socket.receive({ type: "ready", version: 1, provider: "apple-speech" });
+    const session = await opening;
+    socket.bufferedAmount = 256 * 1_024 + 1;
+    let settled = false;
+    const outcome = session.write(new Uint8Array(3_200)).then(
+      () => {
+        settled = true;
+        return "resolved";
+      },
+      (error: unknown) => {
+        settled = true;
+        return error instanceof Error ? error.message : "unknown";
+      }
+    );
+
+    await vi.advanceTimersByTimeAsync(20);
+    await session.cancel();
+    await vi.advanceTimersByTimeAsync(10);
+    const settledAfterCancellation = settled;
+
+    socket.bufferedAmount = 0;
+    await vi.advanceTimersByTimeAsync(10);
+    expect(await outcome).toContain("closed while writing");
+    expect(settledAfterCancellation).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it("fails a connection that never becomes ready", async () => {
+    vi.useFakeTimers();
+    const socket = new RecordingWebSocket();
+    const client = createAppleSpeechStreamingSttClient(sidecar, {
+      webSocketFactory: () => socket
+    });
+    const opening = client.open();
+    socket.open();
+    const rejected = expect(opening).rejects.toThrow("ready timed out");
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await rejected;
+    expect(socket.closes.at(-1)?.code).toBe(1000);
+    vi.useRealTimers();
+  });
+
+  it("returns a typed busy turn failure when the server fails before ready", async () => {
+    const socket = new RecordingWebSocket();
+    const client = createAppleSpeechStreamingSttClient(sidecar, {
+      webSocketFactory: () => socket
+    });
+    const opening = client.open();
+    socket.open();
+
+    socket.receive({
+      type: "failed",
+      provider: "apple-speech",
+      error: { code: "busy", message: "speech backend is busy" }
+    });
+
+    const session = await opening;
+    await expect(session.write(new Uint8Array([1, 0]))).resolves.toBeUndefined();
+    await expect(session.finish()).resolves.toMatchObject({ ok: false, reason: "busy" });
+  });
+
+  it("does not arm a ready timer for an already-aborted open", async () => {
+    vi.useFakeTimers();
+    const socket = new RecordingWebSocket();
+    const controller = new AbortController();
+    controller.abort();
+    const client = createAppleSpeechStreamingSttClient(sidecar, {
+      webSocketFactory: () => socket
+    });
+
+    await expect(client.open(controller.signal)).rejects.toThrow("open was aborted");
+
+    expect(vi.getTimerCount()).toBe(0);
+    vi.useRealTimers();
+  });
+
+  it("cancels without sending finish and never falls back to batch", async () => {
+    const socket = new RecordingWebSocket();
+    const fetchSpy = vi.fn<typeof fetch>();
+    const client = createAppleSpeechStreamingSttClient(sidecar, {
+      webSocketFactory: () => socket
+    });
+    const opening = client.open();
+    socket.open();
+    socket.receive({ type: "ready", version: 1, provider: "apple-speech" });
+    const session = await opening;
+
+    await session.cancel();
+
+    expect(socket.sent).toHaveLength(1);
+    expect(socket.closes.at(-1)).toEqual({ code: 1000, reason: "cancelled" });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("settles an in-flight finalization when cancellation closes the socket", async () => {
+    const socket = new RecordingWebSocket();
+    const client = createAppleSpeechStreamingSttClient(sidecar, {
+      webSocketFactory: () => socket
+    });
+    const opening = client.open();
+    socket.open();
+    socket.receive({ type: "ready", version: 1, provider: "apple-speech" });
+    const session = await opening;
+    await session.write(new Uint8Array(3_200));
+    const finishing = session.finish();
+
+    await session.cancel();
+
+    await expect(finishing).resolves.toMatchObject({ ok: false, reason: "aborted" });
+  });
+});
 
 describe("Apple Speech STT sidecar boundary", () => {
   it("requires the explicit Apple Speech provider", () => {

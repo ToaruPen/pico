@@ -35,7 +35,7 @@ export async function runResidentPiTurnMeasure(): Promise<ResidentPiTurnMeasureR
   const started = lifecycle.start({
     kind: "button_trigger",
     label: "hold_to_talk",
-    source: "loopback_http"
+    source: "macos_resident_io"
   });
   const client = createPiAgentTurnClient({
     cwd: process.cwd()

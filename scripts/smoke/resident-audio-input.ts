@@ -67,7 +67,10 @@ async function executeResidentAudioInputSmoke(
   dependencies: ResidentAudioInputSmokeDependencies
 ): Promise<ResidentAudioInputSmokeReport> {
   const resolvedConfig = config ?? dependencies.loadConfig?.() ?? loadPicoConfigFromEnvironment();
-  const skipReason = residentAudioInputSkipReason(resolvedConfig);
+  const skipReason = residentAudioInputSkipReason(
+    resolvedConfig,
+    dependencies.measureInputLevel !== undefined
+  );
 
   if (skipReason !== undefined) {
     return skipped(skipReason);
@@ -92,9 +95,16 @@ function residentAudioMinimumRmsDatabase(config: PicoConfig): number {
     : defaultMinimumRmsDatabase;
 }
 
-function residentAudioInputSkipReason(config: PicoConfig): string | undefined {
+function residentAudioInputSkipReason(
+  config: PicoConfig,
+  hasInjectedMeasurement: boolean
+): string | undefined {
   if (!config.voice.resident.enabled || config.voice.resident.audioInput === undefined) {
     return "Set voice.resident.enabled=true and voice.resident.audioInput to run the resident audio input smoke.";
+  }
+
+  if (config.voice.resident.audioInput.provider === "avaudioengine" && !hasInjectedMeasurement) {
+    return "AVAudioEngine admits audio only inside native PTT; run just field-resident-hold-to-talk for input signal validation.";
   }
 
   return undefined;

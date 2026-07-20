@@ -108,6 +108,8 @@ public struct TranscriptionResult: Codable, Equatable, Sendable {
 
 public enum SidecarErrorCode: String, Codable, Equatable, Sendable {
   case invalidRequest = "invalid_request"
+  case busy
+  case inputOverflow = "input_overflow"
   case timeout
   case modelLoad = "model_load"
   case backendError = "backend_error"
@@ -153,6 +155,7 @@ public enum SidecarServiceError: Error, Equatable, Sendable {
   case modelLoad
   case backendError
   case busy
+  case inputOverflow
 
   public var payload: SidecarErrorPayload {
     switch self {
@@ -165,7 +168,9 @@ public enum SidecarServiceError: Error, Equatable, Sendable {
     case .backendError:
       SidecarErrorPayload(code: .backendError, message: "speech backend failed")
     case .busy:
-      SidecarErrorPayload(code: .backendError, message: "speech backend is busy")
+      SidecarErrorPayload(code: .busy, message: "speech backend is busy")
+    case .inputOverflow:
+      SidecarErrorPayload(code: .inputOverflow, message: "streaming input overflowed")
     }
   }
 }

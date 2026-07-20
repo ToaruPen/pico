@@ -17,7 +17,7 @@ export type ResidentLaunchdService = {
   readonly logDirectory: string;
   readonly standardOutputPath: string;
   readonly standardErrorPath: string;
-  readonly macOSControlPackagePath: string;
+  readonly macOSResidentIoPackagePath: string;
   readonly plist: string;
 };
 
@@ -126,7 +126,7 @@ export function defineResidentLaunchdService(
   const logDirectory = join(picoDirectory, ...defaults.logDirectory);
   const standardOutputPath = join(logDirectory, `${defaults.logName}.out.log`);
   const standardErrorPath = join(logDirectory, `${defaults.logName}.err.log`);
-  const macOSControlPackagePath = join(repoRoot, "sidecars", "macos-control");
+  const macOSResidentIoPackagePath = join(repoRoot, "sidecars", "macos-resident-io");
 
   const service = {
     configPath,
@@ -136,7 +136,7 @@ export function defineResidentLaunchdService(
     logDirectory,
     standardOutputPath,
     standardErrorPath,
-    macOSControlPackagePath
+    macOSResidentIoPackagePath
   };
 
   return {
@@ -202,7 +202,7 @@ export function createResidentLaunchdOperationPlan(
           "-c",
           "release",
           "--package-path",
-          service.macOSControlPackagePath,
+          service.macOSResidentIoPackagePath,
           "-Xswiftc",
           "-warnings-as-errors"
         ],

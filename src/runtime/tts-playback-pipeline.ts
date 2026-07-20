@@ -24,7 +24,7 @@ export type TtsPlaybackPipelineOptions = {
   readonly probe?: VoiceStageProbe;
   readonly now: () => string;
   readonly monotonicNow: () => number;
-  readonly onFirstPlaybackStart?: () => boolean;
+  readonly onFirstPlaybackStart?: () => boolean | Promise<boolean>;
 };
 
 export type TtsPlaybackPipelineResult =

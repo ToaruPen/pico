@@ -7,10 +7,15 @@ import type {
   PicoTelemetry
 } from "../src/modules/telemetry/index.js";
 import type { TtsSynthesisEvent } from "../src/modules/voice/index.js";
-import type { ResidentControlHandler } from "../src/runtime/resident-control.js";
+import type {
+  MacOSResidentIoControlEvent,
+  MacOSResidentIoControlOutcome
+} from "../src/runtime/macos-resident-io-bridge.js";
+import type { ResidentAudioCapture } from "../src/runtime/resident-audio-io.js";
 import {
   assertResidentVoiceStartupReadiness,
   createConfiguredOpenTelemetry,
+  createConfiguredStt,
   createConfiguredTts,
   createResidentVoiceStageProbe,
   requireResidentVoiceEnabled,
@@ -30,18 +35,20 @@ function residentConfig(output: "ffplay" | "alsa" = "ffplay"): PicoConfig {
         enabled: true,
         audioInput:
           output === "ffplay"
-            ? { provider: "avfoundation", device: ":0" }
+            ? { provider: "avaudioengine", deviceUid: "BuiltInMicrophoneDevice" }
             : { provider: "alsa", device: "hw:1,0" },
         audioOutput:
           output === "ffplay"
             ? { provider: "ffplay", route: "system_default" }
             : { provider: "alsa", device: "hw:0,0" },
         control: {
-          provider: "loopback_http",
-          host: "127.0.0.1",
-          port: 8781,
-          authTokenPath: "tmp/pico-control-token",
+          provider: "macos_resident_io",
           keyboard: { provider: "macos", talkKey: "F13", cancelKey: "F14" }
+        }
+      },
+      stt: {
+        appleSpeech: {
+          localBaseUrl: "http://127.0.0.1:8766"
         }
       },
       tts: {
@@ -90,6 +97,13 @@ function wavResponse(): Response {
 }
 
 describe("resident voice TTS telemetry wiring", () => {
+  it("selects the streaming Apple Speech client for resident production", () => {
+    const client = createConfiguredStt(residentConfig());
+
+    expect(typeof client.open).toBe("function");
+    expect(client).not.toHaveProperty("transcribe");
+  });
+
   it("fans validated stage observations into the operator sink", () => {
     const events: unknown[] = [];
     const probe = createResidentVoiceStageProbe(undefined, {
@@ -388,6 +402,15 @@ describe("resident voice TTS telemetry wiring", () => {
   });
 });
 
+function unusedAudioCapture(): ResidentAudioCapture {
+  return {
+    start() {
+      throw new Error("unused resident audio capture");
+    },
+    close: () => Promise.resolve()
+  };
+}
+
 describe("resident voice startup readiness", () => {
   it.each([
     {
@@ -641,28 +664,20 @@ describe("resident voice runner ownership", () => {
     expect(events).toEqual(["release"]);
   });
 
-  it("starts the server, runtime, and bridge in order and shuts them down in reverse", async () => {
+  it("starts resident I/O before the runtime and shuts owners down in reverse", async () => {
     const abortController = new AbortController();
     const events: string[] = [];
-    let serverHandler: ResidentControlHandler | undefined;
+    let bridgeHandler:
+      | ((event: MacOSResidentIoControlEvent) => Promise<MacOSResidentIoControlOutcome>)
+      | undefined;
     const lifecycle = runResidentControlLifecycle({
       signal: abortController.signal,
-      startServer: (handle) => {
-        events.push("server:start");
-        serverHandler = handle;
-        return Promise.resolve({
-          url: "http://127.0.0.1:43127",
-          close: () => {
-            events.push("server:close");
-            return Promise.resolve();
-          }
-        });
-      },
       createRuntime: () => {
         events.push("runtime:start");
         return {
           handleControl: () => Promise.resolve("accepted"),
           state: () => "idle",
+          generationId: () => 7,
           completion: new Promise(() => undefined),
           stop: () => {
             events.push("runtime:stop");
@@ -670,10 +685,14 @@ describe("resident voice runner ownership", () => {
           }
         };
       },
-      startBridge: () => {
+      startBridge: (handleControl) => {
         events.push("bridge:start");
+        bridgeHandler = async (event) => handleControl(event);
         return Promise.resolve({
+          audioCapture: unusedAudioCapture(),
           completion: new Promise(() => undefined),
+          suppressCapture: () => Promise.resolve(),
+          resumeCapture: () => Promise.resolve(),
           close: () => {
             events.push("bridge:close");
             return Promise.resolve();
@@ -683,21 +702,14 @@ describe("resident voice runner ownership", () => {
     });
 
     await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(events).toEqual(["server:start", "runtime:start", "bridge:start"]);
+    expect(events).toEqual(["bridge:start", "runtime:start"]);
     await expect(
-      serverHandler?.({ kind: "talk_pressed", occurredAt: "2026-07-17T00:00:00.000Z" })
-    ).resolves.toBe("accepted");
+      bridgeHandler?.({ kind: "talk_pressed", physicalTimestampNanoseconds: "123" })
+    ).resolves.toEqual({ result: "accepted", generation: 7 });
 
     abortController.abort();
     await expect(lifecycle).resolves.toBeUndefined();
-    expect(events).toEqual([
-      "server:start",
-      "runtime:start",
-      "bridge:start",
-      "runtime:stop",
-      "bridge:close",
-      "server:close"
-    ]);
+    expect(events).toEqual(["bridge:start", "runtime:start", "runtime:stop", "bridge:close"]);
   });
 
   it("fails closed and cleans up when the managed bridge exits", async () => {
@@ -708,17 +720,10 @@ describe("resident voice runner ownership", () => {
     });
     const lifecycle = runResidentControlLifecycle({
       signal: new AbortController().signal,
-      startServer: () =>
-        Promise.resolve({
-          url: "http://127.0.0.1:43127",
-          close: () => {
-            events.push("server:close");
-            return Promise.resolve();
-          }
-        }),
       createRuntime: () => ({
         handleControl: () => Promise.resolve("accepted"),
         state: () => "idle",
+        generationId: () => undefined,
         completion: new Promise(() => undefined),
         stop: () => {
           events.push("runtime:stop");
@@ -727,7 +732,10 @@ describe("resident voice runner ownership", () => {
       }),
       startBridge: () =>
         Promise.resolve({
+          audioCapture: unusedAudioCapture(),
           completion: bridgeCompletion,
+          suppressCapture: () => Promise.resolve(),
+          resumeCapture: () => Promise.resolve(),
           close: () => {
             events.push("bridge:close");
             return Promise.reject(new Error("bridge close also failed"));
@@ -739,7 +747,45 @@ describe("resident voice runner ownership", () => {
     rejectBridge(new Error("event tap stopped"));
 
     await expect(lifecycle).rejects.toThrow("event tap stopped");
-    expect(events).toEqual(["runtime:stop", "bridge:close", "server:close"]);
+    expect(events).toEqual(["runtime:stop", "bridge:close"]);
+  });
+
+  it("cancels an active runtime turn when native capture becomes unavailable", async () => {
+    const abortController = new AbortController();
+    const controls: string[] = [];
+    let state: "listening" | "idle" = "listening";
+    let captureUnavailable: (() => void | Promise<void>) | undefined;
+    const lifecycle = runResidentControlLifecycle({
+      signal: abortController.signal,
+      createRuntime: () => ({
+        handleControl: (event) => {
+          controls.push(event.kind);
+          state = "idle";
+          return Promise.resolve("accepted");
+        },
+        state: () => state,
+        generationId: () => 1,
+        completion: new Promise(() => undefined),
+        stop: () => Promise.resolve()
+      }),
+      startBridge: (_handleControl, _handleTailComplete, handleCaptureUnavailable) => {
+        captureUnavailable = handleCaptureUnavailable;
+        return Promise.resolve({
+          audioCapture: unusedAudioCapture(),
+          completion: new Promise(() => undefined),
+          suppressCapture: () => Promise.resolve(),
+          resumeCapture: () => Promise.resolve(),
+          close: () => Promise.resolve()
+        });
+      }
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    await captureUnavailable?.();
+
+    expect(controls).toEqual(["cancel_pressed"]);
+    abortController.abort();
+    await expect(lifecycle).resolves.toBeUndefined();
   });
 
   it("requires the immutable control contract when resident voice is enabled", () => {

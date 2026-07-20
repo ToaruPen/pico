@@ -182,15 +182,24 @@ Configure these sections in `config/pico.local.yaml` as needed:
   `samplePcm16lePath` is optional and, when set for provider smoke, must point
   to a PCM16LE mono 16 kHz sample.
 - `voice.resident.audioInput` and `voice.resident.audioOutput` for the direct
-  resident voice harness. Use `avfoundation` plus `afplay` with
-  explicit `route: system_default` on macOS, and `alsa` plus `alsa` with explicit
-  devices on Raspberry Pi / Linux. `smoke:resident-audio-input` records a short
-  bounded sample and reports RMS/peak levels only; speak near the resident mic
-  during the capture to verify it clears `voice.resident.vad.minRmsDb` when the
-  energy gate is selected.
-- `voice.resident.control` for the authenticated loopback control server and
-  macOS keyboard bridge. `talkKey` and `cancelKey` are explicit startup-only
-  bindings; the example uses `F13` and `F14` without making them defaults.
+  resident voice harness. On macOS use `avaudioengine` with an explicit stable
+  Core Audio `deviceUid`, plus `ffplay` with `route: system_default`. Run the
+  bounded macOS audio probe to identify and verify the selected UID, then use
+  `just field-resident-hold-to-talk` for PTT signal validation. AVAudioEngine
+  keeps the selected input device open while Pico is running, so macOS shows its
+  microphone indicator; PCM outside an accepted PTT boundary is discarded in
+  the Swift sidecar and is not sent to Node, STT, logs, or files. Linux keeps
+  explicit `alsa` input/output devices.
+- `voice.resident.control` for the integrated `macos_resident_io` keyboard and
+  audio sidecar. `talkKey` and `cancelKey` are explicit startup-only bindings;
+  the example uses `F13` and `F14` without making them defaults.
+- Resident Apple Speech uses one loopback WebSocket and one `SpeechAnalyzer`
+  session per accepted PTT turn. Accepted PCM is sent online in bounded 100 ms
+  messages, so a two-minute turn does not accumulate one full recording in
+  Node or hit the batch endpoint's 4 MiB limit. The batch transcription route
+  remains only for startup warmup and finite provider checks; production does
+  not fall back to it when streaming fails. Only the final transcript enters
+  the Pi turn, and PCM is not written to files or ordinary telemetry.
 - `camera.tapo` for one Tapo RTSP JPEG frame.
 - `vision.ollama` for `qwen3.5:9b` through the protected local tunnel.
 - `camera.tapo` plus `vision.ollama` for camera-to-VLM scene smoke.

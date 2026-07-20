@@ -1,10 +1,12 @@
 import Foundation
 
-public enum ControlConfigurationError: Error, Equatable, LocalizedError {
+public enum ResidentIoConfigurationError: Error, Equatable, LocalizedError {
   case missingArgument(String)
   case unknownArgument(String)
-  case invalidHost
-  case invalidPort
+  case invalidSampleRate
+  case invalidChannels
+  case invalidFrameMilliseconds
+  case invalidReleaseTail
   case invalidKey(String)
   case identicalKeys
 
@@ -14,10 +16,14 @@ public enum ControlConfigurationError: Error, Equatable, LocalizedError {
       "missing required argument \(name)"
     case .unknownArgument(let name):
       "unknown argument \(name)"
-    case .invalidHost:
-      "control host must be 127.0.0.1 or ::1"
-    case .invalidPort:
-      "control port must be between 1 and 65535"
+    case .invalidSampleRate:
+      "resident I/O sample rate must be 16000 Hz"
+    case .invalidChannels:
+      "resident I/O channel count must be 1"
+    case .invalidFrameMilliseconds:
+      "resident I/O frame duration must be a positive integer"
+    case .invalidReleaseTail:
+      "resident I/O release tail must be 250 ms"
     case .invalidKey(let name):
       "unknown keyboard control \(name)"
     case .identicalKeys:
@@ -26,52 +32,58 @@ public enum ControlConfigurationError: Error, Equatable, LocalizedError {
   }
 }
 
-public struct ControlConfiguration: Equatable, Sendable {
-  public let host: String
-  public let port: UInt16
-  public let tokenPath: String
+public struct ResidentIoConfiguration: Equatable, Sendable {
+  public let deviceUID: String
+  public let sampleRateHz: UInt32
+  public let channels: UInt32
+  public let frameMilliseconds: UInt32
+  public let releaseTailMilliseconds: UInt32
   public let talkKey: String
   public let cancelKey: String
   public let talkKeyCode: UInt16
   public let cancelKeyCode: UInt16
 
-  public var baseURL: URL {
-    let formattedHost = host == "::1" ? "[::1]" : host
-    return URL(string: "http://\(formattedHost):\(port)")!
-  }
-
-  public static func parse(arguments: [String]) throws -> ControlConfiguration {
+  public static func parse(arguments: [String]) throws -> ResidentIoConfiguration {
     let values = try parseNamedArguments(arguments)
-    let host = try require(values, "--host")
-    let portText = try require(values, "--port")
-    let tokenPath = try require(values, "--token-path")
+    let deviceUID = try require(values, "--device-uid")
+    let sampleRateText = try require(values, "--sample-rate-hz")
+    let channelsText = try require(values, "--channels")
+    let frameMillisecondsText = try require(values, "--frame-ms")
+    let releaseTailText = try require(values, "--release-tail-ms")
     let talkKey = try require(values, "--talk-key")
     let cancelKey = try require(values, "--cancel-key")
 
-    guard host == "127.0.0.1" || host == "::1" else {
-      throw ControlConfigurationError.invalidHost
+    guard UInt32(sampleRateText) == 16_000 else {
+      throw ResidentIoConfigurationError.invalidSampleRate
     }
-
-    guard let port = UInt16(portText), port > 0 else {
-      throw ControlConfigurationError.invalidPort
+    guard UInt32(channelsText) == 1 else {
+      throw ResidentIoConfigurationError.invalidChannels
+    }
+    guard let frameMilliseconds = UInt32(frameMillisecondsText), frameMilliseconds > 0 else {
+      throw ResidentIoConfigurationError.invalidFrameMilliseconds
+    }
+    guard UInt32(releaseTailText) == 250 else {
+      throw ResidentIoConfigurationError.invalidReleaseTail
     }
 
     guard let talkKeyCode = MacKeyCodes.value(for: talkKey) else {
-      throw ControlConfigurationError.invalidKey(talkKey)
+      throw ResidentIoConfigurationError.invalidKey(talkKey)
     }
 
     guard let cancelKeyCode = MacKeyCodes.value(for: cancelKey) else {
-      throw ControlConfigurationError.invalidKey(cancelKey)
+      throw ResidentIoConfigurationError.invalidKey(cancelKey)
     }
 
     guard talkKeyCode != cancelKeyCode else {
-      throw ControlConfigurationError.identicalKeys
+      throw ResidentIoConfigurationError.identicalKeys
     }
 
-    return ControlConfiguration(
-      host: host,
-      port: port,
-      tokenPath: tokenPath,
+    return ResidentIoConfiguration(
+      deviceUID: deviceUID,
+      sampleRateHz: 16_000,
+      channels: 1,
+      frameMilliseconds: frameMilliseconds,
+      releaseTailMilliseconds: 250,
       talkKey: talkKey,
       cancelKey: cancelKey,
       talkKeyCode: talkKeyCode,
@@ -83,17 +95,20 @@ public struct ControlConfiguration: Equatable, Sendable {
 private func parseNamedArguments(_ arguments: [String]) throws -> [String: String] {
   var values: [String: String] = [:]
   var index = 0
-  let known = Set(["--host", "--port", "--token-path", "--talk-key", "--cancel-key"])
+  let known = Set([
+    "--device-uid", "--sample-rate-hz", "--channels", "--frame-ms", "--release-tail-ms",
+    "--talk-key", "--cancel-key",
+  ])
 
   while index < arguments.count {
     let name = arguments[index]
     guard known.contains(name) else {
-      throw ControlConfigurationError.unknownArgument(name)
+      throw ResidentIoConfigurationError.unknownArgument(name)
     }
 
     let valueIndex = index + 1
     guard valueIndex < arguments.count else {
-      throw ControlConfigurationError.missingArgument(name)
+      throw ResidentIoConfigurationError.missingArgument(name)
     }
 
     values[name] = arguments[valueIndex]
@@ -106,7 +121,7 @@ private func parseNamedArguments(_ arguments: [String]) throws -> [String: Strin
 private func require(_ values: [String: String], _ name: String) throws -> String {
   guard let value = values[name], !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   else {
-    throw ControlConfigurationError.missingArgument(name)
+    throw ResidentIoConfigurationError.missingArgument(name)
   }
 
   return value

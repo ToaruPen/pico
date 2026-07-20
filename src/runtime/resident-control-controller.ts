@@ -48,6 +48,7 @@ export type ResidentControlControllerOptions = {
     readonly from: ResidentControlState;
     readonly to: ResidentControlState;
   }) => void;
+  readonly onError?: (error: unknown) => void;
 };
 
 type OwnedGeneration = {
@@ -55,7 +56,7 @@ type OwnedGeneration = {
   readonly abortController: AbortController;
 };
 
-const releaseTailMs = 250;
+const tailCompletionWatchdogMs = 1_000;
 
 export function createResidentControlController(
   options: ResidentControlControllerOptions = {}
@@ -74,6 +75,7 @@ export function createResidentControlController(
     clearReleaseTimer();
     currentGeneration?.abortController.abort(error);
     currentState = "error";
+    options.onError?.(error);
   };
   const transition = (next: ResidentControlState): void => {
     const from = currentState;
@@ -134,25 +136,35 @@ export function createResidentControlController(
 
     const generation = currentGeneration.value;
     transition("tailing");
-    releaseTimer = scheduler.schedule(releaseTailMs, () => {
+    releaseTimer = scheduler.schedule(tailCompletionWatchdogMs, () => {
       releaseTimer = undefined;
 
       if (!matches(generation.id, "tailing")) {
         return;
       }
 
-      try {
-        transition("transcribing");
-      } catch {
-        return;
-      }
-
-      try {
-        options.onTailReady?.(generation);
-      } catch (error) {
-        enterError(error);
-      }
+      enterError(new Error("pico resident native audio tail completion timed out"));
     });
+
+    return "accepted";
+  };
+  const handleTailComplete = (
+    event: Extract<ResidentControlEvent, { readonly kind: "tail_complete" }>
+  ): ResidentControlResult => {
+    if (!matches(event.generationId, "tailing") || currentGeneration === undefined) {
+      return "ignored_stale";
+    }
+
+    const generation = currentGeneration.value;
+    clearReleaseTimer();
+    transition("transcribing");
+
+    try {
+      options.onTailReady?.(generation);
+    } catch (error) {
+      enterError(error);
+      throw error;
+    }
 
     return "accepted";
   };
@@ -196,6 +208,8 @@ export function createResidentControlController(
           return handleTalkReleased();
         case "cancel_pressed":
           return handleCancelPressed();
+        case "tail_complete":
+          return handleTailComplete(event);
       }
     },
     advance(generationId, expected, next) {

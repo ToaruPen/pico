@@ -4,7 +4,11 @@ import {
   type EchoControlProvider,
   type VoicePcmFrame
 } from "../modules/voice/echo-control.js";
-import type { SttClient, TtsClient } from "../modules/voice/index.js";
+import type {
+  ResidentStreamingSttClient,
+  ResidentStreamingSttSession,
+  TtsClient
+} from "../modules/voice/index.js";
 import type { DeferredToolDeliverableResult } from "./deferred-tool-coordinator.js";
 import type { ResidentAudioCapture, ResidentCaptureSession } from "./resident-audio-io.js";
 import type { ResidentControlEvent, ResidentControlResult } from "./resident-control.js";
@@ -56,10 +60,14 @@ export type VoiceResidentLogSink = {
 
 export type VoiceResidentRuntimeOptions = {
   readonly audioCapture: ResidentAudioCapture;
+  readonly captureBoundary?: {
+    readonly suppress: () => Promise<void>;
+    readonly resume: () => Promise<void>;
+  };
   readonly sessionLifecycle: SessionLifecycle;
   readonly echoControl: EchoControlProvider;
   readonly speechActivity?: SpeechActivityGate;
-  readonly stt: SttClient;
+  readonly stt: ResidentStreamingSttClient;
   readonly tts: TtsClient;
   readonly playback: VoicePlaybackSink;
   readonly piAgent: PiAgentTurnClient;
@@ -100,6 +108,7 @@ export type VoiceResidentRuntimeResult = {
 export type VoiceResidentRuntime = {
   readonly handleControl: (event: ResidentControlEvent) => Promise<ResidentControlResult>;
   readonly state: () => ResidentControlState;
+  readonly generationId: () => number | undefined;
   readonly completion: Promise<VoiceResidentRuntimeResult>;
   readonly stop: () => Promise<void>;
 };
@@ -118,8 +127,8 @@ type RuntimeCounters = {
 type ActiveTurn = {
   readonly generation: ResidentTurnGeneration;
   readonly capture: ResidentCaptureSession;
-  readonly frames: VoicePcmFrame[];
-  readonly frameCollection: Promise<void>;
+  readonly sttSession: Promise<ResidentStreamingSttSession>;
+  readonly frameCollection: Promise<StreamingCaptureAdmission>;
   operation: Promise<void> | undefined;
   cancellation: Promise<void> | undefined;
   pttRelease: PttReleaseMeasurement | undefined;
@@ -204,13 +213,19 @@ export function createVoiceResidentRuntime(
   };
   const controller: ResidentControlController = createResidentControlController({
     ...(options.scheduler === undefined ? {} : { scheduler: options.scheduler }),
+    onError: (error) => failRuntime(error, controller.generation()?.id),
     onListen(generation) {
       if (activeSessionId !== undefined) {
         refreshSession(options.sessionLifecycle, activeSessionId);
       }
-      const capture = options.audioCapture.start(generation.signal);
-      const frames: VoicePcmFrame[] = [];
-      const frameCollection = collectCaptureFrames(capture.frames, frames, generation.signal);
+      const capture = options.audioCapture.start(generation.signal, generation.id);
+      const sttSession = options.stt.open(generation.signal);
+      const frameCollection = streamCaptureFrames(
+        capture.frames,
+        sttSession,
+        options,
+        generation.signal
+      );
       void frameCollection.catch((error: unknown) => {
         if (!generation.signal.aborted) {
           counters.failedCaptures += 1;
@@ -220,7 +235,7 @@ export function createVoiceResidentRuntime(
       activeTurn = {
         generation,
         capture,
-        frames,
+        sttSession,
         frameCollection,
         operation: undefined,
         cancellation: undefined,
@@ -471,6 +486,7 @@ export function createVoiceResidentRuntime(
       return Promise.resolve().then(() => handleControlEvent(event));
     },
     state: controller.state,
+    generationId: () => controller.generation()?.id,
     completion,
     stop
   };
@@ -500,15 +516,91 @@ function acceptInteractionEndingCancel(
   return event.kind === "cancel_pressed" && cancel();
 }
 
-async function collectCaptureFrames(
+type StreamingCaptureAdmission = {
+  readonly speech: boolean;
+  readonly writtenBytes: number;
+  readonly sttFailed: boolean;
+};
+
+type StreamingCaptureState = {
+  readonly stream: ResidentStreamingSttSession | undefined;
+  speech: boolean;
+  writtenBytes: number;
+  sttFailed: boolean;
+};
+
+async function streamCaptureFrames(
   source: AsyncIterable<VoicePcmFrame>,
-  target: VoicePcmFrame[],
+  sttSession: Promise<ResidentStreamingSttSession>,
+  options: Pick<VoiceResidentRuntimeOptions, "echoControl" | "speechActivity">,
+  signal: AbortSignal
+): Promise<StreamingCaptureAdmission> {
+  const stream = await openStreamingSession(sttSession, signal);
+  const state: StreamingCaptureState = {
+    stream,
+    speech: false,
+    writtenBytes: 0,
+    sttFailed: stream === undefined
+  };
+
+  try {
+    for await (const input of source) {
+      await processStreamingCaptureFrame(input, state, options, signal);
+    }
+    return {
+      speech: state.speech,
+      writtenBytes: state.writtenBytes,
+      sttFailed: state.sttFailed
+    };
+  } catch (error) {
+    await state.stream?.cancel();
+    throw error;
+  }
+}
+
+async function openStreamingSession(
+  sttSession: Promise<ResidentStreamingSttSession>,
+  signal: AbortSignal
+): Promise<ResidentStreamingSttSession | undefined> {
+  try {
+    return await sttSession;
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return undefined;
+  }
+}
+
+async function processStreamingCaptureFrame(
+  input: VoicePcmFrame,
+  state: StreamingCaptureState,
+  options: Pick<VoiceResidentRuntimeOptions, "echoControl" | "speechActivity">,
   signal: AbortSignal
 ): Promise<void> {
-  for await (const frame of source) {
-    signal.throwIfAborted();
-    target.push(defineVoicePcmFrame(frame));
+  signal.throwIfAborted();
+  const frame = defineVoicePcmFrame(input);
+  const stream = writableStreamingSession(state);
+  if (stream === undefined) return;
+  const echo = await options.echoControl.processNearEnd(frame);
+  signal.throwIfAborted();
+  if (echo.action === "suppress") return;
+
+  const activity = await options.speechActivity?.process(echo.frame);
+  signal.throwIfAborted();
+  state.speech ||= activity?.speech ?? echo.diagnostics.voiceActivity;
+  try {
+    await stream.write(echo.frame.audio);
+    state.writtenBytes += echo.frame.audio.byteLength;
+  } catch {
+    state.sttFailed = true;
+    await stream.cancel().catch(() => undefined);
   }
+}
+
+function writableStreamingSession(
+  state: StreamingCaptureState
+): ResidentStreamingSttSession | undefined {
+  if (state.sttFailed) return undefined;
+  return state.stream;
 }
 
 async function processCompletedHold(
@@ -562,21 +654,26 @@ async function processCompletedHoldWork(
   }
 ): Promise<void> {
   await turn.capture.stop();
-  await turn.frameCollection;
+  const admitted = await turn.frameCollection;
 
   if (!isCurrentStage(controller, turn.generation.id, "transcribing", counters)) {
     return;
   }
 
-  const admitted = await admitCapturedSpeech(turn.frames, options, turn.generation.signal);
+  if (admitted.sttFailed) {
+    counters.failedTurns += 1;
+    finishCurrentTurn(controller, turn, "transcribing", counters, options);
+    return;
+  }
 
-  if (!admitted.speech || admitted.audio.byteLength === 0) {
+  if (!admitted.speech || admitted.writtenBytes === 0) {
+    await cancelStreamingStt(turn);
     counters.emptyHolds += 1;
     finishCurrentTurn(controller, turn, "transcribing", counters, options);
     return;
   }
 
-  const transcript = await transcribeHold(admitted, turn, options, state.now, state.monotonicNow);
+  const transcript = await transcribeHold(turn, options, state.now, state.monotonicNow);
 
   if (!isCurrentStage(controller, turn.generation.id, "transcribing", counters)) {
     return;
@@ -666,34 +763,74 @@ async function processCompletedHoldWork(
   }
   recordTurnPhase(options.operator, "synthesizing");
 
-  const playback = await runTtsPlaybackPipeline({
-    text: response.text,
-    signal: turn.generation.signal,
-    tts: options.tts,
-    playback: options.playback,
-    echoControl: options.echoControl,
-    ...(options.probe === undefined ? {} : { probe: options.probe }),
-    now: state.now,
-    monotonicNow: state.monotonicNow,
-    onFirstPlaybackStart: () => {
-      if (
-        controller.generation()?.id !== turn.generation.id ||
-        controller.state() !== "synthesizing"
-      ) {
-        return false;
-      }
-      if (!controller.advance(turn.generation.id, "synthesizing", "speaking")) {
-        return false;
-      }
-      recordTurnPhase(options.operator, "speaking");
-      settlePttReleaseMeasurement(turn, options, "ok", state.monotonicNow);
-      return true;
-    }
-  });
+  const captureBoundary = createCaptureBoundaryLease(options.captureBoundary);
+  let playback: TtsPlaybackPipelineResult;
+  try {
+    playback = await runTtsPlaybackPipeline({
+      text: response.text,
+      signal: turn.generation.signal,
+      tts: options.tts,
+      playback: options.playback,
+      echoControl: options.echoControl,
+      ...(options.probe === undefined ? {} : { probe: options.probe }),
+      now: state.now,
+      monotonicNow: state.monotonicNow,
+      onFirstPlaybackStart: () =>
+        admitTurnPlayback(controller, turn, options, state.monotonicNow, captureBoundary)
+    });
+  } finally {
+    await captureBoundary.resume();
+  }
 
   throwPlaybackInfrastructureError(playback);
 
   settleCompletedTurn(playback, turn, controller, options, counters, sessionId, deferredResults);
+}
+
+type CaptureBoundaryLease = {
+  readonly suppress: () => Promise<void>;
+  readonly resume: () => Promise<void>;
+};
+
+function createCaptureBoundaryLease(
+  boundary: VoiceResidentRuntimeOptions["captureBoundary"]
+): CaptureBoundaryLease {
+  let suppressed = false;
+
+  return {
+    async suppress() {
+      if (boundary === undefined) return;
+      suppressed = true;
+      await boundary.suppress();
+    },
+    async resume() {
+      if (!suppressed || boundary === undefined) return;
+      suppressed = false;
+      await boundary.resume();
+    }
+  };
+}
+
+async function admitTurnPlayback(
+  controller: ResidentControlController,
+  turn: ActiveTurn,
+  options: VoiceResidentRuntimeOptions,
+  monotonicNow: () => number,
+  captureBoundary: CaptureBoundaryLease
+): Promise<boolean> {
+  if (controller.generation()?.id !== turn.generation.id || controller.state() !== "synthesizing") {
+    return false;
+  }
+  await captureBoundary.suppress();
+  if (controller.generation()?.id !== turn.generation.id || controller.state() !== "synthesizing") {
+    return false;
+  }
+  if (!controller.advance(turn.generation.id, "synthesizing", "speaking")) {
+    return false;
+  }
+  recordTurnPhase(options.operator, "speaking");
+  settlePttReleaseMeasurement(turn, options, "ok", monotonicNow);
+  return true;
 }
 
 function settleCompletedTurn(
@@ -740,52 +877,7 @@ function currentPlaybackState(
   return state === "synthesizing" || state === "speaking" ? state : undefined;
 }
 
-// Frame admission keeps echo suppression, optional VAD, and audio retention in one pass.
-// eslint-disable-next-line complexity
-async function admitCapturedSpeech(
-  frames: readonly VoicePcmFrame[],
-  options: VoiceResidentRuntimeOptions,
-  signal: AbortSignal
-): Promise<{
-  readonly audio: Uint8Array;
-  readonly speech: boolean;
-  readonly sampleRateHz: number;
-  readonly channels: number;
-}> {
-  const admitted: Uint8Array[] = [];
-  let speech = false;
-
-  for (const frame of frames) {
-    signal.throwIfAborted();
-    const echo = await options.echoControl.processNearEnd(frame);
-    signal.throwIfAborted();
-
-    if (echo.action === "suppress") {
-      continue;
-    }
-
-    admitted.push(echo.frame.audio);
-    const activity = await options.speechActivity?.process(echo.frame);
-    signal.throwIfAborted();
-    speech ||= activity?.speech ?? echo.diagnostics.voiceActivity;
-  }
-
-  const first = frames[0];
-
-  return {
-    audio: concatenateAudio(admitted),
-    speech,
-    sampleRateHz: first?.sampleRateHz ?? 16_000,
-    channels: first?.channels ?? 1
-  };
-}
-
 async function transcribeHold(
-  admitted: {
-    readonly audio: Uint8Array;
-    readonly sampleRateHz: number;
-    readonly channels: number;
-  },
   turn: ActiveTurn,
   options: VoiceResidentRuntimeOptions,
   now: () => string,
@@ -803,16 +895,10 @@ async function transcribeHold(
       { "pico.voice.error_code": errorCode }
     );
   };
-  let result: Awaited<ReturnType<SttClient["transcribe"]>>;
+  let result: Awaited<ReturnType<ResidentStreamingSttSession["finish"]>>;
 
   try {
-    result = await options.stt.transcribe({
-      audio: admitted.audio,
-      encoding: "pcm16le",
-      sampleRateHz: admitted.sampleRateHz,
-      channels: admitted.channels,
-      signal: turn.generation.signal
-    });
+    result = await (await turn.sttSession).finish();
   } catch {
     const cancelled = turn.generation.signal.aborted;
     recordFailure(cancelled, cancelled ? "cancelled" : "stt_request_failed");
@@ -864,7 +950,7 @@ async function ensureActiveSession(
   const session = options.sessionLifecycle.start({
     kind: "button_trigger",
     label: "hold_to_talk",
-    source: "loopback_http"
+    source: "macos_resident_io"
   });
   state.setActiveSessionId(session.id);
   return session.id;
@@ -1054,6 +1140,7 @@ async function runFarewellPlayback(
 ): Promise<void> {
   const signal = ending.abortController.signal;
   let result: TtsPlaybackPipelineResult;
+  const captureBoundary = createCaptureBoundaryLease(options.captureBoundary);
   try {
     result = await runTtsPlaybackPipeline({
       text,
@@ -1064,8 +1151,12 @@ async function runFarewellPlayback(
       ...(options.probe === undefined ? {} : { probe: options.probe }),
       now,
       monotonicNow,
-      onFirstPlaybackStart: () => {
-        if (signal.aborted) {
+      onFirstPlaybackStart: async () => {
+        if (isAbortRequested(signal)) {
+          return false;
+        }
+        await captureBoundary.suppress();
+        if (isAbortRequested(signal)) {
           return false;
         }
         ending.cleanupOwner = "pipeline";
@@ -1074,6 +1165,7 @@ async function runFarewellPlayback(
     });
   } finally {
     ending.cleanupOwner = "resident";
+    await captureBoundary.resume();
   }
 
   if (result.status === "failed") {
@@ -1096,10 +1188,14 @@ function cancelInteractionEndingResources(
 function throwPlaybackInfrastructureError(result: TtsPlaybackPipelineResult): void {
   if (
     result.status === "failed" &&
-    (result.errorCode === "playback_stop_failed" || result.errorCode === "playback_stop_timeout")
+    (result.errorCode === "playback_start_failed" ||
+      result.errorCode === "playback_stop_failed" ||
+      result.errorCode === "playback_stop_timeout")
   ) {
+    const phase =
+      result.errorCode === "playback_start_failed" ? "during startup" : "during cancellation";
     throw new PlaybackInfrastructureError(
-      `pico resident voice playback infrastructure failed during cancellation: ${result.errorCode}`
+      `pico resident voice playback infrastructure failed ${phase}: ${result.errorCode}`
     );
   }
 }
@@ -1144,6 +1240,15 @@ function recordPiTurnSettlement(
   });
 }
 
+async function cancelStreamingStt(turn: ActiveTurn): Promise<void> {
+  try {
+    const session = await turn.sttSession;
+    await session.cancel();
+  } catch (error) {
+    if (!turn.generation.signal.aborted) throw error;
+  }
+}
+
 async function convergeCancellation(
   turn: ActiveTurn,
   controller: ResidentControlController,
@@ -1152,6 +1257,7 @@ async function convergeCancellation(
 ): Promise<void> {
   const stops = await Promise.allSettled([
     turn.capture.stop(),
+    cancelStreamingStt(turn),
     ...(pipelineOwnsPlayback ? [] : [options.playback.stop()])
   ]);
   await turn.frameCollection.catch(() => undefined);
@@ -1183,6 +1289,7 @@ async function shutdownVoiceRuntime(
       ? []
       : [
           turn.capture.stop(),
+          cancelStreamingStt(turn),
           turn.frameCollection,
           turn.operation ?? Promise.resolve(),
           turn.cancellation ?? Promise.resolve()
@@ -1355,18 +1462,6 @@ function recordTurnIdle(turn: ActiveTurn | undefined, options: VoiceResidentRunt
 function isEmptyTranscript(text: string): boolean {
   const normalized = text.trim().replaceAll(/\s+/gu, "");
   return normalized === "" || noSpeechTranscripts.has(normalized);
-}
-
-function concatenateAudio(chunks: readonly Uint8Array[]): Uint8Array {
-  const output = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0));
-  let offset = 0;
-
-  for (const chunk of chunks) {
-    output.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-
-  return output;
 }
 
 function recordLog(sink: VoiceResidentLogSink | undefined, event: VoiceResidentLogEvent): void {

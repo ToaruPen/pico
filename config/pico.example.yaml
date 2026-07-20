@@ -75,8 +75,8 @@ voice:
     enabled: false
     # Mac mini resident runtime:
     audioInput:
-      provider: avfoundation
-      device: ':0'
+      provider: avaudioengine
+      deviceUid: BuiltInMicrophoneDevice
     audioOutput:
       provider: ffplay
       route: system_default
@@ -90,10 +90,7 @@ voice:
     singleInstanceLockPath: tmp/pico-voice-resident.lock
     shutdownGraceMs: 5000
     control:
-      provider: loopback_http
-      host: 127.0.0.1
-      port: 8781
-      authTokenPath: ~/.pico/resident-voice/control-token
+      provider: macos_resident_io
       keyboard:
         provider: macos
         # Examples only. Both bindings are required and may be changed.

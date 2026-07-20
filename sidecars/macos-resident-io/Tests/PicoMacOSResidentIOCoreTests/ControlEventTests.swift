@@ -1,6 +1,6 @@
 import Testing
 
-@testable import PicoMacOSControlCore
+@testable import PicoMacOSResidentIOCore
 
 @Suite("macOS semantic key mapping")
 struct ControlEventTests {

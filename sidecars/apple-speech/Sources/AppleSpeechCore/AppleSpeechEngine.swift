@@ -3,10 +3,9 @@ import CoreMedia
 import Foundation
 import Speech
 
-public actor AppleSpeechEngine: AppleSpeechServing {
+public actor AppleSpeechEngine: AppleSpeechServing, AppleSpeechStreamingServing {
   private let localeIdentifier: String
   private let analysisTimeoutMilliseconds: Int
-  private var requestInFlight = false
 
   public init(localeIdentifier: String, analysisTimeoutMilliseconds: Int) {
     self.localeIdentifier = localeIdentifier
@@ -20,12 +19,6 @@ public actor AppleSpeechEngine: AppleSpeechServing {
   public func transcribe(
     _ request: ValidatedTranscriptionRequest
   ) async throws -> TranscriptionResult {
-    guard !requestInFlight else {
-      throw SidecarServiceError.busy
-    }
-    requestInFlight = true
-    defer { requestInFlight = false }
-
     do {
       let transcriber = try await AppleSpeechAssets.makeReadyTranscriber(
         localeIdentifier: localeIdentifier
@@ -38,6 +31,16 @@ public actor AppleSpeechEngine: AppleSpeechServing {
     } catch {
       throw SidecarServiceError.backendError
     }
+  }
+
+  public func makeStreamingSession(
+    timeoutMilliseconds: Int
+  ) async throws -> any AppleSpeechStreamingSession {
+    try await AppleSpeechStreamingAnalysisSession.make(
+      localeIdentifier: localeIdentifier,
+      clientTimeoutMilliseconds: timeoutMilliseconds,
+      analysisTimeoutMilliseconds: analysisTimeoutMilliseconds
+    )
   }
 
   private func performTranscription(
@@ -122,7 +125,7 @@ public actor AppleSpeechEngine: AppleSpeechServing {
     return try await consume()
   }
 
-  nonisolated private static func makeRuns(
+  nonisolated static func makeRuns(
     from transcription: AttributedString
   ) -> [TranscriptRun] {
     transcription.runs.map { run in
