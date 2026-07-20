@@ -17,6 +17,7 @@ import {
 } from "./resident-control-controller.js";
 import {
   type ResidentVoiceOperatorSink,
+  type ResidentVoiceTurnPhase,
   recordResidentVoiceOperatorEvent
 } from "./resident-voice-operator.js";
 import type { ResidentVoiceValidationSink } from "./resident-voice-validation.js";
@@ -122,6 +123,7 @@ type ActiveTurn = {
   operation: Promise<void> | undefined;
   cancellation: Promise<void> | undefined;
   pttRelease: PttReleaseMeasurement | undefined;
+  operatorIdleRecorded: boolean;
 };
 
 type PttReleaseMeasurement = {
@@ -189,7 +191,9 @@ export function createVoiceResidentRuntime(
     }
 
     runtimeFailure = asError(error);
-    controller.fail(generationId);
+    if (controller.fail(generationId)) {
+      recordTurnIdle(activeTurn, options);
+    }
 
     if (shutdownStarted) {
       return;
@@ -204,9 +208,6 @@ export function createVoiceResidentRuntime(
       if (activeSessionId !== undefined) {
         refreshSession(options.sessionLifecycle, activeSessionId);
       }
-      recordResidentVoiceOperatorEvent(options.operator, {
-        kind: "turn_started"
-      });
       const capture = options.audioCapture.start(generation.signal);
       const frames: VoicePcmFrame[] = [];
       const frameCollection = collectCaptureFrames(capture.frames, frames, generation.signal);
@@ -223,8 +224,13 @@ export function createVoiceResidentRuntime(
         frameCollection,
         operation: undefined,
         cancellation: undefined,
-        pttRelease: undefined
+        pttRelease: undefined,
+        operatorIdleRecorded: false
       };
+      recordResidentVoiceOperatorEvent(options.operator, {
+        kind: "turn_started"
+      });
+      recordTurnPhase(options.operator, "listening");
       counters.acceptedHolds += 1;
     },
     onTailReady(generation) {
@@ -234,6 +240,8 @@ export function createVoiceResidentRuntime(
         counters.lateResultsSuppressed += 1;
         return;
       }
+
+      recordTurnPhase(options.operator, "transcribing");
 
       turn.operation = processCompletedHold(turn, controller, options, counters, {
         now,
@@ -393,6 +401,7 @@ export function createVoiceResidentRuntime(
     const endingAtShutdown = interactionEnding;
     unsubscribeSessionEnding();
     controller.stop();
+    recordTurnIdle(turn, options);
     stopOperation = shutdownVoiceRuntime(
       turn,
       options,
@@ -563,7 +572,7 @@ async function processCompletedHoldWork(
 
   if (!admitted.speech || admitted.audio.byteLength === 0) {
     counters.emptyHolds += 1;
-    finishCurrentTurn(controller, turn.generation.id, "transcribing", counters);
+    finishCurrentTurn(controller, turn, "transcribing", counters, options);
     return;
   }
 
@@ -575,13 +584,13 @@ async function processCompletedHoldWork(
 
   if (transcript === undefined) {
     counters.failedTurns += 1;
-    finishCurrentTurn(controller, turn.generation.id, "transcribing", counters);
+    finishCurrentTurn(controller, turn, "transcribing", counters, options);
     return;
   }
 
   if (isEmptyTranscript(transcript)) {
     counters.emptyHolds += 1;
-    finishCurrentTurn(controller, turn.generation.id, "transcribing", counters);
+    finishCurrentTurn(controller, turn, "transcribing", counters, options);
     return;
   }
 
@@ -589,6 +598,7 @@ async function processCompletedHoldWork(
     counters.lateResultsSuppressed += 1;
     return;
   }
+  recordTurnPhase(options.operator, "processing");
 
   const sessionId = await ensureActiveSession(options, state);
   const deferredResults = collectDeferredResults(options, sessionId, state.now());
@@ -627,7 +637,7 @@ async function processCompletedHoldWork(
   }
 
   if (response === undefined) {
-    finishCurrentTurn(controller, turn.generation.id, "processing", counters);
+    finishCurrentTurn(controller, turn, "processing", counters, options);
     return;
   }
 
@@ -654,6 +664,7 @@ async function processCompletedHoldWork(
     counters.lateResultsSuppressed += 1;
     return;
   }
+  recordTurnPhase(options.operator, "synthesizing");
 
   const playback = await runTtsPlaybackPipeline({
     text: response.text,
@@ -674,6 +685,7 @@ async function processCompletedHoldWork(
       if (!controller.advance(turn.generation.id, "synthesizing", "speaking")) {
         return false;
       }
+      recordTurnPhase(options.operator, "speaking");
       settlePttReleaseMeasurement(turn, options, "ok", state.monotonicNow);
       return true;
     }
@@ -681,27 +693,19 @@ async function processCompletedHoldWork(
 
   throwPlaybackInfrastructureError(playback);
 
-  settleCompletedTurn(
-    playback,
-    turn.generation.id,
-    controller,
-    options,
-    counters,
-    sessionId,
-    deferredResults
-  );
+  settleCompletedTurn(playback, turn, controller, options, counters, sessionId, deferredResults);
 }
 
 function settleCompletedTurn(
   result: TtsPlaybackPipelineResult,
-  generationId: number,
+  turn: ActiveTurn,
   controller: ResidentControlController,
   options: VoiceResidentRuntimeOptions,
   counters: RuntimeCounters,
   sessionId: string,
   deferredResults: readonly DeferredToolDeliverableResult[]
 ): void {
-  const state = currentPlaybackState(controller, generationId);
+  const state = currentPlaybackState(controller, turn.generation.id);
   if (state === undefined) {
     return;
   }
@@ -720,7 +724,9 @@ function settleCompletedTurn(
       break;
   }
 
-  controller.finish(generationId, state);
+  if (controller.finish(turn.generation.id, state)) {
+    recordTurnIdle(turn, options);
+  }
 }
 
 function currentPlaybackState(
@@ -1159,7 +1165,9 @@ async function convergeCancellation(
     throw rejected.reason;
   }
 
-  controller.completeCancellation(turn.generation.id);
+  if (controller.completeCancellation(turn.generation.id)) {
+    recordTurnIdle(turn, options);
+  }
 }
 
 // Await each independently owned async boundary before shared resources close.
@@ -1319,13 +1327,29 @@ function isCurrentStage(
 
 function finishCurrentTurn(
   controller: ResidentControlController,
-  generationId: number,
+  turn: ActiveTurn,
   expected: ResidentControlState,
-  counters: RuntimeCounters
+  counters: RuntimeCounters,
+  options: VoiceResidentRuntimeOptions
 ): void {
-  if (!controller.finish(generationId, expected)) {
+  if (!controller.finish(turn.generation.id, expected)) {
     counters.lateResultsSuppressed += 1;
+    return;
   }
+  recordTurnIdle(turn, options);
+}
+
+function recordTurnPhase(
+  operator: ResidentVoiceOperatorSink | undefined,
+  phase: ResidentVoiceTurnPhase
+): void {
+  recordResidentVoiceOperatorEvent(operator, { kind: "turn_phase", phase });
+}
+
+function recordTurnIdle(turn: ActiveTurn | undefined, options: VoiceResidentRuntimeOptions): void {
+  if (turn === undefined || turn.operatorIdleRecorded) return;
+  turn.operatorIdleRecorded = true;
+  recordTurnPhase(options.operator, "idle");
 }
 
 function isEmptyTranscript(text: string): boolean {

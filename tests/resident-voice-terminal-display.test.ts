@@ -1,49 +1,52 @@
 import { describe, expect, it, vi } from "vitest";
+
 import type { ResidentVoiceOperatorEvent } from "../src/runtime/resident-voice-operator.js";
 import {
   createResidentVoiceTerminalDisplay,
   createResidentVoiceTerminalOperator
 } from "../src/runtime/resident-voice-terminal-display.js";
+import type { ResidentVoiceTerminalTheme } from "../src/runtime/resident-voice-terminal-renderer.js";
+
+const plainTheme: ResidentVoiceTerminalTheme = {
+  fg: (_color, text) => text,
+  bold: (text) => text
+};
 
 describe("resident voice terminal display", () => {
-  it("creates a non-persistent widget sink only for TUI mode", () => {
+  it("registers one custom component only in TUI mode and refreshes accepted events", () => {
     const setWidget = vi.fn();
 
     expect(createResidentVoiceTerminalOperator({ mode: "print", setWidget })).toBeUndefined();
     const operator = createResidentVoiceTerminalOperator({ mode: "tui", setWidget });
-    operator?.record({
-      kind: "staff_transcript",
-      text: "表示する"
-    });
 
     expect(setWidget).toHaveBeenCalledOnce();
-    expect(setWidget).toHaveBeenCalledWith(
-      "pico-resident-voice",
-      ["Pico voice", "Staff: 表示する"],
-      { placement: "aboveEditor" }
-    );
+    const factory = setWidget.mock.calls[0]?.[1] as
+      | ((
+          tui: { requestRender: () => void },
+          theme: ResidentVoiceTerminalTheme
+        ) => { render: (width: number) => string[]; invalidate: () => void })
+      | undefined;
+    const requestRender = vi.fn();
+    const component = factory?.({ requestRender }, plainTheme);
+
+    operator?.record({ kind: "turn_started" });
+    operator?.record({ kind: "turn_phase", phase: "listening" });
+    operator?.record({ kind: "staff_transcript", text: "表示する" });
+
+    expect(requestRender).toHaveBeenCalledTimes(3);
+    expect(component?.render(100).join("\n")).toContain("YOU   表示する");
+    expect(setWidget).toHaveBeenCalledWith("pico-resident-voice", expect.any(Function), {
+      placement: "aboveEditor"
+    });
   });
 
-  it("shows bounded conversation, tool evidence, stop reason, and aggregated timings", () => {
-    const renders: string[][] = [];
-    const display = createResidentVoiceTerminalDisplay({
-      setLines: (lines) => renders.push([...lines])
-    });
+  it("renders structured conversation, safe tool evidence, and priority timings", () => {
+    const onChange = vi.fn();
+    const display = createResidentVoiceTerminalDisplay({ onChange });
 
-    display.record({
-      kind: "turn_started"
-    });
-    display.record({
-      kind: "stage",
-      stage: "stt",
-      status: "ok",
-      durationMs: 125,
-      attributes: { "pico.voice.utterance_duration_ms": 800 }
-    });
-    display.record({
-      kind: "staff_transcript",
-      text: "スタックチャンの状態を教えて"
-    });
+    display.record({ kind: "turn_started" });
+    display.record({ kind: "turn_phase", phase: "processing" });
+    display.record({ kind: "staff_transcript", text: "スタックチャンの状態を教えて" });
     display.record({
       kind: "tool_execution_start",
       toolCallId: "call-1",
@@ -58,15 +61,10 @@ describe("resident voice terminal display", () => {
       status: "ok",
       durationMs: 350
     });
-    display.record({
-      kind: "assistant_settled",
-      stopReason: "stop"
-    });
-    display.record({
-      kind: "pi_response",
-      text: "準備できています"
-    });
+    display.record({ kind: "assistant_settled", stopReason: "stop" });
+    display.record({ kind: "pi_response", text: "準備できています" });
     for (const [stage, durationMs] of [
+      ["stt", 125],
       ["pi_time_to_first_text", 750],
       ["pi_turn", 1_075],
       ["tts_time_to_first_chunk", 240],
@@ -82,252 +80,267 @@ describe("resident voice terminal display", () => {
       });
     }
 
-    const lines = renders.at(-1) ?? [];
-    expect(lines[0]).toBe("Pico voice");
-    expect(lines).toContain("Staff: スタックチャンの状態を教えて");
-    expect(lines).toContain(
-      'Tool: stackchan_get_status({"detail":true}) -> ok 350 ms {"status":"ready"}'
-    );
-    expect(lines).toContain("Pico: 準備できています [stop=stop]");
-    expect(lines.at(-1)).toBe(
-      "時間: STT 125 ms | Pi初字 750 ms | Pi 1.08 s | TTS初音 240 ms | 再生 600 ms | 合成末尾無音 100 ms | PTT→再生 1.40 s"
-    );
+    const output = display.render(100, plainTheme).join("\n");
+    expect(output).toContain("YOU   スタックチャンの状態を教えて");
+    expect(output).toContain("TOOL  ✓ stackchan_get_status  350 ms");
+    expect(output).toContain("PICO  準備できています");
+    expect(output).toContain("応答開始 1.40 s · 最長 Pi 1.08 s");
+    expect(output).not.toContain("detail");
+    expect(output).not.toContain("ready");
+    expect(output).not.toContain("[stop=stop]");
+    expect(output).not.toContain("末尾無音");
+    expect(onChange).toHaveBeenCalledTimes(13);
   });
 
-  it("truncates Japanese text only at UTF-8 character boundaries", () => {
-    const renders: string[][] = [];
-    const display = createResidentVoiceTerminalDisplay({
-      maximumTextBytes: 32,
-      setLines: (lines) => renders.push([...lines])
-    });
+  it("ignores farewell telemetry after a resident turn becomes idle", () => {
+    const display = createResidentVoiceTerminalDisplay();
 
+    display.record({ kind: "turn_started" });
+    display.record({ kind: "turn_phase", phase: "processing" });
+    display.record({ kind: "staff_transcript", text: "今日の予定を教えて" });
     display.record({
-      kind: "staff_transcript",
-      text: "あ".repeat(11)
-    });
-
-    expect(renders.at(-1)).toEqual(["Pico voice", `Staff: ${"あ".repeat(9)}…`]);
-  });
-
-  it("shows a terminal stop reason even when no Pi response follows", () => {
-    const renders: string[][] = [];
-    const display = createResidentVoiceTerminalDisplay({
-      setLines: (lines) => renders.push([...lines])
-    });
-
-    display.record({ kind: "assistant_settled", stopReason: "error" });
-
-    expect(renders.at(-1)).toEqual(["Pico voice", "Pico: [stop=error]"]);
-  });
-
-  it("keeps transcripts and tool names on one terminal-safe line", () => {
-    const renders: string[][] = [];
-    const display = createResidentVoiceTerminalDisplay({
-      setLines: (lines) => renders.push([...lines])
-    });
-
-    display.record({ kind: "staff_transcript", text: "一行目\n時間: 偽装\u001B[31m" });
-    display.record({
-      kind: "tool_execution_start",
-      toolCallId: "call-1",
-      toolName: "unsafe\r\nname\u001B",
-      args: {}
-    });
-    display.record({
-      kind: "tool_execution_end",
-      toolCallId: "call-1",
-      toolName: "unsafe",
-      result: {},
+      kind: "stage",
+      stage: "ptt_release_to_playback_start",
       status: "ok",
-      durationMs: 1
+      durationMs: 1_400,
+      attributes: {}
     });
-
-    const lines = renders.at(-1) ?? [];
-    expect(lines).toContain("Staff: 一行目 時間: 偽装 [31m");
-    expect(lines).toContain("Tool: unsafe name({}) -> ok 1 ms {}");
-    expect(
-      lines.every(
-        (line) => !line.includes("\r") && !line.includes("\n") && !line.includes("\u001B")
-      )
-    ).toBe(true);
-  });
-
-  it("shows and releases a tool call that is cancelled before an SDK end event", () => {
-    const renders: string[][] = [];
-    const display = createResidentVoiceTerminalDisplay({
-      setLines: (lines) => renders.push([...lines])
+    display.record({
+      kind: "stage",
+      stage: "pi_turn",
+      status: "ok",
+      durationMs: 1_075,
+      attributes: {}
     });
+    display.record({ kind: "turn_phase", phase: "idle" });
+    const completedCard = display.render(100, plainTheme);
 
     display.record({
+      kind: "stage",
+      stage: "pi_turn",
+      status: "ok",
+      durationMs: 9_000,
+      attributes: {}
+    });
+    display.record({
       kind: "tool_execution_start",
-      toolCallId: "call-1",
-      toolName: "slow_tool",
-      args: { wait: true }
+      toolCallId: "farewell-tool",
+      toolName: "farewell_status",
+      args: undefined
     });
     display.record({
       kind: "tool_execution_end",
-      toolCallId: "call-1",
-      toolName: "slow_tool",
-      status: "skipped",
-      errorCode: "cancelled",
+      toolCallId: "farewell-tool",
+      toolName: "farewell_status",
+      status: "ok",
       durationMs: 250
     });
 
-    expect(renders.at(-1)).toContain(
-      'Tool: slow_tool({"wait":true}) -> cancelled 250 ms [cancelled]'
-    );
+    const afterFarewell = display.render(100, plainTheme);
+    expect(afterFarewell).toEqual(completedCard);
+    expect(afterFarewell.join("\n")).not.toContain("farewell_status");
   });
 
-  it("bounds cyclic tool payloads and keeps only the configured history", () => {
-    const renders: string[][] = [];
-    const display = createResidentVoiceTerminalDisplay({
-      maximumHistoryEntries: 2,
-      maximumPayloadBytes: 48,
-      setLines: (lines) => renders.push([...lines])
-    });
-    const cyclic: Record<string, unknown> = { value: "x".repeat(100) };
-    cyclic.self = cyclic;
+  it("shows a post-response audio failure while preserving the response", () => {
+    const display = createResidentVoiceTerminalDisplay();
 
+    display.record({ kind: "turn_started" });
+    display.record({ kind: "turn_phase", phase: "synthesizing" });
+    display.record({ kind: "pi_response", text: "準備できました" });
     display.record({
-      kind: "turn_started"
-    });
-    display.record({
-      kind: "tool_execution_start",
-      toolCallId: "call-1",
-      toolName: "example",
-      args: cyclic
-    });
-    display.record({
-      kind: "tool_execution_end",
-      toolCallId: "call-1",
-      toolName: "example",
-      result: cyclic,
+      kind: "stage",
+      stage: "tts_time_to_first_chunk",
       status: "error",
-      durationMs: 100
-    });
-    display.record({
-      kind: "staff_transcript",
-      text: "二つ目"
-    });
-    display.record({
-      kind: "pi_response",
-      text: "三つ目"
+      durationMs: 500,
+      attributes: { "pico.voice.error_code": "backend_error" }
     });
 
-    const lines = renders.at(-1) ?? [];
-    expect(lines).toEqual(["Pico voice", "Staff: 二つ目", "Pico: 三つ目"]);
-    expect(renders.flat().join("\n")).toContain("…");
+    const output = display.render(100, plainTheme).join("\n");
+    expect(output).toContain("✗ 音声準備失敗: backend_error");
+    expect(output).toContain("PICO  準備できました");
   });
 
-  it("does not execute accessors, toJSON, custom inspection, or Proxy traps", () => {
-    const renders: string[][] = [];
+  it("never reads tool args or results, including hostile accessors and proxies", () => {
     const sideEffect = vi.fn();
-    class HostileBytes extends Uint8Array {
-      override get byteLength(): number {
-        sideEffect();
-        return super.byteLength;
-      }
-    }
-    const payload: Record<string, unknown> = { bytes: new HostileBytes(1) };
-    Object.defineProperty(payload, "secret", {
-      enumerable: true,
-      get: sideEffect
-    });
-    Object.defineProperty(payload, "toJSON", {
-      enumerable: false,
-      value: sideEffect
-    });
-    const proxy = new Proxy(payload, {
+    const arguments_ = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(arguments_, "secret", { enumerable: true, get: sideEffect });
+    Object.defineProperty(arguments_, "toJSON", { value: sideEffect });
+    Object.defineProperty(arguments_, "inspect", { value: sideEffect });
+    const result = new Proxy(Object.create(null) as Record<string, unknown>, {
       get() {
         sideEffect();
         return undefined;
       },
-      getOwnPropertyDescriptor(target, property) {
+      getOwnPropertyDescriptor() {
         sideEffect();
-        return Reflect.getOwnPropertyDescriptor(target, property);
+        return undefined;
       },
-      getPrototypeOf(target) {
+      getPrototypeOf() {
         sideEffect();
-        return Reflect.getPrototypeOf(target);
+        return Object.prototype;
       },
-      ownKeys(target) {
+      ownKeys() {
         sideEffect();
-        return Reflect.ownKeys(target);
+        return [];
       }
     });
-    const display = createResidentVoiceTerminalDisplay({
-      maximumPayloadBytes: 64,
-      setLines: (lines) => renders.push([...lines])
-    });
+    const display = createResidentVoiceTerminalDisplay();
 
+    display.record({ kind: "turn_started" });
     display.record({
       kind: "tool_execution_start",
       toolCallId: "call-1",
       toolName: "safe_tool",
-      args: payload
+      args: arguments_
     });
     display.record({
       kind: "tool_execution_end",
       toolCallId: "call-1",
       toolName: "safe_tool",
       status: "ok",
-      result: proxy,
+      result,
       durationMs: 1
     });
 
     expect(sideEffect).not.toHaveBeenCalled();
-    expect(renders.at(-1)?.join("\n")).toContain("[accessor]");
-    expect(renders.at(-1)?.join("\n")).toContain("[Proxy]");
+    expect(display.render(100, plainTheme).join("\n")).toContain("TOOL  ✓ safe_tool  1 ms");
   });
 
-  it("caps pending tool snapshots and evicts the oldest bounded payload", () => {
-    const renders: string[][] = [];
-    const display = createResidentVoiceTerminalDisplay({
-      setLines: (lines) => renders.push([...lines])
+  it("sanitizes terminal controls and truncates text at UTF-8 character boundaries", () => {
+    const display = createResidentVoiceTerminalDisplay({ maximumTextBytes: 32 });
+
+    display.record({ kind: "turn_started" });
+    display.record({ kind: "staff_transcript", text: `${"あ".repeat(11)}\n偽装\u001B[31m` });
+    display.record({
+      kind: "tool_execution_start",
+      toolCallId: "call-1",
+      toolName: "unsafe\r\nname\u001B",
+      args: undefined
+    });
+    display.record({
+      kind: "tool_execution_end",
+      toolCallId: "call-1",
+      toolName: "ignored",
+      status: "ok",
+      durationMs: 1
     });
 
+    const output = display.render(100, plainTheme).join("\n");
+    expect(output).toContain(`YOU   ${"あ".repeat(9)}…`);
+    expect(output).toContain("TOOL  ✓ unsafe name  1 ms");
+    expect(output).not.toContain(String.fromCodePoint(27));
+  });
+
+  it("shows only response-less terminal failures", () => {
+    const display = createResidentVoiceTerminalDisplay();
+
+    display.record({ kind: "turn_started" });
+    display.record({ kind: "assistant_settled", stopReason: "stop" });
+    expect(display.render(100, plainTheme).join("\n")).not.toContain("stop");
+
+    display.record({ kind: "assistant_settled", stopReason: "error" });
+    expect(display.render(100, plainTheme).join("\n")).toContain("✗ error");
+
+    display.record({ kind: "pi_response", text: "回復した応答" });
+    const output = display.render(100, plainTheme).join("\n");
+    expect(output).toContain("PICO  回復した応答");
+    expect(output).not.toContain("✗ error");
+  });
+
+  it("keeps only the current and previous turn", () => {
+    const display = createResidentVoiceTerminalDisplay();
+
+    for (const text of ["最初", "前", "現在"] as const) {
+      display.record({ kind: "turn_started" });
+      display.record({ kind: "staff_transcript", text });
+    }
+
+    const output = display.render(100, plainTheme).join("\n");
+    expect(output).not.toContain("最初");
+    expect(output).toContain("前");
+    expect(output).toContain("現在");
+  });
+
+  it("caps pending tools at 32 safe names", () => {
+    const display = createResidentVoiceTerminalDisplay();
+
+    display.record({ kind: "turn_started" });
     for (let index = 0; index < 33; index += 1) {
       display.record({
         kind: "tool_execution_start",
         toolCallId: `call-${String(index)}`,
-        toolName: `tool-${String(index)}`,
-        args: { index }
+        toolName: `original-${String(index)}`,
+        args: undefined
       });
     }
     display.record({
       kind: "tool_execution_end",
       toolCallId: "call-0",
-      toolName: "tool-0",
+      toolName: "evicted-name",
       status: "ok",
-      result: {},
+      durationMs: 1
+    });
+    display.record({
+      kind: "tool_execution_end",
+      toolCallId: "call-1",
+      toolName: "wrong-name",
+      status: "ok",
       durationMs: 1
     });
 
-    expect(renders.at(-1)).toContain("Tool: tool-0(undefined) -> ok 1 ms {}");
+    const output = display.render(100, plainTheme).join("\n");
+    expect(output).toContain("evicted-name");
+    expect(output).toContain("original-1");
+    expect(output).not.toContain("wrong-name");
   });
 
-  it("contains widget failures so observability cannot fail the voice runtime", () => {
+  it("contains change, refresh, registration, render, theme, and malformed-event failures", () => {
     const display = createResidentVoiceTerminalDisplay({
-      setLines: vi.fn(() => {
-        throw new Error("widget unavailable");
+      onChange: vi.fn(() => {
+        throw new Error("change unavailable");
       })
     });
-
-    expect(() =>
-      display.record({
-        kind: "staff_transcript",
-        text: "続行する"
-      })
-    ).not.toThrow();
-  });
-
-  it("contains malformed operator events so formatting cannot fail the voice runtime", () => {
-    const display = createResidentVoiceTerminalDisplay({ setLines: vi.fn() });
-    const malformedEvent = {
+    const brokenTheme: ResidentVoiceTerminalTheme = {
+      fg: () => {
+        throw new Error("theme unavailable");
+      },
+      bold: (text) => text
+    };
+    const malformed = {
       kind: "staff_transcript",
       text: undefined
     } as unknown as ResidentVoiceOperatorEvent;
 
-    expect(() => display.record(malformedEvent)).not.toThrow();
+    expect(() => display.record({ kind: "turn_started" })).not.toThrow();
+    expect(() => display.record({ kind: "staff_transcript", text: "続行する" })).not.toThrow();
+    expect(() => display.record(malformed)).not.toThrow();
+    expect(() => display.render(100, brokenTheme)).not.toThrow();
+    expect(display.render(100, brokenTheme)).toEqual([]);
+    expect(() =>
+      createResidentVoiceTerminalOperator({
+        mode: "tui",
+        setWidget: () => {
+          throw new Error("registration unavailable");
+        }
+      })
+    ).not.toThrow();
+
+    const setWidget = vi.fn();
+    const operator = createResidentVoiceTerminalOperator({ mode: "tui", setWidget });
+    const factory = setWidget.mock.calls[0]?.[1] as (
+      tui: { requestRender: () => void },
+      theme: ResidentVoiceTerminalTheme
+    ) => { render: (width: number) => string[] };
+    const component = factory(
+      {
+        requestRender: () => {
+          throw new Error("refresh unavailable");
+        }
+      },
+      brokenTheme
+    );
+
+    expect(() => operator?.record({ kind: "turn_phase", phase: "speaking" })).not.toThrow();
+    expect(component.render(100)).toEqual([]);
   });
 });

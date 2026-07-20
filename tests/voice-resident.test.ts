@@ -435,12 +435,36 @@ describe("resident hold-to-talk voice runtime", () => {
         kind: "turn_started"
       },
       {
+        kind: "turn_phase",
+        phase: "listening"
+      },
+      {
+        kind: "turn_phase",
+        phase: "transcribing"
+      },
+      {
+        kind: "turn_phase",
+        phase: "processing"
+      },
+      {
         kind: "staff_transcript",
         text: "職員の発話"
       },
       {
         kind: "pi_response",
         text: "Picoの応答"
+      },
+      {
+        kind: "turn_phase",
+        phase: "synthesizing"
+      },
+      {
+        kind: "turn_phase",
+        phase: "speaking"
+      },
+      {
+        kind: "turn_phase",
+        phase: "idle"
       }
     ]);
 
@@ -449,7 +473,8 @@ describe("resident hold-to-talk voice runtime", () => {
 
   it("rejects a no-speech hold before STT and Pi", async () => {
     vi.useFakeTimers();
-    const driver = createDriver({ speechDetected: false });
+    const operatorEvents: ResidentVoiceOperatorEvent[] = [];
+    const driver = createDriver({ speechDetected: false, operatorEvents });
 
     await driver.press();
     driver.capture.emit(frame("quiet", [0, 0]));
@@ -459,6 +484,12 @@ describe("resident hold-to-talk voice runtime", () => {
 
     expect(driver.sttRequests).toEqual([]);
     expect(driver.piRequests).toEqual([]);
+    expect(operatorEvents).toEqual([
+      { kind: "turn_started" },
+      { kind: "turn_phase", phase: "listening" },
+      { kind: "turn_phase", phase: "transcribing" },
+      { kind: "turn_phase", phase: "idle" }
+    ]);
 
     await driver.runtime.stop();
     await expect(driver.runtime.completion).resolves.toMatchObject({ emptyHolds: 1 });
@@ -466,7 +497,9 @@ describe("resident hold-to-talk voice runtime", () => {
 
   it("records an STT provider failure separately from an empty hold", async () => {
     vi.useFakeTimers();
+    const operatorEvents: ResidentVoiceOperatorEvent[] = [];
     const driver = createDriver({
+      operatorEvents,
       sttResponse: () =>
         Promise.resolve({
           ok: false,
@@ -485,6 +518,10 @@ describe("resident hold-to-talk voice runtime", () => {
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
     expect(driver.piRequests).toEqual([]);
+    expect(operatorEvents.at(-1)).toEqual({ kind: "turn_phase", phase: "idle" });
+    expect(
+      operatorEvents.filter((event) => event.kind === "turn_phase" && event.phase === "idle")
+    ).toHaveLength(1);
     await driver.runtime.stop();
     await expect(driver.runtime.completion).resolves.toMatchObject({
       emptyHolds: 0,
@@ -549,7 +586,8 @@ describe("resident hold-to-talk voice runtime", () => {
   });
 
   it("cancels listening without STT, farewell, or interaction-session disposal", async () => {
-    const driver = createDriver();
+    const operatorEvents: ResidentVoiceOperatorEvent[] = [];
+    const driver = createDriver({ operatorEvents });
 
     await driver.press();
     driver.capture.emit(frame("partial", [1, 0]));
@@ -560,6 +598,14 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(driver.sttRequests).toEqual([]);
     expect(driver.piRequests).toEqual([]);
     expect(driver.disposedSessions).toEqual([]);
+    expect(operatorEvents).toEqual([
+      { kind: "turn_started" },
+      { kind: "turn_phase", phase: "listening" },
+      { kind: "turn_phase", phase: "idle" }
+    ]);
+    expect(
+      operatorEvents.filter((event) => event.kind === "turn_phase" && event.phase === "idle")
+    ).toHaveLength(1);
 
     await driver.runtime.stop();
   });
@@ -1598,7 +1644,8 @@ describe("resident hold-to-talk voice runtime", () => {
   });
 
   it("drains owned work on shutdown and rejects later controls", async () => {
-    const driver = createDriver();
+    const operatorEvents: ResidentVoiceOperatorEvent[] = [];
+    const driver = createDriver({ operatorEvents });
 
     await driver.press();
     const firstStop = driver.runtime.stop();
@@ -1610,6 +1657,11 @@ describe("resident hold-to-talk voice runtime", () => {
     await expect(driver.press()).resolves.toBe("ignored_busy");
     expect(driver.capture.stops()).toBe(1);
     expect(driver.playbackCloses()).toBe(1);
+    expect(operatorEvents).toEqual([
+      { kind: "turn_started" },
+      { kind: "turn_phase", phase: "listening" },
+      { kind: "turn_phase", phase: "idle" }
+    ]);
   });
 
   it("settles completion when shutdown owner cleanup fails", async () => {
