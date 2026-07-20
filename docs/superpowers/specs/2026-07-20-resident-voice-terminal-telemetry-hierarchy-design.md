@@ -71,16 +71,18 @@ raw tool引数と結果は、非表示にするだけでなく既存契約どお
 
 ## 表示状態
 
-状態はoperator eventから導出し、新しいruntime制御イベントを追加しない。
+状態はruntime制御を変更しないoperator専用の `turn_phase` eventで受け取る。
+controllerが確定した遷移だけを通知し、表示側の推測で待機状態へ戻さない。
 
 | 状態 | 契機 | 表示 |
 | --- | --- | --- |
-| 待機中 | 初期状態、再生完了 | `● 待機中` |
-| 聞き取り中 | `turn_started` | `● 聞き取り中` |
-| 考えています | `staff_transcript`、tool完了 | `◐ 考えています` |
-| Tool実行中 | `tool_execution_start` | `◐ Tool実行中` |
-| 音声準備中 | `pi_response` | `◐ 音声準備中` |
-| 話しています | `tts_time_to_first_chunk`完了 | `● 話しています` |
+| 待機中 | 初期状態、`turn_phase: idle` | `● 待機中` |
+| 聞き取り中 | `turn_phase: listening` | `● 聞き取り中` |
+| 文字起こし中 | `turn_phase: transcribing` | `◐ 文字起こし中` |
+| 考えています | `turn_phase: processing` | `◐ 考えています` |
+| Tool実行中 | `tool_execution_start`からendまで | `◐ Tool実行中` |
+| 音声準備中 | `turn_phase: synthesizing` | `◐ 音声準備中` |
+| 話しています | `turn_phase: speaking` | `● 話しています` |
 | 失敗 | error status、応答本文のないterminal failure | `✗ <失敗箇所>` |
 
 状態は同じheader位置で更新し、イベントごとの進捗行は履歴へ積み上げない。
@@ -139,6 +141,12 @@ widget factoryは一度だけ登録する。event受理時は状態を更新し�
 `tui.requestRender()` を呼び、Piが次に指定した幅とthemeで再描画する。
 rendererやrefreshが失敗してもvoice runtimeへ例外を返さない。
 
+`voice-resident.ts` は既存controllerの成功した遷移と終了に合わせて
+`listening`、`transcribing`、`processing`、`synthesizing`、`speaking`、`idle` を
+operatorへ通知する。このeventは表示専用で、controller stateを変更せず、ログ、OTel、
+Pi sessionへも書き込まない。no-speech、empty transcript、失敗、cancelを含む終了経路は
+必ず `idle` を通知する。
+
 ## 安全性と上限
 
 - 改行、制御文字、Unicode行区切りを既存どおり無害化する。
@@ -155,6 +163,7 @@ raw payloadを表示しなくなるため、payload serializerは削除する。
 ## 検証
 
 - 待機、聞き取り、思考、tool、音声準備、発話、失敗の状態遷移を単体試験する。
+- 正常、no-speech、cancelの各終了経路が `turn_phase: idle` を通知することを試験する。
 - 正常turnで正常stop reasonとraw payloadが表示されないことを試験する。
 - tool名、成否、durationが表示され、hostile args/resultへ触れないことを試験する。
 - end-to-endと比較可能な最長区間だけが要約されることを試験する。
