@@ -26,6 +26,7 @@ describe("resident dev terminal", () => {
       homeDirectory: "/Users/monsoon",
       configPath: "/Users/monsoon/Dev/pico/config/pico.local.yaml",
       pathEnvironment: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+      terminal: "terminal",
       now: () => "2026-06-22T01:02:03.000Z",
       processId: 1234
     });
@@ -88,6 +89,34 @@ describe("resident dev terminal", () => {
       "exec /bin/zsh '/Users/monsoon/.pico/dev-terminal/resident-voice-launcher.sh'"
     );
     expect(session.appleScript).not.toContain("npm run resident:voice");
+  });
+
+  it("builds a Ghostty session by default through the macOS app launcher", () => {
+    const session = defineResidentDevelopmentTerminalSession({
+      repoRoot: "/Users/monsoon/Dev/pico",
+      homeDirectory: "/Users/monsoon",
+      configPath: "/Users/monsoon/Dev/pico/config/pico.local.yaml",
+      pathEnvironment: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    });
+
+    expect(session.terminal).toBe("ghostty");
+    expect(session.ghosttyCommand).toEqual({
+      command: "open",
+      args: [
+        "-na",
+        "Ghostty.app",
+        "--args",
+        "--title=pico resident voice",
+        "--wait-after-command=true",
+        "-e",
+        "/bin/zsh",
+        "/Users/monsoon/.pico/dev-terminal/resident-voice-launcher.sh"
+      ]
+    });
+    expect(session.shellCommand).not.toContain("PICO_DEV_TERMINAL_TTY=$(tty)");
+    expect(session.shellCommand).not.toContain("osascript");
+    expect(session.appleScript).toBeUndefined();
+    expect(session.kittyCommand).toBeUndefined();
   });
 
   it("builds a kitty session without Terminal.app AppleScript tab management", () => {
@@ -165,7 +194,8 @@ describe("resident dev terminal", () => {
       repoRoot: '/tmp/pico\'s "lab"',
       homeDirectory: "/tmp/home",
       configPath: '/tmp/pico\'s "lab"/config/pico.local.yaml',
-      pathEnvironment: "/bin"
+      pathEnvironment: "/bin",
+      terminal: "terminal"
     });
 
     expect(session.shellCommand).toContain("cd '/tmp/pico'\\''s \"lab\"'");

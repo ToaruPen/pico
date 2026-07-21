@@ -15,7 +15,7 @@ export type PicoCliPlan =
       readonly args: readonly string[];
     };
 
-type DevelopmentTerminal = "kitty" | "terminal";
+type DevelopmentTerminal = "ghostty" | "kitty" | "terminal";
 
 const helpCommands = new Set(["help", "--help", "-h"]);
 
@@ -60,7 +60,7 @@ export function formatPicoCliHelp(): string {
     "Usage:",
     "  pico",
     "  pico help",
-    "  pico dev [--terminal=kitty|terminal]",
+    "  pico dev [--terminal=ghostty|kitty|terminal]",
     "  pico roster <command> [options]",
     "",
     "Commands:",
@@ -82,7 +82,7 @@ function createDevelopmentTerminalPlan(arguments_: readonly string[]): PicoCliPl
     options: {
       terminal: {
         type: "string",
-        default: "kitty"
+        default: "ghostty"
       }
     }
   });
@@ -96,9 +96,9 @@ function createDevelopmentTerminalPlan(arguments_: readonly string[]): PicoCliPl
 }
 
 function requireDevelopmentTerminal(value: string | boolean | undefined): DevelopmentTerminal {
-  if (value === "kitty" || value === "terminal") {
+  if (value === "ghostty" || value === "kitty" || value === "terminal") {
     return value;
   }
 
-  throw new Error("pico dev --terminal must be kitty or terminal");
+  throw new Error("pico dev --terminal must be ghostty, kitty, or terminal");
 }

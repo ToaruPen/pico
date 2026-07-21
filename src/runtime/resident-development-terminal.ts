@@ -17,7 +17,7 @@ export type ResidentDevelopmentTerminalSessionOptions = {
   readonly runId?: string;
 };
 
-export type ResidentDevelopmentTerminal = "kitty" | "terminal";
+export type ResidentDevelopmentTerminal = "ghostty" | "kitty" | "terminal";
 
 export type ResidentDevelopmentTerminalSession = {
   readonly runId: string;
@@ -32,6 +32,10 @@ export type ResidentDevelopmentTerminalSession = {
   readonly appleScript?: string;
   readonly kittyCommand?: {
     readonly command: "kitty";
+    readonly args: readonly string[];
+  };
+  readonly ghosttyCommand?: {
+    readonly command: "open";
     readonly args: readonly string[];
   };
 };
@@ -57,7 +61,7 @@ export function defineResidentDevelopmentTerminalSession(
     options.pathEnvironment,
     "resident dev terminal pathEnvironment"
   );
-  const terminal = options.terminal ?? "terminal";
+  const terminal = options.terminal ?? "ghostty";
   const title = requireNonEmpty(options.title ?? defaultTitle, "resident dev terminal title");
   const occurredAt = options.now?.() ?? new Date().toISOString();
   const runId =
@@ -96,10 +100,26 @@ export function defineResidentDevelopmentTerminalSession(
     logDirectory,
     logPath,
     shellCommand,
-    ...(terminal === "terminal"
-      ? { appleScript: buildTerminalAppleScript(buildTerminalLauncherCommand(launcherPath)) }
-      : { kittyCommand: buildKittyCommand(title, launcherPath) })
+    ...buildTerminalLaunchPlan(terminal, title, launcherPath)
   };
+}
+
+function buildTerminalLaunchPlan(
+  terminal: ResidentDevelopmentTerminal,
+  title: string,
+  launcherPath: string
+) {
+  if (terminal === "terminal") {
+    return {
+      appleScript: buildTerminalAppleScript(buildTerminalLauncherCommand(launcherPath))
+    };
+  }
+
+  if (terminal === "kitty") {
+    return { kittyCommand: buildKittyCommand(title, launcherPath) };
+  }
+
+  return { ghosttyCommand: buildGhosttyCommand(title, launcherPath) };
 }
 
 function buildLauncherScript(shellCommand: string): string {
@@ -206,6 +226,28 @@ function buildKittyCommand(
   return {
     command: "kitty",
     args: ["--title", title, "/bin/zsh", launcherPath]
+  };
+}
+
+function buildGhosttyCommand(
+  title: string,
+  launcherPath: string
+): {
+  readonly command: "open";
+  readonly args: readonly string[];
+} {
+  return {
+    command: "open",
+    args: [
+      "-na",
+      "Ghostty.app",
+      "--args",
+      `--title=${title}`,
+      "--wait-after-command=true",
+      "-e",
+      "/bin/zsh",
+      launcherPath
+    ]
   };
 }
 

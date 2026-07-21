@@ -119,9 +119,20 @@ async function startPico(
   setController(controller);
   try {
     await controller.start();
-  } catch {
-    throw new PicoStartupUserError("Pico controller failed to start");
+  } catch (error) {
+    throw new PicoStartupUserError(describeControllerStartFailure(error));
   }
+}
+
+function describeControllerStartFailure(error: unknown): string {
+  if (
+    error instanceof Error &&
+    /^pico resident voice runtime is already running \(pid: [1-9]\d*\)$/u.test(error.message)
+  ) {
+    return error.message;
+  }
+
+  return "Pico controller failed to start";
 }
 
 function requirePicoModel(config: PicoConfig): PicoAgentModelConfig {

@@ -38,8 +38,24 @@ describe("pico cli", () => {
     });
   });
 
-  it("routes dev to a kitty-backed development terminal", () => {
+  it("routes dev to a Ghostty-backed development terminal", () => {
     expect(createPicoCliPlan(["dev"])).toEqual({
+      kind: "script",
+      scriptPath: "scripts/resident/development-terminal.ts",
+      args: ["--terminal=ghostty"]
+    });
+  });
+
+  it("allows Ghostty development sessions explicitly", () => {
+    expect(createPicoCliPlan(["dev", "--terminal=ghostty"])).toEqual({
+      kind: "script",
+      scriptPath: "scripts/resident/development-terminal.ts",
+      args: ["--terminal=ghostty"]
+    });
+  });
+
+  it("allows kitty development sessions explicitly", () => {
+    expect(createPicoCliPlan(["dev", "--terminal=kitty"])).toEqual({
       kind: "script",
       scriptPath: "scripts/resident/development-terminal.ts",
       args: ["--terminal=kitty"]
@@ -94,6 +110,7 @@ describe("pico cli", () => {
     const help = formatPicoCliHelp();
 
     expect(help).toContain("pico dev");
+    expect(help).toContain("--terminal=ghostty|kitty|terminal");
     expect(help).toContain("pico roster");
     expect(help).toContain("Pi Agent");
     expect(help).toContain("non-persistent host session");
