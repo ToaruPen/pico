@@ -291,7 +291,7 @@ export function createVoiceResidentRuntime(
       }
 
       counters.cancelledTurns += 1;
-      settlePttReleaseMeasurement(turn, options, "skipped", monotonicNow, "cancelled");
+      settlePttReleaseToFirstPcmWrite(turn, options, "skipped", monotonicNow, "cancelled");
       turn.cancellation = convergeCancellation(
         turn,
         controller,
@@ -619,7 +619,7 @@ async function processCompletedHold(
   try {
     await processCompletedHoldWork(turn, controller, options, counters, state);
   } catch (error) {
-    settlePttReleaseMeasurement(
+    settlePttReleaseToFirstPcmWrite(
       turn,
       options,
       turn.generation.signal.aborted ? "skipped" : "error",
@@ -628,7 +628,7 @@ async function processCompletedHold(
     );
     throw error;
   } finally {
-    settlePttReleaseMeasurement(
+    settlePttReleaseToFirstPcmWrite(
       turn,
       options,
       "skipped",
@@ -775,13 +775,17 @@ async function processCompletedHoldWork(
       ...(options.probe === undefined ? {} : { probe: options.probe }),
       now: state.now,
       monotonicNow: state.monotonicNow,
-      onFirstPlaybackStart: () =>
-        admitTurnPlayback(controller, turn, options, state.monotonicNow, captureBoundary)
+      onFirstPlaybackStart: () => admitTurnPlayback(controller, turn, options, captureBoundary),
+      onFirstPlaybackWriteAccepted: () =>
+        settlePttReleaseToFirstPcmWrite(turn, options, "ok", state.monotonicNow)
     });
   } finally {
     await captureBoundary.resume();
   }
 
+  if (playback.status === "failed") {
+    settlePttReleaseToFirstPcmWrite(turn, options, "error", state.monotonicNow, playback.errorCode);
+  }
   throwPlaybackInfrastructureError(playback);
 
   settleCompletedTurn(playback, turn, controller, options, counters, sessionId, deferredResults);
@@ -815,7 +819,6 @@ async function admitTurnPlayback(
   controller: ResidentControlController,
   turn: ActiveTurn,
   options: VoiceResidentRuntimeOptions,
-  monotonicNow: () => number,
   captureBoundary: CaptureBoundaryLease
 ): Promise<boolean> {
   if (controller.generation()?.id !== turn.generation.id || controller.state() !== "synthesizing") {
@@ -829,7 +832,6 @@ async function admitTurnPlayback(
     return false;
   }
   recordTurnPhase(options.operator, "speaking");
-  settlePttReleaseMeasurement(turn, options, "ok", monotonicNow);
   return true;
 }
 
@@ -1489,7 +1491,7 @@ function recordStage(
   });
 }
 
-function settlePttReleaseMeasurement(
+function settlePttReleaseToFirstPcmWrite(
   turn: ActiveTurn,
   options: VoiceResidentRuntimeOptions,
   status: Parameters<typeof recordStage>[2],
@@ -1504,7 +1506,7 @@ function settlePttReleaseMeasurement(
   measurement.settled = true;
   recordStage(
     options,
-    "ptt_release_to_playback_start",
+    "ptt_release_to_first_pcm_write",
     status,
     measurement.startedAt,
     Math.max(0, monotonicNow() - measurement.startedAtMs),

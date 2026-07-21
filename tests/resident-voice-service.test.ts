@@ -1,8 +1,60 @@
 import { describe, expect, it } from "vitest";
 
-import { createResidentVoiceServiceController } from "../src/runtime/resident-voice-service.js";
+import { definePicoConfig, type PicoResidentControlConfig } from "../src/config/index.js";
+import {
+  createResidentVoiceService,
+  createResidentVoiceServiceController
+} from "../src/runtime/resident-voice-service.js";
+import type { PiAgentTurnClient } from "../src/runtime/voice-resident.js";
 
 describe("resident voice service controller", () => {
+  it("builds operator controls from the injected resident config", () => {
+    const config = definePicoConfig({
+      voice: {
+        resident: {
+          enabled: true,
+          audioInput: {
+            provider: "avaudioengine",
+            deviceUid: "BuiltInMicrophoneDevice"
+          },
+          audioOutput: { provider: "ffplay", route: "system_default" },
+          control: {
+            provider: "macos_resident_io",
+            keyboard: { provider: "macos", talkKey: "F13", cancelKey: "F14" }
+          }
+        },
+        stt: {
+          appleSpeech: { localBaseUrl: "http://127.0.0.1:8766" }
+        },
+        tts: {
+          aivis: {
+            id: "local-aivis",
+            localBaseUrl: "http://127.0.0.1:10101",
+            speakerId: 1,
+            timeoutMs: 250
+          }
+        }
+      }
+    });
+    const piAgent: PiAgentTurnClient = {
+      prompt: () => Promise.resolve({ text: "unused" })
+    };
+    let receivedKeyboard: PicoResidentControlConfig["keyboard"] | undefined;
+
+    expect(() =>
+      createResidentVoiceService({
+        config,
+        createOperator: (keyboard) => {
+          receivedKeyboard = keyboard;
+          return { record() {} };
+        },
+        createPiAgent: () => piAgent,
+        onError() {}
+      })
+    ).not.toThrow();
+    expect(receivedKeyboard).toBe(config.voice.resident.control?.keyboard);
+  });
+
   it("starts one runtime and releases its lock after shutdown drains", async () => {
     const events: string[] = [];
     let runtimeSignal: AbortSignal | undefined;

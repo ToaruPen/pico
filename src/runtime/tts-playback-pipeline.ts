@@ -25,6 +25,7 @@ export type TtsPlaybackPipelineOptions = {
   readonly now: () => string;
   readonly monotonicNow: () => number;
   readonly onFirstPlaybackStart?: () => boolean | Promise<boolean>;
+  readonly onFirstPlaybackWriteAccepted?: () => void;
 };
 
 export type TtsPlaybackPipelineResult =
@@ -53,6 +54,7 @@ type PipelineState = {
   playbackStartedAt?: string;
   playbackStartedAtMs?: number;
   playbackSettled: boolean;
+  firstPlaybackWriteAccepted: boolean;
   stopSettlement?: Promise<Settlement<void>>;
   deferredRequest?: {
     readonly status: VoiceStageStatus;
@@ -133,6 +135,7 @@ export async function runTtsPlaybackPipeline(
     firstChunkSettled: false,
     requestSettled: false,
     playbackSettled: false,
+    firstPlaybackWriteAccepted: false,
     pendingPull: undefined,
     pendingPullResolvedChunk: false,
     submissionPending: false,
@@ -292,6 +295,7 @@ async function submitChunk(
     return convergePlaybackFailure(state, "playback_write_failed");
   }
 
+  notifyFirstPlaybackWriteAccepted(state);
   state.playedChunkCount += 1;
   state.playedDurationMs += chunk.durationMs;
   state.trailingSilenceMs = tryMeasureTrailingPcm16SilenceMs(
@@ -300,6 +304,17 @@ async function submitChunk(
     chunk.channels
   );
   return undefined;
+}
+
+function notifyFirstPlaybackWriteAccepted(state: PipelineState): void {
+  if (state.firstPlaybackWriteAccepted) return;
+  state.firstPlaybackWriteAccepted = true;
+
+  try {
+    state.options.onFirstPlaybackWriteAccepted?.();
+  } catch {
+    // Observation failure cannot change an accepted playback write.
+  }
 }
 
 async function prepareChunkSubmission(

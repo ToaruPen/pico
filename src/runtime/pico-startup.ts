@@ -21,7 +21,8 @@ export type PicoStartupOptions = {
   readonly loadConfig?: () => PicoConfig;
   readonly createController: (
     context: ExtensionContext,
-    agentSettings: PicoStartupAgentSettings
+    agentSettings: PicoStartupAgentSettings,
+    config: PicoConfig
   ) => PicoController;
 };
 
@@ -112,7 +113,8 @@ async function startPico(
       model,
       thinkingLevel: pi.getThinkingLevel(),
       activeToolNames: Object.freeze([...pi.getActiveTools()])
-    })
+    }),
+    config
   );
   setController(controller);
   try {

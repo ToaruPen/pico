@@ -130,12 +130,15 @@ describe("Pico startup", () => {
     const events: string[] = [];
     const activeToolNames = ["read", "stackchan_say"];
     const harness = createStartupHarness({ pico: true, events, activeToolNames });
+    const config = configuredPicoModel();
     let agentSettings: PicoStartupAgentSettings | undefined;
+    let receivedConfig: ReturnType<typeof configuredPicoModel> | undefined;
 
     registerPicoStartup(harness.api as never, {
-      loadConfig: configuredPicoModel,
-      createController: (_context, settings) => {
+      loadConfig: () => config,
+      createController: (_context, settings, startupConfig) => {
         agentSettings = settings;
+        receivedConfig = startupConfig;
         events.push("create-controller");
         return {
           start: () => {
@@ -167,6 +170,7 @@ describe("Pico startup", () => {
     });
     expect(agentSettings).not.toBeUndefined();
     expect(Object.isFrozen(agentSettings?.activeToolNames)).toBe(true);
+    expect(receivedConfig).toBe(config);
   });
 
   it("fails closed without a configured model, a registry match, or authentication", async () => {

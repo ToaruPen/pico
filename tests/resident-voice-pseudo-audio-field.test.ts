@@ -702,7 +702,7 @@ const requiredStages = [
   "tts_audio_query",
   "tts_synthesize",
   "tts_request_wall",
-  "ptt_release_to_playback_start",
+  "ptt_release_to_first_pcm_write",
   "tts_playback"
 ] as const;
 
