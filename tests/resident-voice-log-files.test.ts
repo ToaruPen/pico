@@ -259,9 +259,7 @@ describe("resident voice file logs", () => {
     }).processLogPath;
     await expect(readFile(path, "utf8")).resolves.toBe(accepted);
     expect(log.droppedRecordCount()).toBe(1);
-    expect(diagnostics).toEqual([
-      { code: "queue_capacity_exceeded", droppedRecordCount: 1 }
-    ]);
+    expect(diagnostics).toEqual([{ code: "queue_capacity_exceeded", droppedRecordCount: 1 }]);
   });
 
   it("prunes the oldest recognized closed file to preserve the mode cap", async () => {
@@ -280,7 +278,11 @@ describe("resident voice file logs", () => {
     }).metricsJsonlPath;
     await createSparseFile(oldPath, 70 * 1024 * 1024);
     await createSparseFile(recentPath, 70 * 1024 * 1024);
-    await utimes(oldPath, new Date("2026-06-20T00:00:00.000Z"), new Date("2026-06-20T00:00:00.000Z"));
+    await utimes(
+      oldPath,
+      new Date("2026-06-20T00:00:00.000Z"),
+      new Date("2026-06-20T00:00:00.000Z")
+    );
     await utimes(
       recentPath,
       new Date("2026-06-21T00:00:00.000Z"),
@@ -323,9 +325,7 @@ describe("resident voice file logs", () => {
 
     await expect(stat(activePath)).resolves.toMatchObject({ size: 128 * 1024 * 1024 });
     expect(log.droppedRecordCount()).toBe(1);
-    expect(diagnostics).toEqual([
-      { code: "mode_capacity_exceeded", droppedRecordCount: 1 }
-    ]);
+    expect(diagnostics).toEqual([{ code: "mode_capacity_exceeded", droppedRecordCount: 1 }]);
   });
 
   it("does not remove or count unknown managed files as owned diagnostics", async () => {
@@ -369,7 +369,9 @@ describe("resident voice file logs", () => {
       now: () => "2026-06-22T00:00:00.000Z"
     });
 
-    await expect(log.ready).rejects.toThrow("resident voice managed log path must not be symlinked");
+    await expect(log.ready).rejects.toThrow(
+      "resident voice managed log path must not be symlinked"
+    );
   });
 
   it("does not follow a symlinked log target", async () => {
@@ -394,10 +396,12 @@ describe("resident voice file logs", () => {
     });
 
     log.writeProcessLine("must not escape\n");
+    await log.flush();
+    expect(() => log.writeProcessLine("also dropped\n")).not.toThrow();
     await log.close();
 
     await expect(readFile(outsidePath, "utf8")).resolves.toBe("outside\n");
-    expect(log.droppedRecordCount()).toBe(1);
+    expect(log.droppedRecordCount()).toBe(2);
     expect(diagnostics).toEqual([{ code: "write_failed", droppedRecordCount: 1 }]);
   });
 
@@ -431,9 +435,7 @@ describe("resident voice file logs", () => {
     const after = await stat(legacyPath);
     expect(after.size).toBe(before.size);
     expect(after.mtimeMs).toBe(before.mtimeMs);
-    expect(diagnostics).toEqual([
-      { code: "legacy_resident_logs_detected", droppedRecordCount: 0 }
-    ]);
+    expect(diagnostics).toEqual([{ code: "legacy_resident_logs_detected", droppedRecordCount: 0 }]);
   });
 
   it("composes multiple log sinks without changing event payloads", () => {

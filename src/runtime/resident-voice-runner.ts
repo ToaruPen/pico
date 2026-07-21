@@ -58,6 +58,7 @@ import { createResidentVoiceConsoleLog } from "./resident-voice-console-log.js";
 import {
   createResidentVoiceCompositeLogSink,
   createResidentVoiceFileLogSink,
+  type ResidentVoiceFileLogSink,
   type ResidentVoiceLogRunMode,
   requireResidentVoiceRunId
 } from "./resident-voice-log-files.js";
@@ -148,151 +149,185 @@ export async function runResidentVoiceWithProviders(input: {
   const fileLog = createResidentVoiceFileLogSink({
     homeDirectory: homedir(),
     runMode: logRunMode,
+    onDiagnostic: (diagnostic) => {
+      process.stderr.write(
+        `[pico] resident voice log ${diagnostic.code} dropped=${String(diagnostic.droppedRecordCount)}\n`
+      );
+    },
     ...(runId === undefined ? {} : { runId })
   });
-  const writeProcessLine = (line: string): void => {
-    fileLog.writeProcessLine(line);
+  await runWithResidentVoiceFileLog(fileLog, async () => {
+    const writeProcessLine = (line: string): void => {
+      fileLog.writeProcessLine(line);
 
-    if (stdoutProbeMode !== undefined) {
-      process.stdout.write(line);
-    }
-  };
-  const telemetry = createConfiguredOpenTelemetry(
-    config.telemetry.otel,
-    input.createTelemetry ?? createOpenTelemetryProvider,
-    writeProcessLine
-  );
-
-  try {
-    const audit = config.voice.probes.enabled
-      ? createResidentVoiceAuditLog({
-          stdoutEnabled: true,
-          writeStdout: writeProcessLine,
-          writeEvent: createAuditEventFanout([
-            (event) => {
-              writeResidentVoiceMetricEvent(fileLog.writeAuditEvent, event);
-            },
-            ...(telemetry === undefined
-              ? []
-              : [
-                  (event: AuditEvent) => {
-                    if (shouldExportResidentVoiceAuditEvent(event)) {
-                      telemetry.record(event);
-                    }
-                  }
-                ])
-          ]),
-          ...(stdoutProbeMode === undefined ? {} : { stdoutMode: stdoutProbeMode })
-        })
-      : undefined;
-    const sessionLifecycle = createSessionLifecycle({
-      ending: config.session.ending,
-      ...(audit === undefined ? {} : { audit })
-    });
-    const stageProbe = createResidentVoiceStageProbe(audit, input.operator);
-    const deferredTools = createDeferredToolCoordinator();
-    const stt = createConfiguredStt(config);
-    const tts = createConfiguredTts(config, stageProbe);
-    const control = requireResidentControlConfig(config);
-    const audioInput = requireMacOSResidentAudioInput(config);
-    const echoControl = createConfiguredEchoControl(config);
-    const playback = createResidentContinuousPlaybackSink(
-      createResidentAudioOutputPlan(config),
-      undefined,
-      { finalSilenceMs: residentPlaybackFinalSilenceMs }
-    );
-    const piAgent = resolveResidentPiAgent(input.piAgent, input.createPiAgent, {
-      cwd: process.cwd(),
-      deferredTools: {
-        coordinator: deferredTools
-      },
-      voiceProbe: stageProbe,
-      ...(input.operator === undefined ? {} : { operator: input.operator })
-    });
-    const speechActivity = await createConfiguredSpeechActivityGate(config);
-    const healthPublication = createResidentHealthPublicationGate();
-
-    await runResidentControlLifecycle({
-      signal,
-      startBridge: (handleControl, handleTailComplete, handleCaptureUnavailable) =>
-        startMacOSResidentIoBridge({
-          input: {
-            deviceUid: audioInput.deviceUid,
-            sampleRateHz: config.voice.echoControl.sampleRateHz,
-            channels: config.voice.echoControl.channels,
-            frameMs: config.voice.echoControl.frameMs,
-            releaseTailMs: 250,
-            talkKey: control.keyboard.talkKey,
-            cancelKey: control.keyboard.cancelKey
-          },
-          handleControl,
-          handleTailComplete,
-          handleCaptureInvalidated: handleCaptureUnavailable,
-          observeHealth: async (event) => {
-            if (!healthPublication.accept(event, performance.now())) return;
-            writeProcessLine(
-              `[pico] macOS resident I/O health: ${event.state}/${event.code} restarts=${String(event.restartCount)} dropped=${String(event.droppedFrameCount)}\n`
-            );
-            audit?.record({
-              category: "transport_event",
-              name: "voice.resident_io.health",
-              severity: event.state === "running" ? "info" : "warn",
-              occurredAt: new Date().toISOString(),
-              summary: "Pico macOS resident I/O health changed.",
-              attributes: {
-                "pico.voice.resident_io.state": event.state,
-                "pico.voice.resident_io.code": event.code,
-                "pico.voice.resident_io.restart_count": event.restartCount,
-                "pico.voice.resident_io.dropped_frame_count": event.droppedFrameCount,
-                "pico.voice.resident_io.buffer_cadence_ms": event.bufferCadenceMs,
-                "pico.voice.resident_io.outside_ptt_dropped_frame_count":
-                  event.outsidePttDroppedFrameCount,
-                "pico.voice.resident_io.suppressed_dropped_frame_count":
-                  event.suppressedDroppedFrameCount
-              }
-            });
-            if (event.state !== "running") {
-              await handleCaptureUnavailable();
-            }
-          },
-          observeTiming: (event) => {
-            const occurredAtMs = Date.now();
-            recordVoiceStageProbe(stageProbe, {
-              stage: residentIoVoiceStage(event.stage),
-              status: "ok",
-              startedAt: new Date(Math.max(0, occurredAtMs - event.durationMs)).toISOString(),
-              durationMs: event.durationMs
-            });
-          },
-          signal
-        }),
-      createRuntime: (bridge) => {
-        writeProcessLine("[pico] macOS resident I/O: ready\n");
-        return createVoiceResidentRuntime({
-          audioCapture: bridge.audioCapture,
-          captureBoundary: {
-            suppress: bridge.suppressCapture,
-            resume: bridge.resumeCapture
-          },
-          sessionLifecycle,
-          echoControl,
-          speechActivity,
-          stt,
-          tts,
-          playback,
-          piAgent,
-          deferredTools,
-          farewell: { enabled: true },
-          log: createResidentVoiceRuntimeLogSink(logRunMode, fileLog, stdoutProbeMode),
-          probe: stageProbe,
-          ...(input.operator === undefined ? {} : { operator: input.operator }),
-          signal
-        });
+      if (stdoutProbeMode !== undefined) {
+        process.stdout.write(line);
       }
-    });
-  } finally {
-    await shutdownResidentVoiceTelemetry(telemetry, writeProcessLine);
+    };
+    const telemetry = createConfiguredOpenTelemetry(
+      config.telemetry.otel,
+      input.createTelemetry ?? createOpenTelemetryProvider,
+      writeProcessLine
+    );
+
+    try {
+      const audit = config.voice.probes.enabled
+        ? createResidentVoiceAuditLog({
+            stdoutEnabled: true,
+            writeStdout: writeProcessLine,
+            writeEvent: createAuditEventFanout([
+              (event) => {
+                writeResidentVoiceMetricEvent(fileLog.writeAuditEvent, event);
+              },
+              ...(telemetry === undefined
+                ? []
+                : [
+                    (event: AuditEvent) => {
+                      if (shouldExportResidentVoiceAuditEvent(event)) {
+                        telemetry.record(event);
+                      }
+                    }
+                  ])
+            ]),
+            ...(stdoutProbeMode === undefined ? {} : { stdoutMode: stdoutProbeMode })
+          })
+        : undefined;
+      const sessionLifecycle = createSessionLifecycle({
+        ending: config.session.ending,
+        ...(audit === undefined ? {} : { audit })
+      });
+      const stageProbe = createResidentVoiceStageProbe(audit, input.operator);
+      const deferredTools = createDeferredToolCoordinator();
+      const stt = createConfiguredStt(config);
+      const tts = createConfiguredTts(config, stageProbe);
+      const control = requireResidentControlConfig(config);
+      const audioInput = requireMacOSResidentAudioInput(config);
+      const echoControl = createConfiguredEchoControl(config);
+      const playback = createResidentContinuousPlaybackSink(
+        createResidentAudioOutputPlan(config),
+        undefined,
+        { finalSilenceMs: residentPlaybackFinalSilenceMs }
+      );
+      const piAgent = resolveResidentPiAgent(input.piAgent, input.createPiAgent, {
+        cwd: process.cwd(),
+        deferredTools: {
+          coordinator: deferredTools
+        },
+        voiceProbe: stageProbe,
+        ...(input.operator === undefined ? {} : { operator: input.operator })
+      });
+      const speechActivity = await createConfiguredSpeechActivityGate(config);
+      const healthPublication = createResidentHealthPublicationGate();
+
+      await runResidentControlLifecycle({
+        signal,
+        startBridge: (handleControl, handleTailComplete, handleCaptureUnavailable) =>
+          startMacOSResidentIoBridge({
+            input: {
+              deviceUid: audioInput.deviceUid,
+              sampleRateHz: config.voice.echoControl.sampleRateHz,
+              channels: config.voice.echoControl.channels,
+              frameMs: config.voice.echoControl.frameMs,
+              releaseTailMs: 250,
+              talkKey: control.keyboard.talkKey,
+              cancelKey: control.keyboard.cancelKey
+            },
+            handleControl,
+            handleTailComplete,
+            handleCaptureInvalidated: handleCaptureUnavailable,
+            observeHealth: async (event) => {
+              if (!healthPublication.accept(event, performance.now())) return;
+              writeProcessLine(
+                `[pico] macOS resident I/O health: ${event.state}/${event.code} restarts=${String(event.restartCount)} dropped=${String(event.droppedFrameCount)}\n`
+              );
+              audit?.record({
+                category: "transport_event",
+                name: "voice.resident_io.health",
+                severity: event.state === "running" ? "info" : "warn",
+                occurredAt: new Date().toISOString(),
+                summary: "Pico macOS resident I/O health changed.",
+                attributes: {
+                  "pico.voice.resident_io.state": event.state,
+                  "pico.voice.resident_io.code": event.code,
+                  "pico.voice.resident_io.restart_count": event.restartCount,
+                  "pico.voice.resident_io.dropped_frame_count": event.droppedFrameCount,
+                  "pico.voice.resident_io.buffer_cadence_ms": event.bufferCadenceMs,
+                  "pico.voice.resident_io.outside_ptt_dropped_frame_count":
+                    event.outsidePttDroppedFrameCount,
+                  "pico.voice.resident_io.suppressed_dropped_frame_count":
+                    event.suppressedDroppedFrameCount
+                }
+              });
+              if (event.state !== "running") {
+                await handleCaptureUnavailable();
+              }
+            },
+            observeTiming: (event) => {
+              const occurredAtMs = Date.now();
+              recordVoiceStageProbe(stageProbe, {
+                stage: residentIoVoiceStage(event.stage),
+                status: "ok",
+                startedAt: new Date(Math.max(0, occurredAtMs - event.durationMs)).toISOString(),
+                durationMs: event.durationMs
+              });
+            },
+            signal
+          }),
+        createRuntime: (bridge) => {
+          writeProcessLine("[pico] macOS resident I/O: ready\n");
+          return createVoiceResidentRuntime({
+            audioCapture: bridge.audioCapture,
+            captureBoundary: {
+              suppress: bridge.suppressCapture,
+              resume: bridge.resumeCapture
+            },
+            sessionLifecycle,
+            echoControl,
+            speechActivity,
+            stt,
+            tts,
+            playback,
+            piAgent,
+            deferredTools,
+            farewell: { enabled: true },
+            log: createResidentVoiceRuntimeLogSink(logRunMode, fileLog, stdoutProbeMode),
+            probe: stageProbe,
+            ...(input.operator === undefined ? {} : { operator: input.operator }),
+            signal
+          });
+        }
+      });
+    } finally {
+      await shutdownResidentVoiceTelemetry(telemetry, writeProcessLine);
+    }
+  });
+}
+
+export async function runWithResidentVoiceFileLog(
+  fileLog: ResidentVoiceFileLogSink,
+  operation: () => Promise<void>
+): Promise<void> {
+  let operationFailure: unknown;
+  let operationFailed = false;
+  try {
+    await fileLog.ready;
+    await operation();
+  } catch (error) {
+    operationFailed = true;
+    operationFailure = error;
   }
+
+  let closeFailure: unknown;
+  let closeFailed = false;
+  try {
+    await fileLog.close();
+  } catch (error) {
+    closeFailed = true;
+    closeFailure = error;
+  }
+
+  if (operationFailed) throw operationFailure;
+  if (closeFailed) throw closeFailure;
 }
 
 function residentIoVoiceStage(stage: ResidentIoTimingStage) {

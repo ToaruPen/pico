@@ -33,9 +33,7 @@ describe("resident health publication", () => {
     expect(
       gate.accept(healthEvent({ state: "recovering", code: "configuration_changed" }), 2)
     ).toBe(true);
-    expect(gate.accept(healthEvent({ state: "recovering", code: "engine_stopped" }), 3)).toBe(
-      true
-    );
+    expect(gate.accept(healthEvent({ state: "recovering", code: "engine_stopped" }), 3)).toBe(true);
     expect(gate.accept(healthEvent({ code: "health_sample" }), 4)).toBe(true);
   });
 });
