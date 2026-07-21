@@ -236,28 +236,29 @@ export async function runResidentVoiceWithProviders(input: {
             handleTailComplete,
             handleCaptureInvalidated: handleCaptureUnavailable,
             observeHealth: async (event) => {
-              if (!healthPublication.accept(event, performance.now())) return;
-              writeProcessLine(
-                `[pico] macOS resident I/O health: ${event.state}/${event.code} restarts=${String(event.restartCount)} dropped=${String(event.droppedFrameCount)}\n`
-              );
-              audit?.record({
-                category: "transport_event",
-                name: "voice.resident_io.health",
-                severity: event.state === "running" ? "info" : "warn",
-                occurredAt: new Date().toISOString(),
-                summary: "Pico macOS resident I/O health changed.",
-                attributes: {
-                  "pico.voice.resident_io.state": event.state,
-                  "pico.voice.resident_io.code": event.code,
-                  "pico.voice.resident_io.restart_count": event.restartCount,
-                  "pico.voice.resident_io.dropped_frame_count": event.droppedFrameCount,
-                  "pico.voice.resident_io.buffer_cadence_ms": event.bufferCadenceMs,
-                  "pico.voice.resident_io.outside_ptt_dropped_frame_count":
-                    event.outsidePttDroppedFrameCount,
-                  "pico.voice.resident_io.suppressed_dropped_frame_count":
-                    event.suppressedDroppedFrameCount
-                }
-              });
+              if (healthPublication.accept(event, performance.now())) {
+                writeProcessLine(
+                  `[pico] macOS resident I/O health: ${event.state}/${event.code} restarts=${String(event.restartCount)} dropped=${String(event.droppedFrameCount)}\n`
+                );
+                audit?.record({
+                  category: "transport_event",
+                  name: "voice.resident_io.health",
+                  severity: event.state === "running" ? "info" : "warn",
+                  occurredAt: new Date().toISOString(),
+                  summary: "Pico macOS resident I/O health changed.",
+                  attributes: {
+                    "pico.voice.resident_io.state": event.state,
+                    "pico.voice.resident_io.code": event.code,
+                    "pico.voice.resident_io.restart_count": event.restartCount,
+                    "pico.voice.resident_io.dropped_frame_count": event.droppedFrameCount,
+                    "pico.voice.resident_io.buffer_cadence_ms": event.bufferCadenceMs,
+                    "pico.voice.resident_io.outside_ptt_dropped_frame_count":
+                      event.outsidePttDroppedFrameCount,
+                    "pico.voice.resident_io.suppressed_dropped_frame_count":
+                      event.suppressedDroppedFrameCount
+                  }
+                });
+              }
               if (event.state !== "running") {
                 await handleCaptureUnavailable();
               }
