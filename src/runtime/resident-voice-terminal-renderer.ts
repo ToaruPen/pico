@@ -73,7 +73,11 @@ const phasePresentations: Readonly<Record<ResidentVoiceTerminalPhase, PhasePrese
   cancelling: { symbol: "◐", label: "中断処理中", color: "warning" },
   ending: { symbol: "◐", label: "セッション終了中", color: "warning" }
 };
-
+const criticalPathStages = [
+  ["stt", "STT"],
+  ["pi_final_response_ready", "Pi確定"],
+  ["tts_time_to_first_chunk", "TTS"]
+] as const satisfies readonly (readonly [VoiceRuntimeStage, string])[];
 const rolePrefixWidth = 6;
 
 export function renderResidentVoiceTerminal(
@@ -253,14 +257,9 @@ function formatMetrics(
 function formatCriticalPath(
   timings: ReadonlyMap<VoiceRuntimeStage, StageTimingView>
 ): string | undefined {
-  const stages = [
-    ["stt", "STT"],
-    ["pi_final_response_ready", "Pi確定"],
-    ["tts_time_to_first_chunk", "TTS"]
-  ] as const satisfies readonly (readonly [VoiceRuntimeStage, string])[];
   const parts: string[] = [];
 
-  for (const [stage, label] of stages) {
+  for (const [stage, label] of criticalPathStages) {
     const timing = timings.get(stage);
     if (timing?.status === "ok") {
       parts.push(`${label} ${formatDuration(timing.durationMs)}`);

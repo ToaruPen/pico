@@ -127,6 +127,12 @@ describe("resident voice terminal display", () => {
       durationMs: 1_075,
       attributes: {}
     });
+    display.record({
+      kind: "control_decision",
+      control: "talk",
+      result: "ignored_busy",
+      state: "cancelling"
+    });
     display.record({ kind: "turn_phase", phase: "idle" });
     display.record({ kind: "interaction_ending_started" });
     display.record({ kind: "pi_response", text: "またお手伝いします" });
@@ -140,11 +146,23 @@ describe("resident voice terminal display", () => {
     const duringFarewell = display.render(100, plainTheme).join("\n");
     expect(duringFarewell).toContain("◐ セッション終了中");
     expect(duringFarewell).toContain("PICO  またお手伝いします");
+    expect(duringFarewell).not.toContain("中断処理中のため受理せず");
+
+    display.record({
+      kind: "control_decision",
+      control: "talk",
+      result: "ignored_busy",
+      state: "interaction_ending"
+    });
+    expect(display.render(100, plainTheme).join("\n")).toContain(
+      "F13: セッション終了中のため受理せず"
+    );
 
     display.record({ kind: "interaction_ending_finished" });
     const afterFarewell = display.render(100, plainTheme).join("\n");
     expect(afterFarewell).toContain("● 待機中");
     expect(afterFarewell).toContain("PICO  またお手伝いします");
+    expect(afterFarewell).not.toContain("セッション終了中のため受理せず");
   });
 
   it("retains one configured busy notice until the next accepted turn", () => {

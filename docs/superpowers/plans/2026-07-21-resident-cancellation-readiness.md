@@ -381,7 +381,7 @@ npx --yes --package secretlint@9.3.4 --package @secretlint/secretlint-rule-prese
 Expected: every command exits zero. Do not run an exclusive microphone field
 test while the user's Pico process is active.
 
-- [ ] **Step 2: Run AI slop cleaner**
+- [x] **Step 2: Run AI slop cleaner**
 
 Lock the focused tests, then inspect only files changed since `786c57c` for
 dead state, duplicate promise ownership, needless wrappers, boundary leaks,

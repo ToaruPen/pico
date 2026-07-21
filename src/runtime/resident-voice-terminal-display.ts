@@ -6,7 +6,6 @@ import type {
 import {
   type ResidentVoiceTerminalControls,
   type ResidentVoiceTerminalControlNotice,
-  type ResidentVoiceTerminalPhase,
   type ResidentVoiceTerminalTheme,
   type ResidentVoiceTerminalToolView,
   type ResidentVoiceTerminalTurnView,
@@ -225,6 +224,7 @@ function applyEvent(
     pendingTools.clear();
     lifecycle.active = true;
     lifecycle.ending = true;
+    delete lifecycle.notice;
     return true;
   }
 
@@ -233,6 +233,7 @@ function applyEvent(
     lifecycle.active = false;
     lifecycle.ending = false;
     lifecycle.phase = "idle";
+    delete lifecycle.notice;
     return true;
   }
 
@@ -348,18 +349,11 @@ function createView(
   const activeToolName = Array.from(pendingTools.values()).at(-1)?.toolName;
   return {
     controls,
-    phase: terminalPhase(lifecycle, lifecycle.phase),
+    phase: lifecycle.ending ? "ending" : lifecycle.phase,
     ...(activeToolName === undefined ? {} : { activeToolName }),
     ...(lifecycle.notice === undefined ? {} : { notice: lifecycle.notice }),
     turns: turns.map(toTurnView)
   };
-}
-
-function terminalPhase(
-  lifecycle: DisplayTurnLifecycle,
-  turnPhase: ResidentVoiceTurnPhase
-): ResidentVoiceTerminalPhase {
-  return lifecycle.ending ? "ending" : turnPhase;
 }
 
 function toTurnView(turn: MutableTurn): ResidentVoiceTerminalTurnView {

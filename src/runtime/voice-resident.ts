@@ -1154,11 +1154,7 @@ function ownTurnOperation(operations: Set<Promise<void>>, operation: Promise<voi
 
 async function waitForOwnedTurnOperations(operations: Set<Promise<void>>): Promise<void> {
   while (operations.size > 0) {
-    const batch = [...operations];
-    await Promise.allSettled(batch);
-    for (const operation of batch) {
-      operations.delete(operation);
-    }
+    await Promise.allSettled([...operations]);
   }
 }
 
