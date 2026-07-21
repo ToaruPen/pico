@@ -50,6 +50,10 @@ voice-stop:
 
 voice-dev:
   -npm run resident:voice:launchd -- stop
+  npm run resident:voice:dev-terminal -- --terminal=ghostty
+
+voice-dev-terminal:
+  -npm run resident:voice:launchd -- stop
   npm run resident:voice:dev-terminal -- --terminal=terminal
 
 voice-dev-kitty:

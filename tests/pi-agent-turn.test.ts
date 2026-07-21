@@ -34,6 +34,7 @@ const expectedResidentPiAgentToolNamesWithoutDeferred = expectedResidentPiAgentT
 function createSdkToolState(
   registeredToolNames: readonly string[] = expectedResidentPiAgentToolNames
 ): {
+  readonly agent: { readonly hasQueuedMessages: () => boolean };
   readonly getActiveToolNames: () => string[];
   readonly setActiveToolsByName: (toolNames: string[]) => void;
 } {
@@ -41,6 +42,7 @@ function createSdkToolState(
   let active = [...registeredToolNames];
 
   return {
+    agent: { hasQueuedMessages: () => false },
     getActiveToolNames: () => [...active],
     setActiveToolsByName: (toolNames) => {
       active = toolNames.filter((toolName) => registered.has(toolName));
@@ -49,6 +51,353 @@ function createSdkToolState(
 }
 
 describe("Pi Agent turn adapter", () => {
+  it("publishes the final response before prompt settlement", async () => {
+    let listener: ((event: unknown) => void) | undefined;
+    let markFinalResponseObserved: (() => void) | undefined;
+    let releasePrompt: (() => void) | undefined;
+    let settlementFinished = false;
+    const finalResponseObserved = new Promise<void>((resolve) => {
+      markFinalResponseObserved = resolve;
+    });
+    const promptGate = new Promise<void>((resolve) => {
+      releasePrompt = resolve;
+    });
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      createResourceLoader: () => ({ reload: () => Promise.resolve() }),
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: (inputListener) => {
+              listener = inputListener;
+              return () => undefined;
+            },
+            prompt: async () => {
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "最終回答です。" }],
+                    stopReason: "stop"
+                  }
+                ],
+                willRetry: false
+              });
+              markFinalResponseObserved?.();
+              await promptGate;
+              settlementFinished = true;
+            },
+            dispose: () => undefined
+          }
+        })
+    });
+
+    const pendingResponse = client.prompt({ sessionId: "session-1", text: "質問" });
+    await finalResponseObserved;
+    try {
+      const response = await Promise.race([
+        pendingResponse,
+        new Promise<"response still pending">((resolve) =>
+          setImmediate(() => resolve("response still pending"))
+        )
+      ]);
+      expect(response).not.toBe("response still pending");
+      if (response === "response still pending") return;
+      expect(response.text).toBe("最終回答です。");
+      expect(settlementFinished).toBe(false);
+      let settled = false;
+      void response.settled.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        }
+      );
+      await Promise.resolve();
+      expect(settled).toBe(false);
+    } finally {
+      releasePrompt?.();
+    }
+    const response = await pendingResponse;
+    await response.settled;
+    expect(settlementFinished).toBe(true);
+  });
+
+  it("waits for a final stop response after tool, retry, and queued follow-up boundaries", async () => {
+    let listener: ((event: unknown) => void) | undefined;
+    let queuedMessages = false;
+    let markIntermediateEventsObserved: (() => void) | undefined;
+    let releaseFinalResponse: (() => void) | undefined;
+    let releaseSettlement: (() => void) | undefined;
+    const intermediateEventsObserved = new Promise<void>((resolve) => {
+      markIntermediateEventsObserved = resolve;
+    });
+    const finalResponseGate = new Promise<void>((resolve) => {
+      releaseFinalResponse = resolve;
+    });
+    const settlementGate = new Promise<void>((resolve) => {
+      releaseSettlement = resolve;
+    });
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      createResourceLoader: () => ({ reload: () => Promise.resolve() }),
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            agent: { hasQueuedMessages: () => queuedMessages },
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: (inputListener) => {
+              listener = inputListener;
+              return () => undefined;
+            },
+            prompt: async () => {
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "ツールを使います。" }],
+                    stopReason: "toolUse"
+                  }
+                ],
+                willRetry: false
+              });
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "再試行前です。" }],
+                    stopReason: "stop"
+                  }
+                ],
+                willRetry: true
+              });
+              queuedMessages = true;
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "後続処理待ちです。" }],
+                    stopReason: "stop"
+                  }
+                ],
+                willRetry: false
+              });
+              markIntermediateEventsObserved?.();
+              await finalResponseGate;
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "確定した最終回答です。" }],
+                    stopReason: "stop"
+                  }
+                ],
+                willRetry: false
+              });
+              await settlementGate;
+            },
+            dispose: () => undefined
+          }
+        })
+    });
+
+    const pendingResponse = client.prompt({ sessionId: "session-1", text: "確認" });
+    await intermediateEventsObserved;
+    const premature = await Promise.race([
+      pendingResponse.then(() => "published"),
+      new Promise<"pending">((resolve) => setImmediate(() => resolve("pending")))
+    ]);
+    expect(premature).toBe("pending");
+
+    queuedMessages = false;
+    releaseFinalResponse?.();
+    const response = await pendingResponse;
+    expect(response.text).toBe("確定した最終回答です。");
+    releaseSettlement?.();
+    await response.settled;
+  });
+
+  it.each([
+    { name: "tool-use", stopReason: "toolUse", willRetry: false, queued: false },
+    { name: "retry", stopReason: "stop", willRetry: true, queued: false },
+    { name: "queued follow-up", stopReason: "stop", willRetry: false, queued: true }
+  ])("rejects a settled $name response without a publishable final", async (setup) => {
+    let listener: ((event: unknown) => void) | undefined;
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      createResourceLoader: () => ({ reload: () => Promise.resolve() }),
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            agent: { hasQueuedMessages: () => setup.queued },
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: (inputListener) => {
+              listener = inputListener;
+              return () => undefined;
+            },
+            prompt: () => {
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "発話してはいけない中間応答" }],
+                    stopReason: setup.stopReason
+                  }
+                ],
+                willRetry: setup.willRetry
+              });
+              return Promise.resolve();
+            },
+            dispose: () => undefined
+          }
+        })
+    });
+
+    await expect(client.prompt({ sessionId: "session-1", text: "確認" })).rejects.toThrow(
+      "pico resident Pi Agent prompt settled without a publishable final response"
+    );
+  });
+
+  it("returns a successful non-stop response only after prompt settlement", async () => {
+    let listener: ((event: unknown) => void) | undefined;
+    let markNonStopObserved: (() => void) | undefined;
+    let releasePrompt: (() => void) | undefined;
+    const nonStopObserved = new Promise<void>((resolve) => {
+      markNonStopObserved = resolve;
+    });
+    const promptGate = new Promise<void>((resolve) => {
+      releasePrompt = resolve;
+    });
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      createResourceLoader: () => ({ reload: () => Promise.resolve() }),
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: (inputListener) => {
+              listener = inputListener;
+              return () => undefined;
+            },
+            prompt: async () => {
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "長さ上限までの回答" }],
+                    stopReason: "length"
+                  }
+                ],
+                willRetry: false
+              });
+              markNonStopObserved?.();
+              await promptGate;
+            },
+            dispose: () => undefined
+          }
+        })
+    });
+
+    const pendingResponse = client.prompt({ sessionId: "session-1", text: "長い質問" });
+    await nonStopObserved;
+    const premature = await Promise.race([
+      pendingResponse.then(() => "published"),
+      new Promise<"pending">((resolve) => setImmediate(() => resolve("pending")))
+    ]);
+    expect(premature).toBe("pending");
+
+    releasePrompt?.();
+    const response = await pendingResponse;
+    expect(response.text).toBe("長さ上限までの回答");
+    await response.settled;
+  });
+
+  it("does not abort Pi settlement after publishing the final response", async () => {
+    let abortCalls = 0;
+    let listener: ((event: unknown) => void) | undefined;
+    let markResponseObserved: (() => void) | undefined;
+    let releasePrompt: (() => void) | undefined;
+    const responseObserved = new Promise<void>((resolve) => {
+      markResponseObserved = resolve;
+    });
+    const promptGate = new Promise<void>((resolve) => {
+      releasePrompt = resolve;
+    });
+    const abortController = new AbortController();
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      createResourceLoader: () => ({ reload: () => Promise.resolve() }),
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: (inputListener) => {
+              listener = inputListener;
+              return () => undefined;
+            },
+            prompt: async () => {
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "話し始めます。" }],
+                    stopReason: "stop"
+                  }
+                ],
+                willRetry: false
+              });
+              markResponseObserved?.();
+              await promptGate;
+            },
+            abort: () => {
+              abortCalls += 1;
+              return Promise.resolve();
+            },
+            dispose: () => undefined
+          }
+        })
+    });
+
+    const pendingResponse = client.prompt({
+      sessionId: "session-1",
+      text: "回答して",
+      signal: abortController.signal
+    });
+    await responseObserved;
+    const response = await pendingResponse;
+    abortController.abort();
+    await Promise.resolve();
+    expect(abortCalls).toBe(0);
+
+    const settlement = await Promise.race([
+      response.settled.then(() => "settled"),
+      new Promise<"pending">((resolve) => setImmediate(() => resolve("pending")))
+    ]);
+    expect(settlement).toBe("pending");
+    releasePrompt?.();
+    await response.settled;
+  });
+
   it("uses the SDK session prompt stream and returns assistant text", async () => {
     const prompts: string[] = [];
     let listener: ((event: unknown) => void) | undefined;
@@ -101,7 +450,7 @@ describe("Pi Agent turn adapter", () => {
         })
     });
 
-    await expect(client.prompt({ sessionId: "session-1", text: "ピコ" })).resolves.toEqual({
+    await expect(client.prompt({ sessionId: "session-1", text: "ピコ" })).resolves.toMatchObject({
       text: "こんにちは。"
     });
     expect(prompts).toEqual(["ピコ"]);
@@ -173,7 +522,9 @@ describe("Pi Agent turn adapter", () => {
         })
     });
 
-    await expect(client.prompt({ sessionId: "session-1", text: "状態は？" })).resolves.toEqual({
+    await expect(
+      client.prompt({ sessionId: "session-1", text: "状態は？" })
+    ).resolves.toMatchObject({
       text: "準備できています。"
     });
   });
@@ -233,7 +584,9 @@ describe("Pi Agent turn adapter", () => {
         })
     });
 
-    await expect(client.prompt({ sessionId: "session-1", text: "もう一度" })).resolves.toEqual({
+    await expect(
+      client.prompt({ sessionId: "session-1", text: "もう一度" })
+    ).resolves.toMatchObject({
       text: "確定回答"
     });
   });
@@ -1209,6 +1562,65 @@ describe("Pi Agent turn adapter", () => {
     expect(createdSessions).toBe(2);
   });
 
+  it("keeps disposal behind settlement after an early response is published", async () => {
+    let disposed = false;
+    const lifecycleEvents: string[] = [];
+    let listener: ((event: unknown) => void) | undefined;
+    let releasePrompt: (() => void) | undefined;
+    const promptGate = new Promise<void>((resolve) => {
+      releasePrompt = resolve;
+    });
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      createResourceLoader: () => ({ reload: () => Promise.resolve() }),
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: (inputListener) => {
+              listener = inputListener;
+              return () => undefined;
+            },
+            prompt: async () => {
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "先に公開する応答" }],
+                    stopReason: "stop"
+                  }
+                ],
+                willRetry: false
+              });
+              await promptGate;
+            },
+            dispose: () => {
+              disposed = true;
+              lifecycleEvents.push("dispose");
+            }
+          }
+        })
+    });
+
+    const response = await client.prompt({ sessionId: "session-1", text: "質問" });
+    void response.settled.then(
+      () => lifecycleEvents.push("settled"),
+      () => lifecycleEvents.push("settled")
+    );
+    const disposal = client.disposeSession?.("session-1");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(disposed).toBe(false);
+
+    releasePrompt?.();
+    await response.settled;
+    await disposal;
+    expect(disposed).toBe(true);
+    expect(lifecycleEvents).toEqual(["settled", "dispose"]);
+  });
+
   it("releases an active turn when SDK subscription cleanup fails", async () => {
     let disposedSessions = 0;
     let notifyPromptStarted: (() => void) | undefined;
@@ -1329,7 +1741,7 @@ describe("Pi Agent turn adapter", () => {
     await expect(client.prompt({ sessionId: "session-1", text: "一回目" })).rejects.toThrow(
       "sdk unavailable"
     );
-    await expect(client.prompt({ sessionId: "session-1", text: "二回目" })).resolves.toEqual({
+    await expect(client.prompt({ sessionId: "session-1", text: "二回目" })).resolves.toMatchObject({
       text: ""
     });
   });
@@ -1485,7 +1897,9 @@ describe("Pi Agent turn adapter", () => {
     expect(promptCalls).toBe(0);
     expect(abortCalls).toBe(0);
 
-    await expect(client.prompt({ sessionId: "session-1", text: "再利用する" })).resolves.toEqual({
+    await expect(
+      client.prompt({ sessionId: "session-1", text: "再利用する" })
+    ).resolves.toMatchObject({
       text: ""
     });
     expect(createdSessions).toBe(1);
@@ -1575,7 +1989,7 @@ describe("Pi Agent turn adapter", () => {
       }
     });
 
-    await expect(client.prompt({ sessionId: "session-1", text: "計測" })).resolves.toEqual({
+    await expect(client.prompt({ sessionId: "session-1", text: "計測" })).resolves.toMatchObject({
       text: "応答"
     });
     await client.disposeSession?.("session-1");
@@ -1604,6 +2018,7 @@ describe("Pi Agent turn adapter", () => {
       pi_session_bind: { status: "ok", durationMs: 50 },
       pi_tool_execution: { status: "ok", durationMs: 350 },
       pi_time_to_first_text: { status: "ok", durationMs: 800 },
+      pi_final_response_ready: { status: "ok", durationMs: 800 },
       pi_session_dispose: { status: "ok", durationMs: 200 }
     });
     expect(JSON.stringify(audit.entries())).not.toContain("private-tool-call");
@@ -1673,7 +2088,9 @@ describe("Pi Agent turn adapter", () => {
         })
     });
 
-    await expect(client.prompt({ sessionId: "session-1", text: "receiver" })).resolves.toEqual({
+    await expect(
+      client.prompt({ sessionId: "session-1", text: "receiver" })
+    ).resolves.toMatchObject({
       text: ""
     });
     expect(resourceLoader.loaded).toBe(true);

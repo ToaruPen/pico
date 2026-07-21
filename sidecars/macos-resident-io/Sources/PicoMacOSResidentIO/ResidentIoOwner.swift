@@ -139,11 +139,7 @@ final class ResidentIoOwner: @unchecked Sendable {
       self.activeAudioEngineGeneration = nil
       self.activeAudioEngineHasDeliveredCallback = false
       self.audioEngine.stop()
-      self.writer.write(
-        .healthEvent(
-          HealthEventMetadata(
-            state: "suspended", code: "sleep", restartCount: self.restartCount,
-            droppedFrameCount: self.droppedFrameCount)))
+      self.writeHealth(state: "suspended", code: "sleep")
     }
   }
 
@@ -161,7 +157,7 @@ final class ResidentIoOwner: @unchecked Sendable {
       stopped = true
       healthTimer?.cancel()
       healthTimer = nil
-      _ = gate.markUnavailable()
+      recordGateDiscard(gate.markUnavailable().output)
       assembler.clear()
       activeAudioEngineGeneration = nil
       activeAudioEngineHasDeliveredCallback = false
@@ -174,21 +170,12 @@ final class ResidentIoOwner: @unchecked Sendable {
     do {
       recordBufferCadence(snapshot.startHostSeconds)
       let sourceSamples = snapshot.monoSamples.map(pcm16Sample)
-      let stateBeforeConsume = gate.state
       let output = try gate.consume(
         bufferStartingAt: snapshot.startHostSeconds,
         sampleRate: snapshot.sampleRate,
         samples: sourceSamples
       )
-      droppedFrameCount += UInt64(output.droppedFrameCount)
-      switch stateBeforeConsume {
-      case .suppressed:
-        suppressedDroppedFrameCount += UInt64(output.droppedFrameCount)
-      case .discarding, .unavailable:
-        outsidePttDroppedFrameCount += UInt64(output.droppedFrameCount)
-      default:
-        break
-      }
+      recordGateDiscard(output)
       try emit(output)
       activeAudioEngineHasDeliveredCallback = true
       if recovering {
@@ -203,11 +190,7 @@ final class ResidentIoOwner: @unchecked Sendable {
               engineGeneration: engineGeneration,
               sampleRateHz: configuration.sampleRateHz,
               channels: configuration.channels)))
-        writer.write(
-          .healthEvent(
-            HealthEventMetadata(
-              state: "running", code: "engine_started", restartCount: restartCount,
-              droppedFrameCount: droppedFrameCount)))
+        writeHealth(state: "running", code: "engine_started")
         readySemaphore.signal()
       }
     } catch {
@@ -241,8 +224,7 @@ final class ResidentIoOwner: @unchecked Sendable {
       case .talkPressed:
         if gate.state == .discarding {
           let output = try gate.observePress(sequence: sequence, hostSeconds: hostSeconds)
-          droppedFrameCount += UInt64(output.droppedFrameCount)
-          outsidePttDroppedFrameCount += UInt64(output.droppedFrameCount)
+          recordGateDiscard(output)
           scheduleAdmissionTimeout(sequence: sequence)
         }
       case .talkReleased:
@@ -254,7 +236,7 @@ final class ResidentIoOwner: @unchecked Sendable {
           }
         }
       case .cancelPressed:
-        gate.cancel()
+        recordGateDiscard(gate.cancel())
         assembler.clear()
         pendingReleaseTimestamp = nil
         releaseTimestampByGeneration.removeAll(keepingCapacity: true)
@@ -274,6 +256,12 @@ final class ResidentIoOwner: @unchecked Sendable {
     }
   }
 
+  private func recordGateDiscard(_ output: PttGateOutput) {
+    droppedFrameCount += UInt64(output.droppedFrameCount)
+    outsidePttDroppedFrameCount += UInt64(output.outsidePttDroppedFrameCount)
+    suppressedDroppedFrameCount += UInt64(output.suppressedDroppedFrameCount)
+  }
+
   private func processCommand(_ message: ResidentIoMessage) {
     guard !stopped else { return }
     do {
@@ -281,7 +269,7 @@ final class ResidentIoOwner: @unchecked Sendable {
       case .controlResult(let metadata):
         try applyControlResult(metadata)
       case .suppressCapture(let metadata):
-        gate.suppress()
+        recordGateDiscard(gate.suppress())
         assembler.clear()
         pendingReleaseTimestamp = nil
         releaseTimestampByGeneration.removeAll(keepingCapacity: true)
@@ -294,7 +282,7 @@ final class ResidentIoOwner: @unchecked Sendable {
         writer.write(.resumeCapture(metadata))
       case .cancelGeneration(let metadata):
         if activeGeneration(gate.state) == metadata.generation {
-          gate.cancel()
+          recordGateDiscard(gate.cancel())
           assembler.clear()
           releaseTimestampByGeneration[metadata.generation] = nil
           clearGenerationObservations(metadata.generation)
@@ -316,7 +304,21 @@ final class ResidentIoOwner: @unchecked Sendable {
     guard let pending = pendingControls.remove(sequence: metadata.sequence) else {
       throw ResidentIoRuntimeError.unmatchedControlResult
     }
-    guard pending.kind == .talkPressed else { return }
+    switch pending.kind {
+    case .cancelPressed:
+      writeTiming(
+        .cancelKeyToAdmission,
+        seconds: machHostSeconds() - pending.hostSeconds,
+        controlResult: metadata.result)
+      return
+    case .talkReleased:
+      return
+    case .talkPressed:
+      writeTiming(
+        .keyToAdmission,
+        seconds: machHostSeconds() - pending.hostSeconds,
+        controlResult: metadata.result)
+    }
     guard case .pendingAdmission(let sequence, _, _) = gate.state, sequence == metadata.sequence
     else {
       if let generation = admissionTimeouts.invalidatedGeneration(
@@ -328,14 +330,19 @@ final class ResidentIoOwner: @unchecked Sendable {
       }
       return
     }
-    writeTiming(.keyToAdmission, seconds: machHostSeconds() - pending.hostSeconds)
     let admissionAt = machHostSeconds()
     let output = try gate.resolveAdmission(
       sequence: metadata.sequence,
       result: metadata.result,
       generation: metadata.generation
     )
-    writeTiming(.admissionToGate, seconds: machHostSeconds() - admissionAt)
+    recordGateDiscard(output)
+    if metadata.result == .accepted {
+      writeTiming(
+        .admissionToGate,
+        seconds: machHostSeconds() - admissionAt,
+        controlResult: metadata.result)
+    }
     if metadata.result == .accepted, let generation = metadata.generation {
       pressHostSecondsByGeneration[generation] = pending.hostSeconds
     }
@@ -476,11 +483,7 @@ final class ResidentIoOwner: @unchecked Sendable {
     activeAudioEngineGeneration = nil
     activeAudioEngineHasDeliveredCallback = false
     audioEngine.stop()
-    writer.write(
-      .healthEvent(
-        HealthEventMetadata(
-          state: "recovering", code: code, restartCount: restartCount,
-          droppedFrameCount: droppedFrameCount)))
+    writeHealth(state: "recovering", code: code)
     attemptRecovery()
   }
 
@@ -531,11 +534,7 @@ final class ResidentIoOwner: @unchecked Sendable {
     writeTiming(.engineRestart, seconds: machHostSeconds() - engineStartBeganAt)
     engineGeneration += 1
     restartCount += 1
-    writer.write(
-      .healthEvent(
-        HealthEventMetadata(
-          state: "running", code: "engine_restarted", restartCount: restartCount,
-          droppedFrameCount: droppedFrameCount)))
+    writeHealth(state: "running", code: "engine_restarted")
   }
 
   private func startHealthTimer() {
@@ -562,8 +561,9 @@ final class ResidentIoOwner: @unchecked Sendable {
         pendingSequence == sequence
       else { return }
       do {
-        _ = try self.gate.resolveAdmission(
+        let output = try self.gate.resolveAdmission(
           sequence: sequence, result: .ignoredStale, generation: nil)
+        self.recordGateDiscard(output)
         do {
           try self.admissionTimeouts.expire(sequence: sequence)
         } catch AdmissionTimeoutTrackerError.backlogExceeded {
@@ -573,13 +573,7 @@ final class ResidentIoOwner: @unchecked Sendable {
           return
         }
         self.pendingReleaseTimestamp = nil
-        self.writer.write(
-          .healthEvent(
-            HealthEventMetadata(
-              state: "running",
-              code: "admission_timeout",
-              restartCount: self.restartCount,
-              droppedFrameCount: self.droppedFrameCount)))
+        self.writeHealth(state: "running", code: "admission_timeout")
       } catch {
         self.fatal(code: "admission_timeout_failed", error: error)
       }
@@ -594,7 +588,7 @@ final class ResidentIoOwner: @unchecked Sendable {
     stopped = true
     healthTimer?.cancel()
     healthTimer = nil
-    _ = gate.markUnavailable()
+    recordGateDiscard(gate.markUnavailable().output)
     assembler.clear()
     audioEngine.stop()
     FileHandle.standardError.write(Data("pico macOS resident I/O: \(error)\n".utf8))
@@ -603,9 +597,18 @@ final class ResidentIoOwner: @unchecked Sendable {
     stopRunLoop()
   }
 
-  private func writeTiming(_ stage: ResidentIoTimingStage, seconds: Double) {
+  private func writeTiming(
+    _ stage: ResidentIoTimingStage,
+    seconds: Double,
+    controlResult: ResidentIoControlResult? = nil
+  ) {
     guard seconds.isFinite, seconds >= 0 else { return }
-    writer.write(.timingEvent(TimingEventMetadata(stage: stage, durationMs: seconds * 1_000)))
+    writer.write(
+      .timingEvent(
+        TimingEventMetadata(
+          stage: stage,
+          durationMs: seconds * 1_000,
+          controlResult: controlResult)))
   }
 
   private func recordBufferCadence(_ startHostSeconds: Double) {
@@ -623,18 +626,22 @@ final class ResidentIoOwner: @unchecked Sendable {
     let cadenceMs =
       bufferCadenceSamples == 0
       ? 0 : (bufferCadenceTotalSeconds / Double(bufferCadenceSamples)) * 1_000
+    writeHealth(state: "running", code: "health_sample", bufferCadenceMs: cadenceMs)
+    bufferCadenceTotalSeconds = 0
+    bufferCadenceSamples = 0
+  }
+
+  private func writeHealth(state: String, code: String, bufferCadenceMs: Double = 0) {
     writer.write(
       .healthEvent(
         HealthEventMetadata(
-          state: "running",
-          code: "health_sample",
+          state: state,
+          code: code,
           restartCount: restartCount,
           droppedFrameCount: droppedFrameCount,
-          bufferCadenceMs: cadenceMs,
+          bufferCadenceMs: bufferCadenceMs,
           outsidePttDroppedFrameCount: outsidePttDroppedFrameCount,
           suppressedDroppedFrameCount: suppressedDroppedFrameCount)))
-    bufferCadenceTotalSeconds = 0
-    bufferCadenceSamples = 0
   }
 
   private func clearGenerationObservations(_ generation: UInt64) {
@@ -656,7 +663,9 @@ final class ResidentIoOwner: @unchecked Sendable {
   }
 
   private func invalidateCapture() throws {
-    switch gate.markUnavailable() {
+    let transition = gate.markUnavailable()
+    recordGateDiscard(transition.output)
+    switch transition.invalidation {
     case .pendingAdmission(let sequence):
       try admissionTimeouts.expire(sequence: sequence)
     case .activeGeneration(let generation):

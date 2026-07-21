@@ -103,6 +103,7 @@ exportまたはshutdownの失敗はprocess logへ残すが、既存の音声runt
 |---|---|---|
 | `ptt_release_to_first_pcm_write` | accepted `talk_released` | 最初のplayback session write成功直後 |
 | `pi_time_to_first_text` | Pi prompt受付 | 最初のnon-empty text delta |
+| `pi_final_response_ready` | Pi prompt受付 | canonical final responseの公開 |
 | `pi_session_resource_load` | child resource reload開始 | reload settlement |
 | `pi_session_create` | Pi SDK child session生成開始 | factory settlement |
 | `pi_session_bind` | extension bind開始 | tool contract検証完了 |
@@ -118,6 +119,10 @@ admission前にsettleしていたため、このstageと直接比較しない。
 `pi_time_to_first_text`はsession準備、plugin hook、model first-token latencyを包含する。
 個別plugin、特にMem0の内部処理時間はPicoで計測しない。Pi-level pluginが自身のtelemetryを
 所有する。
+
+`pi_final_response_ready`は、暫定deltaではなく発話可能なcanonical final responseが得られるまでを
+表す。`pi_turn`はPi-level hookを含むprompt全体のsettlementまでを引き続き表す。両者を分けても、
+plugin名、provider名、session identifier、本文は属性へ記録しない。
 
 tool call IDは対応付けのためprocess memory内でだけ使用し、eventやmetricへ出さない。promptが
 text deltaなしでsettleした場合、`pi_time_to_first_text`は`skipped`または`error`として一度だけ

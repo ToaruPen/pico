@@ -154,6 +154,7 @@ public struct FatalMetadata: Codable, Equatable, Sendable {
 
 public enum ResidentIoTimingStage: String, Codable, Sendable {
   case keyToAdmission = "key_to_admission"
+  case cancelKeyToAdmission = "cancel_key_to_admission"
   case admissionToGate = "admission_to_gate"
   case gateToFirstSample = "gate_to_first_sample"
   case firstSampleToDispatch = "first_sample_to_dispatch"
@@ -165,10 +166,16 @@ public enum ResidentIoTimingStage: String, Codable, Sendable {
 public struct TimingEventMetadata: Codable, Equatable, Sendable {
   public let stage: ResidentIoTimingStage
   public let durationMs: Double
+  public let controlResult: ResidentIoControlResult?
 
-  public init(stage: ResidentIoTimingStage, durationMs: Double) {
+  public init(
+    stage: ResidentIoTimingStage,
+    durationMs: Double,
+    controlResult: ResidentIoControlResult? = nil
+  ) {
     self.stage = stage
     self.durationMs = durationMs
+    self.controlResult = controlResult
   }
 }
 

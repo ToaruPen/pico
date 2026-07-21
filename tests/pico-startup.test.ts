@@ -227,6 +227,48 @@ describe("Pico startup", () => {
     expect(JSON.stringify(events)).not.toContain("SECRET_CONFIG_VALUE");
   });
 
+  it("reports the live lock owner when another Pico controller is already running", async () => {
+    const events: string[] = [];
+    const harness = createStartupHarness({ pico: true, events });
+
+    registerPicoStartup(harness.api as never, {
+      loadConfig: configuredPicoModel,
+      createController: () => ({
+        start: () => {
+          throw new Error("pico resident voice runtime is already running (pid: 22222)");
+        },
+        stop: () => undefined
+      })
+    });
+
+    await harness.emit("session_start", { type: "session_start" }, createContext(events));
+
+    expect(events).toContain(
+      "notify:error:Pico startup failed: pico resident voice runtime is already running (pid: 22222)"
+    );
+    expect(events.at(-1)).toBe("shutdown");
+  });
+
+  it("does not expose an arbitrary controller startup error", async () => {
+    const events: string[] = [];
+    const harness = createStartupHarness({ pico: true, events });
+
+    registerPicoStartup(harness.api as never, {
+      loadConfig: configuredPicoModel,
+      createController: () => ({
+        start: () => {
+          throw new Error("credential: SECRET_CONTROLLER_VALUE");
+        },
+        stop: () => undefined
+      })
+    });
+
+    await harness.emit("session_start", { type: "session_start" }, createContext(events));
+
+    expect(events).toContain("notify:error:Pico startup failed: Pico controller failed to start");
+    expect(JSON.stringify(events)).not.toContain("SECRET_CONTROLLER_VALUE");
+  });
+
   it("waits for controller shutdown and stops it only once", async () => {
     const harness = createStartupHarness({ pico: true });
     let releaseStop: (() => void) | undefined;

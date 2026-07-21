@@ -60,7 +60,24 @@ struct ResidentIoCodecTests {
   @Test("round-trips fixed privacy-safe timing stages")
   func preservesTimingEvent() throws {
     let message = ResidentIoMessage.timingEvent(
-      TimingEventMetadata(stage: .keyToAdmission, durationMs: 1.25))
+      TimingEventMetadata(
+        stage: .keyToAdmission,
+        durationMs: 1.25,
+        controlResult: .ignoredBusy))
+    var decoder = ResidentIoDecoder()
+
+    try decoder.append(ResidentIoCodec.encode(message))
+
+    #expect(try decoder.next() == message)
+  }
+
+  @Test("round-trips cancel admission timing without identifiers")
+  func preservesCancelTimingEvent() throws {
+    let message = ResidentIoMessage.timingEvent(
+      TimingEventMetadata(
+        stage: .cancelKeyToAdmission,
+        durationMs: 2.5,
+        controlResult: .accepted))
     var decoder = ResidentIoDecoder()
 
     try decoder.append(ResidentIoCodec.encode(message))

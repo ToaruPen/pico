@@ -21,8 +21,11 @@ import {
 } from "./resident-control-controller.js";
 import {
   type ResidentVoiceOperatorSink,
+  type ResidentVoiceOperatorStageSink,
   type ResidentVoiceTurnPhase,
-  recordResidentVoiceOperatorEvent
+  recordResidentVoiceOperatorEvent,
+  recordResidentVoiceOperatorStageEvent,
+  scopeResidentVoiceOperatorStagesToCurrentTurn
 } from "./resident-voice-operator.js";
 import type { ResidentVoiceValidationSink } from "./resident-voice-validation.js";
 import type { SpeechActivityGate } from "./speech-activity-gate.js";
@@ -30,13 +33,18 @@ import { runTtsPlaybackPipeline, type TtsPlaybackPipelineResult } from "./tts-pl
 import type { VoicePlaybackSink } from "./voice-playback.js";
 import { recordVoiceStageProbe, type VoiceStageProbe } from "./voice-stage-probe.js";
 
+export type PiAgentTurnResponse = {
+  readonly text: string;
+  readonly settled: Promise<void>;
+};
+
 export type PiAgentTurnClient = {
   readonly prompt: (input: {
     readonly sessionId: string;
     readonly text: string;
     readonly deferredToolResults?: readonly DeferredToolDeliverableResult[];
     readonly signal?: AbortSignal;
-  }) => Promise<{ readonly text: string }>;
+  }) => Promise<PiAgentTurnResponse>;
   readonly disposeSession?: (sessionId: string) => void | Promise<void>;
   readonly disposeAll?: () => void | Promise<void>;
 };
@@ -129,8 +137,11 @@ type ActiveTurn = {
   readonly capture: ResidentCaptureSession;
   readonly sttSession: Promise<ResidentStreamingSttSession>;
   readonly frameCollection: Promise<StreamingCaptureAdmission>;
+  readonly operatorStages: ResidentVoiceOperatorStageSink | undefined;
+  playbackOperation: Promise<TtsPlaybackPipelineResult> | undefined;
   operation: Promise<void> | undefined;
   cancellation: Promise<void> | undefined;
+  pipelineOwnsPlayback: boolean;
   pttRelease: PttReleaseMeasurement | undefined;
   operatorIdleRecorded: boolean;
 };
@@ -139,6 +150,20 @@ type PttReleaseMeasurement = {
   readonly startedAt: string;
   readonly startedAtMs: number;
   settled: boolean;
+};
+
+type CancellationMeasurement = {
+  readonly startedAt: string;
+  readonly startedAtMs: number;
+  outputStoppedSettled: boolean;
+  idleSettled: boolean;
+};
+
+type PiTurnSettlement = "ok" | "failed";
+
+type PiAdmissionBarrier = {
+  pending: boolean;
+  readonly completion: Promise<void>;
 };
 
 type InteractionEndingControl = {
@@ -182,6 +207,11 @@ export function createVoiceResidentRuntime(
   let activeSessionId: string | undefined;
   let activeInteractionEnding: InteractionEndingControl | undefined;
   let interactionEnding: Promise<void> = Promise.resolve();
+  const ownedTurnOperations = new Set<Promise<void>>();
+  let piAdmissionBarrier: PiAdmissionBarrier = {
+    pending: false,
+    completion: Promise.resolve()
+  };
   const shutdownCancelledSessionIds = new Set<string>();
   let stopOperation: Promise<void> | undefined;
   let shutdownStarted = false;
@@ -232,19 +262,22 @@ export function createVoiceResidentRuntime(
           failRuntime(error, generation.id);
         }
       });
+      recordResidentVoiceOperatorEvent(options.operator, {
+        kind: "turn_started"
+      });
       activeTurn = {
         generation,
         capture,
         sttSession,
         frameCollection,
+        operatorStages: scopeResidentVoiceOperatorStagesToCurrentTurn(options.operator),
+        playbackOperation: undefined,
         operation: undefined,
         cancellation: undefined,
+        pipelineOwnsPlayback: false,
         pttRelease: undefined,
         operatorIdleRecorded: false
       };
-      recordResidentVoiceOperatorEvent(options.operator, {
-        kind: "turn_started"
-      });
       recordTurnPhase(options.operator, "listening");
       counters.acceptedHolds += 1;
     },
@@ -258,13 +291,30 @@ export function createVoiceResidentRuntime(
 
       recordTurnPhase(options.operator, "transcribing");
 
-      turn.operation = processCompletedHold(turn, controller, options, counters, {
+      const operation = processCompletedHold(turn, controller, options, counters, {
         now,
         monotonicNow,
         getActiveSessionId: () => activeSessionId,
         getEndingSessionId: () => activeInteractionEnding?.sessionId,
         setActiveSessionId: (sessionId) => {
           activeSessionId = sessionId;
+        },
+        waitForPiAdmission: async (signal) => {
+          if (piAdmissionBarrier.pending) {
+            recordTurnPhase(options.operator, "waiting_for_previous_turn");
+          }
+          return waitForPiAdmission(piAdmissionBarrier, signal);
+        },
+        ownPiSettlement: (settlement) => {
+          const barrier: PiAdmissionBarrier = {
+            pending: true,
+            completion: settlement
+          };
+          piAdmissionBarrier = barrier;
+          const clearPending = (): void => {
+            barrier.pending = false;
+          };
+          void settlement.then(clearPending, clearPending);
         }
       })
         .catch((error: unknown) => {
@@ -282,8 +332,10 @@ export function createVoiceResidentRuntime(
             activeTurn = undefined;
           }
         });
+      turn.operation = operation;
+      ownTurnOperation(ownedTurnOperations, operation);
     },
-    onCancel(generation, cancelledState) {
+    onCancel(generation) {
       const turn = currentTurn(activeTurn, generation.id);
 
       if (turn === undefined || turn.cancellation !== undefined) {
@@ -291,12 +343,21 @@ export function createVoiceResidentRuntime(
       }
 
       counters.cancelledTurns += 1;
+      recordResidentVoiceOperatorEvent(options.operator, { kind: "turn_cancelled" });
+      recordTurnPhase(options.operator, "cancelling");
       settlePttReleaseToFirstPcmWrite(turn, options, "skipped", monotonicNow, "cancelled");
       turn.cancellation = convergeCancellation(
         turn,
         controller,
         options,
-        cancelledState === "synthesizing" || cancelledState === "speaking"
+        turn.pipelineOwnsPlayback,
+        {
+          startedAt: now(),
+          startedAtMs: monotonicNow(),
+          outputStoppedSettled: false,
+          idleSettled: false
+        },
+        monotonicNow
       ).then(() => {
         if (activeTurn === turn) {
           activeTurn = undefined;
@@ -347,6 +408,10 @@ export function createVoiceResidentRuntime(
 
       try {
         await waitForTurnBoundary(turn);
+        await waitForOwnedTurnOperations(ownedTurnOperations);
+        recordResidentVoiceOperatorEvent(options.operator, {
+          kind: "interaction_ending_started"
+        });
         await finalizeEndedInteraction(
           ending,
           options,
@@ -365,6 +430,9 @@ export function createVoiceResidentRuntime(
         settlement = { status: "error", errorCode: "interaction_end_failed" };
         throw error;
       } finally {
+        recordResidentVoiceOperatorEvent(options.operator, {
+          kind: "interaction_ending_finished"
+        });
         recordStage(
           options,
           "interaction_end",
@@ -421,6 +489,7 @@ export function createVoiceResidentRuntime(
       turn,
       options,
       endingAtShutdown,
+      ownedTurnOperations,
       () => runtimeFailure
     ).then(
       () => {
@@ -455,7 +524,7 @@ export function createVoiceResidentRuntime(
 
   const processControlEvent = (event: ResidentControlEvent): ResidentControlResult => {
     if (event.kind === "talk_pressed" && activeInteractionEnding !== undefined) {
-      counters.ignoredBusyTalkPresses += 1;
+      recordTalkControlDecision(event, "ignored_busy", "interaction_ending", counters, options);
       return "ignored_busy";
     }
 
@@ -466,9 +535,7 @@ export function createVoiceResidentRuntime(
       return "accepted";
     }
 
-    if (event.kind === "talk_pressed" && result === "ignored_busy") {
-      counters.ignoredBusyTalkPresses += 1;
-    }
+    recordTalkControlDecision(event, result, controller.state(), counters, options);
 
     return result;
   };
@@ -490,6 +557,26 @@ export function createVoiceResidentRuntime(
     completion,
     stop
   };
+}
+
+function recordTalkControlDecision(
+  event: ResidentControlEvent,
+  result: ResidentControlResult,
+  state: ResidentControlState | "interaction_ending",
+  counters: RuntimeCounters,
+  options: Pick<VoiceResidentRuntimeOptions, "operator">
+): void {
+  if (event.kind !== "talk_pressed") return;
+  if (result === "ignored_busy") {
+    counters.ignoredBusyTalkPresses += 1;
+  }
+  if (result === "accepted" || state === "error" || state === "stopped") return;
+  recordResidentVoiceOperatorEvent(options.operator, {
+    kind: "control_decision",
+    control: "talk",
+    result,
+    state
+  });
 }
 
 function recordAcceptedPttRelease(
@@ -614,6 +701,8 @@ async function processCompletedHold(
     readonly getActiveSessionId: () => string | undefined;
     readonly getEndingSessionId: () => string | undefined;
     readonly setActiveSessionId: (sessionId: string | undefined) => void;
+    readonly waitForPiAdmission: (signal: AbortSignal) => Promise<boolean>;
+    readonly ownPiSettlement: (settlement: Promise<void>) => void;
   }
 ): Promise<void> {
   try {
@@ -651,6 +740,8 @@ async function processCompletedHoldWork(
     readonly getActiveSessionId: () => string | undefined;
     readonly getEndingSessionId: () => string | undefined;
     readonly setActiveSessionId: (sessionId: string | undefined) => void;
+    readonly waitForPiAdmission: (signal: AbortSignal) => Promise<boolean>;
+    readonly ownPiSettlement: (settlement: Promise<void>) => void;
   }
 ): Promise<void> {
   await turn.capture.stop();
@@ -715,9 +806,16 @@ async function processCompletedHoldWork(
     occurredAt: transcriptOccurredAt,
     sessionId
   });
+  const waitedForPiAdmission = await state.waitForPiAdmission(turn.generation.signal);
+  if (!isCurrentStage(controller, turn.generation.id, "processing", counters)) {
+    return;
+  }
+  if (waitedForPiAdmission) {
+    recordTurnPhase(options.operator, "processing");
+  }
   const piStartedAt = state.now();
   const piStartedAtMs = state.monotonicNow();
-  const response = await requestPiTurn(
+  const responseOperation = requestPiTurn(
     transcript,
     sessionId,
     deferredResults,
@@ -725,16 +823,38 @@ async function processCompletedHoldWork(
     options,
     counters
   );
-  const piDurationMs = Math.max(0, state.monotonicNow() - piStartedAtMs);
+  const piSettlementOperation = responseOperation.then((response) =>
+    response === undefined
+      ? "failed"
+      : settlePiResponse(
+          response,
+          options,
+          turn.operatorStages,
+          piStartedAt,
+          piStartedAtMs,
+          state.monotonicNow
+        )
+  );
+  state.ownPiSettlement(piSettlementOperation.then(() => undefined));
+  const response = await responseOperation;
+  const responseReadyDurationMs = Math.max(0, state.monotonicNow() - piStartedAtMs);
 
-  recordPiTurnSettlement(response, turn.generation.signal, options, piStartedAt, piDurationMs);
-
-  if (!isCurrentStage(controller, turn.generation.id, "processing", counters)) {
+  if (response === undefined) {
+    recordUnavailablePiTurn(
+      turn.generation.signal,
+      options,
+      turn.operatorStages,
+      piStartedAt,
+      responseReadyDurationMs
+    );
+    if (isCurrentStage(controller, turn.generation.id, "processing", counters)) {
+      finishCurrentTurn(controller, turn, "processing", counters, options);
+    }
     return;
   }
 
-  if (response === undefined) {
-    finishCurrentTurn(controller, turn, "processing", counters, options);
+  if (!isCurrentStage(controller, turn.generation.id, "processing", counters)) {
+    await piSettlementOperation;
     return;
   }
 
@@ -754,7 +874,7 @@ async function processCompletedHoldWork(
     kind: "pi_agent_response",
     occurredAt: responseOccurredAt,
     sessionId,
-    durationMs: piDurationMs
+    durationMs: responseReadyDurationMs
   });
 
   if (!controller.advance(turn.generation.id, "processing", "synthesizing")) {
@@ -764,31 +884,66 @@ async function processCompletedHoldWork(
   recordTurnPhase(options.operator, "synthesizing");
 
   const captureBoundary = createCaptureBoundaryLease(options.captureBoundary);
-  let playback: TtsPlaybackPipelineResult;
-  try {
-    playback = await runTtsPlaybackPipeline({
-      text: response.text,
-      signal: turn.generation.signal,
-      tts: options.tts,
-      playback: options.playback,
-      echoControl: options.echoControl,
-      ...(options.probe === undefined ? {} : { probe: options.probe }),
-      now: state.now,
-      monotonicNow: state.monotonicNow,
-      onFirstPlaybackStart: () => admitTurnPlayback(controller, turn, options, captureBoundary),
-      onFirstPlaybackWriteAccepted: () =>
-        settlePttReleaseToFirstPcmWrite(turn, options, "ok", state.monotonicNow)
-    });
-  } finally {
-    await captureBoundary.resume();
-  }
+  const playbackOperation = runTurnPlayback(
+    response.text,
+    turn,
+    controller,
+    options,
+    state.now,
+    state.monotonicNow,
+    captureBoundary
+  );
+  turn.playbackOperation = playbackOperation;
+  const [playback, piSettlement] = await settleConcurrentOperations(
+    playbackOperation,
+    piSettlementOperation
+  );
 
   if (playback.status === "failed") {
     settlePttReleaseToFirstPcmWrite(turn, options, "error", state.monotonicNow, playback.errorCode);
   }
   throwPlaybackInfrastructureError(playback);
 
-  settleCompletedTurn(playback, turn, controller, options, counters, sessionId, deferredResults);
+  settleCompletedTurn(
+    playback,
+    piSettlement,
+    turn,
+    controller,
+    options,
+    counters,
+    sessionId,
+    deferredResults
+  );
+}
+
+async function runTurnPlayback(
+  text: string,
+  turn: ActiveTurn,
+  controller: ResidentControlController,
+  options: VoiceResidentRuntimeOptions,
+  now: () => string,
+  monotonicNow: () => number,
+  captureBoundary: CaptureBoundaryLease
+): Promise<TtsPlaybackPipelineResult> {
+  turn.pipelineOwnsPlayback = true;
+  try {
+    return await runTtsPlaybackPipeline({
+      text,
+      signal: turn.generation.signal,
+      tts: options.tts,
+      playback: options.playback,
+      echoControl: options.echoControl,
+      ...(options.probe === undefined ? {} : { probe: options.probe }),
+      now,
+      monotonicNow,
+      onFirstPlaybackStart: () => admitTurnPlayback(controller, turn, options, captureBoundary),
+      onFirstPlaybackWriteAccepted: () =>
+        settlePttReleaseToFirstPcmWrite(turn, options, "ok", monotonicNow)
+    });
+  } finally {
+    turn.pipelineOwnsPlayback = false;
+    await captureBoundary.resume();
+  }
 }
 
 type CaptureBoundaryLease = {
@@ -837,6 +992,7 @@ async function admitTurnPlayback(
 
 function settleCompletedTurn(
   result: TtsPlaybackPipelineResult,
+  piSettlement: PiTurnSettlement,
   turn: ActiveTurn,
   controller: ResidentControlController,
   options: VoiceResidentRuntimeOptions,
@@ -849,18 +1005,22 @@ function settleCompletedTurn(
     return;
   }
 
-  switch (result.status) {
-    case "completed":
-      acknowledgeDeferredResults(options, deferredResults);
-      refreshSession(options.sessionLifecycle, sessionId);
-      counters.completedTurns += 1;
-      break;
-    case "failed":
-      counters.failedTurns += 1;
-      break;
-    case "cancelled":
-    case "empty":
-      break;
+  if (piSettlement === "failed") {
+    counters.failedTurns += 1;
+  } else {
+    switch (result.status) {
+      case "completed":
+        acknowledgeDeferredResults(options, deferredResults);
+        refreshSession(options.sessionLifecycle, sessionId);
+        counters.completedTurns += 1;
+        break;
+      case "failed":
+        counters.failedTurns += 1;
+        break;
+      case "cancelled":
+      case "empty":
+        break;
+    }
   }
 
   if (controller.finish(turn.generation.id, state)) {
@@ -980,7 +1140,7 @@ async function requestPiTurn(
   turn: ActiveTurn,
   options: VoiceResidentRuntimeOptions,
   counters: RuntimeCounters
-): Promise<{ readonly text: string } | undefined> {
+): Promise<PiAgentTurnResponse | undefined> {
   try {
     return await options.piAgent.prompt({
       sessionId,
@@ -999,6 +1159,52 @@ async function requestPiTurn(
 
 function isCancellableControlState(state: ResidentControlState): boolean {
   return state !== "idle" && state !== "cancelling" && state !== "error" && state !== "stopped";
+}
+
+function ownTurnOperation(operations: Set<Promise<void>>, operation: Promise<void>): void {
+  operations.add(operation);
+  void operation.then(
+    () => operations.delete(operation),
+    () => operations.delete(operation)
+  );
+}
+
+async function waitForOwnedTurnOperations(operations: Set<Promise<void>>): Promise<void> {
+  while (operations.size > 0) {
+    await Promise.allSettled([...operations]);
+  }
+}
+
+function waitForPiAdmission(barrier: PiAdmissionBarrier, signal: AbortSignal): Promise<boolean> {
+  if (!barrier.pending) {
+    signal.throwIfAborted();
+    return Promise.resolve(false);
+  }
+
+  return waitForCompletionOrAbort(barrier.completion, signal).then(() => true);
+}
+
+function waitForCompletionOrAbort(completion: Promise<void>, signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const removeAbortListener = (): void => signal.removeEventListener("abort", abort);
+    const settle = (operation: () => void): void => {
+      if (settled) return;
+      settled = true;
+      removeAbortListener();
+      operation();
+    };
+    const abort = (): void => {
+      settle(() => reject(asError(signal.reason ?? "pico resident Pi admission cancelled")));
+    };
+
+    completion.then(
+      () => settle(resolve),
+      (error: unknown) => settle(() => reject(asError(error)))
+    );
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+  });
 }
 
 async function waitForTurnBoundary(turn: ActiveTurn | undefined): Promise<void> {
@@ -1105,6 +1311,8 @@ function cancelDeferredAfterInteraction(
   });
 }
 
+// Farewell keeps prompt, playback, cancellation, and settlement in one lifecycle boundary.
+// eslint-disable-next-line complexity
 async function runInteractionFarewell(
   ending: InteractionEndingControl,
   options: VoiceResidentRuntimeOptions,
@@ -1120,26 +1328,54 @@ async function runInteractionFarewell(
   const piStartedAt = now();
   const monotonicNow = options.monotonicNow ?? defaultMonotonicNow;
   const piStartedAtMs = monotonicNow();
+  const operatorStages = scopeResidentVoiceOperatorStagesToCurrentTurn(options.operator);
   const response = await requestFarewellResponse(sessionId, signal, options, counters);
-  const piDurationMs = Math.max(0, monotonicNow() - piStartedAtMs);
-
-  recordPiTurnSettlement(response, signal, options, piStartedAt, piDurationMs);
-
-  if (response === undefined || isAbortRequested(signal)) {
+  if (response === undefined) {
+    recordUnavailablePiTurn(
+      signal,
+      options,
+      operatorStages,
+      piStartedAt,
+      Math.max(0, monotonicNow() - piStartedAtMs)
+    );
     return;
   }
 
-  await runFarewellPlayback(response.text, ending, options, counters, now, monotonicNow);
+  const [playback, piSettlement] = await settleConcurrentOperations(
+    isAbortRequested(signal)
+      ? Promise.resolve(undefined)
+      : runFarewellPlayback(response.text, ending, options, now, monotonicNow),
+    settlePiResponse(response, options, operatorStages, piStartedAt, piStartedAtMs, monotonicNow)
+  );
+  if (playback?.status === "failed" || (piSettlement === "failed" && !isAbortRequested(signal))) {
+    counters.failedTurns += 1;
+  }
+  if (playback !== undefined) {
+    throwPlaybackInfrastructureError(playback);
+  }
+}
+
+async function settleConcurrentOperations<First, Second>(
+  first: Promise<First>,
+  second: Promise<Second>
+): Promise<readonly [First, Second]> {
+  const [firstOutcome, secondOutcome] = await Promise.allSettled([first, second]);
+  if (firstOutcome.status === "rejected") {
+    throw firstOutcome.reason;
+  }
+  if (secondOutcome.status === "rejected") {
+    throw secondOutcome.reason;
+  }
+  return [firstOutcome.value, secondOutcome.value];
 }
 
 async function runFarewellPlayback(
   text: string,
   ending: InteractionEndingControl,
   options: VoiceResidentRuntimeOptions,
-  counters: RuntimeCounters,
   now: () => string,
   monotonicNow: () => number
-): Promise<void> {
+): Promise<TtsPlaybackPipelineResult> {
   const signal = ending.abortController.signal;
   let result: TtsPlaybackPipelineResult;
   const captureBoundary = createCaptureBoundaryLease(options.captureBoundary);
@@ -1170,10 +1406,7 @@ async function runFarewellPlayback(
     await captureBoundary.resume();
   }
 
-  if (result.status === "failed") {
-    counters.failedTurns += 1;
-    throwPlaybackInfrastructureError(result);
-  }
+  return result;
 }
 
 function cancelInteractionEndingResources(
@@ -1211,7 +1444,7 @@ async function requestFarewellResponse(
   signal: AbortSignal,
   options: VoiceResidentRuntimeOptions,
   counters: RuntimeCounters
-): Promise<{ readonly text: string } | undefined> {
+): Promise<PiAgentTurnResponse | undefined> {
   try {
     return await options.piAgent.prompt({ sessionId, text: farewellPrompt, signal });
   } catch {
@@ -1224,21 +1457,70 @@ async function requestFarewellResponse(
   }
 }
 
-function recordPiTurnSettlement(
-  response: { readonly text: string } | undefined,
+function recordUnavailablePiTurn(
   signal: AbortSignal,
   options: VoiceResidentRuntimeOptions,
+  operatorStages: ResidentVoiceOperatorStageSink | undefined,
   startedAt: string,
   durationMs: number
 ): void {
-  if (response !== undefined && !signal.aborted) {
-    recordStage(options, "pi_turn", "ok", startedAt, durationMs);
-    return;
-  }
-
   const cancelled = signal.aborted;
-  recordStage(options, "pi_turn", cancelled ? "skipped" : "error", startedAt, durationMs, {
-    "pico.voice.error_code": cancelled ? "cancelled" : "pi_agent_prompt_failed"
+  recordPiTurnStage(
+    options,
+    operatorStages,
+    cancelled ? "skipped" : "error",
+    startedAt,
+    durationMs,
+    { "pico.voice.error_code": cancelled ? "cancelled" : "pi_agent_prompt_failed" }
+  );
+}
+
+async function settlePiResponse(
+  response: PiAgentTurnResponse,
+  options: VoiceResidentRuntimeOptions,
+  operatorStages: ResidentVoiceOperatorStageSink | undefined,
+  startedAt: string,
+  startedAtMs: number,
+  monotonicNow: () => number
+): Promise<PiTurnSettlement> {
+  try {
+    await response.settled;
+    recordPiTurnStage(
+      options,
+      operatorStages,
+      "ok",
+      startedAt,
+      Math.max(0, monotonicNow() - startedAtMs)
+    );
+    return "ok";
+  } catch {
+    recordPiTurnStage(
+      options,
+      operatorStages,
+      "error",
+      startedAt,
+      Math.max(0, monotonicNow() - startedAtMs),
+      { "pico.voice.error_code": "pi_agent_settlement_failed" }
+    );
+    return "failed";
+  }
+}
+
+function recordPiTurnStage(
+  options: VoiceResidentRuntimeOptions,
+  operatorStages: ResidentVoiceOperatorStageSink | undefined,
+  status: Parameters<typeof recordStage>[2],
+  startedAt: string,
+  durationMs: number,
+  attributes?: Parameters<typeof recordStage>[5]
+): void {
+  recordStage(options, "pi_turn", status, startedAt, durationMs, attributes);
+  recordResidentVoiceOperatorStageEvent(operatorStages, {
+    kind: "stage",
+    stage: "pi_turn",
+    status,
+    durationMs,
+    attributes: attributes ?? {}
   });
 }
 
@@ -1255,6 +1537,51 @@ async function convergeCancellation(
   turn: ActiveTurn,
   controller: ResidentControlController,
   options: VoiceResidentRuntimeOptions,
+  pipelineOwnsPlayback: boolean,
+  measurement: CancellationMeasurement,
+  monotonicNow: () => number
+): Promise<void> {
+  try {
+    await settleCancellationOutput(turn, options, pipelineOwnsPlayback);
+    settleCancellationMeasurement(measurement, "output_stopped", options, "ok", monotonicNow);
+    await flushCancellationEcho(options.echoControl, pipelineOwnsPlayback);
+
+    const completed = controller.completeCancellation(turn.generation.id);
+    settleCancellationMeasurement(
+      measurement,
+      "idle",
+      options,
+      completed ? "ok" : "skipped",
+      monotonicNow,
+      completed ? undefined : "shutdown"
+    );
+    if (completed) {
+      recordTurnIdle(turn, options);
+    }
+  } catch (error) {
+    settleCancellationMeasurement(
+      measurement,
+      "output_stopped",
+      options,
+      "error",
+      monotonicNow,
+      "cancellation_failed"
+    );
+    settleCancellationMeasurement(
+      measurement,
+      "idle",
+      options,
+      "error",
+      monotonicNow,
+      "cancellation_failed"
+    );
+    throw error;
+  }
+}
+
+async function settleCancellationOutput(
+  turn: ActiveTurn,
+  options: Pick<VoiceResidentRuntimeOptions, "playback">,
   pipelineOwnsPlayback: boolean
 ): Promise<void> {
   const stops = await Promise.allSettled([
@@ -1263,19 +1590,52 @@ async function convergeCancellation(
     ...(pipelineOwnsPlayback ? [] : [options.playback.stop()])
   ]);
   await turn.frameCollection.catch(() => undefined);
-  await turn.operation?.catch(() => undefined);
+  const [playbackSettlement] = await Promise.allSettled([
+    turn.playbackOperation ?? Promise.resolve(undefined)
+  ]);
+  const outputFailure = findRejected([...stops, playbackSettlement]);
+
+  if (outputFailure !== undefined) {
+    throw outputFailure.reason;
+  }
+  if (playbackSettlement.status === "fulfilled" && playbackSettlement.value !== undefined) {
+    throwPlaybackInfrastructureError(playbackSettlement.value);
+  }
+}
+
+async function flushCancellationEcho(
+  echoControl: EchoControlProvider,
+  pipelineOwnsPlayback: boolean
+): Promise<void> {
   if (!pipelineOwnsPlayback) {
-    await options.echoControl.flush();
+    await echoControl.flush();
   }
-  const rejected = findRejected(stops);
+}
 
-  if (rejected !== undefined) {
-    throw rejected.reason;
-  }
+function settleCancellationMeasurement(
+  measurement: CancellationMeasurement,
+  boundary: "output_stopped" | "idle",
+  options: VoiceResidentRuntimeOptions,
+  status: Parameters<typeof recordStage>[2],
+  monotonicNow: () => number,
+  errorCode?: string
+): void {
+  const settledKey = boundary === "output_stopped" ? "outputStoppedSettled" : "idleSettled";
 
-  if (controller.completeCancellation(turn.generation.id)) {
-    recordTurnIdle(turn, options);
+  if (measurement[settledKey]) {
+    return;
   }
+  measurement[settledKey] = true;
+  recordStage(
+    options,
+    boundary === "output_stopped"
+      ? "resident_cancel_admission_to_output_stopped"
+      : "resident_cancel_admission_to_idle",
+    status,
+    measurement.startedAt,
+    Math.max(0, monotonicNow() - measurement.startedAtMs),
+    errorCode === undefined ? undefined : { "pico.voice.error_code": errorCode }
+  );
 }
 
 // Await each independently owned async boundary before shared resources close.
@@ -1284,6 +1644,7 @@ async function shutdownVoiceRuntime(
   turn: ActiveTurn | undefined,
   options: VoiceResidentRuntimeOptions,
   interactionEnding: Promise<void>,
+  ownedTurnOperations: Set<Promise<void>>,
   precedingFailure: () => Error | undefined
 ): Promise<void> {
   const turnResults = await Promise.allSettled(
@@ -1297,6 +1658,7 @@ async function shutdownVoiceRuntime(
           turn.cancellation ?? Promise.resolve()
         ]
   );
+  await waitForOwnedTurnOperations(ownedTurnOperations);
   const endingResults = await Promise.allSettled([interactionEnding]);
   const ownerResults = await Promise.allSettled([
     options.playback.stop(),

@@ -44,7 +44,7 @@ import {
   residentPlaybackFinalSilenceMs
 } from "./resident-audio-playback.js";
 import { createResidentHealthPublicationGate } from "./resident-health-publication.js";
-import type { ResidentIoTimingStage } from "./resident-io-protocol.js";
+import type { ResidentIoMessage, ResidentIoTimingStage } from "./resident-io-protocol.js";
 import {
   acquireResidentSingleInstanceLock,
   registerResidentSingleInstanceLockShutdownCleanup
@@ -237,9 +237,7 @@ export async function runResidentVoiceWithProviders(input: {
             handleCaptureInvalidated: handleCaptureUnavailable,
             observeHealth: async (event) => {
               if (healthPublication.accept(event, performance.now())) {
-                writeProcessLine(
-                  `[pico] macOS resident I/O health: ${event.state}/${event.code} restarts=${String(event.restartCount)} dropped=${String(event.droppedFrameCount)}\n`
-                );
+                writeProcessLine(formatResidentIoHealthLine(event));
                 audit?.record({
                   category: "transport_event",
                   name: "voice.resident_io.health",
@@ -263,15 +261,7 @@ export async function runResidentVoiceWithProviders(input: {
                 await handleCaptureUnavailable();
               }
             },
-            observeTiming: (event) => {
-              const occurredAtMs = Date.now();
-              recordVoiceStageProbe(stageProbe, {
-                stage: residentIoVoiceStage(event.stage),
-                status: "ok",
-                startedAt: new Date(Math.max(0, occurredAtMs - event.durationMs)).toISOString(),
-                durationMs: event.durationMs
-              });
-            },
+            observeTiming: (event) => recordResidentIoTimingEvent(stageProbe, event),
             signal
           }),
         createRuntime: (bridge) => {
@@ -335,6 +325,43 @@ function residentIoVoiceStage(stage: ResidentIoTimingStage) {
   return `resident_${stage}` as const;
 }
 
+export function recordResidentIoTimingEvent(
+  stageProbe: VoiceStageProbe,
+  event: Extract<ResidentIoMessage, { kind: "timing_event" }>,
+  occurredAtMs = Date.now()
+): void {
+  recordVoiceStageProbe(stageProbe, {
+    stage: residentIoVoiceStage(event.stage),
+    status: "ok",
+    startedAt: new Date(Math.max(0, occurredAtMs - event.durationMs)).toISOString(),
+    durationMs: event.durationMs,
+    ...(event.controlResult === undefined
+      ? {}
+      : {
+          attributes: {
+            "pico.voice.control_result": event.controlResult
+          }
+        })
+  });
+}
+
+export function formatResidentIoHealthLine(
+  event: Extract<ResidentIoMessage, { kind: "health_event" }>
+): string {
+  const expectedDiscardedSampleFrames =
+    event.outsidePttDroppedFrameCount + event.suppressedDroppedFrameCount;
+  const abnormalDroppedSampleFrames = Math.max(
+    0,
+    event.droppedFrameCount - expectedDiscardedSampleFrames
+  );
+  const abnormalLoss =
+    event.state !== "running" || abnormalDroppedSampleFrames > 0
+      ? ` abnormal_dropped_sample_frames=${String(abnormalDroppedSampleFrames)}`
+      : "";
+
+  return `[pico] macOS resident I/O health: ${event.state}/${event.code} restarts=${String(event.restartCount)} outside_ptt_discarded_sample_frames=${String(event.outsidePttDroppedFrameCount)} suppressed_discarded_sample_frames=${String(event.suppressedDroppedFrameCount)}${abnormalLoss}\n`;
+}
+
 function resolveStartupReadiness(
   startupReadiness: ((config: PicoConfig) => Promise<void>) | undefined
 ): (config: PicoConfig) => Promise<void> {
@@ -351,6 +378,12 @@ export function createResidentVoiceStageProbe(
       ? {}
       : {
           observe: (observation) => {
+            if (
+              observation.stage === "pi_turn" &&
+              operator.scopeStagesToCurrentTurn !== undefined
+            ) {
+              return;
+            }
             recordResidentVoiceOperatorEvent(operator, {
               kind: "stage",
               stage: observation.stage,

@@ -1,10 +1,12 @@
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 import type { PicoMacKey } from "../config/index.js";
+import type { ResidentControlResult } from "./resident-control.js";
+import type { ResidentControlState } from "./resident-control-controller.js";
 import type { ResidentVoiceTurnPhase } from "./resident-voice-operator.js";
 import type { VoiceRuntimeStage, VoiceStageStatus } from "./voice-stage-probe.js";
 
-export type ResidentVoiceTerminalPhase = ResidentVoiceTurnPhase;
+export type ResidentVoiceTerminalPhase = ResidentVoiceTurnPhase | "ending";
 
 export type ResidentVoiceTerminalTheme = {
   readonly fg: (
@@ -30,14 +32,22 @@ export type ResidentVoiceTerminalTurnView = {
   readonly staffText?: string;
   readonly picoText?: string;
   readonly failure?: string;
+  readonly cancelled?: boolean;
   readonly tools: readonly ResidentVoiceTerminalToolView[];
   readonly timings: ReadonlyMap<VoiceRuntimeStage, StageTimingView>;
+};
+
+export type ResidentVoiceTerminalControlNotice = {
+  readonly control: "talk";
+  readonly result: ResidentControlResult;
+  readonly state: ResidentControlState | "interaction_ending";
 };
 
 export type ResidentVoiceTerminalView = {
   readonly controls: ResidentVoiceTerminalControls;
   readonly phase: ResidentVoiceTerminalPhase;
   readonly activeToolName?: string;
+  readonly notice?: ResidentVoiceTerminalControlNotice;
   readonly turns: readonly ResidentVoiceTerminalTurnView[];
 };
 
@@ -57,13 +67,15 @@ const phasePresentations: Readonly<Record<ResidentVoiceTerminalPhase, PhasePrese
   listening: { symbol: "●", label: "聞き取り中", color: "accent" },
   transcribing: { symbol: "◐", label: "文字起こし中", color: "warning" },
   processing: { symbol: "◐", label: "考えています", color: "warning" },
+  waiting_for_previous_turn: { symbol: "◐", label: "前の処理を整理中", color: "warning" },
   synthesizing: { symbol: "◐", label: "音声準備中", color: "warning" },
-  speaking: { symbol: "●", label: "話しています", color: "accent" }
+  speaking: { symbol: "●", label: "話しています", color: "accent" },
+  cancelling: { symbol: "◐", label: "中断処理中", color: "warning" },
+  ending: { symbol: "◐", label: "セッション終了中", color: "warning" }
 };
-
-const comparableStages = [
+const criticalPathStages = [
   ["stt", "STT"],
-  ["pi_turn", "Pi"],
+  ["pi_final_response_ready", "Pi確定"],
   ["tts_time_to_first_chunk", "TTS"]
 ] as const satisfies readonly (readonly [VoiceRuntimeStage, string])[];
 const rolePrefixWidth = 6;
@@ -78,6 +90,10 @@ export function renderResidentVoiceTerminal(
   const turns = view.turns.slice(-2);
   const currentTurn = turns.at(-1);
   const lines = renderHeader(view, currentTurn, width, theme);
+  const notice = formatControlNotice(view);
+  if (notice !== undefined) {
+    lines.push(theme.fg("muted", notice));
+  }
 
   if (width >= 48) {
     lines.push(theme.fg("dim", "─".repeat(width)));
@@ -147,6 +163,10 @@ function renderTurn(
     renderRoleText(lines, "PICO", theme.fg("error", `✗ ${turn.failure}`), width, theme);
   }
 
+  if (turn.cancelled === true) {
+    lines.push(`${" ".repeat(rolePrefixWidth)}${theme.fg("muted", "− 中断済み")}`);
+  }
+
   const metrics = formatMetrics(turn.timings);
   if (metrics !== undefined) {
     const styled = theme.fg("muted", metrics);
@@ -156,6 +176,23 @@ function renderTurn(
       lines.push(`${" ".repeat(rolePrefixWidth)}${styled}`);
     }
   }
+}
+
+function formatControlNotice(view: ResidentVoiceTerminalView): string | undefined {
+  const notice = view.notice;
+  if (notice === undefined) return undefined;
+
+  if (notice.result === "noop" && notice.state === "listening") {
+    return `− ${view.controls.talkKey}: 既に聞き取り中`;
+  }
+
+  const reason =
+    notice.state === "cancelling"
+      ? "中断処理中"
+      : notice.state === "interaction_ending"
+        ? "セッション終了中"
+        : "現在の処理中";
+  return `− ${view.controls.talkKey}: ${reason}のため受理せず`;
 }
 
 function renderRoleText(
@@ -201,30 +238,47 @@ function formatMetrics(
   const responseStart = timings.get("ptt_release_to_first_pcm_write");
 
   if (responseStart?.status === "ok") {
-    values.push(`音声送出 ${formatDuration(responseStart.durationMs)}`);
+    values.push(`応答開始 ${formatDuration(responseStart.durationMs)}`);
   }
 
-  const longest = findLongestComparableTiming(timings);
-  if (longest !== undefined) {
-    values.push(`最長 ${longest.label} ${formatDuration(longest.durationMs)}`);
+  const criticalPath = formatCriticalPath(timings);
+  if (criticalPath !== undefined) {
+    values.push(criticalPath);
+  }
+
+  const piSettlementTail = piSettlementTailDuration(timings);
+  if (piSettlementTail > 0) {
+    values.push(`Pi後処理 ${formatDuration(piSettlementTail)}`);
   }
 
   return values.length === 0 ? undefined : values.join(" · ");
 }
 
-function findLongestComparableTiming(
+function formatCriticalPath(
   timings: ReadonlyMap<VoiceRuntimeStage, StageTimingView>
-): { readonly label: string; readonly durationMs: number } | undefined {
-  let longest: { readonly label: string; readonly durationMs: number } | undefined;
-  for (const [stage, label] of comparableStages) {
+): string | undefined {
+  const parts: string[] = [];
+
+  for (const [stage, label] of criticalPathStages) {
     const timing = timings.get(stage);
-    if (timing?.status !== "ok") continue;
-    if (longest === undefined || timing.durationMs > longest.durationMs) {
-      longest = { label, durationMs: timing.durationMs };
+    if (timing?.status === "ok") {
+      parts.push(`${label} ${formatDuration(timing.durationMs)}`);
     }
   }
 
-  return longest;
+  return parts.length === 0 ? undefined : parts.join(" → ");
+}
+
+function piSettlementTailDuration(
+  timings: ReadonlyMap<VoiceRuntimeStage, StageTimingView>
+): number {
+  const turn = timings.get("pi_turn");
+  const response = timings.get("pi_final_response_ready");
+
+  if (turn?.status !== "ok" || response?.status !== "ok") {
+    return 0;
+  }
+  return Math.max(0, turn.durationMs - response.durationMs);
 }
 
 function formatDuration(durationMs: number): string {

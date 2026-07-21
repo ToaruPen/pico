@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import type { PiAgentTurnClient } from "./voice-resident.js";
+import type { PiAgentTurnClient, PiAgentTurnResponse } from "./voice-resident.js";
 
 export type PiHostTurnClient = PiAgentTurnClient & {
   readonly close: () => void;
@@ -14,7 +14,7 @@ export type PiHostTurnClientOptions = {
 type ActiveTurn = {
   readonly chunks: string[];
   readonly expectedPrompt: string;
-  readonly resolve: (value: { readonly text: string }) => void;
+  readonly resolve: (value: PiAgentTurnResponse) => void;
   readonly reject: (error: Error) => void;
   readonly signal: AbortSignal | undefined;
   abortRequested: boolean;
@@ -104,7 +104,7 @@ export function createPiHostTurnClient(
         return;
       }
 
-      turn.resolve({ text: turn.chunks.join("") });
+      turn.resolve({ text: turn.chunks.join(""), settled: Promise.resolve() });
     });
   });
   pi.on("session_shutdown", close);

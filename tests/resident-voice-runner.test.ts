@@ -19,6 +19,8 @@ import {
   createConfiguredStt,
   createConfiguredTts,
   createResidentVoiceStageProbe,
+  formatResidentIoHealthLine,
+  recordResidentIoTimingEvent,
   requireResidentVoiceEnabled,
   runResidentControlLifecycle,
   runResidentVoiceWithProviders,
@@ -129,6 +131,63 @@ describe("resident voice TTS telemetry wiring", () => {
         attributes: { "pico.voice.utterance_duration_ms": 800 }
       }
     ]);
+  });
+
+  it("records resident control timing with only the bounded decision result", () => {
+    const audit = createStructuredAuditLog();
+
+    recordResidentIoTimingEvent(
+      { audit },
+      {
+        kind: "timing_event",
+        stage: "key_to_admission",
+        durationMs: 1.25,
+        controlResult: "ignored_busy"
+      },
+      Date.parse("2026-07-19T00:00:01.000Z")
+    );
+
+    expect(audit.entries()).toEqual([
+      expect.objectContaining({
+        attributes: {
+          "pico.voice.stage": "resident_key_to_admission",
+          "pico.voice.stage_status": "ok",
+          "pico.voice.stage_duration_ms": 1.25,
+          "pico.voice.control_result": "ignored_busy"
+        }
+      })
+    ]);
+    expect(JSON.stringify(audit.entries())).not.toContain("F13");
+  });
+
+  it("labels expected gate discard separately from abnormal audio loss", () => {
+    const running = formatResidentIoHealthLine({
+      kind: "health_event",
+      state: "running",
+      code: "health_sample",
+      restartCount: 0,
+      droppedFrameCount: 2_928_000,
+      bufferCadenceMs: 10,
+      outsidePttDroppedFrameCount: 2_880_000,
+      suppressedDroppedFrameCount: 48_000
+    });
+    const recovering = formatResidentIoHealthLine({
+      kind: "health_event",
+      state: "recovering",
+      code: "audio_callback_overrun",
+      restartCount: 1,
+      droppedFrameCount: 2_928_005,
+      bufferCadenceMs: 0,
+      outsidePttDroppedFrameCount: 2_880_000,
+      suppressedDroppedFrameCount: 48_000
+    });
+
+    expect(running).toContain("outside_ptt_discarded_sample_frames=2880000");
+    expect(running).toContain("suppressed_discarded_sample_frames=48000");
+    expect(running).not.toContain("abnormal_dropped_sample_frames");
+    expect(running).not.toContain(" dropped=");
+    expect(recovering).toContain("abnormal_dropped_sample_frames=5");
+    expect(recovering).not.toContain(" dropped=");
   });
 
   it("maps successful provider observations to allowlisted voice stage probes", async () => {

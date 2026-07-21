@@ -21,10 +21,33 @@ const session = defineResidentDevelopmentTerminalSession({
 
 await writeLauncherScript(session);
 
-if (session.terminal === "kitty") {
-  await runKitty(requireKittyCommand(session.kittyCommand));
+if (session.terminal === "ghostty") {
+  await runTerminalApplication(requireGhosttyCommand(session.ghosttyCommand));
+} else if (session.terminal === "kitty") {
+  await runTerminalApplication(requireKittyCommand(session.kittyCommand));
 } else {
   await runAppleScript(requireAppleScript(session.appleScript));
+}
+
+function runTerminalApplication(command: {
+  readonly command: "kitty" | "open";
+  readonly args: readonly string[];
+}): Promise<void> {
+  return new Promise((resolveRun, rejectRun) => {
+    const child = spawn(command.command, command.args, {
+      stdio: "inherit"
+    });
+
+    child.once("error", rejectRun);
+    child.once("exit", (code) => {
+      if (code === 0) {
+        resolveRun();
+        return;
+      }
+
+      rejectRun(new Error(`${command.command} exited with code ${String(code ?? -1)}`));
+    });
+  });
 }
 
 async function writeLauncherScript(session: {
@@ -60,32 +83,21 @@ function runAppleScript(script: string): Promise<void> {
   });
 }
 
-function runKitty(command: {
-  readonly command: "kitty";
-  readonly args: readonly string[];
-}): Promise<void> {
-  return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(command.command, command.args, {
-      stdio: "inherit"
-    });
-
-    child.once("error", rejectRun);
-    child.once("exit", (code) => {
-      if (code === 0) {
-        resolveRun();
-        return;
-      }
-
-      rejectRun(new Error(`kitty exited with code ${String(code ?? -1)}`));
-    });
-  });
-}
-
 function requireKittyCommand(
   command: { readonly command: "kitty"; readonly args: readonly string[] } | undefined
 ): { readonly command: "kitty"; readonly args: readonly string[] } {
   if (command === undefined) {
     throw new Error("pico dev terminal session is missing kitty command");
+  }
+
+  return command;
+}
+
+function requireGhosttyCommand(
+  command: { readonly command: "open"; readonly args: readonly string[] } | undefined
+): { readonly command: "open"; readonly args: readonly string[] } {
+  if (command === undefined) {
+    throw new Error("pico dev terminal session is missing Ghostty command");
   }
 
   return command;
@@ -104,13 +116,13 @@ function readDevelopmentTerminal(
   environment: NodeJS.ProcessEnv
 ): ResidentDevelopmentTerminal {
   const option = arguments_.find((argument) => argument.startsWith("--terminal="));
-  const value = option?.slice("--terminal=".length) ?? environment.PICO_DEV_TERMINAL ?? "terminal";
+  const value = option?.slice("--terminal=".length) ?? environment.PICO_DEV_TERMINAL ?? "ghostty";
 
-  if (value === "kitty" || value === "terminal") {
+  if (value === "ghostty" || value === "kitty" || value === "terminal") {
     return value;
   }
 
-  throw new Error("PICO_DEV_TERMINAL and --terminal must be kitty or terminal");
+  throw new Error("PICO_DEV_TERMINAL and --terminal must be ghostty, kitty, or terminal");
 }
 
 function readDevelopmentTerminalPathEnvironment(

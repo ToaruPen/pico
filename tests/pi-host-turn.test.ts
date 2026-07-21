@@ -104,7 +104,7 @@ describe("Pi host resident turn client", () => {
     await harness.emit("message_update", textDelta("です"), context);
     await harness.emit("agent_settled", { type: "agent_settled" }, context);
 
-    await expect(response).resolves.toEqual({ text: "応答です" });
+    await expect(response).resolves.toMatchObject({ text: "応答です" });
     expect(abortCalls).toEqual([]);
   });
 
@@ -122,7 +122,7 @@ describe("Pi host resident turn client", () => {
 
     await acceptTurn(harness, context, "一件目");
     await harness.emit("agent_settled", { type: "agent_settled" }, context);
-    await expect(first).resolves.toEqual({ text: "" });
+    await expect(first).resolves.toMatchObject({ text: "" });
   });
 
   it("refuses to inject a voice turn while Pi is not idle", async () => {

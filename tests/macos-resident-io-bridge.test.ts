@@ -55,6 +55,7 @@ describe("managed macOS resident I/O bridge", () => {
     const process = new ControlledProcess();
     const launches: Array<{ executable: string; arguments_: readonly string[] }> = [];
     const controls: Array<{ kind: string; physicalTimestampNanoseconds: string }> = [];
+    const timings: unknown[] = [];
     const tails: number[] = [];
     const invalidations: number[] = [];
     const starting = startMacOSResidentIoBridge({
@@ -64,8 +65,8 @@ describe("managed macOS resident I/O bridge", () => {
         channels: 1,
         frameMs: 10,
         releaseTailMs: 250,
-        talkKey: "F1",
-        cancelKey: "F2"
+        talkKey: "F13",
+        cancelKey: "F14"
       },
       platform: "darwin",
       handleControl: (event) => {
@@ -78,6 +79,7 @@ describe("managed macOS resident I/O bridge", () => {
       handleCaptureInvalidated: (generation) => {
         invalidations.push(generation);
       },
+      observeTiming: (event) => timings.push(event),
       spawnProcess: (executable, arguments_) => {
         launches.push({ executable, arguments_ });
         return process;
@@ -102,9 +104,9 @@ describe("managed macOS resident I/O bridge", () => {
           "--release-tail-ms",
           "250",
           "--talk-key",
-          "F1",
+          "F13",
           "--cancel-key",
-          "F2"
+          "F14"
         ]
       }
     ]);
@@ -125,6 +127,22 @@ describe("managed macOS resident I/O bridge", () => {
       result: "accepted",
       generation: 1
     });
+    process.send({
+      kind: "timing_event",
+      stage: "key_to_admission",
+      durationMs: 1.25,
+      controlResult: "ignored_busy"
+    });
+    await vi.waitFor(() =>
+      expect(timings).toEqual([
+        {
+          kind: "timing_event",
+          stage: "key_to_admission",
+          durationMs: 1.25,
+          controlResult: "ignored_busy"
+        }
+      ])
+    );
 
     process.send({
       kind: "pcm_frame",
@@ -395,8 +413,8 @@ function residentInput() {
     channels: 1,
     frameMs: 10,
     releaseTailMs: 250,
-    talkKey: "F1",
-    cancelKey: "F2"
+    talkKey: "F13",
+    cancelKey: "F14"
   } as const;
 }
 

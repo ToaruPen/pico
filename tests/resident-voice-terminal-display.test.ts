@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { ResidentVoiceOperatorEvent } from "../src/runtime/resident-voice-operator.js";
+import {
+  type ResidentVoiceOperatorEvent,
+  scopeResidentVoiceOperatorStagesToCurrentTurn
+} from "../src/runtime/resident-voice-operator.js";
 import {
   createResidentVoiceTerminalDisplay,
   createResidentVoiceTerminalOperator
@@ -78,6 +81,7 @@ describe("resident voice terminal display", () => {
     for (const [stage, durationMs] of [
       ["stt", 125],
       ["pi_time_to_first_text", 750],
+      ["pi_final_response_ready", 800],
       ["pi_turn", 1_075],
       ["tts_time_to_first_chunk", 240],
       ["tts_playback", 600],
@@ -96,15 +100,46 @@ describe("resident voice terminal display", () => {
     expect(output).toContain("YOU   スタックチャンの状態を教えて");
     expect(output).toContain("TOOL  ✓ stackchan_get_status  350 ms");
     expect(output).toContain("PICO  準備できています");
-    expect(output).toContain("音声送出 1.40 s · 最長 Pi 1.08 s");
+    expect(output).toContain(
+      "応答開始 1.40 s · STT 125 ms → Pi確定 800 ms → TTS 240 ms · Pi後処理 275 ms"
+    );
     expect(output).not.toContain("detail");
     expect(output).not.toContain("ready");
     expect(output).not.toContain("[stop=stop]");
     expect(output).not.toContain("末尾無音");
-    expect(onChange).toHaveBeenCalledTimes(13);
+    expect(onChange).toHaveBeenCalledTimes(14);
   });
 
-  it("ignores farewell telemetry after a resident turn becomes idle", () => {
+  it("keeps a late Pi settlement timing on the turn that owns it", () => {
+    const display = createResidentVoiceTerminalDisplay({ controls: configuredControls });
+
+    display.record({ kind: "turn_started" });
+    display.record({ kind: "staff_transcript", text: "最初の発話" });
+    display.record({
+      kind: "stage",
+      stage: "pi_final_response_ready",
+      status: "ok",
+      durationMs: 800,
+      attributes: {}
+    });
+    const firstTurnStages = scopeResidentVoiceOperatorStagesToCurrentTurn(display);
+    display.record({ kind: "turn_started" });
+    display.record({ kind: "staff_transcript", text: "次の発話" });
+
+    firstTurnStages?.record({
+      kind: "stage",
+      stage: "pi_turn",
+      status: "ok",
+      durationMs: 1_075,
+      attributes: {}
+    });
+
+    const output = display.render(100, plainTheme).join("\n");
+    expect(output).toContain("Pi後処理 275 ms");
+    expect(output.indexOf("Pi後処理 275 ms")).toBeLessThan(output.indexOf("YOU   次の発話"));
+  });
+
+  it("shows farewell telemetry in a bounded interaction-ending lifecycle", () => {
     const display = createResidentVoiceTerminalDisplay({ controls: configuredControls });
 
     display.record({ kind: "turn_started" });
@@ -124,9 +159,15 @@ describe("resident voice terminal display", () => {
       durationMs: 1_075,
       attributes: {}
     });
+    display.record({
+      kind: "control_decision",
+      control: "talk",
+      result: "ignored_busy",
+      state: "cancelling"
+    });
     display.record({ kind: "turn_phase", phase: "idle" });
-    const completedCard = display.render(100, plainTheme);
-
+    display.record({ kind: "interaction_ending_started" });
+    display.record({ kind: "pi_response", text: "またお手伝いします" });
     display.record({
       kind: "stage",
       stage: "pi_turn",
@@ -134,23 +175,54 @@ describe("resident voice terminal display", () => {
       durationMs: 9_000,
       attributes: {}
     });
+    const duringFarewell = display.render(100, plainTheme).join("\n");
+    expect(duringFarewell).toContain("◐ セッション終了中");
+    expect(duringFarewell).toContain("PICO  またお手伝いします");
+    expect(duringFarewell).not.toContain("中断処理中のため受理せず");
+
     display.record({
-      kind: "tool_execution_start",
-      toolCallId: "farewell-tool",
-      toolName: "farewell_status",
-      args: undefined
+      kind: "control_decision",
+      control: "talk",
+      result: "ignored_busy",
+      state: "interaction_ending"
     });
+    expect(display.render(100, plainTheme).join("\n")).toContain(
+      "F13: セッション終了中のため受理せず"
+    );
+
+    display.record({ kind: "interaction_ending_finished" });
+    const afterFarewell = display.render(100, plainTheme).join("\n");
+    expect(afterFarewell).toContain("● 待機中");
+    expect(afterFarewell).toContain("PICO  またお手伝いします");
+    expect(afterFarewell).not.toContain("セッション終了中のため受理せず");
+  });
+
+  it("retains one configured busy notice until the next accepted turn", () => {
+    const display = createResidentVoiceTerminalDisplay({ controls: configuredControls });
+
+    display.record({ kind: "turn_started" });
+    display.record({ kind: "turn_phase", phase: "speaking" });
+    display.record({ kind: "turn_cancelled" });
+    display.record({ kind: "turn_phase", phase: "cancelling" });
     display.record({
-      kind: "tool_execution_end",
-      toolCallId: "farewell-tool",
-      toolName: "farewell_status",
-      status: "ok",
-      durationMs: 250
+      kind: "control_decision",
+      control: "talk",
+      result: "ignored_busy",
+      state: "cancelling"
     });
 
-    const afterFarewell = display.render(100, plainTheme);
-    expect(afterFarewell).toEqual(completedCard);
-    expect(afterFarewell.join("\n")).not.toContain("farewell_status");
+    const cancelled = display.render(100, plainTheme).join("\n");
+    expect(cancelled).toContain("◐ 中断処理中");
+    expect(cancelled).toContain("− F13: 中断処理中のため受理せず");
+    expect(cancelled).toContain("− 中断済み");
+
+    display.record({ kind: "turn_phase", phase: "idle" });
+    expect(display.render(100, plainTheme).join("\n")).toContain("− F13: 中断処理中のため受理せず");
+
+    display.record({ kind: "turn_started" });
+    display.record({ kind: "turn_phase", phase: "listening" });
+    const nextTurn = display.render(100, plainTheme).join("\n");
+    expect(nextTurn).not.toContain("中断処理中のため受理せず");
   });
 
   it("shows a post-response audio failure while preserving the response", () => {
