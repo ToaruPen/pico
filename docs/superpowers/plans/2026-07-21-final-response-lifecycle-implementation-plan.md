@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Add the response-plus-settlement adapter contract
+## Task 1: Add the response-plus-settlement adapter contract
 
 **Files:**
 - Modify: `src/runtime/voice-resident.ts`
@@ -58,7 +58,7 @@ Run: `npx vitest run tests/pi-agent-turn.test.ts -t "publishes the final respons
 
 Expected: pass.
 
-### Task 2: Enforce the conservative final-response boundary
+## Task 2: Enforce the conservative final-response boundary
 
 **Files:**
 - Modify: `src/runtime/pi-agent-turn.ts`
@@ -96,7 +96,7 @@ Expected: all adapter lifecycle, tool, retry, disposal, and compatibility tests 
 
 Commit: `feat: expose final response before Pi settlement`
 
-### Task 3: Split pre- and post-response cancellation
+## Task 3: Split pre- and post-response cancellation
 
 **Files:**
 - Modify: `src/runtime/pi-agent-turn.ts`
@@ -134,7 +134,7 @@ Expected: all focused tests pass.
 
 Commit: `fix: preserve Pi settlement after speech cancellation`
 
-### Task 4: Define post-response failure, disposal, and farewell convergence
+## Task 4: Define post-response failure, disposal, and farewell convergence
 
 **Files:**
 - Modify: `src/runtime/voice-resident.ts`
@@ -166,7 +166,7 @@ Expected: all tests pass.
 
 Commit: `fix: converge spoken responses with Pi settlement`
 
-### Task 5: Add minimal phase telemetry and run PR 3 gates
+## Task 5: Add minimal phase telemetry and run PR 3 gates
 
 **Files:**
 - Modify: `src/runtime/voice-stage-probe.ts`
@@ -214,4 +214,3 @@ Expected: all commands exit 0.
 - [ ] **Step 6: Commit telemetry and docs**
 
 Commit: `docs: define final response settlement timing`
-

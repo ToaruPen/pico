@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Pass the resolved startup config through the controller boundary
+## Task 1: Pass the resolved startup config through the controller boundary
 
 **Files:**
 - Modify: `src/runtime/pico-startup.ts`
@@ -116,7 +116,7 @@ Expected: both files pass.
 
 Commit: `refactor: share resolved resident startup config`
 
-### Task 2: Render configured controls
+## Task 2: Render configured controls
 
 **Files:**
 - Modify: `src/runtime/resident-voice-terminal-display.ts`
@@ -166,7 +166,7 @@ Expected: all tests pass and every rendered line satisfies the width invariant.
 
 Commit: `fix: display configured resident voice controls`
 
-### Task 3: Move the PTT metric to the first accepted playback write
+## Task 3: Move the PTT metric to the first accepted playback write
 
 **Files:**
 - Modify: `src/runtime/tts-playback-pipeline.ts`
@@ -221,7 +221,7 @@ Expected: all focused tests pass.
 
 Commit: `fix: measure first resident playback write`
 
-### Task 4: Update contracts and run PR 1 gates
+## Task 4: Update contracts and run PR 1 gates
 
 **Files:**
 - Modify: `docs/superpowers/specs/2026-07-17-hold-to-talk-resident-control-design.md`

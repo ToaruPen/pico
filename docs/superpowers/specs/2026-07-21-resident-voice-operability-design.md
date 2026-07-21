@@ -101,7 +101,14 @@ Process lines use the current writer clock. Metrics and interaction events use t
 
 Each `normal` and `development` managed root has a fixed 128 MiB total limit. The limit is an internal operational constant, not user configuration.
 
-At startup and when capacity is required, the writer removes only recognized closed files inside the same managed mode root, oldest first. It never follows symlinks, leaves the managed root, deletes an active run file, or touches legacy paths. If active files alone prevent capacity recovery, the new record is dropped and a bounded operator diagnostic is emitted.
+At startup the writer inventories only recognized managed files. When capacity
+is required, it removes recognized closed files inside the same managed mode
+root, oldest first. At each filesystem observation it rejects symlinked path
+components, ignores symlink inventory entries, and opens final write targets
+with no-follow semantics. It does not intentionally leave the managed root,
+delete an active run file, or touch legacy paths. If active files alone prevent
+capacity recovery, the new record is dropped and a bounded operator diagnostic
+is emitted.
 
 ### 5.4 Bounded asynchronous writer
 
@@ -113,7 +120,12 @@ Public log sink methods remain synchronous enqueue operations so existing runtim
 - shutdown waits for queued writes within the existing resident shutdown ownership;
 - provider execution does not fall back to another log destination.
 
-The managed root is rejected at startup if its path is a symlink. File creation uses no-follow semantics and private modes. This is a narrow protection for the owned root, not a general filesystem security framework.
+Managed path components that are symlinks when observed are rejected, and file
+creation uses no-follow semantics and private modes. The root is local-user-only
+with mode `0700`. This is a narrow accidental-traversal protection, not a
+general filesystem security framework: it does not promise race-free behavior
+against another process running as the same UID that concurrently replaces a
+path component after inspection.
 
 ### 5.5 Legacy handling
 

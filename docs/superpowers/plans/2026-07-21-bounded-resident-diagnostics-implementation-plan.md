@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Add non-retaining structured audit mode
+## Task 1: Add non-retaining structured audit mode
 
 **Files:**
 - Modify: `src/modules/audit/index.ts`
@@ -52,7 +52,7 @@ Expected: all tests pass and default callers still retain.
 
 Commit: `fix: stop retaining resident audit events`
 
-### Task 2: Reduce healthy health publication and disable speech-gate persistence
+## Task 2: Reduce healthy health publication and disable speech-gate persistence
 
 **Files:**
 - Create: `src/runtime/resident-health-publication.ts`
@@ -97,7 +97,7 @@ Expected: all focused tests pass.
 
 Commit: `fix: reduce resident health persistence`
 
-### Task 3: Replace synchronous legacy-path writes with a bounded managed writer
+## Task 3: Replace synchronous legacy-path writes with a bounded managed writer
 
 **Files:**
 - Rewrite within scope: `src/runtime/resident-voice-log-files.ts`
@@ -105,7 +105,10 @@ Commit: `fix: reduce resident health persistence`
 
 - [ ] **Step 1: Write failing managed-path and rollover tests**
 
-Assert new paths contain `/.pico/resident-voice/managed/<mode>/`, process and metrics records use their current/occurred day, and a writer that crosses UTC midnight writes to two day paths without restart.
+Assert new paths contain `/.pico/resident-voice/managed/<mode>/`. Process records
+use the current writer day; metrics, daily interaction events, and session
+events use their validated occurrence day. A writer that crosses UTC midnight
+writes each record class to both day-specific paths without restart.
 
 - [ ] **Step 2: Verify Red**
 
@@ -132,11 +135,23 @@ Use a real temporary directory and a controllable filesystem-operation barrier. 
 
 - [ ] **Step 5: Write failing capacity and safety tests**
 
-Populate recognized managed files with deterministic mtimes. Assert oldest closed files are removed to satisfy a fixed 128 MiB mode cap, active run files are retained, unknown files are not removed, a symlinked managed root rejects `ready`, and a no-follow target cannot be opened.
+Populate recognized managed files with deterministic mtimes. Assert oldest
+closed files are removed to satisfy a fixed 128 MiB mode cap, active run files
+are retained, and unknown files are not removed. Assert statically symlinked
+root and descendant directory components are rejected when observed, inventory
+ignores symlink entries, and a final no-follow target cannot be opened. Do not
+claim complete race resistance against another process running as the same UID
+that concurrently replaces an already-checked path component.
 
 - [ ] **Step 6: Implement fixed managed capacity**
 
-Inventory only recognized regular files within the selected managed mode root. Prune oldest closed files when capacity is required. If capacity remains unavailable, drop the new record and emit one bounded diagnostic through an injected `onDiagnostic` callback. Do not add YAML options.
+Inventory only recognized regular files within the selected managed mode root
+using non-following metadata checks, and ignore observed symlink entries. Check
+each directory component before traversal and open final write targets with
+no-follow semantics. Prune oldest closed files when capacity is required. If
+capacity remains unavailable, drop the new record and emit one bounded
+diagnostic through an injected `onDiagnostic` callback. Do not add YAML options
+or a directory-FD filesystem layer outside the same-UID local threat model.
 
 - [ ] **Step 7: Write failing legacy-isolation test and implement warning**
 
@@ -150,7 +165,7 @@ Expected: all managed writer tests pass.
 
 Commit: `feat: bound resident diagnostic files`
 
-### Task 4: Integrate writer startup and shutdown ownership
+## Task 4: Integrate writer startup and shutdown ownership
 
 **Files:**
 - Modify: `src/runtime/resident-voice-runner.ts`
@@ -169,7 +184,12 @@ Expected: failure because the runner does not await log lifecycle methods.
 
 - [ ] **Step 3: Implement lifecycle ownership**
 
-Await `ready` before provider construction. In the runner `finally`, flush/close the writer without replacing a preceding runtime error. Route diagnostics to the existing bounded process/operator error boundary without recursively enqueuing them into the failed sink.
+Await `ready` before provider construction. In the runner cleanup, await
+`close()` exactly once without replacing a preceding runtime error. The sink's
+`close()` first stops new record acceptance and then drains its queue; individual
+write handles remain owned by their per-write `finally` blocks. Route diagnostics
+to the existing bounded process/operator error boundary without recursively
+enqueuing them into the failed sink.
 
 - [ ] **Step 4: Verify focused Green**
 
