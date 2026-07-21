@@ -18,7 +18,7 @@ describe("voice stage probe", () => {
       resident_engine_start: { persisted: true, summary: false },
       resident_engine_restart: { persisted: true, summary: false },
       echo_control: { persisted: false, summary: false },
-      speech_gate: { persisted: true, summary: false },
+      speech_gate: { persisted: false, summary: false },
       stt: { persisted: true, summary: true },
       session_start: { persisted: true, summary: true },
       ptt_release_to_first_pcm_write: { persisted: true, summary: true },

@@ -44,6 +44,7 @@ import {
   residentPlaybackFinalSilenceMs
 } from "./resident-audio-playback.js";
 import type { ResidentIoTimingStage } from "./resident-io-protocol.js";
+import { createResidentHealthPublicationGate } from "./resident-health-publication.js";
 import {
   acquireResidentSingleInstanceLock,
   registerResidentSingleInstanceLockShutdownCleanup
@@ -209,6 +210,7 @@ export async function runResidentVoiceWithProviders(input: {
       ...(input.operator === undefined ? {} : { operator: input.operator })
     });
     const speechActivity = await createConfiguredSpeechActivityGate(config);
+    const healthPublication = createResidentHealthPublicationGate();
 
     await runResidentControlLifecycle({
       signal,
@@ -227,6 +229,7 @@ export async function runResidentVoiceWithProviders(input: {
           handleTailComplete,
           handleCaptureInvalidated: handleCaptureUnavailable,
           observeHealth: async (event) => {
+            if (!healthPublication.accept(event, performance.now())) return;
             writeProcessLine(
               `[pico] macOS resident I/O health: ${event.state}/${event.code} restarts=${String(event.restartCount)} dropped=${String(event.droppedFrameCount)}\n`
             );
