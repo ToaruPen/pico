@@ -68,6 +68,25 @@ struct ResidentIoCodecTests {
     #expect(try decoder.next() == message)
   }
 
+  @Test("decodes Node capture boundary wire fixtures")
+  func decodesNodeCaptureBoundaryFixtures() throws {
+    let fixtures: [(kind: UInt8, expected: ResidentIoMessage)] = [
+      (6, .suppressCapture(CaptureBoundaryMetadata(commandID: 1))),
+      (7, .resumeCapture(CaptureBoundaryMetadata(commandID: 1))),
+    ]
+
+    for fixture in fixtures {
+      var encoded = Data([0x50, 0x49, 0x43, 0x4F, 1, fixture.kind, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0])
+      encoded.append(Data(#"{"command_id":1}"#.utf8))
+      var decoder = ResidentIoDecoder()
+
+      try decoder.append(encoded)
+
+      #expect(try decoder.next() == fixture.expected)
+      #expect(try ResidentIoCodec.encode(fixture.expected) == encoded)
+    }
+  }
+
   @Test("rejects unknown versions and kinds")
   func rejectsUnknownHeaderFields() throws {
     var version = try ResidentIoCodec.encode(.shutdown)

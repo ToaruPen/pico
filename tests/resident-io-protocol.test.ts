@@ -80,6 +80,35 @@ describe("resident I/O framed protocol", () => {
     expect(metadata).toEqual({ generation: 11, result: "accepted", sequence: 9 });
   });
 
+  it.each([
+    ["suppress_capture", 6],
+    ["resume_capture", 7]
+  ] as const)("encodes %s with the exact Swift wire fixture", (kind, kindCode) => {
+    const metadata = Buffer.from('{"command_id":1}', "utf8");
+    const header = Buffer.from([
+      0x50,
+      0x49,
+      0x43,
+      0x4f,
+      1,
+      kindCode,
+      0,
+      0,
+      0,
+      0,
+      0,
+      metadata.byteLength,
+      0,
+      0,
+      0,
+      0
+    ]);
+
+    expect(encodeResidentIoMessage({ kind, commandId: 1 })).toEqual(
+      Buffer.concat([header, metadata])
+    );
+  });
+
   it("rejects invalid headers, oversized bodies, and payload on non-PCM messages", () => {
     const wrongVersion = encodeResidentIoMessage({ kind: "shutdown" });
     wrongVersion[4] = 2;
