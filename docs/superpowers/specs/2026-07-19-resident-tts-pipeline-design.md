@@ -45,8 +45,11 @@ Picoが受け取る境界は、Pi adapterが最終assistant messageとして確�
 一括本文を返す場合も本文deltaを返す場合も、Pi adapterが同じ確定本文へ正規化する。モデル名、
 provider名、token ID、reasoning item、tool-call内部表現を発話処理へ渡さない。
 
-tool call前の暫定本文、tool callの引数・結果、reasoning textは発話せず、Pi turn settlement後の
-最終assistant本文だけを発話対象にする。本文deltaから発話を先行開始する変更は本設計へ含めない。
+tool call前の暫定本文、tool callの引数・結果、reasoning textは発話しない。Pi adapterが
+`willRetry === false`、`stopReason === "stop"`、queued messageなしを確認して公開したcanonical
+final assistant本文だけを発話対象にできる。本文deltaから発話を先行開始する変更は本設計へ
+含めない。Pi-level settlementは再生と並行できるが、resident turn、session dispose、次のfarewellは
+再生とsettlementの両方が収束するまで完了しない。
 
 モデル変更時の受け入れ条件は、Pi設定のモデル選択だけを変更してもTTS pipelineとplayback
 実装が変わらないことである。
@@ -171,6 +174,7 @@ cancelまたはplayback失敗時は、現行契約どおりplayback停止とecho
 ## 設定
 
 - LLM model設定とreasoning effortは変更しない。
+- Pi-level memory pluginの所有権、設定、capture処理は変更しない。
 - Aivisの既定voice parameterは現行値を維持する。
 - `speedScale`による再生時間短縮は本変更へ含めない。
 - macOS continuous playback providerは設定で明示し、旧providerから暗黙移行しない。

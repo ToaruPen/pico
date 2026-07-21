@@ -17,7 +17,7 @@ import {
   recordResidentVoiceOperatorEvent
 } from "./resident-voice-operator.js";
 import type { ResidentVoiceValidationSink } from "./resident-voice-validation.js";
-import type { PiAgentTurnClient } from "./voice-resident.js";
+import type { PiAgentTurnClient, PiAgentTurnResponse } from "./voice-resident.js";
 import {
   recordVoiceStageProbe,
   type VoiceRuntimeStage,
@@ -47,6 +47,9 @@ const residentPiAgentToolNamesWithoutDeferred = Object.freeze(
 );
 
 export type PiAgentSdkSession = {
+  readonly agent: {
+    readonly hasQueuedMessages: () => boolean;
+  };
   readonly bindExtensions: (bindings: { readonly mode: "print" }) => Promise<void>;
   readonly extensionRunner: {
     readonly hasHandlers: (eventType: "session_shutdown") => boolean;
@@ -121,49 +124,39 @@ export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAg
 
   return {
     async prompt(input) {
+      const now = options.now ?? defaultNow;
+      const monotonicNow = options.monotonicNow ?? defaultMonotonicNow;
+      const promptStarted = {
+        occurredAt: now(),
+        monotonicMs: monotonicNow()
+      };
       const releaseTurn = claimTurn(
         activeTurns,
         sessionDisposals,
         activeDisposeAllCalls > 0,
         input.sessionId
       );
-      const output: string[] = [];
-      let unsubscribe: (() => void) | undefined;
-      let abortHandle: PromptAbortHandle | undefined;
-      const observation = createPromptObservation(options, output, input.sessionId);
-
+      let session: PiAgentSdkSession;
       try {
         throwIfSignalAborted(input.signal);
         const pendingSession = getOrCreateTurnSession(options, sessions, input.sessionId);
-        const session = await waitForTurnSession(pendingSession, input.signal);
-        unsubscribe = session.subscribe(observation.accept);
-        abortHandle = installPromptAbort(session, input.signal);
-        throwIfSignalAborted(input.signal);
-        await session.prompt(
-          formatPromptForSdkSession(input.text, input.deferredToolResults ?? [])
-        );
-        throwIfSignalAborted(input.signal);
-        observation.throwIfTerminalFailure();
-        observation.settle("skipped", "no_text_delta");
-
-        return {
-          text: output.join("")
-        };
+        session = await waitForTurnSession(pendingSession, input.signal);
       } catch (error) {
+        releaseTurn();
         const settlement = interruptedStageSettlement(input.signal, "pi_agent_prompt_failed");
-        observation.settle(settlement.status, settlement.errorCode);
-        await abortIfSignalAborted(input.signal, abortHandle);
+        recordPiStage(
+          options,
+          "pi_time_to_first_text",
+          settlement.status,
+          promptStarted.occurredAt,
+          elapsedSince(promptStarted.monotonicMs, options.monotonicNow ?? defaultMonotonicNow),
+          settlement.errorCode
+        );
+        recordFinalResponseReady(options, promptStarted, settlement.status, settlement.errorCode);
         throw error;
-      } finally {
-        try {
-          const settlement = interruptedStageSettlement(input.signal, "tool_execution_incomplete");
-          observation.settleOpenTools(settlement.status, settlement.errorCode);
-          abortHandle?.remove();
-          unsubscribe?.();
-        } finally {
-          releaseTurn();
-        }
       }
+
+      return startPiAgentPrompt(options, session, input, releaseTurn, promptStarted);
     },
     async disposeSession(sessionId) {
       const disposal = getOrStartSessionDisposal(
@@ -212,6 +205,116 @@ export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAg
       }
     }
   };
+}
+
+function startPiAgentPrompt(
+  options: PiAgentTurnClientOptions,
+  session: PiAgentSdkSession,
+  input: Parameters<PiAgentTurnClient["prompt"]>[0],
+  releaseTurn: () => void,
+  promptStarted: PromptStarted
+): ReturnType<PiAgentTurnClient["prompt"]> {
+  const output: string[] = [];
+  let unsubscribe: (() => void) | undefined;
+  let abortHandle: PromptAbortHandle | undefined;
+  const responseState = { published: false };
+  let resolveResponse!: (response: PiAgentTurnResponse) => void;
+  let rejectResponse!: (error: unknown) => void;
+  let resolveSettlement!: () => void;
+  let rejectSettlement!: (error: unknown) => void;
+  const settled = new Promise<void>((resolve, reject) => {
+    resolveSettlement = resolve;
+    rejectSettlement = reject;
+  });
+  void settled.catch(() => undefined);
+  const response = new Promise<PiAgentTurnResponse>((resolve, reject) => {
+    resolveResponse = resolve;
+    rejectResponse = reject;
+  });
+  const publishResponse = (text: string): void => {
+    if (responseState.published) return;
+    responseState.published = true;
+    abortHandle?.remove();
+    recordFinalResponseReady(options, promptStarted, "ok");
+    resolveResponse({ text, settled });
+  };
+  const observation = createPromptObservation(
+    options,
+    output,
+    input.sessionId,
+    (assistant) => {
+      if (
+        assistant.stopReason === "stop" &&
+        !session.agent.hasQueuedMessages() &&
+        input.signal?.aborted !== true
+      ) {
+        publishResponse(assistant.text);
+      }
+    },
+    promptStarted
+  );
+
+  // Prompt settlement owns several mandatory cleanup paths after response publication.
+  // eslint-disable-next-line complexity
+  const operation = (async (): Promise<void> => {
+    try {
+      throwIfSignalAborted(input.signal);
+      unsubscribe = session.subscribe(observation.accept);
+      abortHandle = installPromptAbort(session, input.signal);
+      throwIfSignalAborted(input.signal);
+      await session.prompt(formatPromptForSdkSession(input.text, input.deferredToolResults ?? []));
+      if (!responseState.published) throwIfSignalAborted(input.signal);
+      observation.throwIfTerminalFailure();
+      if (
+        !responseState.published &&
+        (observation.requiresFurtherAgentWork() || session.agent.hasQueuedMessages())
+      ) {
+        throw new Error(
+          "pico resident Pi Agent prompt settled without a publishable final response"
+        );
+      }
+      observation.settle("skipped", "no_text_delta");
+    } catch (error) {
+      const settlement = interruptedStageSettlement(
+        responseState.published ? undefined : input.signal,
+        "pi_agent_prompt_failed"
+      );
+      observation.settle(settlement.status, settlement.errorCode);
+      if (!responseState.published) {
+        recordFinalResponseReady(options, promptStarted, settlement.status, settlement.errorCode);
+      }
+      if (!responseState.published) await abortIfSignalAborted(input.signal, abortHandle);
+      throw error;
+    } finally {
+      const settlement = interruptedStageSettlement(
+        responseState.published ? undefined : input.signal,
+        "tool_execution_incomplete"
+      );
+      observation.settleOpenTools(settlement.status, settlement.errorCode);
+      abortHandle?.remove();
+      unsubscribe?.();
+    }
+  })();
+
+  void operation.then(
+    () => {
+      try {
+        resolveSettlement();
+        publishResponse(output.join(""));
+      } finally {
+        releaseTurn();
+      }
+    },
+    (error: unknown) => {
+      try {
+        rejectSettlement(error);
+        if (!responseState.published) rejectResponse(error);
+      } finally {
+        releaseTurn();
+      }
+    }
+  );
+  return response;
 }
 
 function formatPromptForSdkSession(
@@ -531,9 +634,15 @@ function createResidentPicoExtensionFactory(
 
 type PromptObservation = {
   readonly accept: (event: unknown) => void;
+  readonly requiresFurtherAgentWork: () => boolean;
   readonly throwIfTerminalFailure: () => void;
   readonly settle: (status: VoiceStageStatus, errorCode: string) => void;
   readonly settleOpenTools: (status: VoiceStageStatus, errorCode: string) => void;
+};
+
+type PromptStarted = {
+  readonly occurredAt: string;
+  readonly monotonicMs: number;
 };
 
 type PendingToolExecution = {
@@ -551,14 +660,17 @@ type CompletedToolExecution = {
 function createPromptObservation(
   options: PiAgentTurnClientOptions,
   output: string[],
-  sessionId: string
+  sessionId: string,
+  onSettledAssistant: (assistant: SettledAssistant) => void,
+  promptStarted: PromptStarted
 ): PromptObservation {
   const now = options.now ?? defaultNow;
   const monotonicNow = options.monotonicNow ?? defaultMonotonicNow;
-  const promptStartedAt = now();
-  const promptStartedAtMs = monotonicNow();
+  const promptStartedAt = promptStarted.occurredAt;
+  const promptStartedAtMs = promptStarted.monotonicMs;
   const pendingTools = new Map<string, PendingToolExecution>();
   let firstTextSettled = false;
+  let furtherAgentWorkRequired = false;
   let terminalFailure = false;
 
   const settleFirstText = (status: VoiceStageStatus, errorCode?: string): void => {
@@ -653,12 +765,17 @@ function createPromptObservation(
   };
 
   const acceptSettledAssistant = (event: unknown): void => {
+    if (isRetryingAgentEnd(event)) {
+      furtherAgentWorkRequired = true;
+      return;
+    }
     const settledAssistant = readSettledAssistant(event);
     if (settledAssistant === undefined) {
       return;
     }
 
     terminalFailure = isTerminalAssistantFailure(settledAssistant.stopReason);
+    furtherAgentWorkRequired = settledAssistant.stopReason === "toolUse";
     recordResidentVoiceOperatorEvent(options.operator, {
       kind: "assistant_settled",
       stopReason: normalizeStopReason(settledAssistant.stopReason)
@@ -667,6 +784,7 @@ function createPromptObservation(
     if (!terminalFailure) {
       output.push(settledAssistant.text);
     }
+    onSettledAssistant(settledAssistant);
   };
 
   return {
@@ -686,6 +804,9 @@ function createPromptObservation(
       } else if (toolEvent?.kind === "end") {
         acceptToolEnd(toolEvent);
       }
+    },
+    requiresFurtherAgentWork() {
+      return furtherAgentWorkRequired;
     },
     throwIfTerminalFailure() {
       if (terminalFailure) {
@@ -864,6 +985,23 @@ function recordPiStage(
   });
 }
 
+function recordFinalResponseReady(
+  options: PiAgentTurnClientOptions,
+  promptStarted: PromptStarted,
+  status: VoiceStageStatus,
+  errorCode?: string
+): void {
+  const monotonicNow = options.monotonicNow ?? defaultMonotonicNow;
+  recordPiStage(
+    options,
+    "pi_final_response_ready",
+    status,
+    promptStarted.occurredAt,
+    elapsedSince(promptStarted.monotonicMs, monotonicNow),
+    errorCode
+  );
+}
+
 function elapsedSince(startedAtMs: number, monotonicNow: () => number): number {
   return Math.max(0, monotonicNow() - startedAtMs);
 }
@@ -933,6 +1071,15 @@ function readSettledAgentEndMessages(event: unknown): readonly unknown[] | undef
   }
 
   return candidate.messages as readonly unknown[];
+}
+
+function isRetryingAgentEnd(event: unknown): boolean {
+  if (typeof event !== "object" || event === null || Array.isArray(event)) {
+    return false;
+  }
+
+  const candidate = event as { readonly type?: unknown; readonly willRetry?: unknown };
+  return candidate.type === "agent_end" && candidate.willRetry === true;
 }
 
 function readAssistantMessage(message: unknown): SettledAssistant | undefined {

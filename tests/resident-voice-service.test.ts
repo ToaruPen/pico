@@ -37,7 +37,7 @@ describe("resident voice service controller", () => {
       }
     });
     const piAgent: PiAgentTurnClient = {
-      prompt: () => Promise.resolve({ text: "unused" })
+      prompt: () => Promise.resolve({ text: "unused", settled: Promise.resolve() })
     };
     let receivedKeyboard: PicoResidentControlConfig["keyboard"] | undefined;
 

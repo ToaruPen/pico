@@ -285,6 +285,136 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
+  it("starts playback before Pi settlement and keeps the turn active until both complete", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    const settlement = createGate<undefined>();
+    const driver = createDriver({
+      audit,
+      piResponse: () => Promise.resolve({ text: "先に読み上げる応答", settled: settlement.promise })
+    });
+
+    await startReleasedHold(driver);
+    await driver.tailComplete();
+    await vi.waitFor(() => expect(driver.playedChunks).toHaveLength(1));
+
+    expect(driver.runtime.state()).toBe("speaking");
+    expect(voiceStageEvents(audit, "pi_turn")).toEqual([]);
+    settlement.resolve(undefined);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+    expect(voiceStageEvents(audit, "pi_turn")).toHaveLength(1);
+
+    await driver.runtime.stop();
+  });
+
+  it("stops post-response playback on F2 but waits for Pi settlement before idle", async () => {
+    vi.useFakeTimers();
+    const playback = createGate<undefined>();
+    const settlement = createGate<undefined>();
+    const captureBoundaries: string[] = [];
+    const driver = createDriver({
+      piResponse: () => Promise.resolve({ text: "中断できる応答", settled: settlement.promise }),
+      playbackCompletion: () => playback.promise,
+      captureBoundary: {
+        suppress() {
+          captureBoundaries.push("suppress");
+          return Promise.resolve();
+        },
+        resume() {
+          captureBoundaries.push("resume");
+          return Promise.resolve();
+        }
+      }
+    });
+
+    await startReleasedHold(driver);
+    await driver.tailComplete();
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    playback.resolve(undefined);
+    await vi.waitFor(() => expect(captureBoundaries).toEqual(["suppress", "resume"]));
+
+    expect(driver.playbackStops()).toBe(1);
+    expect(driver.runtime.state()).toBe("cancelling");
+    settlement.resolve(undefined);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    await driver.runtime.stop();
+  });
+
+  it("cleans up playback and echo when F2 arrives after playback but before Pi settlement", async () => {
+    vi.useFakeTimers();
+    const settlement = createGate<undefined>();
+    const driver = createDriver({
+      piResponse: () =>
+        Promise.resolve({ text: "再生完了後もsettlement待ち", settled: settlement.promise })
+    });
+
+    await startReleasedHold(driver);
+    await driver.tailComplete();
+    await vi.waitFor(() => expect(driver.playedChunks).toHaveLength(1));
+    expect(driver.runtime.state()).toBe("speaking");
+
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    await vi.waitFor(() => expect(driver.echoFlushes()).toBe(1));
+    expect(driver.playbackStops()).toBe(1);
+    expect(driver.runtime.state()).toBe("cancelling");
+
+    settlement.resolve(undefined);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+    await driver.runtime.stop();
+  });
+
+  it("records one failed turn when Pi settlement rejects after speech", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    const settlement = createGate<undefined>();
+    const captureBoundaries: string[] = [];
+    let monotonicTimeMs = 0;
+    const driver = createDriver({
+      audit,
+      monotonicNow: () => monotonicTimeMs,
+      piResponse: () =>
+        Promise.resolve({ text: "一度だけ読み上げる応答", settled: settlement.promise }),
+      captureBoundary: {
+        suppress() {
+          captureBoundaries.push("suppress");
+          return Promise.resolve();
+        },
+        resume() {
+          captureBoundaries.push("resume");
+          return Promise.resolve();
+        }
+      }
+    });
+
+    await startReleasedHold(driver);
+    await driver.tailComplete();
+    await vi.waitFor(() => expect(driver.playedChunks).toHaveLength(1));
+    expect(driver.runtime.state()).toBe("speaking");
+
+    monotonicTimeMs = 700;
+    settlement.reject(new Error("post-response settlement failed"));
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(driver.playedChunks).toHaveLength(1);
+    expect(driver.playbackOpens()).toBe(1);
+    expect(captureBoundaries).toEqual(["suppress", "resume"]);
+    expect(voiceStageEvent(audit, "pi_turn")).toMatchObject({
+      attributes: {
+        "pico.voice.stage_status": "error",
+        "pico.voice.stage_duration_ms": 700,
+        "pico.voice.error_code": "pi_agent_settlement_failed"
+      }
+    });
+
+    await driver.runtime.stop();
+    await expect(driver.runtime.completion).resolves.toMatchObject({
+      completedTurns: 0,
+      failedTurns: 1
+    });
+  });
+
   it("settles a non-empty completed turn exactly once", async () => {
     vi.useFakeTimers();
     const deferredResults = [deferredResult("job-1"), deferredResult("job-2")];
@@ -809,6 +939,7 @@ describe("resident hold-to-talk voice runtime", () => {
 
   it("aborts the active Pi turn exactly once and preserves its interaction session", async () => {
     vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
     let aborts = 0;
     const piResponse = (signal: AbortSignal | undefined): Promise<{ readonly text: string }> =>
       new Promise((_resolve, reject) => {
@@ -821,7 +952,7 @@ describe("resident hold-to-talk voice runtime", () => {
           { once: true }
         );
       });
-    const driver = createDriver({ piResponse });
+    const driver = createDriver({ audit, piResponse });
 
     await startReleasedHold(driver);
     await driver.tailComplete();
@@ -832,6 +963,12 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(aborts).toBe(1);
     expect(driver.disposedSessions).toEqual([]);
     expect(driver.playedChunks).toEqual([]);
+    expect(voiceStageEvent(audit, "pi_turn")).toMatchObject({
+      attributes: {
+        "pico.voice.stage_status": "skipped",
+        "pico.voice.error_code": "cancelled"
+      }
+    });
 
     await driver.runtime.stop();
   });
@@ -1251,6 +1388,65 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(driver.piRequests[1]?.text).toContain("voice session is ending");
     expect(driver.playedChunks).toHaveLength(2);
     expect(lifecycleEvents).toContain("cancel_session");
+    await driver.runtime.stop();
+  });
+
+  it("does not begin inactivity farewell until the preceding turn settles", async () => {
+    vi.useFakeTimers();
+    const turnSettlement = createGate<undefined>();
+    let promptCount = 0;
+    const driver = createDriver({
+      farewellEnabled: true,
+      sessionDurationMs: 1_000,
+      piResponse: () => {
+        promptCount += 1;
+        return Promise.resolve(
+          promptCount === 1
+            ? { text: "通常の応答", settled: turnSettlement.promise }
+            : { text: "終了の挨拶" }
+        );
+      }
+    });
+
+    await startReleasedHold(driver);
+    await driver.tailComplete();
+    await vi.waitFor(() => expect(driver.playedChunks).toHaveLength(1));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(driver.piRequests).toHaveLength(1);
+    expect(driver.disposedSessions).toEqual([]);
+
+    turnSettlement.resolve(undefined);
+    await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
+    expect(driver.piRequests).toHaveLength(2);
+    expect(driver.piRequests[1]?.text).toContain("voice session is ending");
+
+    await driver.runtime.stop();
+  });
+
+  it("plays farewell before settlement but disposes the session only after settlement", async () => {
+    vi.useFakeTimers();
+    const farewellSettlement = createGate<undefined>();
+    let promptCount = 0;
+    const driver = createDriver({
+      farewellEnabled: true,
+      sessionDurationMs: 1_000,
+      piResponse: () => {
+        promptCount += 1;
+        return Promise.resolve(
+          promptCount === 1
+            ? { text: "通常の応答" }
+            : { text: "終了の挨拶", settled: farewellSettlement.promise }
+        );
+      }
+    });
+
+    await completeHold(driver, "farewell-settlement");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(driver.playedChunks).toHaveLength(2));
+    expect(driver.disposedSessions).toEqual([]);
+
+    farewellSettlement.resolve(undefined);
+    await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
     await driver.runtime.stop();
   });
 
@@ -1940,7 +2136,9 @@ function createDriver(
   options: {
     readonly speechDetected?: boolean;
     readonly sttResponse?: (signal: AbortSignal | undefined) => Promise<SttTranscriptionResult>;
-    readonly piResponse?: (signal: AbortSignal | undefined) => Promise<{ readonly text: string }>;
+    readonly piResponse?: (
+      signal: AbortSignal | undefined
+    ) => Promise<{ readonly text: string; readonly settled?: Promise<void> }>;
     readonly ttsResponse?: (signal: AbortSignal | undefined) => Promise<TtsSynthesisResult>;
     readonly ttsEvents?: (signal: AbortSignal | undefined) => AsyncIterable<TtsSynthesisEvent>;
     readonly playbackCompletion?: (signal: AbortSignal | undefined) => Promise<void>;
@@ -2025,9 +2223,14 @@ function createDriver(
     }
   };
   const piAgent: PiAgentTurnClient = {
-    prompt(request) {
+    async prompt(request) {
       piRequests.push(request);
-      return options.piResponse?.(request.signal) ?? Promise.resolve({ text: "Picoの応答" });
+      const response = await (options.piResponse?.(request.signal) ??
+        Promise.resolve({ text: "Picoの応答" }));
+      return {
+        text: response.text,
+        settled: ("settled" in response ? response.settled : undefined) ?? Promise.resolve()
+      };
     },
     disposeSession(sessionId) {
       disposedSessions.push(sessionId);

@@ -23,6 +23,7 @@ describe("voice stage probe", () => {
       session_start: { persisted: true, summary: true },
       ptt_release_to_first_pcm_write: { persisted: true, summary: true },
       pi_time_to_first_text: { persisted: true, summary: true },
+      pi_final_response_ready: { persisted: true, summary: true },
       pi_session_resource_load: { persisted: true, summary: false },
       pi_session_create: { persisted: true, summary: false },
       pi_session_bind: { persisted: true, summary: false },

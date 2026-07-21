@@ -30,13 +30,18 @@ import { runTtsPlaybackPipeline, type TtsPlaybackPipelineResult } from "./tts-pl
 import type { VoicePlaybackSink } from "./voice-playback.js";
 import { recordVoiceStageProbe, type VoiceStageProbe } from "./voice-stage-probe.js";
 
+export type PiAgentTurnResponse = {
+  readonly text: string;
+  readonly settled: Promise<void>;
+};
+
 export type PiAgentTurnClient = {
   readonly prompt: (input: {
     readonly sessionId: string;
     readonly text: string;
     readonly deferredToolResults?: readonly DeferredToolDeliverableResult[];
     readonly signal?: AbortSignal;
-  }) => Promise<{ readonly text: string }>;
+  }) => Promise<PiAgentTurnResponse>;
   readonly disposeSession?: (sessionId: string) => void | Promise<void>;
   readonly disposeAll?: () => void | Promise<void>;
 };
@@ -131,6 +136,7 @@ type ActiveTurn = {
   readonly frameCollection: Promise<StreamingCaptureAdmission>;
   operation: Promise<void> | undefined;
   cancellation: Promise<void> | undefined;
+  pipelineOwnsPlayback: boolean;
   pttRelease: PttReleaseMeasurement | undefined;
   operatorIdleRecorded: boolean;
 };
@@ -140,6 +146,8 @@ type PttReleaseMeasurement = {
   readonly startedAtMs: number;
   settled: boolean;
 };
+
+type PiTurnSettlement = "ok" | "failed";
 
 type InteractionEndingControl = {
   readonly sessionId: string;
@@ -239,6 +247,7 @@ export function createVoiceResidentRuntime(
         frameCollection,
         operation: undefined,
         cancellation: undefined,
+        pipelineOwnsPlayback: false,
         pttRelease: undefined,
         operatorIdleRecorded: false
       };
@@ -283,7 +292,7 @@ export function createVoiceResidentRuntime(
           }
         });
     },
-    onCancel(generation, cancelledState) {
+    onCancel(generation) {
       const turn = currentTurn(activeTurn, generation.id);
 
       if (turn === undefined || turn.cancellation !== undefined) {
@@ -296,7 +305,7 @@ export function createVoiceResidentRuntime(
         turn,
         controller,
         options,
-        cancelledState === "synthesizing" || cancelledState === "speaking"
+        turn.pipelineOwnsPlayback
       ).then(() => {
         if (activeTurn === turn) {
           activeTurn = undefined;
@@ -725,16 +734,18 @@ async function processCompletedHoldWork(
     options,
     counters
   );
-  const piDurationMs = Math.max(0, state.monotonicNow() - piStartedAtMs);
+  const responseReadyDurationMs = Math.max(0, state.monotonicNow() - piStartedAtMs);
 
-  recordPiTurnSettlement(response, turn.generation.signal, options, piStartedAt, piDurationMs);
-
-  if (!isCurrentStage(controller, turn.generation.id, "processing", counters)) {
+  if (response === undefined) {
+    recordUnavailablePiTurn(turn.generation.signal, options, piStartedAt, responseReadyDurationMs);
+    if (isCurrentStage(controller, turn.generation.id, "processing", counters)) {
+      finishCurrentTurn(controller, turn, "processing", counters, options);
+    }
     return;
   }
 
-  if (response === undefined) {
-    finishCurrentTurn(controller, turn, "processing", counters, options);
+  if (!isCurrentStage(controller, turn.generation.id, "processing", counters)) {
+    await settlePiResponse(response, options, piStartedAt, piStartedAtMs, state.monotonicNow);
     return;
   }
 
@@ -754,7 +765,7 @@ async function processCompletedHoldWork(
     kind: "pi_agent_response",
     occurredAt: responseOccurredAt,
     sessionId,
-    durationMs: piDurationMs
+    durationMs: responseReadyDurationMs
   });
 
   if (!controller.advance(turn.generation.id, "processing", "synthesizing")) {
@@ -764,31 +775,64 @@ async function processCompletedHoldWork(
   recordTurnPhase(options.operator, "synthesizing");
 
   const captureBoundary = createCaptureBoundaryLease(options.captureBoundary);
-  let playback: TtsPlaybackPipelineResult;
-  try {
-    playback = await runTtsPlaybackPipeline({
-      text: response.text,
-      signal: turn.generation.signal,
-      tts: options.tts,
-      playback: options.playback,
-      echoControl: options.echoControl,
-      ...(options.probe === undefined ? {} : { probe: options.probe }),
-      now: state.now,
-      monotonicNow: state.monotonicNow,
-      onFirstPlaybackStart: () => admitTurnPlayback(controller, turn, options, captureBoundary),
-      onFirstPlaybackWriteAccepted: () =>
-        settlePttReleaseToFirstPcmWrite(turn, options, "ok", state.monotonicNow)
-    });
-  } finally {
-    await captureBoundary.resume();
-  }
+  const [playback, piSettlement] = await settleConcurrentOperations(
+    runTurnPlayback(
+      response.text,
+      turn,
+      controller,
+      options,
+      state.now,
+      state.monotonicNow,
+      captureBoundary
+    ),
+    settlePiResponse(response, options, piStartedAt, piStartedAtMs, state.monotonicNow)
+  );
 
   if (playback.status === "failed") {
     settlePttReleaseToFirstPcmWrite(turn, options, "error", state.monotonicNow, playback.errorCode);
   }
   throwPlaybackInfrastructureError(playback);
 
-  settleCompletedTurn(playback, turn, controller, options, counters, sessionId, deferredResults);
+  settleCompletedTurn(
+    playback,
+    piSettlement,
+    turn,
+    controller,
+    options,
+    counters,
+    sessionId,
+    deferredResults
+  );
+}
+
+async function runTurnPlayback(
+  text: string,
+  turn: ActiveTurn,
+  controller: ResidentControlController,
+  options: VoiceResidentRuntimeOptions,
+  now: () => string,
+  monotonicNow: () => number,
+  captureBoundary: CaptureBoundaryLease
+): Promise<TtsPlaybackPipelineResult> {
+  turn.pipelineOwnsPlayback = true;
+  try {
+    return await runTtsPlaybackPipeline({
+      text,
+      signal: turn.generation.signal,
+      tts: options.tts,
+      playback: options.playback,
+      echoControl: options.echoControl,
+      ...(options.probe === undefined ? {} : { probe: options.probe }),
+      now,
+      monotonicNow,
+      onFirstPlaybackStart: () => admitTurnPlayback(controller, turn, options, captureBoundary),
+      onFirstPlaybackWriteAccepted: () =>
+        settlePttReleaseToFirstPcmWrite(turn, options, "ok", monotonicNow)
+    });
+  } finally {
+    turn.pipelineOwnsPlayback = false;
+    await captureBoundary.resume();
+  }
 }
 
 type CaptureBoundaryLease = {
@@ -837,6 +881,7 @@ async function admitTurnPlayback(
 
 function settleCompletedTurn(
   result: TtsPlaybackPipelineResult,
+  piSettlement: PiTurnSettlement,
   turn: ActiveTurn,
   controller: ResidentControlController,
   options: VoiceResidentRuntimeOptions,
@@ -849,18 +894,22 @@ function settleCompletedTurn(
     return;
   }
 
-  switch (result.status) {
-    case "completed":
-      acknowledgeDeferredResults(options, deferredResults);
-      refreshSession(options.sessionLifecycle, sessionId);
-      counters.completedTurns += 1;
-      break;
-    case "failed":
-      counters.failedTurns += 1;
-      break;
-    case "cancelled":
-    case "empty":
-      break;
+  if (piSettlement === "failed") {
+    counters.failedTurns += 1;
+  } else {
+    switch (result.status) {
+      case "completed":
+        acknowledgeDeferredResults(options, deferredResults);
+        refreshSession(options.sessionLifecycle, sessionId);
+        counters.completedTurns += 1;
+        break;
+      case "failed":
+        counters.failedTurns += 1;
+        break;
+      case "cancelled":
+      case "empty":
+        break;
+    }
   }
 
   if (controller.finish(turn.generation.id, state)) {
@@ -980,7 +1029,7 @@ async function requestPiTurn(
   turn: ActiveTurn,
   options: VoiceResidentRuntimeOptions,
   counters: RuntimeCounters
-): Promise<{ readonly text: string } | undefined> {
+): Promise<PiAgentTurnResponse | undefined> {
   try {
     return await options.piAgent.prompt({
       sessionId,
@@ -1105,6 +1154,8 @@ function cancelDeferredAfterInteraction(
   });
 }
 
+// Farewell keeps prompt, playback, cancellation, and settlement in one lifecycle boundary.
+// eslint-disable-next-line complexity
 async function runInteractionFarewell(
   ending: InteractionEndingControl,
   options: VoiceResidentRuntimeOptions,
@@ -1121,25 +1172,51 @@ async function runInteractionFarewell(
   const monotonicNow = options.monotonicNow ?? defaultMonotonicNow;
   const piStartedAtMs = monotonicNow();
   const response = await requestFarewellResponse(sessionId, signal, options, counters);
-  const piDurationMs = Math.max(0, monotonicNow() - piStartedAtMs);
-
-  recordPiTurnSettlement(response, signal, options, piStartedAt, piDurationMs);
-
-  if (response === undefined || isAbortRequested(signal)) {
+  if (response === undefined) {
+    recordUnavailablePiTurn(
+      signal,
+      options,
+      piStartedAt,
+      Math.max(0, monotonicNow() - piStartedAtMs)
+    );
     return;
   }
 
-  await runFarewellPlayback(response.text, ending, options, counters, now, monotonicNow);
+  const [playback, piSettlement] = await settleConcurrentOperations(
+    isAbortRequested(signal)
+      ? Promise.resolve(undefined)
+      : runFarewellPlayback(response.text, ending, options, now, monotonicNow),
+    settlePiResponse(response, options, piStartedAt, piStartedAtMs, monotonicNow)
+  );
+  if (playback?.status === "failed" || (piSettlement === "failed" && !isAbortRequested(signal))) {
+    counters.failedTurns += 1;
+  }
+  if (playback !== undefined) {
+    throwPlaybackInfrastructureError(playback);
+  }
+}
+
+async function settleConcurrentOperations<First, Second>(
+  first: Promise<First>,
+  second: Promise<Second>
+): Promise<readonly [First, Second]> {
+  const [firstOutcome, secondOutcome] = await Promise.allSettled([first, second]);
+  if (firstOutcome.status === "rejected") {
+    throw firstOutcome.reason;
+  }
+  if (secondOutcome.status === "rejected") {
+    throw secondOutcome.reason;
+  }
+  return [firstOutcome.value, secondOutcome.value];
 }
 
 async function runFarewellPlayback(
   text: string,
   ending: InteractionEndingControl,
   options: VoiceResidentRuntimeOptions,
-  counters: RuntimeCounters,
   now: () => string,
   monotonicNow: () => number
-): Promise<void> {
+): Promise<TtsPlaybackPipelineResult> {
   const signal = ending.abortController.signal;
   let result: TtsPlaybackPipelineResult;
   const captureBoundary = createCaptureBoundaryLease(options.captureBoundary);
@@ -1170,10 +1247,7 @@ async function runFarewellPlayback(
     await captureBoundary.resume();
   }
 
-  if (result.status === "failed") {
-    counters.failedTurns += 1;
-    throwPlaybackInfrastructureError(result);
-  }
+  return result;
 }
 
 function cancelInteractionEndingResources(
@@ -1211,7 +1285,7 @@ async function requestFarewellResponse(
   signal: AbortSignal,
   options: VoiceResidentRuntimeOptions,
   counters: RuntimeCounters
-): Promise<{ readonly text: string } | undefined> {
+): Promise<PiAgentTurnResponse | undefined> {
   try {
     return await options.piAgent.prompt({ sessionId, text: farewellPrompt, signal });
   } catch {
@@ -1224,22 +1298,35 @@ async function requestFarewellResponse(
   }
 }
 
-function recordPiTurnSettlement(
-  response: { readonly text: string } | undefined,
+function recordUnavailablePiTurn(
   signal: AbortSignal,
   options: VoiceResidentRuntimeOptions,
   startedAt: string,
   durationMs: number
 ): void {
-  if (response !== undefined && !signal.aborted) {
-    recordStage(options, "pi_turn", "ok", startedAt, durationMs);
-    return;
-  }
-
   const cancelled = signal.aborted;
   recordStage(options, "pi_turn", cancelled ? "skipped" : "error", startedAt, durationMs, {
     "pico.voice.error_code": cancelled ? "cancelled" : "pi_agent_prompt_failed"
   });
+}
+
+async function settlePiResponse(
+  response: PiAgentTurnResponse,
+  options: VoiceResidentRuntimeOptions,
+  startedAt: string,
+  startedAtMs: number,
+  monotonicNow: () => number
+): Promise<PiTurnSettlement> {
+  try {
+    await response.settled;
+    recordStage(options, "pi_turn", "ok", startedAt, Math.max(0, monotonicNow() - startedAtMs));
+    return "ok";
+  } catch {
+    recordStage(options, "pi_turn", "error", startedAt, Math.max(0, monotonicNow() - startedAtMs), {
+      "pico.voice.error_code": "pi_agent_settlement_failed"
+    });
+    return "failed";
+  }
 }
 
 async function cancelStreamingStt(turn: ActiveTurn): Promise<void> {
@@ -1263,11 +1350,11 @@ async function convergeCancellation(
     ...(pipelineOwnsPlayback ? [] : [options.playback.stop()])
   ]);
   await turn.frameCollection.catch(() => undefined);
-  await turn.operation?.catch(() => undefined);
-  if (!pipelineOwnsPlayback) {
-    await options.echoControl.flush();
-  }
-  const rejected = findRejected(stops);
+  const [, echoSettlement] = await Promise.allSettled([
+    turn.operation?.catch(() => undefined) ?? Promise.resolve(),
+    pipelineOwnsPlayback ? Promise.resolve() : options.echoControl.flush()
+  ]);
+  const rejected = findRejected([...stops, echoSettlement]);
 
   if (rejected !== undefined) {
     throw rejected.reason;
