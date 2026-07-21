@@ -159,7 +159,7 @@ describe("resident voice file logs", () => {
     ).toContain("/.pico/resident-voice/managed/normal/processes/2026-06-22");
   });
 
-  it("rolls process and metric output by each record timestamp", async () => {
+  it("rolls process, metric, and interaction output by each record timestamp", async () => {
     const homeDirectory = await mkdtemp(join(tmpdir(), "pico-home-"));
     let processTimestamp = "2026-06-22T23:59:59.000Z";
     const log = createResidentVoiceFileLogSink({
@@ -172,7 +172,10 @@ describe("resident voice file logs", () => {
     log.writeProcessLine("before midnight\n");
     processTimestamp = "2026-06-23T00:00:01.000Z";
     log.writeProcessLine("after midnight\n");
-    for (const occurredAt of ["2026-06-22T23:59:59.000Z", "2026-06-23T00:00:01.000Z"]) {
+    for (const [occurredAt, sessionId] of [
+      ["2026-06-22T23:59:59.000Z", "session-before-midnight"],
+      ["2026-06-23T00:00:01.000Z", "session-after-midnight"]
+    ] as const) {
       log.writeAuditEvent({
         category: "transport_event",
         name: "voice.runtime.stage",
@@ -185,6 +188,7 @@ describe("resident voice file logs", () => {
           "pico.voice.stage_duration_ms": 1
         }
       });
+      log.record({ kind: "staff_input", occurredAt, sessionId });
     }
     await log.close();
 
@@ -192,13 +196,15 @@ describe("resident voice file logs", () => {
       homeDirectory,
       runMode: "normal",
       runId: "midnight-run",
-      occurredAt: "2026-06-22T23:59:59.000Z"
+      occurredAt: "2026-06-22T23:59:59.000Z",
+      sessionId: "session-before-midnight"
     });
     const second = resolveResidentVoiceLogPaths({
       homeDirectory,
       runMode: "normal",
       runId: "midnight-run",
-      occurredAt: "2026-06-23T00:00:01.000Z"
+      occurredAt: "2026-06-23T00:00:01.000Z",
+      sessionId: "session-after-midnight"
     });
 
     await expect(readFile(first.processLogPath, "utf8")).resolves.toBe("before midnight\n");
@@ -208,6 +214,18 @@ describe("resident voice file logs", () => {
     );
     await expect(readFile(second.metricsJsonlPath, "utf8")).resolves.toContain(
       "2026-06-23T00:00:01.000Z"
+    );
+    await expect(readFile(first.dailyEventsJsonlPath, "utf8")).resolves.toContain(
+      "2026-06-22T23:59:59.000Z"
+    );
+    await expect(readFile(second.dailyEventsJsonlPath, "utf8")).resolves.toContain(
+      "2026-06-23T00:00:01.000Z"
+    );
+    await expect(readFile(first.sessionJsonlPath ?? "", "utf8")).resolves.toContain(
+      "session-before-midnight"
+    );
+    await expect(readFile(second.sessionJsonlPath ?? "", "utf8")).resolves.toContain(
+      "session-after-midnight"
     );
   });
 
@@ -372,6 +390,36 @@ describe("resident voice file logs", () => {
     await expect(log.ready).rejects.toThrow(
       "resident voice managed log path must not be symlinked"
     );
+  });
+
+  it("does not follow a symlinked managed descendant directory", async () => {
+    const homeDirectory = await mkdtemp(join(tmpdir(), "pico-home-"));
+    const outsideDirectory = await mkdtemp(join(tmpdir(), "pico-outside-"));
+    const paths = resolveResidentVoiceLogPaths({
+      homeDirectory,
+      runMode: "normal",
+      runId: "symlink-descendant",
+      occurredAt: "2026-06-22T00:00:00.000Z"
+    });
+    const diagnostics: unknown[] = [];
+    const log = createResidentVoiceFileLogSink({
+      homeDirectory,
+      runMode: "normal",
+      runId: "symlink-descendant",
+      now: () => "2026-06-22T00:00:00.000Z",
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic)
+    });
+    await log.ready;
+    await symlink(outsideDirectory, join(paths.modeDirectory, "processes"));
+
+    log.writeProcessLine("must not escape\n");
+    await log.close();
+
+    await expect(
+      readFile(join(outsideDirectory, "2026-06-22", "symlink-descendant.log"), "utf8")
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(log.droppedRecordCount()).toBe(1);
+    expect(diagnostics).toEqual([{ code: "write_failed", droppedRecordCount: 1 }]);
   });
 
   it("does not follow a symlinked log target", async () => {
