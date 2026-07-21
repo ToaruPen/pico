@@ -16,7 +16,7 @@
 - Modify: `tests/voice-resident.test.ts`
 - Modify: `src/runtime/voice-resident.ts`
 
-- [ ] **Step 1: Write the failing re-entry test**
+- [x] **Step 1: Write the failing re-entry test**
 
 Replace the post-response cancellation expectation with a test that holds the
 first `settled` promise, cancels playback, and starts a second configured PTT
@@ -60,7 +60,7 @@ it("captures and transcribes the next hold before the cancelled Pi turn settles"
 });
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run:
 
@@ -71,7 +71,7 @@ npm test -- tests/voice-resident.test.ts -t "captures and transcribes the next h
 Expected: FAIL because the controller remains `cancelling` until
 `firstSettlement` resolves and the second press returns `ignored_busy`.
 
-- [ ] **Step 3: Add the foreground/background ownership split**
+- [x] **Step 3: Add the foreground/background ownership split**
 
 In `ActiveTurn`, add an optional playback operation. In the runtime closure,
 retain a `Set<Promise<void>>` of owned turn operations and a session Pi
@@ -113,7 +113,7 @@ Track `turn.operation` independently so replacing `activeTurn` cannot orphan
 the predecessor. Interaction ending and shutdown drain the tracked set before
 Pi session disposal.
 
-- [ ] **Step 4: Run GREEN and the lifecycle neighborhood**
+- [x] **Step 4: Run GREEN and the lifecycle neighborhood**
 
 Run:
 
@@ -124,7 +124,7 @@ npm test -- tests/voice-resident.test.ts
 Expected: all voice resident tests pass, including shutdown, cancellation,
 farewell, and disposal ordering.
 
-- [ ] **Step 5: Commit the ownership change**
+- [x] **Step 5: Commit the ownership change**
 
 ```bash
 git add src/runtime/voice-resident.ts tests/voice-resident.test.ts

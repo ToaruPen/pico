@@ -307,14 +307,22 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
-  it("stops post-response playback on F2 but waits for Pi settlement before idle", async () => {
+  it("captures and transcribes the next hold before the cancelled Pi turn settles", async () => {
     vi.useFakeTimers();
-    const playback = createGate<undefined>();
-    const settlement = createGate<undefined>();
+    const firstPlayback = createGate<undefined>();
+    const firstSettlement = createGate<undefined>();
     const captureBoundaries: string[] = [];
+    let promptCount = 0;
     const driver = createDriver({
-      piResponse: () => Promise.resolve({ text: "中断できる応答", settled: settlement.promise }),
-      playbackCompletion: () => playback.promise,
+      piResponse: () => {
+        promptCount += 1;
+        return Promise.resolve(
+          promptCount === 1
+            ? { text: "中断できる応答", settled: firstSettlement.promise }
+            : { text: "次の応答" }
+        );
+      },
+      playbackCompletion: () => firstPlayback.promise,
       captureBoundary: {
         suppress() {
           captureBoundaries.push("suppress");
@@ -331,12 +339,20 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
     await expect(driver.cancel()).resolves.toBe("accepted");
-    playback.resolve(undefined);
+    firstPlayback.resolve(undefined);
     await vi.waitFor(() => expect(captureBoundaries).toEqual(["suppress", "resume"]));
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
     expect(driver.playbackStops()).toBe(1);
-    expect(driver.runtime.state()).toBe("cancelling");
-    settlement.resolve(undefined);
+    await expect(driver.press()).resolves.toBe("accepted");
+    driver.capture.emit(frame("second", [1, 0]));
+    await expect(driver.release()).resolves.toBe("accepted");
+    await driver.tailComplete();
+    await vi.waitFor(() => expect(driver.sttRequests).toHaveLength(2));
+    expect(driver.piRequests).toHaveLength(1);
+
+    firstSettlement.resolve(undefined);
+    await vi.waitFor(() => expect(driver.piRequests).toHaveLength(2));
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
     await driver.runtime.stop();
