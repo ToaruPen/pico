@@ -55,6 +55,16 @@ export type ResidentIoTimingStage =
   | "engine_start"
   | "engine_restart";
 export type ResidentIoControlResult = "accepted" | "ignored_busy" | "ignored_stale" | "noop";
+const timingStages = new Set<ResidentIoTimingStage>([
+  "key_to_admission",
+  "cancel_key_to_admission",
+  "admission_to_gate",
+  "gate_to_first_sample",
+  "first_sample_to_dispatch",
+  "release_to_tail_complete",
+  "engine_start",
+  "engine_restart"
+]);
 
 export type ResidentIoMessage =
   | {
@@ -535,17 +545,8 @@ function requireFatalCode(value: unknown, kind: ResidentIoMessageKind): Resident
 }
 
 function requireTimingStage(value: unknown, kind: ResidentIoMessageKind): ResidentIoTimingStage {
-  if (
-    value === "key_to_admission" ||
-    value === "cancel_key_to_admission" ||
-    value === "admission_to_gate" ||
-    value === "gate_to_first_sample" ||
-    value === "first_sample_to_dispatch" ||
-    value === "release_to_tail_complete" ||
-    value === "engine_start" ||
-    value === "engine_restart"
-  ) {
-    return value;
+  if (typeof value === "string" && timingStages.has(value as ResidentIoTimingStage)) {
+    return value as ResidentIoTimingStage;
   }
   throw new Error(`resident I/O ${kind} metadata is invalid`);
 }

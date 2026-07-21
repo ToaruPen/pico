@@ -397,7 +397,6 @@ function isControlDecision(
   event: Extract<ResidentVoiceOperatorEvent, { readonly kind: "control_decision" }>
 ): boolean {
   return (
-    event.control === "talk" &&
     typeof event.result === "string" &&
     controlResults.has(event.result) &&
     typeof event.state === "string" &&

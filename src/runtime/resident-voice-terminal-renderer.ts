@@ -180,7 +180,7 @@ function renderTurn(
 
 function formatControlNotice(view: ResidentVoiceTerminalView): string | undefined {
   const notice = view.notice;
-  if (notice === undefined || notice.control !== "talk") return undefined;
+  if (notice === undefined) return undefined;
 
   if (notice.result === "noop" && notice.state === "listening") {
     return `− ${view.controls.talkKey}: 既に聞き取り中`;

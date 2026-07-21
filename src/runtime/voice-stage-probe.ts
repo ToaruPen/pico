@@ -189,20 +189,7 @@ function normalizeVoiceStageAttributes(
   const normalized: Record<string, AuditAttributeValue> = {};
 
   for (const [key, value] of Object.entries(attributes)) {
-    if (!voiceStageAttributeKeys.has(key)) {
-      throw new Error("pico voice stage probe attribute is not allowed");
-    }
-
-    if (numericVoiceStageAttributeKeys.has(key) && typeof value !== "number") {
-      throw new Error("pico voice stage probe numeric attribute is invalid");
-    }
-
-    if (
-      key === "pico.voice.control_result" &&
-      (typeof value !== "string" || !voiceStageControlResults.has(value))
-    ) {
-      throw new Error("pico voice stage probe control result attribute is invalid");
-    }
+    requireVoiceStageAttribute(key, value);
 
     if (typeof value === "number" && !Number.isFinite(value)) {
       continue;
@@ -212,4 +199,19 @@ function normalizeVoiceStageAttributes(
   }
 
   return Object.freeze(normalized);
+}
+
+function requireVoiceStageAttribute(key: string, value: AuditAttributeValue): void {
+  if (!voiceStageAttributeKeys.has(key)) {
+    throw new Error("pico voice stage probe attribute is not allowed");
+  }
+  if (numericVoiceStageAttributeKeys.has(key) && typeof value !== "number") {
+    throw new Error("pico voice stage probe numeric attribute is invalid");
+  }
+  if (
+    key === "pico.voice.control_result" &&
+    (typeof value !== "string" || !voiceStageControlResults.has(value))
+  ) {
+    throw new Error("pico voice stage probe control result attribute is invalid");
+  }
 }

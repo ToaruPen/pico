@@ -306,9 +306,10 @@ export function createVoiceResidentRuntime(
             completion: settlement
           };
           piAdmissionBarrier = barrier;
-          void settlement.then(() => {
+          const clearPending = (): void => {
             barrier.pending = false;
-          });
+          };
+          void settlement.then(clearPending, clearPending);
         }
       })
         .catch((error: unknown) => {
@@ -518,13 +519,7 @@ export function createVoiceResidentRuntime(
 
   const processControlEvent = (event: ResidentControlEvent): ResidentControlResult => {
     if (event.kind === "talk_pressed" && activeInteractionEnding !== undefined) {
-      counters.ignoredBusyTalkPresses += 1;
-      recordResidentVoiceOperatorEvent(options.operator, {
-        kind: "control_decision",
-        control: "talk",
-        result: "ignored_busy",
-        state: "interaction_ending"
-      });
+      recordTalkControlDecision(event, "ignored_busy", "interaction_ending", counters, options);
       return "ignored_busy";
     }
 
@@ -535,23 +530,7 @@ export function createVoiceResidentRuntime(
       return "accepted";
     }
 
-    if (event.kind === "talk_pressed" && result === "ignored_busy") {
-      counters.ignoredBusyTalkPresses += 1;
-    }
-    const controlState = controller.state();
-    if (
-      event.kind === "talk_pressed" &&
-      result !== "accepted" &&
-      controlState !== "error" &&
-      controlState !== "stopped"
-    ) {
-      recordResidentVoiceOperatorEvent(options.operator, {
-        kind: "control_decision",
-        control: "talk",
-        result,
-        state: controlState
-      });
-    }
+    recordTalkControlDecision(event, result, controller.state(), counters, options);
 
     return result;
   };
@@ -573,6 +552,26 @@ export function createVoiceResidentRuntime(
     completion,
     stop
   };
+}
+
+function recordTalkControlDecision(
+  event: ResidentControlEvent,
+  result: ResidentControlResult,
+  state: ResidentControlState | "interaction_ending",
+  counters: RuntimeCounters,
+  options: Pick<VoiceResidentRuntimeOptions, "operator">
+): void {
+  if (event.kind !== "talk_pressed") return;
+  if (result === "ignored_busy") {
+    counters.ignoredBusyTalkPresses += 1;
+  }
+  if (result === "accepted" || state === "error" || state === "stopped") return;
+  recordResidentVoiceOperatorEvent(options.operator, {
+    kind: "control_decision",
+    control: "talk",
+    result,
+    state
+  });
 }
 
 function recordAcceptedPttRelease(
@@ -1487,33 +1486,9 @@ async function convergeCancellation(
   monotonicNow: () => number
 ): Promise<void> {
   try {
-    const stops = await Promise.allSettled([
-      turn.capture.stop(),
-      cancelStreamingStt(turn),
-      ...(pipelineOwnsPlayback ? [] : [options.playback.stop()])
-    ]);
-    await turn.frameCollection.catch(() => undefined);
-    const [playbackSettlement] = await Promise.allSettled([
-      turn.playbackOperation ?? Promise.resolve(undefined)
-    ]);
-    const outputFailure = findRejected([...stops, playbackSettlement]);
-
-    if (outputFailure !== undefined) {
-      throw outputFailure.reason;
-    }
-    if (playbackSettlement.status === "fulfilled" && playbackSettlement.value !== undefined) {
-      throwPlaybackInfrastructureError(playbackSettlement.value);
-    }
+    await settleCancellationOutput(turn, options, pipelineOwnsPlayback);
     settleCancellationMeasurement(measurement, "output_stopped", options, "ok", monotonicNow);
-
-    const [echoSettlement] = await Promise.allSettled([
-      pipelineOwnsPlayback ? Promise.resolve() : options.echoControl.flush()
-    ]);
-    const echoFailure = findRejected([echoSettlement]);
-
-    if (echoFailure !== undefined) {
-      throw echoFailure.reason;
-    }
+    await flushCancellationEcho(options.echoControl, pipelineOwnsPlayback);
 
     const completed = controller.completeCancellation(turn.generation.id);
     settleCancellationMeasurement(
@@ -1545,6 +1520,39 @@ async function convergeCancellation(
       "cancellation_failed"
     );
     throw error;
+  }
+}
+
+async function settleCancellationOutput(
+  turn: ActiveTurn,
+  options: Pick<VoiceResidentRuntimeOptions, "playback">,
+  pipelineOwnsPlayback: boolean
+): Promise<void> {
+  const stops = await Promise.allSettled([
+    turn.capture.stop(),
+    cancelStreamingStt(turn),
+    ...(pipelineOwnsPlayback ? [] : [options.playback.stop()])
+  ]);
+  await turn.frameCollection.catch(() => undefined);
+  const [playbackSettlement] = await Promise.allSettled([
+    turn.playbackOperation ?? Promise.resolve(undefined)
+  ]);
+  const outputFailure = findRejected([...stops, playbackSettlement]);
+
+  if (outputFailure !== undefined) {
+    throw outputFailure.reason;
+  }
+  if (playbackSettlement.status === "fulfilled" && playbackSettlement.value !== undefined) {
+    throwPlaybackInfrastructureError(playbackSettlement.value);
+  }
+}
+
+async function flushCancellationEcho(
+  echoControl: EchoControlProvider,
+  pipelineOwnsPlayback: boolean
+): Promise<void> {
+  if (!pipelineOwnsPlayback) {
+    await echoControl.flush();
   }
 }
 
