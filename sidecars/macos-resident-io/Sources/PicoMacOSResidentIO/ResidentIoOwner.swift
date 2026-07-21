@@ -1,5 +1,4 @@
 import CoreAudio
-import CoreGraphics
 import Darwin
 import Foundation
 import PicoMacOSResidentIOCore
@@ -7,13 +6,14 @@ import PicoMacOSResidentIOCore
 final class ResidentIoOwner: @unchecked Sendable {
   private static let maximumAdmissionRingFrames = 192_000
   private static let maximumControlReorderingFrames = 16_384
+  private static let maximumControlEventSkewSeconds = 5.0
   let queue = DispatchQueue(label: "jp.toarupen.pico.macos-resident-io.owner")
   private let configuration: ResidentIoConfiguration
   private let writer = ResidentIoWriter()
   private let readySemaphore = DispatchSemaphore(value: 0)
   private let stopRunLoop: @Sendable () -> Void
   private var audioEngine: ResidentAudioEngine!
-  private var clockMapper: HostClockMapper?
+  private let clockMapper = HostClockMapper()
   private var gate: PttSampleGate
   private let pcmConverter: AVAudioPcm16MonoConverter
   private var assembler: Pcm16FrameAssembler
@@ -65,7 +65,8 @@ final class ResidentIoOwner: @unchecked Sendable {
         self?.recordDroppedBuffer(engineGeneration: generation, count: count)
       },
       onConfigurationChange: { [weak self] generation in
-        self?.beginRecovery(engineGeneration: generation, code: "configuration_changed")
+        guard let self, self.readySent else { return }
+        self.beginRecovery(engineGeneration: generation, code: "configuration_changed")
       },
       onFailure: { [weak self] generation, error in
         self?.reportAudioFailure(engineGeneration: generation, error: error)
@@ -75,7 +76,6 @@ final class ResidentIoOwner: @unchecked Sendable {
 
   func start() throws {
     try queue.sync {
-      clockMapper = try calibrateHostClock()
       let deviceID = try CoreAudioDeviceCatalog.resolveInputDevice(uid: configuration.deviceUID)
       engineStartBeganAt = machHostSeconds()
       activeAudioEngineGeneration = try audioEngine.start(deviceID: deviceID)
@@ -219,19 +219,18 @@ final class ResidentIoOwner: @unchecked Sendable {
     _ event: SemanticControlEvent,
     eventTimestampNanoseconds: UInt64
   ) {
-    guard !stopped, !suspended, readySent, !recovering, gate.state != .unavailable,
-      let clockMapper
-    else {
+    guard !stopped, !suspended, readySent, !recovering, gate.state != .unavailable else {
       return
     }
     if gate.state == .suppressed, event != .cancelPressed { return }
     let sequence = nextSequence
     nextSequence += 1
     let kind = residentIoKind(event)
-    let hostSeconds = clockMapper.audioHostSeconds(
-      eventTimestampNanoseconds: eventTimestampNanoseconds)
-
     do {
+      let hostSeconds = try clockMapper.audioHostSeconds(
+        eventTimestampNanoseconds: eventTimestampNanoseconds,
+        currentHostSeconds: machHostSeconds(),
+        maximumSkewSeconds: Self.maximumControlEventSkewSeconds)
       switch event {
       case .talkPressed:
         if gate.state == .discarding {
@@ -383,7 +382,7 @@ final class ResidentIoOwner: @unchecked Sendable {
     }
     assembler.flush(generation: generation).forEach(writePcmFrame)
     let releaseTimestamp = releaseTimestampByGeneration.removeValue(forKey: generation) ?? 0
-    if let clockMapper, releaseTimestamp > 0 {
+    if releaseTimestamp > 0 {
       writeTiming(
         .releaseToTailComplete,
         seconds: machHostSeconds()
@@ -460,7 +459,6 @@ final class ResidentIoOwner: @unchecked Sendable {
     recoveryAttempt += 1
     let cycle = recoveryCycle
     do {
-      clockMapper = try calibrateHostClock()
       let deviceID = try CoreAudioDeviceCatalog.resolveInputDevice(uid: configuration.deviceUID)
       resetPcmConversion()
       engineStartBeganAt = machHostSeconds()
@@ -725,21 +723,6 @@ private func pcm16Sample(_ sample: Float) -> Int16 {
     return Int16(min(Float(Int16.max), (clamped * Float(Int16.max)).rounded()))
   }
   return Int16(max(Float(Int16.min), (clamped * -Float(Int16.min)).rounded()))
-}
-
-private func calibrateHostClock() throws -> HostClockMapper {
-  let samples = try (0..<3).map { _ -> HostClockCalibrationSample in
-    let before = machHostSeconds()
-    guard let event = CGEvent(source: nil) else { throw HostClockMapperError.invalidSample }
-    let timestamp = event.timestamp
-    let after = machHostSeconds()
-    return HostClockCalibrationSample(
-      eventTimestampNanoseconds: timestamp,
-      machHostSecondsBefore: before,
-      machHostSecondsAfter: after
-    )
-  }
-  return try HostClockMapper.calibrate(samples: samples, maximumResidualSeconds: 0.002)
 }
 
 private func machHostSeconds() -> Double {

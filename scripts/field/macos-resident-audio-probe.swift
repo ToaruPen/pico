@@ -438,11 +438,16 @@ private func run() throws {
         releaseTailMilliseconds: options.releaseTailMilliseconds
     )
     let engine = AVAudioEngine()
-    try engine.inputNode.auAudioUnit.setDeviceID(deviceID)
-    let format = engine.inputNode.outputFormat(forBus: 0)
-    guard format.sampleRate > 0, format.channelCount > 0 else { throw ProbeError.missingInputFormat }
+    let input = engine.inputNode
+    try input.auAudioUnit.setDeviceID(deviceID)
+    let format = input.inputFormat(forBus: 0)
+    guard format.sampleRate > 0, format.channelCount > 0,
+          input.auAudioUnit.outputBusses.count > 1 else {
+        throw ProbeError.missingInputFormat
+    }
+    try input.auAudioUnit.outputBusses[1].setFormat(format)
 
-    engine.inputNode.installTap(onBus: 0, bufferSize: 4_096, format: format) { buffer, when in
+    input.installTap(onBus: 0, bufferSize: 4_096, format: format) { buffer, when in
         state.recordAudioBuffer(
             startNanoseconds: hostNanoseconds(when.hostTime),
             callbackNanoseconds: hostNanoseconds(),
@@ -474,7 +479,7 @@ private func run() throws {
         notificationCenter.removeObserver(configurationObserver)
         workspaceCenter.removeObserver(sleepObserver)
         workspaceCenter.removeObserver(wakeObserver)
-        engine.inputNode.removeTap(onBus: 0)
+        input.removeTap(onBus: 0)
         engine.stop()
     }
 
