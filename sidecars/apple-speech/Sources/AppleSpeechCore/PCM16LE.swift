@@ -11,8 +11,23 @@ public enum PCM16LE {
       throw SidecarServiceError.invalidRequest
     }
 
-    let sampleCount = byteCount / MemoryLayout<Int16>.size
-    return Double(sampleCount) * 1_000 / Double(AppleSpeechConstants.sampleRateHz)
+    return try streamingDurationMilliseconds(forByteCount: Int64(byteCount))
+  }
+
+  public static func streamingDurationMilliseconds(forByteCount byteCount: Int64) throws -> Double {
+    guard
+      byteCount > 0,
+      byteCount.isMultiple(of: Int64(MemoryLayout<Int16>.size))
+    else {
+      throw SidecarServiceError.invalidRequest
+    }
+
+    let sampleCount = byteCount / Int64(MemoryLayout<Int16>.size)
+    let duration = Double(sampleCount) * 1_000 / Double(AppleSpeechConstants.sampleRateHz)
+    guard duration.isFinite else {
+      throw SidecarServiceError.backendError
+    }
+    return duration
   }
 
   public static func makeBuffer(from data: Data) throws -> AVAudioPCMBuffer {

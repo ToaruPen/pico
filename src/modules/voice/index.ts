@@ -46,7 +46,14 @@ export type SttTranscriptionSuccess = {
 
 export type SttTranscriptionFailure = {
   readonly ok: false;
-  readonly reason: "invalid_request" | "timeout" | "model_load" | "backend_error" | "aborted";
+  readonly reason:
+    | "invalid_request"
+    | "busy"
+    | "input_overflow"
+    | "timeout"
+    | "model_load"
+    | "backend_error"
+    | "aborted";
   readonly message: string;
   readonly source: SttTranscriptionSource;
 };
@@ -56,6 +63,30 @@ export type SttTranscriptionResult = SttTranscriptionSuccess | SttTranscriptionF
 export type SttClient = {
   readonly warmup: () => Promise<SttTranscriptionResult>;
   readonly transcribe: (request: SttTranscriptionRequest) => Promise<SttTranscriptionResult>;
+};
+
+export type ResidentStreamingSttSession = {
+  readonly write: (audio: Uint8Array) => Promise<void>;
+  readonly finish: () => Promise<SttTranscriptionResult>;
+  readonly cancel: () => Promise<void>;
+};
+
+export type ResidentStreamingSttClient = {
+  readonly open: (signal?: AbortSignal) => Promise<ResidentStreamingSttSession>;
+};
+
+type ResidentWebSocket = {
+  binaryType: BinaryType;
+  readonly bufferedAmount: number;
+  readonly readyState: number;
+  send(data: string | Uint8Array<ArrayBuffer>): void;
+  close(code?: number, reason?: string): void;
+  addEventListener(type: string, listener: EventListener): void;
+  removeEventListener(type: string, listener: EventListener): void;
+};
+
+export type AppleSpeechStreamingSttClientOptions = {
+  readonly webSocketFactory?: (url: string) => ResidentWebSocket;
 };
 
 export type AivisSpeechServiceConfigInput = {
@@ -198,6 +229,11 @@ type ParsedAppleSpeechSidecarResponse =
 
 const APPLE_SPEECH_SAMPLE_RATE_HZ = 16_000;
 const PCM16LE_BYTES_PER_SAMPLE = 2;
+const STREAMING_PCM_MESSAGE_BYTES = 3_200;
+const STREAMING_WEBSOCKET_HIGH_WATER_BYTES = 256 * 1_024;
+const STREAMING_WEBSOCKET_POLL_MILLISECONDS = 10;
+const STREAMING_WEBSOCKET_BACKPRESSURE_TIMEOUT_MILLISECONDS = 1_000;
+const STREAMING_WEBSOCKET_READY_TIMEOUT_MILLISECONDS = 1_000;
 const AIVIS_DEFAULT_VOICE: AivisSpeechVoiceParameters = {
   speedScale: 1,
   pitchScale: 0,
@@ -304,6 +340,368 @@ export function createAppleSpeechSttClient(
       return transcribeWithAppleSpeechSidecar(request, sidecar, fetchImplementation);
     }
   };
+}
+
+export function createAppleSpeechStreamingSttClient(
+  sidecar: AppleSpeechSidecarConfig,
+  options: AppleSpeechStreamingSttClientOptions = {}
+): ResidentStreamingSttClient {
+  const webSocketFactory =
+    options.webSocketFactory ?? ((url: string): ResidentWebSocket => new WebSocket(url));
+
+  return {
+    open(signal) {
+      const socket = webSocketFactory(buildStreamingTranscriptionUrl(sidecar));
+      const session = new AppleSpeechResidentStreamingSession(socket, sidecar);
+      return session.open(signal);
+    }
+  };
+}
+
+class AppleSpeechResidentStreamingSession implements ResidentStreamingSttSession {
+  private readonly source: SttTranscriptionSource;
+  private readonly ready = deferred<undefined>();
+  private readonly terminal = deferred<SttTranscriptionResult>();
+  private pendingAudio: Uint8Array<ArrayBuffer> = new Uint8Array();
+  private writeQueue = Promise.resolve();
+  private state: "connecting" | "ready" | "finishing" | "terminal" | "cancelled" = "connecting";
+  private sentBinaryMessages = 0;
+  private readyTimeout: ReturnType<typeof setTimeout> | undefined;
+  private finalizationTimeout: ReturnType<typeof setTimeout> | undefined;
+  private abortSignal: AbortSignal | undefined;
+
+  constructor(
+    private readonly socket: ResidentWebSocket,
+    private readonly sidecar: AppleSpeechSidecarConfig
+  ) {
+    this.source = transcriptionSource(sidecar);
+    this.socket.binaryType = "arraybuffer";
+    this.socket.addEventListener("open", this.onOpen);
+    this.socket.addEventListener("message", this.onMessage);
+    this.socket.addEventListener("close", this.onClose);
+    this.socket.addEventListener("error", this.onError);
+  }
+
+  async open(signal?: AbortSignal): Promise<ResidentStreamingSttSession> {
+    this.abortSignal = signal;
+    signal?.addEventListener("abort", this.onAbort, { once: true });
+    if (signal?.aborted) {
+      this.onAbort(new Event("abort"));
+      await this.ready.promise;
+      return this;
+    }
+    this.readyTimeout = setTimeout(() => {
+      this.failBeforeReady("pico STT Apple Speech streaming ready timed out");
+    }, STREAMING_WEBSOCKET_READY_TIMEOUT_MILLISECONDS);
+    await this.ready.promise;
+    return this;
+  }
+
+  write(audio: Uint8Array): Promise<void> {
+    if (this.state === "terminal") return Promise.resolve();
+    const operation = this.writeQueue.then(() => this.writeAudio(audio));
+    this.writeQueue = operation;
+    return operation;
+  }
+
+  async finish(): Promise<SttTranscriptionResult> {
+    if (this.state === "terminal") return this.terminal.promise;
+    if (!this.isReady()) {
+      throw new Error("pico STT Apple Speech streaming session is not writable");
+    }
+    await this.writeQueue;
+    if (!this.isReady()) {
+      return this.terminal.promise;
+    }
+    if (this.pendingAudio.byteLength > 0) {
+      await this.sendBinary(this.pendingAudio);
+      this.pendingAudio = new Uint8Array();
+    }
+    if (this.sentBinaryMessages === 0) {
+      await this.cancel();
+      return sttStreamingFailure(
+        this.source,
+        "invalid_request",
+        "pico STT Apple Speech streaming turn contained no audio"
+      );
+    }
+
+    this.state = "finishing";
+    this.socket.send(JSON.stringify({ type: "finish" }));
+    this.finalizationTimeout = setTimeout(() => {
+      this.completeTerminal(
+        sttStreamingFailure(
+          this.source,
+          "timeout",
+          "pico STT Apple Speech streaming finalization timed out"
+        )
+      );
+      this.socket.close(1000, "timeout");
+    }, this.sidecar.timeoutMs);
+    return this.terminal.promise;
+  }
+
+  cancel(): Promise<void> {
+    if (this.state === "terminal" || this.state === "cancelled") return Promise.resolve();
+    this.state = "cancelled";
+    this.clearTimers();
+    this.detachAbortSignal();
+    this.terminal.resolve(
+      sttStreamingFailure(
+        this.source,
+        "aborted",
+        "pico STT Apple Speech streaming request was aborted"
+      )
+    );
+    this.socket.close(1000, "cancelled");
+    return Promise.resolve();
+  }
+
+  private async writeAudio(audio: Uint8Array): Promise<void> {
+    if (this.state !== "ready") {
+      throw new Error("pico STT Apple Speech streaming session is not writable");
+    }
+    if (audio.byteLength === 0 || audio.byteLength % PCM16LE_BYTES_PER_SAMPLE !== 0) {
+      throw new Error("pico STT Apple Speech streaming PCM must be non-empty and even-length");
+    }
+
+    const combined = new Uint8Array(this.pendingAudio.byteLength + audio.byteLength);
+    combined.set(this.pendingAudio);
+    combined.set(audio, this.pendingAudio.byteLength);
+    let offset = 0;
+    while (combined.byteLength - offset >= STREAMING_PCM_MESSAGE_BYTES) {
+      await this.sendBinary(combined.slice(offset, offset + STREAMING_PCM_MESSAGE_BYTES));
+      offset += STREAMING_PCM_MESSAGE_BYTES;
+    }
+    this.pendingAudio = combined.slice(offset);
+  }
+
+  private async sendBinary(audio: Uint8Array<ArrayBuffer>): Promise<void> {
+    await this.waitForWritableBuffer();
+    if (this.state !== "ready") {
+      throw new Error("pico STT Apple Speech streaming session closed while writing");
+    }
+    this.socket.send(audio);
+    this.sentBinaryMessages += 1;
+  }
+
+  private async waitForWritableBuffer(): Promise<void> {
+    const deadline = performance.now() + STREAMING_WEBSOCKET_BACKPRESSURE_TIMEOUT_MILLISECONDS;
+    while (this.socket.bufferedAmount > STREAMING_WEBSOCKET_HIGH_WATER_BYTES) {
+      if (this.state !== "ready") {
+        throw new Error("pico STT Apple Speech streaming session closed while writing");
+      }
+      if (performance.now() >= deadline) {
+        throw new Error("pico STT Apple Speech streaming backpressure timed out");
+      }
+      await delay(STREAMING_WEBSOCKET_POLL_MILLISECONDS);
+    }
+  }
+
+  private readonly onOpen: EventListener = () => {
+    if (this.state !== "connecting") return;
+    this.socket.send(
+      JSON.stringify({
+        type: "start",
+        version: 1,
+        provider: this.sidecar.provider,
+        language: this.sidecar.language,
+        timeoutMs: this.sidecar.timeoutMs,
+        encoding: "pcm16le",
+        sampleRateHz: APPLE_SPEECH_SAMPLE_RATE_HZ,
+        channels: 1
+      })
+    );
+  };
+
+  private readonly onMessage: EventListener = (event) => {
+    try {
+      const payload = parseStreamingServerMessage((event as MessageEvent<unknown>).data);
+      this.handleServerMessage(payload);
+    } catch (error) {
+      this.handleMalformedServerMessage(error);
+    }
+  };
+
+  private readonly onClose: EventListener = () => {
+    if (this.state === "terminal" || this.state === "cancelled") return;
+    if (this.state === "connecting") {
+      this.failBeforeReady("pico STT Apple Speech streaming connection closed before ready");
+      return;
+    }
+    this.completeTerminal(
+      sttStreamingFailure(
+        this.source,
+        "backend_error",
+        "pico STT Apple Speech streaming connection closed before completion"
+      )
+    );
+  };
+
+  private readonly onError: EventListener = () => {
+    if (this.state === "connecting") {
+      this.failBeforeReady("pico STT Apple Speech streaming connection failed");
+    }
+  };
+
+  private readonly onAbort: EventListener = () => {
+    if (this.state === "connecting") {
+      this.state = "cancelled";
+      this.clearTimers();
+      this.ready.reject(new Error("pico STT Apple Speech streaming open was aborted"));
+      this.socket.close(1000, "cancelled");
+      return;
+    }
+    this.cancel().catch(() => undefined);
+  };
+
+  private handleServerMessage(payload: StreamingServerMessage): void {
+    if (payload.kind === "ready") {
+      if (this.state !== "connecting") throw new Error("unexpected ready message");
+      this.state = "ready";
+      this.clearReadyTimeout();
+      this.ready.resolve(undefined);
+      return;
+    }
+    if (this.state === "connecting" && !payload.result.ok) {
+      this.completeTerminal({ ...payload.result, source: this.source });
+      this.ready.resolve(undefined);
+      this.socket.close(1000, "failed before ready");
+      return;
+    }
+    if (this.state !== "finishing" && this.state !== "ready") {
+      throw new Error("unexpected terminal message");
+    }
+    this.completeTerminal({ ...payload.result, source: this.source });
+    this.socket.close(1000, "completed");
+  }
+
+  private handleMalformedServerMessage(error: unknown): void {
+    const message = error instanceof Error ? error.message : "malformed response";
+    if (this.state === "connecting") {
+      this.failBeforeReady(`pico STT Apple Speech streaming response is malformed: ${message}`);
+      return;
+    }
+    this.completeTerminal(
+      sttStreamingFailure(
+        this.source,
+        "backend_error",
+        `pico STT Apple Speech streaming response is malformed: ${message}`
+      )
+    );
+    this.socket.close(1002, "protocol error");
+  }
+
+  private isReady(): boolean {
+    return this.state === "ready";
+  }
+
+  private failBeforeReady(message: string): void {
+    if (this.state !== "connecting") return;
+    this.state = "terminal";
+    this.clearTimers();
+    this.detachAbortSignal();
+    this.ready.reject(new Error(message));
+    this.socket.close(1000, "ready timeout");
+  }
+
+  private completeTerminal(result: SttTranscriptionResult): void {
+    if (this.state === "terminal" || this.state === "cancelled") return;
+    this.state = "terminal";
+    this.clearTimers();
+    this.detachAbortSignal();
+    this.terminal.resolve(result);
+  }
+
+  private clearReadyTimeout(): void {
+    if (this.readyTimeout !== undefined) clearTimeout(this.readyTimeout);
+    this.readyTimeout = undefined;
+  }
+
+  private clearTimers(): void {
+    this.clearReadyTimeout();
+    if (this.finalizationTimeout !== undefined) clearTimeout(this.finalizationTimeout);
+    this.finalizationTimeout = undefined;
+  }
+
+  private detachAbortSignal(): void {
+    this.abortSignal?.removeEventListener("abort", this.onAbort);
+    this.abortSignal = undefined;
+  }
+}
+
+type StreamingServerMessage =
+  | { readonly kind: "ready" }
+  | { readonly kind: "terminal"; readonly result: ParsedAppleSpeechSidecarResponse };
+
+function parseStreamingServerMessage(data: unknown): StreamingServerMessage {
+  if (typeof data !== "string") throw new Error("message must be text");
+  const payload = requireRecord(
+    JSON.parse(data) as unknown,
+    "pico STT Apple Speech streaming response is malformed"
+  );
+  if (payload.type === "ready") {
+    requireExactRecordKeys(payload, ["type", "version", "provider"]);
+    if (payload.version !== 1 || payload.provider !== "apple-speech") {
+      throw new Error("ready message is invalid");
+    }
+    return { kind: "ready" };
+  }
+  if (payload.type === "completed") {
+    requireExactRecordKeys(payload, ["type", "provider", "result"]);
+    return {
+      kind: "terminal",
+      result: parseAppleSpeechSidecarResponse({
+        provider: payload.provider,
+        ok: true,
+        result: payload.result
+      })
+    };
+  }
+  if (payload.type === "failed") {
+    requireExactRecordKeys(payload, ["type", "provider", "error"]);
+    return {
+      kind: "terminal",
+      result: parseAppleSpeechSidecarResponse({
+        provider: payload.provider,
+        ok: false,
+        error: payload.error
+      })
+    };
+  }
+  throw new Error("message type is invalid");
+}
+
+function buildStreamingTranscriptionUrl(sidecar: AppleSpeechSidecarConfig): string {
+  const url = new URL("/v1/transcription-stream", sidecar.localBaseUrl);
+  url.protocol = "ws:";
+  return url.toString();
+}
+
+function sttStreamingFailure(
+  source: SttTranscriptionSource,
+  reason: SttTranscriptionFailure["reason"],
+  message: string
+): SttTranscriptionFailure {
+  return { ok: false, reason, message, source };
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+  readonly reject: (reason: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 export function createAivisSpeechTtsClient(
@@ -1104,6 +1502,8 @@ function requireProbability(value: unknown): number {
 function requireSidecarErrorCode(value: unknown): SttTranscriptionFailure["reason"] {
   if (
     value === "invalid_request" ||
+    value === "busy" ||
+    value === "input_overflow" ||
     value === "timeout" ||
     value === "model_load" ||
     value === "backend_error"

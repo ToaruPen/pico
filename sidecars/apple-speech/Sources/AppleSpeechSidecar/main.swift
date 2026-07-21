@@ -31,7 +31,14 @@ struct AppleSpeechSidecarEntryPoint {
         localeIdentifier: options.locale,
         analysisTimeoutMilliseconds: options.analysisTimeoutMilliseconds
       )
-      let handler = SidecarHTTPHandler(service: engine)
+      let admission = TranscriptionAdmission()
+      let registry = StreamingSessionRegistry()
+      let handler = AppleSpeechHTTPHandler(
+        service: engine,
+        streamingService: engine,
+        admission: admission,
+        registry: registry
+      )
       let address = try sockaddr_in.inet(ip4: options.host, port: options.port)
       let server = HTTPServer(
         config: makeAppleSpeechHTTPServerConfiguration(
@@ -40,7 +47,13 @@ struct AppleSpeechSidecarEntryPoint {
         ),
         handler: handler
       )
-      try await server.run()
+      do {
+        try await server.run()
+        await registry.cancelAll()
+      } catch {
+        await registry.cancelAll()
+        throw error
+      }
     }
   }
 

@@ -75,14 +75,17 @@ ast:
 apple-speech-check:
   bash scripts/ci/run-apple-speech-gates.sh
 
-macos-control-check:
-  bash scripts/ci/run-macos-control-gates.sh
+macos-resident-io-check:
+  bash scripts/ci/run-macos-resident-io-gates.sh
 
-macos-control-build:
-  swift build -c release --package-path sidecars/macos-control -Xswiftc -warnings-as-errors
+macos-resident-io-build:
+  swift build -c release --package-path sidecars/macos-resident-io -Xswiftc -warnings-as-errors
+
+macos-resident-audio-probe *args:
+  xcrun swift scripts/field/macos-resident-audio-probe.swift {{args}}
 
 check:
-  if [ "$(uname -s)" = "Darwin" ]; then just apple-speech-check macos-control-check; fi
+  if [ "$(uname -s)" = "Darwin" ]; then just apple-speech-check macos-resident-io-check; fi
   npm run check
 
 ci:

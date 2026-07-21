@@ -2334,7 +2334,7 @@ function pipelineInput(input: {
   readonly echoControl?: EchoControlProvider;
   readonly probe?: VoiceStageProbe;
   readonly monotonicNow?: () => number;
-  readonly onFirstPlaybackStart?: () => boolean;
+  readonly onFirstPlaybackStart?: () => boolean | Promise<boolean>;
   readonly text?: string;
 }) {
   return {

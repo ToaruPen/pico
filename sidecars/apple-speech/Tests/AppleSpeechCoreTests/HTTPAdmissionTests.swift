@@ -30,7 +30,7 @@ struct HTTPAdmissionTests {
     )
 
     #expect(rejected.statusCode == .tooManyRequests)
-    #expect(failure.error.code == .backendError)
+    #expect(failure.error.code == .busy)
     #expect(failure.error.message == "speech backend is busy")
     #expect(await bodyReads.count == 1)
 

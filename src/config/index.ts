@@ -1,5 +1,4 @@
 import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 
 import { parse } from "yaml";
@@ -137,10 +136,7 @@ export type PicoVoiceResidentConfig = {
 };
 
 export type PicoResidentControlConfig = {
-  readonly provider: "loopback_http";
-  readonly host: "127.0.0.1" | "::1";
-  readonly port: number;
-  readonly authTokenPath: string;
+  readonly provider: "macos_resident_io";
   readonly keyboard: {
     readonly provider: "macos";
     readonly talkKey: PicoMacKey;
@@ -253,8 +249,8 @@ export type PicoResidentAudioInputConfig =
       readonly device: string;
     }
   | {
-      readonly provider: "avfoundation";
-      readonly device: string;
+      readonly provider: "avaudioengine";
+      readonly deviceUid: string;
     };
 
 export type PicoResidentAudioOutputConfig =
@@ -736,17 +732,11 @@ function defineVoiceResidentConfig(
 }
 
 function defineResidentControlConfig(input: Record<string, unknown>): PicoResidentControlConfig {
-  requireKnownConfigFields(input, "pico config voice.resident.control", [
-    "provider",
-    "host",
-    "port",
-    "authTokenPath",
-    "keyboard"
-  ]);
+  requireKnownConfigFields(input, "pico config voice.resident.control", ["provider", "keyboard"]);
   const provider = requireString(input.provider, "pico config voice.resident.control.provider");
 
-  if (provider !== "loopback_http") {
-    throw new Error("pico config voice.resident.control.provider must be loopback_http");
+  if (provider !== "macos_resident_io") {
+    throw new Error("pico config voice.resident.control.provider must be macos_resident_io");
   }
 
   const keyboard = requireRecord(input.keyboard, "pico config voice.resident.control.keyboard");
@@ -779,28 +769,12 @@ function defineResidentControlConfig(input: Record<string, unknown>): PicoReside
 
   return {
     provider,
-    host: requireLoopbackControlHost(input.host),
-    port: requireTcpPort(input.port, "pico config voice.resident.control.port"),
-    authTokenPath: requireString(
-      input.authTokenPath,
-      "pico config voice.resident.control.authTokenPath"
-    ),
     keyboard: {
       provider: keyboardProvider,
       talkKey,
       cancelKey
     }
   };
-}
-
-function requireLoopbackControlHost(value: unknown): "127.0.0.1" | "::1" {
-  const host = requireString(value, "pico config voice.resident.control.host");
-
-  if (host !== "127.0.0.1" && host !== "::1") {
-    throw new Error("pico config voice.resident.control.host must be 127.0.0.1 or ::1");
-  }
-
-  return host;
 }
 
 function requirePicoMacKey(value: unknown, label: string): PicoMacKey {
@@ -811,16 +785,6 @@ function requirePicoMacKey(value: unknown, label: string): PicoMacKey {
   }
 
   return key as PicoMacKey;
-}
-
-function requireTcpPort(value: unknown, label: string): number {
-  const port = requireNonNegativeInteger(value, label);
-
-  if (port < 1 || port > maxTcpPort) {
-    throw new Error(`${label} must be between 1 and ${maxTcpPort}`);
-  }
-
-  return port;
 }
 
 function defineVoiceResidentVadConfig(
@@ -921,20 +885,28 @@ function defineResidentAudioInput(input: Record<string, unknown>): PicoResidentA
   const provider = requireString(input.provider, "pico config voice.resident.audioInput.provider");
 
   if (provider === "alsa") {
+    requireKnownConfigFields(input, "pico config voice.resident.audioInput", [
+      "provider",
+      "device"
+    ]);
     return {
       provider,
       device: requireString(input.device, "pico config voice.resident.audioInput.device")
     };
   }
 
-  if (provider === "avfoundation") {
+  if (provider === "avaudioengine") {
+    requireKnownConfigFields(input, "pico config voice.resident.audioInput", [
+      "provider",
+      "deviceUid"
+    ]);
     return {
       provider,
-      device: requireString(input.device, "pico config voice.resident.audioInput.device")
+      deviceUid: requireString(input.deviceUid, "pico config voice.resident.audioInput.deviceUid")
     };
   }
 
-  throw new Error("pico config voice.resident.audioInput.provider must be alsa or avfoundation");
+  throw new Error("pico config voice.resident.audioInput.provider must be alsa or avaudioengine");
 }
 
 function defineResidentAudioOutput(input: Record<string, unknown>): PicoResidentAudioOutputConfig {
@@ -1465,15 +1437,7 @@ function resolveConfigRelativePaths(config: PicoConfig, baseDirectory: string): 
         ),
         ...(config.voice.resident.control === undefined
           ? {}
-          : {
-              control: {
-                ...config.voice.resident.control,
-                authTokenPath: resolveConfigHomeOrRelativePath(
-                  baseDirectory,
-                  config.voice.resident.control.authTokenPath
-                )
-              }
-            }),
+          : { control: config.voice.resident.control }),
         vad:
           config.voice.resident.vad.provider === "ten_vad"
             ? {
@@ -1510,18 +1474,6 @@ function resolveConfigRelativePaths(config: PicoConfig, baseDirectory: string): 
 
 function resolveConfigRelativePath(baseDirectory: string, path: string): string {
   return isAbsolute(path) ? path : resolve(baseDirectory, path);
-}
-
-function resolveConfigHomeOrRelativePath(baseDirectory: string, path: string): string {
-  if (path === "~") {
-    return homedir();
-  }
-
-  if (path.startsWith("~/")) {
-    return resolve(homedir(), path.slice(2));
-  }
-
-  return resolveConfigRelativePath(baseDirectory, path);
 }
 
 function optionalStringProperty(

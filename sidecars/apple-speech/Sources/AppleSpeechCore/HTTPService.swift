@@ -20,23 +20,54 @@ public protocol AppleSpeechServing: Sendable {
   func transcribe(_ request: ValidatedTranscriptionRequest) async throws -> TranscriptionResult
 }
 
+public struct AppleSpeechHTTPHandler: HTTPHandler {
+  private let httpHandler: SidecarHTTPHandler
+  private let webSocketHandler: WebSocketHTTPHandler
+
+  public init(
+    service: any AppleSpeechServing,
+    streamingService: any AppleSpeechStreamingServing,
+    admission: TranscriptionAdmission,
+    registry: StreamingSessionRegistry
+  ) {
+    self.httpHandler = SidecarHTTPHandler(service: service, admission: admission)
+    self.webSocketHandler = WebSocketHTTPHandler(
+      handler: WebSocketSpeechHandler(
+        service: streamingService,
+        admission: admission,
+        registry: registry
+      )
+    )
+  }
+
+  public func handleRequest(_ request: HTTPRequest) async throws -> HTTPResponse {
+    if request.method == .GET, request.path == "/v1/transcription-stream" {
+      return try await webSocketHandler.handleRequest(request)
+    }
+    return try await httpHandler.handleRequest(request)
+  }
+}
+
 public struct SidecarHTTPHandler: HTTPHandler {
   private let service: any AppleSpeechServing
   private let admission: TranscriptionAdmission
   private let bodyReader: @Sendable (HTTPBodySequence) async throws -> Data
 
   public init(service: any AppleSpeechServing) {
-    self.service = service
-    self.admission = TranscriptionAdmission()
-    self.bodyReader = Self.readBoundedBody
+    self.init(service: service, admission: TranscriptionAdmission())
+  }
+
+  public init(service: any AppleSpeechServing, admission: TranscriptionAdmission) {
+    self.init(service: service, admission: admission, bodyReader: Self.readBoundedBody)
   }
 
   init(
     service: any AppleSpeechServing,
+    admission: TranscriptionAdmission = TranscriptionAdmission(),
     bodyReader: @escaping @Sendable (HTTPBodySequence) async throws -> Data
   ) {
     self.service = service
-    self.admission = TranscriptionAdmission()
+    self.admission = admission
     self.bodyReader = bodyReader
   }
 
@@ -61,7 +92,8 @@ public struct SidecarHTTPHandler: HTTPHandler {
       return failureResponse(for: .modelLoad, status: .serviceUnavailable)
     case (.POST, "/v1/transcriptions"):
       return try await handleTranscription(request)
-    case (_, "/health"), (_, "/ready"), (_, "/v1/transcriptions"):
+    case (_, "/health"), (_, "/ready"), (_, "/v1/transcriptions"),
+      (_, "/v1/transcription-stream"):
       return failureResponse(for: .invalidRequest, status: .methodNotAllowed)
     default:
       return failureResponse(for: .invalidRequest, status: .notFound)
@@ -149,6 +181,8 @@ public struct SidecarHTTPHandler: HTTPHandler {
       .internalServerError
     case .busy:
       .tooManyRequests
+    case .inputOverflow:
+      .internalServerError
     }
   }
 
@@ -169,19 +203,6 @@ public struct SidecarHTTPHandler: HTTPHandler {
       ],
       body: body
     )
-  }
-}
-
-private actor TranscriptionAdmission {
-  private var requestInFlight = false
-
-  func perform<Result: Sendable>(
-    _ operation: @Sendable () async throws -> Result
-  ) async rethrows -> Result? {
-    guard !requestInFlight else { return nil }
-    requestInFlight = true
-    defer { requestInFlight = false }
-    return try await operation()
   }
 }
 

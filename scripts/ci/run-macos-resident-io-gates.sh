@@ -3,7 +3,7 @@
 set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-package_dir="$root_dir/sidecars/macos-control"
+package_dir="$root_dir/sidecars/macos-resident-io"
 developer_dir="$(xcode-select -p)"
 testing_frameworks="$developer_dir/Library/Developer/Frameworks"
 testing_libraries="$developer_dir/Library/Developer/usr/lib"
@@ -34,14 +34,14 @@ swift test "${swift_test_arguments[@]}"
 swift build --scratch-path "$build_dir" -c release -Xswiftc -warnings-as-errors
 
 binary_dir="$(swift build --scratch-path "$build_dir" -c release --show-bin-path)"
-binary="$binary_dir/pico-macos-control"
+binary="$binary_dir/pico-macos-resident-io"
 
 if "$binary" --unknown >"$temporary_dir/invalid.stdout" 2>"$temporary_dir/invalid.stderr"; then
-  printf 'macOS control gate failed: invalid command line exited successfully\n' >&2
+  printf 'macOS resident I/O gate failed: invalid command line exited successfully\n' >&2
   exit 1
 fi
 
 [[ ! -s "$temporary_dir/invalid.stdout" ]]
-grep -Fq 'pico macOS control failed:' "$temporary_dir/invalid.stderr"
+grep -Fq 'pico macOS resident I/O failed:' "$temporary_dir/invalid.stderr"
 
-printf 'macOS control gates passed.\n'
+printf 'macOS resident I/O gates passed.\n'

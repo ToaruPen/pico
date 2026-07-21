@@ -42,21 +42,26 @@ SIGTERM cleanupを検証する。
 - accepted / ignored / noop outcome数
 - capture startup、hold、250 ms release tail、cancel convergenceの集計時間
 - completed / cancelled hold数と総frame数
-- idle STT call数（このハーネスでは常に0）
+- native health、restart、buffer cadence、PTT外/suppressed/total drop数
+- physical keyからtail完了までのnative timing stage集計
+- capture invalidation数とgeneration不一致PCM frame数
 - CPU user/system時間とRSS
 
 キー名、raw audio、transcript、prompt、completion本文、activationごとの生値は出力・保存しない。
-このハーネス自体はSTT、Pi、TTS、playbackを呼ばないため、上記の`idleSttCalls: 0`を
-production full-turn実測の代替証拠にはしない。production runtimeのidle無処理とcancel伝播は
-統合テストで別に検証する。
+このハーネス自体はSTT、Pi、TTS、playbackを呼ばないため、idle STT call数を成功証拠として
+出力しない。production runtimeのidle無処理とcancel伝播は統合テストで別に検証する。
 
 ## 実機で残る確認
 
-1. `config/pico.local.yaml`へcontrol、AVFoundation input、afplay outputを設定し、0600の
-   control tokenを用意する。
+1. `config/pico.local.yaml`へ`macos_resident_io` control、stable Core Audio `deviceUid`を
+   持つ`avaudioengine` input、`ffplay`の`system_default` outputを設定する。旧loopback
+   control tokenは使用しない。
 2. Moonlanderまたは代理キーボードを接続し、設定したtalk/cancel controlを送出できるようにする。
-3. `just macos-control-build`後、macOS Input Monitoringでstable release binaryを許可する。
-4. resident serviceを停止し、次を実行してtalk hold、busy中talk、各stage相当のcancelを確認する。
+3. `just macos-resident-io-build`後、統合sidecarのstable release binaryへmacOSの
+   Input Monitoringとmicrophone権限を許可する。
+4. 他checkoutのPicoとexclusive microphone/lock所有を確認して調整した後、
+   `just macos-resident-audio-probe --duration-seconds 30 --device-uid <uid>`と次のbounded harnessでtalk hold、
+   busy中talk、各stage相当のcancelを確認する。無断で別processを停止しない。
 
    ```bash
    PICO_CONFIG_PATH=config/pico.local.yaml \
@@ -65,3 +70,6 @@ production full-turn実測の代替証拠にはしない。production runtimeの
 
 5. production residentでは、capture startupと先頭音節保持、1 hold = 1 turn、busy入力非queue、
    context継続、録音中・STT中・Pi中・再生中のcancelを別途確認する。
+
+最新の順序、privacy境界、未実施項目は
+`docs/superpowers/research/2026-07-20-resident-avaudioengine-input-validation.md`を正とする。

@@ -19,12 +19,23 @@ describe("resident audio input smoke", () => {
     expect(residentAudioInputSmokeExitCode(report)).toBe(0);
   });
 
+  it("routes AVAudioEngine production validation to the native PTT field harness", async () => {
+    const report = await runResidentAudioInputSmoke(residentAudioInputConfig());
+
+    expect(report).toEqual({
+      status: "skipped",
+      provider: "resident-audio-input",
+      reason:
+        "AVAudioEngine admits audio only inside native PTT; run just field-resident-hold-to-talk for input signal validation."
+    });
+  });
+
   it("passes when measured input RMS meets the speech-gate threshold", async () => {
     const config = residentAudioInputConfig();
     const report = await runResidentAudioInputSmoke(config, {
       measureInputLevel: () =>
         Promise.resolve({
-          provider: "avfoundation",
+          provider: "avaudioengine",
           sampleRateHz: 16_000,
           channels: 1,
           capturedMs: 1_000,
@@ -40,7 +51,7 @@ describe("resident audio input smoke", () => {
       status: "passed",
       provider: "resident-audio-input",
       details: {
-        audioProvider: "avfoundation",
+        audioProvider: "avaudioengine",
         sampleRateHz: 16_000,
         channels: 1,
         capturedMs: 1_000,
@@ -59,7 +70,7 @@ describe("resident audio input smoke", () => {
     const report = await runResidentAudioInputSmoke(config, {
       measureInputLevel: () =>
         Promise.resolve({
-          provider: "avfoundation",
+          provider: "avaudioengine",
           sampleRateHz: 16_000,
           channels: 1,
           capturedMs: 1_000,
@@ -77,7 +88,7 @@ describe("resident audio input smoke", () => {
       provider: "resident-audio-input",
       reason: "pico resident audio input RMS -61.9 dB is below minimum -55 dB",
       details: {
-        audioProvider: "avfoundation",
+        audioProvider: "avaudioengine",
         sampleRateHz: 16_000,
         channels: 1,
         capturedMs: 1_000,
@@ -101,8 +112,8 @@ function residentAudioInputConfig() {
       resident: {
         enabled: true,
         audioInput: {
-          provider: "avfoundation",
-          device: ":0"
+          provider: "avaudioengine",
+          deviceUid: "BuiltInMicrophoneDevice"
         },
         audioOutput: {
           provider: "ffplay",

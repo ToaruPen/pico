@@ -10,6 +10,13 @@ describe("voice stage probe", () => {
   it("assigns one persistence and summary policy to every accepted stage", () => {
     expect(voiceRuntimeStagePolicies).toEqual({
       mic_capture: { persisted: false, summary: false },
+      resident_key_to_admission: { persisted: true, summary: false },
+      resident_admission_to_gate: { persisted: true, summary: false },
+      resident_gate_to_first_sample: { persisted: true, summary: false },
+      resident_first_sample_to_dispatch: { persisted: true, summary: false },
+      resident_release_to_tail_complete: { persisted: true, summary: false },
+      resident_engine_start: { persisted: true, summary: false },
+      resident_engine_restart: { persisted: true, summary: false },
       echo_control: { persisted: false, summary: false },
       speech_gate: { persisted: true, summary: false },
       stt: { persisted: true, summary: true },

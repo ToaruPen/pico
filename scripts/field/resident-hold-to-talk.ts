@@ -3,19 +3,17 @@ import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
 
 import { loadPicoConfigFromEnvironment } from "../../src/config/index.js";
-import { startMacOSControlBridge } from "../../src/runtime/macos-control-bridge.js";
-import {
-  createResidentAudioCapture,
-  type ResidentCaptureSession
+import { startMacOSResidentIoBridge } from "../../src/runtime/macos-resident-io-bridge.js";
+import type {
+  ResidentAudioCapture,
+  ResidentCaptureSession
 } from "../../src/runtime/resident-audio-io.js";
-import {
-  createLoopbackHttpResidentControlServer,
-  type ResidentControlResult
-} from "../../src/runtime/resident-control.js";
+import type { ResidentControlResult } from "../../src/runtime/resident-control.js";
 import {
   createResidentControlController,
   type ResidentTurnGeneration
 } from "../../src/runtime/resident-control-controller.js";
+import type { ResidentIoTimingStage } from "../../src/runtime/resident-io-protocol.js";
 import { createResidentAudioFixtureCapture } from "./resident-audio-fixture.js";
 
 export type ResidentHoldToTalkArguments = {
@@ -42,7 +40,15 @@ export type ResidentHoldToTalkFieldReport = {
   readonly holdDuration: BoundedMetricSummary;
   readonly releaseTailDuration: BoundedMetricSummary;
   readonly cancellationDuration: BoundedMetricSummary;
-  readonly idleSttCalls: 0;
+  readonly residentIoHealthEvents: number;
+  readonly residentIoRestartCount: number;
+  readonly residentIoDroppedFrameCount: number;
+  readonly residentIoOutsidePttDroppedFrameCount: number;
+  readonly residentIoSuppressedDroppedFrameCount: number;
+  readonly residentIoBufferCadenceMs: number;
+  readonly residentIoTiming: Readonly<Record<ResidentIoTimingStage, BoundedMetricSummary>>;
+  readonly captureInvalidations: number;
+  readonly unexpectedPcmFrames: number;
   readonly cpuUserMicros: number;
   readonly cpuSystemMicros: number;
   readonly rssBytes: number;
@@ -62,6 +68,24 @@ type ActiveCapture = {
 
 const defaultDurationMs = 30_000;
 const maximumDurationMs = 300_000;
+const requiredTimingStages = [
+  "key_to_admission",
+  "admission_to_gate",
+  "gate_to_first_sample",
+  "first_sample_to_dispatch",
+  "release_to_tail_complete",
+  "engine_start"
+] as const satisfies readonly ResidentIoTimingStage[];
+const unhealthyResidentIoCodes = new Set([
+  "engine_restarted",
+  "sleep",
+  "wake",
+  "configuration_changed",
+  "engine_stopped",
+  "audio_timeline_discontinuity",
+  "audio_callback_overrun",
+  "admission_timeout"
+]);
 
 type MutableResidentHoldToTalkArguments = {
   durationMs: number;
@@ -167,10 +191,15 @@ export async function runResidentHoldToTalkFieldValidation(
 ): Promise<ResidentHoldToTalkFieldReport> {
   const config = loadPicoConfigFromEnvironment();
   const control = config.voice.resident.control;
+  const audioInput = config.voice.resident.audioInput;
 
-  if (!config.voice.resident.enabled || control === undefined) {
+  if (
+    !config.voice.resident.enabled ||
+    control === undefined ||
+    audioInput?.provider !== "avaudioengine"
+  ) {
     throw new Error(
-      "pico hold-to-talk field validation requires voice.resident.enabled and voice.resident.control"
+      "pico hold-to-talk field validation requires enabled macos_resident_io control and avaudioengine input"
     );
   }
 
@@ -178,26 +207,28 @@ export async function runResidentHoldToTalkFieldValidation(
   const startedCpu = process.cpuUsage();
   let durationTimer: ReturnType<typeof setTimeout> | undefined;
   let unregisterSignals: (() => void) | undefined;
-  let capture: ReturnType<typeof createResidentAudioCapture> | undefined;
+  let capture: ResidentAudioCapture | undefined;
   let controller: ReturnType<typeof createResidentControlController> | undefined;
-  let server: Awaited<ReturnType<typeof createLoopbackHttpResidentControlServer>> | undefined;
-  let bridge: Awaited<ReturnType<typeof startMacOSControlBridge>> | undefined;
+  let bridge: Awaited<ReturnType<typeof startMacOSResidentIoBridge>> | undefined;
   let active: ActiveCapture | undefined;
+  let cleanupStarted = false;
+  const closeResources = async (): Promise<void> => {
+    if (cleanupStarted) return;
+    cleanupStarted = true;
+    await closeFieldValidationResources({
+      durationTimer,
+      unregisterSignals,
+      controller,
+      active,
+      bridge,
+      capture
+    });
+  };
 
   try {
     const stopController = new AbortController();
     unregisterSignals = registerStopSignals(stopController);
     durationTimer = setTimeout(() => stopController.abort(), arguments_.durationMs);
-    const ownedCapture =
-      arguments_.audioFixturePath === undefined
-        ? createResidentAudioCapture(config)
-        : createResidentAudioFixtureCapture({
-            path: arguments_.audioFixturePath,
-            expectedSampleRateHz: config.voice.echoControl.sampleRateHz,
-            expectedChannels: config.voice.echoControl.channels,
-            frameMs: config.voice.echoControl.frameMs
-          });
-    capture = ownedCapture;
     const outcomes: Record<ResidentControlResult, number> = {
       accepted: 0,
       ignored_busy: 0,
@@ -208,10 +239,20 @@ export async function runResidentHoldToTalkFieldValidation(
     const holdDurations: number[] = [];
     const releaseTailDurations: number[] = [];
     const cancellationDurations: number[] = [];
+    const residentIoTiming = createResidentIoTimingValues();
     let completedHolds = 0;
     let completedHoldsWithFrames = 0;
     let cancelledHolds = 0;
     let totalFrameCount = 0;
+    let healthEventCount = 0;
+    let engineStartedObserved = false;
+    let restartCount = 0;
+    let droppedFrameCount = 0;
+    let outsidePttDroppedFrameCount = 0;
+    let suppressedDroppedFrameCount = 0;
+    let bufferCadenceMs = 0;
+    let captureInvalidations = 0;
+    let unexpectedPcmFrames = 0;
     let rejectFailure: (error: Error) => void = () => undefined;
     const failure = new Promise<never>((_resolve, reject) => {
       rejectFailure = reject;
@@ -223,7 +264,10 @@ export async function runResidentHoldToTalkFieldValidation(
     };
     const ownedController = createResidentControlController({
       onListen(generation) {
-        const session = ownedCapture.start(generation.signal);
+        if (capture === undefined) {
+          throw new Error("pico macOS resident I/O capture is not ready");
+        }
+        const session = capture.start(generation.signal, generation.id);
         const turn: ActiveCapture = {
           generation,
           session,
@@ -315,15 +359,29 @@ export async function runResidentHoldToTalkFieldValidation(
         active = undefined;
       }
     };
-    server = await createLoopbackHttpResidentControlServer({
-      host: control.host,
-      port: control.port,
-      authTokenPath: control.authTokenPath,
-      shutdownTimeoutMs: config.voice.resident.shutdownGraceMs,
-      handle: (event) => {
+    bridge = await startMacOSResidentIoBridge({
+      input: {
+        deviceUid: audioInput.deviceUid,
+        sampleRateHz: config.voice.echoControl.sampleRateHz,
+        channels: config.voice.echoControl.channels,
+        frameMs: config.voice.echoControl.frameMs,
+        releaseTailMs: 250,
+        talkKey: control.keyboard.talkKey,
+        cancelKey: control.keyboard.cancelKey
+      },
+      // Field accounting intentionally keeps admission, timing, and failure ownership together.
+      // eslint-disable-next-line complexity
+      handleControl: (nativeEvent) => {
+        if (capture === undefined) {
+          return { result: "ignored_busy" };
+        }
         const turn = active;
 
         try {
+          const event = {
+            kind: nativeEvent.kind,
+            occurredAt: new Date().toISOString()
+          } as const;
           const outcome = ownedController.handle(event);
 
           if (event.kind === "talk_released" && outcome === "accepted" && turn !== undefined) {
@@ -331,15 +389,71 @@ export async function runResidentHoldToTalkFieldValidation(
           }
 
           outcomes[outcome] += 1;
-          return outcome;
+          const generation =
+            event.kind === "talk_pressed" && outcome === "accepted"
+              ? ownedController.generation()?.id
+              : undefined;
+          return { result: outcome, ...(generation === undefined ? {} : { generation }) };
         } catch (error) {
           fail(error, ownedController.generation()?.id);
           throw error;
         }
       },
+      handleTailComplete: (generation) => {
+        ownedController.handle({
+          kind: "tail_complete",
+          generationId: generation,
+          occurredAt: new Date().toISOString()
+        });
+      },
+      handleCaptureInvalidated: (generation) => {
+        captureInvalidations += 1;
+        fail(
+          new Error("pico hold-to-talk field validation observed capture invalidation"),
+          generation
+        );
+      },
+      observeHealth: (event) => {
+        healthEventCount += 1;
+        restartCount = event.restartCount;
+        droppedFrameCount = event.droppedFrameCount;
+        outsidePttDroppedFrameCount = event.outsidePttDroppedFrameCount;
+        suppressedDroppedFrameCount = event.suppressedDroppedFrameCount;
+        bufferCadenceMs = event.bufferCadenceMs;
+        engineStartedObserved ||= event.code === "engine_started";
+        if (unhealthyResidentIoCodes.has(event.code)) {
+          fail(
+            new Error(
+              `pico hold-to-talk field validation observed unhealthy resident I/O: ${event.code}`
+            ),
+            ownedController.generation()?.id
+          );
+        }
+      },
+      observeTiming: (event) => {
+        residentIoTiming[event.stage].push(event.durationMs);
+      },
+      observeUnexpectedPcmFrame: () => {
+        unexpectedPcmFrames += 1;
+        fail(
+          new Error("pico hold-to-talk field validation observed PCM without an active generation"),
+          ownedController.generation()?.id
+        );
+      },
       signal: stopController.signal
     });
-    bridge = await startMacOSControlBridge({ control, signal: stopController.signal });
+    capture = bridge.audioCapture;
+    if (arguments_.audioFixturePath !== undefined) {
+      capture = createFixtureOverrideCapture(
+        bridge.audioCapture,
+        createResidentAudioFixtureCapture({
+          path: arguments_.audioFixturePath,
+          expectedSampleRateHz: config.voice.echoControl.sampleRateHz,
+          expectedChannels: config.voice.echoControl.channels,
+          frameMs: config.voice.echoControl.frameMs
+        })
+      );
+    }
     process.stderr.write(
       `[pico field] ready; use the configured controls for ${String(arguments_.durationMs)} ms\n`
     );
@@ -354,11 +468,12 @@ export async function runResidentHoldToTalkFieldValidation(
     ]);
 
     requireCompletedAudioCapture(completedHoldsWithFrames);
+    requireResidentIoEvidence(engineStartedObserved, residentIoTiming);
 
     const elapsedMs = performance.now() - startedAtMs;
     const cpu = process.cpuUsage(startedCpu);
 
-    return {
+    const report: ResidentHoldToTalkFieldReport = {
       status: "passed",
       durationMs: Math.round(elapsedMs),
       outcomes: Object.freeze({ ...outcomes }),
@@ -369,21 +484,71 @@ export async function runResidentHoldToTalkFieldValidation(
       holdDuration: summarizeBoundedMetric(holdDurations),
       releaseTailDuration: summarizeBoundedMetric(releaseTailDurations),
       cancellationDuration: summarizeBoundedMetric(cancellationDurations),
-      idleSttCalls: 0,
+      residentIoHealthEvents: healthEventCount,
+      residentIoRestartCount: restartCount,
+      residentIoDroppedFrameCount: droppedFrameCount,
+      residentIoOutsidePttDroppedFrameCount: outsidePttDroppedFrameCount,
+      residentIoSuppressedDroppedFrameCount: suppressedDroppedFrameCount,
+      residentIoBufferCadenceMs: bufferCadenceMs,
+      residentIoTiming: summarizeResidentIoTiming(residentIoTiming),
+      captureInvalidations,
+      unexpectedPcmFrames,
       cpuUserMicros: cpu.user,
       cpuSystemMicros: cpu.system,
       rssBytes: process.memoryUsage().rss
     };
-  } finally {
-    await closeFieldValidationResources({
-      durationTimer,
-      unregisterSignals,
-      controller,
-      active,
-      bridge,
-      server,
-      capture
-    });
+    await closeResources();
+    return report;
+  } catch (error) {
+    await closeResources().catch(() => undefined);
+    throw error;
+  }
+}
+
+function createFixtureOverrideCapture(
+  nativeCapture: ResidentAudioCapture,
+  fixtureCapture: ResidentAudioCapture
+): ResidentAudioCapture {
+  return {
+    start(signal, generationId) {
+      const nativeSession = nativeCapture.start(signal, generationId);
+      let fixtureSession: ResidentCaptureSession;
+      try {
+        fixtureSession = fixtureCapture.start(signal, generationId);
+      } catch (error) {
+        void nativeSession.stop().catch(() => undefined);
+        throw error;
+      }
+      const nativeDrain = drainFrames(nativeSession.frames);
+      void nativeDrain.catch(() => undefined);
+
+      return {
+        frames: fixtureSession.frames,
+        async stop() {
+          await settleCleanupOperations([fixtureSession.stop(), nativeSession.stop(), nativeDrain]);
+        }
+      };
+    },
+    async close() {
+      await settleCleanupOperations([fixtureCapture.close(), nativeCapture.close()]);
+    }
+  };
+}
+
+async function drainFrames(frames: AsyncIterable<unknown>): Promise<void> {
+  for await (const frame of frames) {
+    // Fixture frames own the field measurements; native PCM remains content-free here.
+    void frame;
+  }
+}
+
+async function settleCleanupOperations(operations: readonly Promise<void>[]): Promise<void> {
+  const results = await Promise.allSettled(operations);
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected"
+  );
+  if (failure !== undefined) {
+    throw failure.reason;
   }
 }
 
@@ -393,14 +558,52 @@ function requireCompletedAudioCapture(completedHoldsWithFrames: number): void {
   }
 }
 
+function createResidentIoTimingValues(): Record<ResidentIoTimingStage, number[]> {
+  return {
+    key_to_admission: [],
+    admission_to_gate: [],
+    gate_to_first_sample: [],
+    first_sample_to_dispatch: [],
+    release_to_tail_complete: [],
+    engine_start: [],
+    engine_restart: []
+  };
+}
+
+function summarizeResidentIoTiming(
+  values: Readonly<Record<ResidentIoTimingStage, readonly number[]>>
+): Readonly<Record<ResidentIoTimingStage, BoundedMetricSummary>> {
+  return Object.freeze({
+    key_to_admission: summarizeBoundedMetric(values.key_to_admission),
+    admission_to_gate: summarizeBoundedMetric(values.admission_to_gate),
+    gate_to_first_sample: summarizeBoundedMetric(values.gate_to_first_sample),
+    first_sample_to_dispatch: summarizeBoundedMetric(values.first_sample_to_dispatch),
+    release_to_tail_complete: summarizeBoundedMetric(values.release_to_tail_complete),
+    engine_start: summarizeBoundedMetric(values.engine_start),
+    engine_restart: summarizeBoundedMetric(values.engine_restart)
+  });
+}
+
+function requireResidentIoEvidence(
+  engineStartedObserved: boolean,
+  timing: Readonly<Record<ResidentIoTimingStage, readonly number[]>>
+): void {
+  if (!engineStartedObserved) {
+    throw new Error("pico hold-to-talk field validation observed no engine start health event");
+  }
+  const missing = requiredTimingStages.find((stage) => timing[stage].length === 0);
+  if (missing !== undefined) {
+    throw new Error(`pico hold-to-talk field validation observed no ${missing} timing event`);
+  }
+}
+
 async function closeFieldValidationResources(input: {
   readonly durationTimer: ReturnType<typeof setTimeout> | undefined;
   readonly unregisterSignals: (() => void) | undefined;
   readonly controller: ReturnType<typeof createResidentControlController> | undefined;
   readonly active: ActiveCapture | undefined;
-  readonly bridge: Awaited<ReturnType<typeof startMacOSControlBridge>> | undefined;
-  readonly server: Awaited<ReturnType<typeof createLoopbackHttpResidentControlServer>> | undefined;
-  readonly capture: ReturnType<typeof createResidentAudioCapture> | undefined;
+  readonly bridge: Awaited<ReturnType<typeof startMacOSResidentIoBridge>> | undefined;
+  readonly capture: ResidentAudioCapture | undefined;
 }): Promise<void> {
   if (input.durationTimer !== undefined) {
     clearTimeout(input.durationTimer);
@@ -408,10 +611,15 @@ async function closeFieldValidationResources(input: {
 
   input.unregisterSignals?.();
   input.controller?.stop();
-  await closeActiveCapture(input.active);
-  await input.bridge?.close().catch(() => undefined);
-  await input.server?.close();
-  await input.capture?.close();
+  await settleCleanupActions([
+    () => closeActiveCapture(input.active),
+    () => input.capture?.close() ?? Promise.resolve(),
+    () => input.bridge?.close() ?? Promise.resolve()
+  ]);
+}
+
+async function settleCleanupActions(actions: readonly (() => Promise<void>)[]): Promise<void> {
+  await settleCleanupOperations(actions.map(async (action) => action()));
 }
 
 async function closeActiveCapture(active: ActiveCapture | undefined): Promise<void> {

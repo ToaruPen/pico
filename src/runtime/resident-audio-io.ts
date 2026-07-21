@@ -22,28 +22,20 @@ export type ResidentAudioInputLevelOptions = {
 };
 
 export type ResidentAudioInputLevel = Pcm16leAudioLevel & {
-  readonly provider: ResidentAudioInputPlan["provider"];
+  readonly provider: "alsa" | "avaudioengine";
   readonly sampleRateHz: number;
   readonly channels: number;
   readonly capturedMs: number;
   readonly signalDetected: boolean;
 };
 
-export type ResidentAudioInputPlan =
-  | {
-      readonly provider: "alsa";
-      readonly command: "arecord";
-      readonly args: readonly string[];
-      readonly frameByteLength: number;
-      readonly frameIdPrefix: "alsa-mic";
-    }
-  | {
-      readonly provider: "avfoundation";
-      readonly command: "ffmpeg";
-      readonly args: readonly string[];
-      readonly frameByteLength: number;
-      readonly frameIdPrefix: "avfoundation-mic";
-    };
+export type ResidentAudioInputPlan = {
+  readonly provider: "alsa";
+  readonly command: "arecord";
+  readonly args: readonly string[];
+  readonly frameByteLength: number;
+  readonly frameIdPrefix: "alsa-mic";
+};
 
 export type ResidentCaptureSession = {
   readonly frames: AsyncIterable<VoicePcmFrame>;
@@ -51,7 +43,7 @@ export type ResidentCaptureSession = {
 };
 
 export type ResidentAudioCapture = {
-  readonly start: (signal: AbortSignal) => ResidentCaptureSession;
+  readonly start: (signal: AbortSignal, generationId?: number) => ResidentCaptureSession;
   readonly close: () => Promise<void>;
 };
 
@@ -97,30 +89,8 @@ export function createResidentAudioInputPlan(
     };
   }
 
-  requirePlatform(platform, "darwin", "pico resident voice AVFoundation input requires macOS");
-
-  return {
-    provider: "avfoundation",
-    command: "ffmpeg",
-    args: [
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-f",
-      "avfoundation",
-      "-i",
-      input.device,
-      "-ac",
-      String(echoControl.channels),
-      "-ar",
-      String(echoControl.sampleRateHz),
-      "-f",
-      "s16le",
-      "pipe:1"
-    ],
-    frameByteLength,
-    frameIdPrefix: "avfoundation-mic"
-  };
+  requirePlatform(platform, "darwin", "pico resident AVAudioEngine input requires macOS");
+  throw new Error("pico resident AVAudioEngine input is owned by the macOS resident I/O sidecar");
 }
 
 export function createResidentAudioCapture(
@@ -254,35 +224,10 @@ function createResidentAudioInputLevelPlan(
   plan: ResidentAudioInputPlan,
   captureMs: number
 ): ResidentAudioInputPlan {
-  if (plan.provider === "alsa") {
-    return {
-      ...plan,
-      args: [...plan.args, "-d", String(Math.ceil(captureMs / 1_000))]
-    };
-  }
-
-  const insertIndex = requireAvfoundationInputDeviceArgumentEnd(plan.args);
-
   return {
     ...plan,
-    args: [
-      ...plan.args.slice(0, insertIndex),
-      "-t",
-      formatCaptureSeconds(captureMs + 1_000),
-      ...plan.args.slice(insertIndex)
-    ]
+    args: [...plan.args, "-d", String(Math.ceil(captureMs / 1_000))]
   };
-}
-
-function requireAvfoundationInputDeviceArgumentEnd(arguments_: readonly string[]): number {
-  const inputArgumentIndex = arguments_.indexOf("-i");
-  const inputDeviceArgumentIndex = inputArgumentIndex + 1;
-
-  if (inputArgumentIndex === -1 || arguments_[inputDeviceArgumentIndex] === undefined) {
-    throw new Error("pico resident voice AVFoundation input plan is missing input device");
-  }
-
-  return inputDeviceArgumentIndex + 1;
 }
 
 function captureResidentAudioInputLevel(
@@ -364,10 +309,6 @@ function isSufficientAudioInputLevelCapture(measuredMs: number, requestedMs: num
   return measuredMs >= requestedMs - timingToleranceMs;
 }
 
-function formatCaptureSeconds(captureMs: number): string {
-  return (captureMs / 1_000).toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
-}
-
 function createResidentCaptureSession(
   plan: ResidentAudioInputPlan,
   config: PicoConfig,
@@ -415,11 +356,7 @@ function createResidentCaptureSession(
   const onChildClose = (code: number | null, signalName: NodeJS.Signals | null): void => {
     closed = true;
     const expectedStopExit =
-      stopping &&
-      (code === 0 ||
-        signalName === "SIGTERM" ||
-        signalName === "SIGKILL" ||
-        (plan.provider === "avfoundation" && code === 255));
+      stopping && (code === 0 || signalName === "SIGTERM" || signalName === "SIGKILL");
 
     if (code !== 0 && !expectedStopExit) {
       childFailure = new Error(

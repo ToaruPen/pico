@@ -24,7 +24,7 @@ describe("resident audio I/O plans", () => {
   });
 
   it("captures bounded resident input level from the configured audio source", async () => {
-    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const config = alsaResidentAudioConfig({ frameMs: 10 });
     const process = createAudioProcess({ stdout: new PassThrough() });
     const spawn = vi.fn(() => process.child);
     const capture = measureResidentAudioInputLevel(
@@ -34,7 +34,7 @@ describe("resident audio I/O plans", () => {
         minimumRmsDb: -55
       },
       spawn,
-      "darwin"
+      "linux"
     );
 
     process.stdout.write(pcm16le([8_192, -8_192, 8_192, -8_192], 80));
@@ -42,7 +42,7 @@ describe("resident audio I/O plans", () => {
     process.emitClose(0, undefined);
 
     await expect(capture).resolves.toMatchObject({
-      provider: "avfoundation",
+      provider: "alsa",
       sampleRateHz: 16000,
       channels: 1,
       capturedMs: 20,
@@ -50,32 +50,15 @@ describe("resident audio I/O plans", () => {
       signalDetected: true
     });
     expect(spawn).toHaveBeenCalledWith(
-      "ffmpeg",
-      [
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "avfoundation",
-        "-i",
-        ":0",
-        "-t",
-        "1.02",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-f",
-        "s16le",
-        "pipe:1"
-      ],
+      "arecord",
+      ["-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "raw", "-D", "hw:1,0", "-d", "1"],
       { stdio: ["ignore", "pipe", "inherit"] }
     );
     expect(process.kill).not.toHaveBeenCalled();
   });
 
   it("accepts a finite input level capture that ends within device timing tolerance", async () => {
-    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const config = alsaResidentAudioConfig({ frameMs: 10 });
     const process = createAudioProcess({ stdout: new PassThrough() });
     const spawn = vi.fn(() => process.child);
     const capture = measureResidentAudioInputLevel(
@@ -85,7 +68,7 @@ describe("resident audio I/O plans", () => {
         minimumRmsDb: -55
       },
       spawn,
-      "darwin"
+      "linux"
     );
 
     process.stdout.write(pcm16le([8_192, -8_192], 152));
@@ -99,30 +82,15 @@ describe("resident audio I/O plans", () => {
     });
   });
 
-  it("builds an explicit macOS AVFoundation input plan", () => {
-    const config = avfoundationResidentAudioConfig({ frameMs: 20 });
+  it("builds an explicit Linux ALSA input plan at the configured frame size", () => {
+    const config = alsaResidentAudioConfig({ frameMs: 20 });
 
-    expect(createResidentAudioInputPlan(config, "darwin")).toEqual({
-      provider: "avfoundation",
-      command: "ffmpeg",
-      args: [
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "avfoundation",
-        "-i",
-        ":0",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-f",
-        "s16le",
-        "pipe:1"
-      ],
+    expect(createResidentAudioInputPlan(config, "linux")).toEqual({
+      provider: "alsa",
+      command: "arecord",
+      args: ["-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "raw", "-D", "hw:1,0"],
       frameByteLength: 640,
-      frameIdPrefix: "avfoundation-mic"
+      frameIdPrefix: "alsa-mic"
     });
   });
 
@@ -197,14 +165,14 @@ describe("resident audio I/O plans", () => {
     );
   });
 
-  it("fails closed when a configured provider is used on the wrong platform", () => {
+  it("keeps AVAudioEngine ownership out of the command-spawn capture path", () => {
     const config = definePicoConfig({
       voice: {
         resident: {
           enabled: true,
           audioInput: {
-            provider: "avfoundation",
-            device: ":0"
+            provider: "avaudioengine",
+            deviceUid: "BuiltInMicrophoneDevice"
           },
           audioOutput: {
             provider: "ffplay",
@@ -214,19 +182,19 @@ describe("resident audio I/O plans", () => {
       }
     });
 
-    expect(() => createResidentAudioInputPlan(config, "linux")).toThrow(
-      "pico resident voice AVFoundation input requires macOS"
+    expect(() => createResidentAudioInputPlan(config, "darwin")).toThrow(
+      "pico resident AVAudioEngine input is owned by the macOS resident I/O sidecar"
     );
   });
 
-  it("turns AVFoundation PCM stdout into bounded voice frames", async () => {
+  it("turns ALSA PCM stdout into bounded voice frames", async () => {
     const config = definePicoConfig({
       voice: {
         resident: {
           enabled: true,
           audioInput: {
-            provider: "avfoundation",
-            device: ":0"
+            provider: "alsa",
+            device: "hw:1,0"
           },
           audioOutput: {
             provider: "ffplay",
@@ -243,7 +211,7 @@ describe("resident audio I/O plans", () => {
     const process = createAudioProcess({ stdout: new PassThrough() });
     const spawn = vi.fn(() => process.child);
     const abortController = new AbortController();
-    const capture = createResidentAudioCapture(config, spawn, "darwin");
+    const capture = createResidentAudioCapture(config, spawn, "linux");
     const session = capture.start(abortController.signal);
     const iterator = session.frames[Symbol.asyncIterator]();
     const firstFrame = iterator.next();
@@ -255,12 +223,12 @@ describe("resident audio I/O plans", () => {
     const second = await secondFrame;
 
     if (first.done === true || second.done === true) {
-      throw new Error("expected two AVFoundation PCM frames");
+      throw new Error("expected two ALSA PCM frames");
     }
 
     expect(first).toMatchObject({
       value: {
-        id: "avfoundation-mic-1",
+        id: "alsa-mic-1",
         direction: "near_end",
         encoding: "pcm16le",
         sampleRateHz: 16000,
@@ -272,7 +240,7 @@ describe("resident audio I/O plans", () => {
     expect(first.value.audio.byteLength).toBe(320);
     expect(second).toMatchObject({
       value: {
-        id: "avfoundation-mic-2",
+        id: "alsa-mic-2",
         direction: "near_end",
         encoding: "pcm16le",
         sampleRateHz: 16000,
@@ -290,23 +258,8 @@ describe("resident audio I/O plans", () => {
     await iterator.return?.();
 
     expect(spawn).toHaveBeenCalledWith(
-      "ffmpeg",
-      [
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "avfoundation",
-        "-i",
-        ":0",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-f",
-        "s16le",
-        "pipe:1"
-      ],
+      "arecord",
+      ["-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "raw", "-D", "hw:1,0"],
       { stdio: ["ignore", "pipe", "inherit"] }
     );
     expect(process.kill).toHaveBeenCalledWith("SIGTERM");
@@ -318,8 +271,8 @@ describe("resident audio I/O plans", () => {
         resident: {
           enabled: true,
           audioInput: {
-            provider: "avfoundation",
-            device: ":0"
+            provider: "alsa",
+            device: "hw:1,0"
           },
           audioOutput: {
             provider: "ffplay",
@@ -339,7 +292,7 @@ describe("resident audio I/O plans", () => {
     const capture = createResidentAudioCapture(
       config,
       spawn,
-      "darwin",
+      "linux",
       sequenceNow([
         "2026-06-18T00:00:00.000Z",
         "2026-06-18T00:00:05.000Z",
@@ -358,7 +311,7 @@ describe("resident audio I/O plans", () => {
       const second = await secondFrame;
 
       if (first.done === true || second.done === true) {
-        throw new Error("expected two AVFoundation PCM frames");
+        throw new Error("expected two ALSA PCM frames");
       }
 
       expect(first.value.capturedAt).toBe("2026-06-18T00:00:00.000Z");
@@ -378,8 +331,8 @@ describe("resident audio I/O plans", () => {
         resident: {
           enabled: true,
           audioInput: {
-            provider: "avfoundation",
-            device: ":0"
+            provider: "alsa",
+            device: "hw:1,0"
           },
           audioOutput: {
             provider: "ffplay",
@@ -399,7 +352,7 @@ describe("resident audio I/O plans", () => {
     const capture = createResidentAudioCapture(
       config,
       spawn,
-      "darwin",
+      "linux",
       () => "not-an-iso-timestamp"
     );
     const session = capture.start(abortController.signal);
@@ -425,8 +378,8 @@ describe("resident audio I/O plans", () => {
         resident: {
           enabled: true,
           audioInput: {
-            provider: "avfoundation",
-            device: ":0"
+            provider: "alsa",
+            device: "hw:1,0"
           },
           audioOutput: {
             provider: "ffplay",
@@ -441,19 +394,19 @@ describe("resident audio I/O plans", () => {
 
     abortController.abort();
 
-    const capture = createResidentAudioCapture(config, spawn, "darwin");
+    const capture = createResidentAudioCapture(config, spawn, "linux");
 
     expect(() => capture.start(abortController.signal)).toThrow(
-      "pico resident voice avfoundation input was aborted before startup"
+      "pico resident voice alsa input was aborted before startup"
     );
     expect(spawn).not.toHaveBeenCalled();
   });
 
   it("owns microphone capture only between explicit start and stop", async () => {
-    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const config = alsaResidentAudioConfig({ frameMs: 10 });
     const process = createAudioProcess({ stdout: new PassThrough() });
     const spawn = vi.fn(() => process.child);
-    const capture = createResidentAudioCapture(config, spawn, "darwin");
+    const capture = createResidentAudioCapture(config, spawn, "linux");
 
     expect(spawn).not.toHaveBeenCalled();
 
@@ -476,12 +429,12 @@ describe("resident audio I/O plans", () => {
 
   it("escalates a stalled capture process from SIGTERM to SIGKILL", async () => {
     vi.useFakeTimers();
-    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const config = alsaResidentAudioConfig({ frameMs: 10 });
     const process = createAudioProcess({ stdout: new PassThrough() });
     const capture = createResidentAudioCapture(
       config,
       vi.fn(() => process.child),
-      "darwin"
+      "linux"
     );
     const session = capture.start(new AbortController().signal);
     const stopped = session.stop();
@@ -500,11 +453,11 @@ describe("resident audio I/O plans", () => {
 
   it("rejects capture stop when the process remains unsettled after SIGKILL", async () => {
     vi.useFakeTimers();
-    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const config = alsaResidentAudioConfig({ frameMs: 10 });
     const process = createAudioProcess({ stdout: new PassThrough() });
     const nextProcess = createAudioProcess({ stdout: new PassThrough() });
     const spawn = vi.fn().mockReturnValueOnce(process.child).mockReturnValueOnce(nextProcess.child);
-    const capture = createResidentAudioCapture(config, spawn, "darwin");
+    const capture = createResidentAudioCapture(config, spawn, "linux");
     const session = capture.start(new AbortController().signal);
     const collection = (async (): Promise<void> => {
       for await (const frame of session.frames) {
@@ -513,10 +466,10 @@ describe("resident audio I/O plans", () => {
     })();
     const stopped = session.stop();
     const stopFailure = expect(stopped).rejects.toThrow(
-      "pico resident voice avfoundation input did not stop after SIGKILL"
+      "pico resident voice alsa input did not stop after SIGKILL"
     );
     const collectionFailure = expect(collection).rejects.toThrow(
-      "pico resident voice avfoundation input did not stop after SIGKILL"
+      "pico resident voice alsa input did not stop after SIGKILL"
     );
     void stopFailure.catch(() => undefined);
     void collectionFailure.catch(() => undefined);
@@ -542,12 +495,12 @@ describe("resident audio I/O plans", () => {
   });
 
   it("retains an unexpected capture failure that races an explicit stop", async () => {
-    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const config = alsaResidentAudioConfig({ frameMs: 10 });
     const process = createAudioProcess({ stdout: new PassThrough() });
     const capture = createResidentAudioCapture(
       config,
       vi.fn(() => process.child),
-      "darwin"
+      "linux"
     );
     const session = capture.start(new AbortController().signal);
     const collection = (async (): Promise<void> => {
@@ -562,18 +515,18 @@ describe("resident audio I/O plans", () => {
 
     await expect(stopped).resolves.toBeUndefined();
     await expect(collection).rejects.toThrow(
-      "pico resident voice avfoundation input exited with code 1 signal undefined"
+      "pico resident voice alsa input exited with code 1 signal undefined"
     );
     await expect(capture.close()).resolves.toBeUndefined();
   });
 
-  it("accepts FFmpeg code 255 after an explicit AVFoundation stop", async () => {
-    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+  it("reports a nonzero ALSA exit even when it races an explicit stop", async () => {
+    const config = alsaResidentAudioConfig({ frameMs: 10 });
     const process = createAudioProcess({ stdout: new PassThrough() });
     const capture = createResidentAudioCapture(
       config,
       vi.fn(() => process.child),
-      "darwin"
+      "linux"
     );
     const session = capture.start(new AbortController().signal);
     const collection = (async (): Promise<void> => {
@@ -587,15 +540,17 @@ describe("resident audio I/O plans", () => {
     process.emitClose(255, undefined);
 
     await expect(stopped).resolves.toBeUndefined();
-    await expect(collection).resolves.toBeUndefined();
+    await expect(collection).rejects.toThrow(
+      "pico resident voice alsa input exited with code 255 signal undefined"
+    );
     await expect(capture.close()).resolves.toBeUndefined();
   });
 
   it("rejects overlapping microphone capture sessions", async () => {
-    const config = avfoundationResidentAudioConfig({ frameMs: 10 });
+    const config = alsaResidentAudioConfig({ frameMs: 10 });
     const process = createAudioProcess({ stdout: new PassThrough() });
     const spawn = vi.fn(() => process.child);
-    const capture = createResidentAudioCapture(config, spawn, "darwin");
+    const capture = createResidentAudioCapture(config, spawn, "linux");
     const first = capture.start(new AbortController().signal);
 
     expect(() => capture.start(new AbortController().signal)).toThrow(
@@ -706,18 +661,18 @@ function pcm16le(samples: readonly number[], repeat = 1): Uint8Array {
   return audio;
 }
 
-function avfoundationResidentAudioConfig(input: { readonly frameMs: number }) {
+function alsaResidentAudioConfig(input: { readonly frameMs: number }) {
   return definePicoConfig({
     voice: {
       resident: {
         enabled: true,
         audioInput: {
-          provider: "avfoundation",
-          device: ":0"
+          provider: "alsa",
+          device: "hw:1,0"
         },
         audioOutput: {
-          provider: "ffplay",
-          route: "system_default"
+          provider: "alsa",
+          device: "hw:0,0"
         }
       },
       echoControl: {

@@ -1,5 +1,5 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -138,16 +138,42 @@ describe("pico YAML config", () => {
     ).toThrow("pico config voice.resident.audioOutput is required when resident is enabled");
   });
 
+  it("requires a stable Core Audio UID for macOS resident input", () => {
+    expect(
+      definePicoConfig({
+        voice: {
+          resident: {
+            enabled: true,
+            audioInput: {
+              provider: "avaudioengine",
+              deviceUid: "BuiltInMicrophoneDevice"
+            },
+            audioOutput: { provider: "ffplay", route: "system_default" }
+          }
+        }
+      }).voice.resident.audioInput
+    ).toEqual({ provider: "avaudioengine", deviceUid: "BuiltInMicrophoneDevice" });
+
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          resident: {
+            enabled: true,
+            audioInput: { provider: "avfoundation", device: ":1" },
+            audioOutput: { provider: "ffplay", route: "system_default" }
+          }
+        }
+      })
+    ).toThrow("pico config voice.resident.audioInput.provider must be alsa or avaudioengine");
+  });
+
   it("parses configurable resident hold-to-talk controls", () => {
     expect(
       definePicoConfig({
         voice: {
           resident: {
             control: {
-              provider: "loopback_http",
-              host: "127.0.0.1",
-              port: 8781,
-              authTokenPath: "~/.pico/resident-voice/control-token",
+              provider: "macos_resident_io",
               keyboard: {
                 provider: "macos",
                 talkKey: "F13",
@@ -158,10 +184,7 @@ describe("pico YAML config", () => {
         }
       }).voice.resident.control
     ).toEqual({
-      provider: "loopback_http",
-      host: "127.0.0.1",
-      port: 8781,
-      authTokenPath: "~/.pico/resident-voice/control-token",
+      provider: "macos_resident_io",
       keyboard: {
         provider: "macos",
         talkKey: "F13",
@@ -177,20 +200,14 @@ describe("pico YAML config", () => {
       definePicoConfig(
         resident({
           provider: "loopback_http",
-          host: "0.0.0.0",
-          port: 8781,
-          authTokenPath: "token",
           keyboard: { provider: "macos", talkKey: "F13", cancelKey: "F14" }
         })
       )
-    ).toThrow("pico config voice.resident.control.host must be 127.0.0.1 or ::1");
+    ).toThrow("pico config voice.resident.control.provider must be macos_resident_io");
     expect(() =>
       definePicoConfig(
         resident({
-          provider: "loopback_http",
-          host: "127.0.0.1",
-          port: 8781,
-          authTokenPath: "token",
+          provider: "macos_resident_io",
           keyboard: { provider: "macos", talkKey: "F13", cancelKey: "F13" }
         })
       )
@@ -198,10 +215,7 @@ describe("pico YAML config", () => {
     expect(() =>
       definePicoConfig(
         resident({
-          provider: "loopback_http",
-          host: "127.0.0.1",
-          port: 8781,
-          authTokenPath: "token",
+          provider: "macos_resident_io",
           keyboard: { provider: "macos", talkKey: "Shift", cancelKey: "F14" }
         })
       )
@@ -209,10 +223,7 @@ describe("pico YAML config", () => {
     expect(() =>
       definePicoConfig(
         resident({
-          provider: "loopback_http",
-          host: "127.0.0.1",
-          port: 8781,
-          authTokenPath: "token",
+          provider: "macos_resident_io",
           keyboard: { provider: "macos", talkKey: "F21", cancelKey: "F14" }
         })
       )
@@ -275,18 +286,15 @@ voice:
   resident:
     enabled: true
     audioInput:
-      provider: avfoundation
-      device: ':0'
+      provider: avaudioengine
+      deviceUid: BuiltInMicrophoneDevice
     audioOutput:
       provider: ffplay
       route: system_default
     singleInstanceLockPath: tmp/pico-custom-resident.lock
     shutdownGraceMs: 3000
     control:
-      provider: loopback_http
-      host: 127.0.0.1
-      port: 8781
-      authTokenPath: tmp/pico-control-token
+      provider: macos_resident_io
       keyboard:
         provider: macos
         talkKey: F13
@@ -398,8 +406,8 @@ telemetry:
         resident: {
           enabled: true,
           audioInput: {
-            provider: "avfoundation",
-            device: ":0"
+            provider: "avaudioengine",
+            deviceUid: "BuiltInMicrophoneDevice"
           },
           audioOutput: {
             provider: "ffplay",
@@ -408,10 +416,7 @@ telemetry:
           singleInstanceLockPath: join(dirname(path), "tmp/pico-custom-resident.lock"),
           shutdownGraceMs: 3000,
           control: {
-            provider: "loopback_http",
-            host: "127.0.0.1",
-            port: 8781,
-            authTokenPath: join(dirname(path), "tmp/pico-control-token"),
+            provider: "macos_resident_io",
             keyboard: {
               provider: "macos",
               talkKey: "F13",
@@ -480,7 +485,7 @@ telemetry:
         voice: {
           resident: {
             enabled: true,
-            audioInput: { provider: "avfoundation", device: ":0" },
+            audioInput: { provider: "avaudioengine", deviceUid: "BuiltInMicrophoneDevice" },
             audioOutput: { provider: "afplay", route: "system_default" }
           }
         }
@@ -712,24 +717,20 @@ telemetry:
     ).toThrow("pico config voice.resident has unknown field minTriggerConfidence");
   });
 
-  it("expands resident control token paths under the user home directory", () => {
-    const path = temporaryConfigFile(`
-voice:
-  resident:
-    control:
-      provider: loopback_http
-      host: 127.0.0.1
-      port: 8781
-      authTokenPath: ~/.pico/resident-voice/control-token
-      keyboard:
-        provider: macos
-        talkKey: F13
-        cancelKey: F14
-`);
-
-    expect(loadPicoConfig({ path }).voice.resident.control).toMatchObject({
-      authTokenPath: join(homedir(), ".pico/resident-voice/control-token")
-    });
+  it("rejects legacy loopback control fields", () => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          resident: {
+            control: {
+              provider: "macos_resident_io",
+              host: "127.0.0.1",
+              keyboard: { provider: "macos", talkKey: "F13", cancelKey: "F14" }
+            }
+          }
+        }
+      })
+    ).toThrow("pico config voice.resident.control has unknown field host");
   });
 
   it("rejects unsupported voice echo control providers", () => {

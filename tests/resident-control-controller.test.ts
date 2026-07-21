@@ -8,7 +8,7 @@ import {
 } from "../src/runtime/resident-control-controller.js";
 
 describe("resident hold-to-talk control controller", () => {
-  it("accepts one press, ignores keyboard repeat, and tails for exactly 250 ms", () => {
+  it("waits for the native 250 ms tail completion before transcribing", () => {
     const scheduler = createScheduler();
     const started: ResidentTurnGeneration[] = [];
     const tailReady: ResidentTurnGeneration[] = [];
@@ -24,12 +24,12 @@ describe("resident hold-to-talk control controller", () => {
     expect(started).toHaveLength(1);
     expect(controller.handle(event("talk_released"))).toBe("accepted");
     expect(controller.state()).toBe("tailing");
-    expect(scheduler.delays()).toEqual([250]);
+    expect(scheduler.delays()).toEqual([1_000]);
 
-    scheduler.advance(249);
+    scheduler.advance(999);
     expect(controller.state()).toBe("tailing");
     expect(tailReady).toEqual([]);
-    scheduler.advance(1);
+    expect(controller.handle(tailComplete(started[0]?.id ?? -1))).toBe("accepted");
     expect(controller.state()).toBe("transcribing");
     expect(tailReady).toEqual(started);
   });
@@ -43,6 +43,30 @@ describe("resident hold-to-talk control controller", () => {
     expect(controller.handle(event("talk_released"))).toBe("noop");
   });
 
+  it("fails closed when the native tail completion never arrives", () => {
+    const scheduler = createScheduler();
+    const failures: unknown[] = [];
+    const controller = createResidentControlController({
+      scheduler,
+      onError: (error) => failures.push(error)
+    });
+
+    controller.handle(event("talk_pressed"));
+    const generation = controller.generation();
+    controller.handle(event("talk_released"));
+
+    scheduler.advance(999);
+    expect(controller.state()).toBe("tailing");
+
+    scheduler.advance(1);
+    expect(controller.state()).toBe("error");
+    expect(generation?.signal.aborted).toBe(true);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toBeInstanceOf(Error);
+    if (!(failures[0] instanceof Error)) throw new Error("expected controller failure");
+    expect(failures[0].message).toContain("timed out");
+  });
+
   it.each([
     "tailing",
     "transcribing",
@@ -53,7 +77,7 @@ describe("resident hold-to-talk control controller", () => {
   ] as const)("ignores talk while %s and never replays it", (state) => {
     const scheduler = createScheduler();
     const controller = createResidentControlController({ scheduler });
-    const generation = beginAndReach(controller, scheduler, state);
+    const generation = beginAndReach(controller, state);
 
     expect(controller.handle(event("talk_pressed"))).toBe("ignored_busy");
     expect(controller.completeCancellation(generation.id)).toBe(state === "cancelling");
@@ -77,7 +101,7 @@ describe("resident hold-to-talk control controller", () => {
         cancelled.push({ state: cancelledState, generation });
       }
     });
-    const generation = beginAndReach(controller, scheduler, state);
+    const generation = beginAndReach(controller, state);
 
     expect(controller.handle(event("cancel_pressed"))).toBe("accepted");
     expect(controller.state()).toBe("cancelling");
@@ -128,7 +152,7 @@ describe("resident hold-to-talk control controller", () => {
     expect(controller.state()).toBe("error");
   });
 
-  it("contains a transition observer failure inside the release timer", () => {
+  it("contains a transition observer failure at native tail completion", () => {
     const scheduler = createScheduler();
     const tailReady: ResidentTurnGeneration[] = [];
     const controller = createResidentControlController({
@@ -145,7 +169,9 @@ describe("resident hold-to-talk control controller", () => {
     const generation = controller.generation();
     controller.handle(event("talk_released"));
 
-    expect(() => scheduler.advance(250)).not.toThrow();
+    expect(() => controller.handle(tailComplete(generation?.id ?? -1))).toThrow(
+      "timer transition observer failed"
+    );
     expect(controller.state()).toBe("error");
     expect(generation?.signal.aborted).toBe(true);
     expect(tailReady).toEqual([]);
@@ -187,9 +213,16 @@ function event(kind: "talk_pressed" | "talk_released" | "cancel_pressed") {
   return { kind, occurredAt: "2026-07-17T00:00:00.000Z" } as const;
 }
 
+function tailComplete(generationId: number) {
+  return {
+    kind: "tail_complete",
+    generationId,
+    occurredAt: "2026-07-17T00:00:00.250Z"
+  } as const;
+}
+
 function beginAndReach(
   controller: ReturnType<typeof createResidentControlController>,
-  scheduler: ReturnType<typeof createScheduler>,
   state: Exclude<ResidentControlState, "idle" | "error" | "stopped">
 ): ResidentTurnGeneration {
   controller.handle(event("talk_pressed"));
@@ -209,7 +242,7 @@ function beginAndReach(
     return generation;
   }
 
-  scheduler.advance(250);
+  controller.handle(tailComplete(generation.id));
 
   if (state === "transcribing") {
     return generation;

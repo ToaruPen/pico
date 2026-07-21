@@ -78,8 +78,8 @@ describe("resident launchd service", () => {
     expect(service.standardErrorPath).toContain(
       "/Users/monsoon/.pico/resident-voice/normal/processes/"
     );
-    expect(service.macOSControlPackagePath).toBe(
-      "/Users/monsoon/Dev/pico project/sidecars/macos-control"
+    expect(service.macOSResidentIoPackagePath).toBe(
+      "/Users/monsoon/Dev/pico project/sidecars/macos-resident-io"
     );
     expect(service.standardErrorPath).toMatch(/resident-voice\.err\.log$/);
     expect(service.plist).toContain("<key>RunAtLoad</key>");
@@ -178,7 +178,7 @@ describe("resident launchd service", () => {
           "-c",
           "release",
           "--package-path",
-          "/repo/pico/sidecars/macos-control",
+          "/repo/pico/sidecars/macos-resident-io",
           "-Xswiftc",
           "-warnings-as-errors"
         ],
