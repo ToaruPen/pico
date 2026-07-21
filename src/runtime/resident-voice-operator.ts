@@ -71,13 +71,44 @@ export type ResidentVoiceOperatorEvent =
       readonly attributes: Readonly<Record<string, AuditAttributeValue>>;
     };
 
+export type ResidentVoiceOperatorStageEvent = Extract<
+  ResidentVoiceOperatorEvent,
+  { readonly kind: "stage" }
+>;
+
+export type ResidentVoiceOperatorStageSink = {
+  readonly record: (event: ResidentVoiceOperatorStageEvent) => void;
+};
+
 export type ResidentVoiceOperatorSink = {
   readonly record: (event: ResidentVoiceOperatorEvent) => void;
+  readonly scopeStagesToCurrentTurn?: () => ResidentVoiceOperatorStageSink;
 };
 
 export function recordResidentVoiceOperatorEvent(
   sink: ResidentVoiceOperatorSink | undefined,
   event: ResidentVoiceOperatorEvent
+): void {
+  try {
+    sink?.record(event);
+  } catch {
+    // Operator visibility is best-effort and cannot own runtime success.
+  }
+}
+
+export function scopeResidentVoiceOperatorStagesToCurrentTurn(
+  sink: ResidentVoiceOperatorSink | undefined
+): ResidentVoiceOperatorStageSink | undefined {
+  try {
+    return sink?.scopeStagesToCurrentTurn?.();
+  } catch {
+    return undefined;
+  }
+}
+
+export function recordResidentVoiceOperatorStageEvent(
+  sink: ResidentVoiceOperatorStageSink | undefined,
+  event: ResidentVoiceOperatorStageEvent
 ): void {
   try {
     sink?.record(event);

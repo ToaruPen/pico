@@ -22,13 +22,18 @@ import type {
   ResidentAudioCapture,
   ResidentCaptureSession
 } from "../src/runtime/resident-audio-io.js";
-import type { ResidentVoiceOperatorEvent } from "../src/runtime/resident-voice-operator.js";
+import type {
+  ResidentVoiceOperatorEvent,
+  ResidentVoiceOperatorSink
+} from "../src/runtime/resident-voice-operator.js";
+import { createResidentVoiceStageProbe } from "../src/runtime/resident-voice-runner.js";
 import type { ResidentVoiceValidationEvent } from "../src/runtime/resident-voice-validation.js";
 import type { VoicePlaybackSession, VoicePlaybackSink } from "../src/runtime/voice-playback.js";
 import {
   createVoiceResidentRuntime,
   type PiAgentTurnClient
 } from "../src/runtime/voice-resident.js";
+import type { VoiceStageProbe } from "../src/runtime/voice-stage-probe.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -408,6 +413,72 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(operatorEvents).toContainEqual({ kind: "turn_phase", phase: "processing" });
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
+    await driver.runtime.stop();
+  });
+
+  it("reports a detached Pi settlement through its original turn stage scope", async () => {
+    vi.useFakeTimers();
+    const firstPlayback = createGate<undefined>();
+    const firstSettlement = createGate<undefined>();
+    const stageOwners: number[] = [];
+    const globalPiTurnStages: ResidentVoiceOperatorEvent[] = [];
+    const observedPiTurnStages: string[] = [];
+    let promptCount = 0;
+    let currentTurn = 0;
+    const operator: ResidentVoiceOperatorSink = {
+      record(event) {
+        if (event.kind === "turn_started") currentTurn += 1;
+        if (event.kind === "stage" && event.stage === "pi_turn") {
+          globalPiTurnStages.push(event);
+        }
+      },
+      scopeStagesToCurrentTurn() {
+        const owner = currentTurn;
+        return {
+          record(event) {
+            if (event.stage === "pi_turn") stageOwners.push(owner);
+          }
+        };
+      }
+    };
+    const productionProbe = createResidentVoiceStageProbe(undefined, operator);
+    const probe: VoiceStageProbe = {
+      ...productionProbe,
+      observe(observation) {
+        if (observation.stage === "pi_turn") observedPiTurnStages.push(observation.status);
+        productionProbe.observe?.(observation);
+      }
+    };
+    const driver = createDriver({
+      operator,
+      probe,
+      piResponse: () => {
+        promptCount += 1;
+        return Promise.resolve(
+          promptCount === 1
+            ? { text: "中断する応答", settled: firstSettlement.promise }
+            : { text: "次の応答" }
+        );
+      },
+      playbackCompletion: () => firstPlayback.promise
+    });
+
+    await startReleasedHold(driver);
+    await driver.tailComplete();
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
+    await driver.cancel();
+    firstPlayback.resolve(undefined);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    await startReleasedHold(driver);
+    await driver.tailComplete();
+    await vi.waitFor(() => expect(driver.sttRequests).toHaveLength(2));
+    firstSettlement.resolve(undefined);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(stageOwners).toEqual([1, 2]);
+    expect(observedPiTurnStages).toEqual(["ok", "ok"]);
+    expect(globalPiTurnStages).toEqual([]);
     await driver.runtime.stop();
   });
 
@@ -2247,6 +2318,8 @@ function createDriver(
     readonly monotonicNow?: () => number;
     readonly validationEvents?: ResidentVoiceValidationEvent[];
     readonly operatorEvents?: ResidentVoiceOperatorEvent[];
+    readonly operator?: ResidentVoiceOperatorSink;
+    readonly probe?: VoiceStageProbe;
     readonly captureBoundary?: {
       readonly suppress: () => Promise<void>;
       readonly resume: () => Promise<void>;
@@ -2468,9 +2541,13 @@ function createDriver(
             }
           }
         }),
-    ...(options.audit === undefined ? {} : { probe: { audit: options.audit } }),
+    ...(options.probe === undefined
+      ? options.audit === undefined
+        ? {}
+        : { probe: { audit: options.audit } }
+      : { probe: options.probe }),
     validation: { record: (event) => options.validationEvents?.push(event) },
-    operator: { record: (event) => options.operatorEvents?.push(event) },
+    operator: options.operator ?? { record: (event) => options.operatorEvents?.push(event) },
     now: () => "2026-07-17T00:00:00.000Z",
     monotonicNow: options.monotonicNow ?? (() => 0)
   });

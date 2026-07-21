@@ -36,17 +36,28 @@ public struct AcceptedPcmSegment: Equatable, Sendable {
 public struct PttGateOutput: Equatable, Sendable {
   public let segments: [AcceptedPcmSegment]
   public let tailCompletedGeneration: UInt64?
-  public let droppedFrameCount: Int
+  public let outsidePttDroppedFrameCount: Int
+  public let suppressedDroppedFrameCount: Int
+  public var droppedFrameCount: Int {
+    outsidePttDroppedFrameCount + suppressedDroppedFrameCount
+  }
 
   public init(
     segments: [AcceptedPcmSegment] = [],
     tailCompletedGeneration: UInt64? = nil,
-    droppedFrameCount: Int = 0
+    outsidePttDroppedFrameCount: Int = 0,
+    suppressedDroppedFrameCount: Int = 0
   ) {
     self.segments = segments
     self.tailCompletedGeneration = tailCompletedGeneration
-    self.droppedFrameCount = droppedFrameCount
+    self.outsidePttDroppedFrameCount = outsidePttDroppedFrameCount
+    self.suppressedDroppedFrameCount = suppressedDroppedFrameCount
   }
+}
+
+public struct PttGateUnavailableTransition: Equatable, Sendable {
+  public let invalidation: PttGateInvalidation?
+  public let output: PttGateOutput
 }
 
 private struct PendingPcmSegment: Sendable {
@@ -71,6 +82,7 @@ public struct PttSampleGate: Sendable {
   private var lastSampleRate: Double?
   private var suppressionRequested = false
   private var pendingInvalidation: PttGateInvalidation?
+  private var unreportedOutsidePttDroppedFrameCount = 0
 
   public init(
     capacityFrames: Int,
@@ -103,7 +115,9 @@ public struct PttSampleGate: Sendable {
     pendingFrameCount = pending.reduce(0) { $0 + $1.samples.count }
     clearRecent()
     state = .pendingAdmission(sequence: sequence, pressedAt: hostSeconds, releaseCutoff: nil)
-    return PttGateOutput(droppedFrameCount: retainedFrameCount - pendingFrameCount)
+    let droppedFrameCount = retainedFrameCount - pendingFrameCount
+    return PttGateOutput(
+      outsidePttDroppedFrameCount: droppedFrameCount)
   }
 
   public mutating func observeRelease(hostSeconds: Double) throws {
@@ -146,9 +160,9 @@ public struct PttSampleGate: Sendable {
       throw PttSampleGateError.sequenceMismatch
     }
     guard result == .accepted else {
-      clearPending()
+      let output = discardBufferedPcm()
       state = .discarding
-      return PttGateOutput()
+      return output
     }
     guard let generation else { throw PttSampleGateError.generationRequired }
     let tailReached = pendingTailReached
@@ -189,13 +203,18 @@ public struct PttSampleGate: Sendable {
       }
       switch state {
       case .discarding:
+        let droppedFrameCount = retainRecent(
+          bufferStartingAt: start,
+          sampleRate: sampleRate,
+          samples: samples)
         return PttGateOutput(
-          droppedFrameCount: retainRecent(
-            bufferStartingAt: start,
-            sampleRate: sampleRate,
-            samples: samples))
-      case .suppressed, .unavailable:
-        return PttGateOutput(droppedFrameCount: samples.count)
+          outsidePttDroppedFrameCount: droppedFrameCount)
+      case .suppressed:
+        return PttGateOutput(
+          suppressedDroppedFrameCount: samples.count)
+      case .unavailable:
+        return PttGateOutput(
+          outsidePttDroppedFrameCount: samples.count)
       case .pendingAdmission(_, let pressedAt, let releaseCutoff):
         let slice = slice(
           start: start,
@@ -217,7 +236,9 @@ public struct PttSampleGate: Sendable {
         {
           pendingTailReached = true
         }
-        return PttGateOutput(droppedFrameCount: samples.count - (slice?.samples.count ?? 0))
+        let droppedFrameCount = samples.count - (slice?.samples.count ?? 0)
+        return PttGateOutput(
+          outsidePttDroppedFrameCount: droppedFrameCount)
       case .accepting(let generation, let pressedAt):
         let accepted = slice(
           start: start,
@@ -228,7 +249,7 @@ public struct PttSampleGate: Sendable {
         ).map { acceptedSegment($0, generation: generation) }
         return PttGateOutput(
           segments: accepted.map { [$0] } ?? [],
-          droppedFrameCount: samples.count - (accepted?.samples.count ?? 0)
+          outsidePttDroppedFrameCount: samples.count - (accepted?.samples.count ?? 0)
         )
       case .tailing(let generation, let cutoff):
         let accepted = slice(
@@ -244,7 +265,7 @@ public struct PttSampleGate: Sendable {
         return PttGateOutput(
           segments: accepted.map { [$0] } ?? [],
           tailCompletedGeneration: complete ? generation : nil,
-          droppedFrameCount: samples.count - (accepted?.samples.count ?? 0)
+          outsidePttDroppedFrameCount: samples.count - (accepted?.samples.count ?? 0)
         )
       }
     } catch let error as PttSampleGateError {
@@ -257,17 +278,19 @@ public struct PttSampleGate: Sendable {
     }
   }
 
-  public mutating func cancel() {
-    clearPending()
-    clearRecent()
+  @discardableResult
+  public mutating func cancel() -> PttGateOutput {
+    let output = discardBufferedPcm()
     state = suppressionRequested ? .suppressed : .discarding
+    return output
   }
 
-  public mutating func suppress() {
+  @discardableResult
+  public mutating func suppress() -> PttGateOutput {
     suppressionRequested = true
-    clearPending()
-    clearRecent()
+    let output = discardBufferedPcm()
     state = .suppressed
+    return output
   }
 
   public mutating func resume() {
@@ -277,14 +300,17 @@ public struct PttSampleGate: Sendable {
     state = .discarding
   }
 
-  public mutating func markUnavailable() -> PttGateInvalidation? {
+  public mutating func markUnavailable() -> PttGateUnavailableTransition {
     let invalidation = pendingInvalidation ?? invalidation(for: state)
     pendingInvalidation = nil
-    clearPending()
-    clearRecent()
+    let bufferedDiscard = discardBufferedPcm()
+    let output = PttGateOutput(
+      outsidePttDroppedFrameCount: unreportedOutsidePttDroppedFrameCount
+        + bufferedDiscard.outsidePttDroppedFrameCount)
+    unreportedOutsidePttDroppedFrameCount = 0
     clearTimeline()
     state = .unavailable
-    return invalidation
+    return PttGateUnavailableTransition(invalidation: invalidation, output: output)
   }
 
   public mutating func restoreAvailability() {
@@ -297,10 +323,17 @@ public struct PttSampleGate: Sendable {
 
   private mutating func failClosed() {
     pendingInvalidation = pendingInvalidation ?? invalidation(for: state)
-    clearPending()
-    clearRecent()
+    unreportedOutsidePttDroppedFrameCount +=
+      discardBufferedPcm().outsidePttDroppedFrameCount
     clearTimeline()
     state = .unavailable
+  }
+
+  private mutating func discardBufferedPcm() -> PttGateOutput {
+    let outsidePttDroppedFrameCount = pendingFrameCount + recentFrameCount
+    clearPending()
+    clearRecent()
+    return PttGateOutput(outsidePttDroppedFrameCount: outsidePttDroppedFrameCount)
   }
 
   private func invalidation(for state: PttGateState) -> PttGateInvalidation? {

@@ -1,11 +1,12 @@
 import type {
   ResidentVoiceOperatorEvent,
   ResidentVoiceOperatorSink,
+  ResidentVoiceOperatorStageEvent,
   ResidentVoiceTurnPhase
 } from "./resident-voice-operator.js";
 import {
-  type ResidentVoiceTerminalControls,
   type ResidentVoiceTerminalControlNotice,
+  type ResidentVoiceTerminalControls,
   type ResidentVoiceTerminalTheme,
   type ResidentVoiceTerminalToolView,
   type ResidentVoiceTerminalTurnView,
@@ -187,6 +188,18 @@ export function createResidentVoiceTerminalDisplay(
         // Malformed display events cannot alter the voice runtime.
       }
     },
+    scopeStagesToCurrentTurn() {
+      const turn = currentTurn(turns);
+      return {
+        record(event) {
+          try {
+            if (applyStageEvent(event, turn)) notifyChange();
+          } catch {
+            // A late malformed stage cannot alter the voice runtime.
+          }
+        }
+      };
+    },
     render(width, theme) {
       try {
         return renderResidentVoiceTerminal(
@@ -318,26 +331,25 @@ function applyEvent(
       return true;
     }
     case "stage": {
-      if (
-        !isRuntimeStage(event.stage) ||
-        !isStatus(event.status) ||
-        !isDuration(event.durationMs)
-      ) {
-        return false;
-      }
-      const turn = currentTurn(turns);
-      const errorCode = readStageErrorCode(event.attributes);
-      turn.timings.set(event.stage, {
-        durationMs: event.durationMs,
-        status: event.status
-      });
-      const failureLabel = stageFailureLabels[event.stage];
-      if (event.status === "error" && failureLabel !== undefined) {
-        turn.failure = errorCode === undefined ? failureLabel : `${failureLabel}: ${errorCode}`;
-      }
-      return true;
+      return applyStageEvent(event, currentTurn(turns));
     }
   }
+}
+
+function applyStageEvent(event: ResidentVoiceOperatorStageEvent, turn: MutableTurn): boolean {
+  if (!isRuntimeStage(event.stage) || !isStatus(event.status) || !isDuration(event.durationMs)) {
+    return false;
+  }
+  const errorCode = readStageErrorCode(event.attributes);
+  turn.timings.set(event.stage, {
+    durationMs: event.durationMs,
+    status: event.status
+  });
+  const failureLabel = stageFailureLabels[event.stage];
+  if (event.status === "error" && failureLabel !== undefined) {
+    turn.failure = errorCode === undefined ? failureLabel : `${failureLabel}: ${errorCode}`;
+  }
+  return true;
 }
 
 function createView(

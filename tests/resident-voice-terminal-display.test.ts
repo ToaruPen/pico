@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { ResidentVoiceOperatorEvent } from "../src/runtime/resident-voice-operator.js";
+import {
+  type ResidentVoiceOperatorEvent,
+  scopeResidentVoiceOperatorStagesToCurrentTurn
+} from "../src/runtime/resident-voice-operator.js";
 import {
   createResidentVoiceTerminalDisplay,
   createResidentVoiceTerminalOperator
@@ -105,6 +108,35 @@ describe("resident voice terminal display", () => {
     expect(output).not.toContain("[stop=stop]");
     expect(output).not.toContain("末尾無音");
     expect(onChange).toHaveBeenCalledTimes(14);
+  });
+
+  it("keeps a late Pi settlement timing on the turn that owns it", () => {
+    const display = createResidentVoiceTerminalDisplay({ controls: configuredControls });
+
+    display.record({ kind: "turn_started" });
+    display.record({ kind: "staff_transcript", text: "最初の発話" });
+    display.record({
+      kind: "stage",
+      stage: "pi_final_response_ready",
+      status: "ok",
+      durationMs: 800,
+      attributes: {}
+    });
+    const firstTurnStages = scopeResidentVoiceOperatorStagesToCurrentTurn(display);
+    display.record({ kind: "turn_started" });
+    display.record({ kind: "staff_transcript", text: "次の発話" });
+
+    firstTurnStages?.record({
+      kind: "stage",
+      stage: "pi_turn",
+      status: "ok",
+      durationMs: 1_075,
+      attributes: {}
+    });
+
+    const output = display.render(100, plainTheme).join("\n");
+    expect(output).toContain("Pi後処理 275 ms");
+    expect(output.indexOf("Pi後処理 275 ms")).toBeLessThan(output.indexOf("YOU   次の発話"));
   });
 
   it("shows farewell telemetry in a bounded interaction-ending lifecycle", () => {

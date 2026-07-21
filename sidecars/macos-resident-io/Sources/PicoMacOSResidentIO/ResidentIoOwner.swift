@@ -157,7 +157,7 @@ final class ResidentIoOwner: @unchecked Sendable {
       stopped = true
       healthTimer?.cancel()
       healthTimer = nil
-      _ = gate.markUnavailable()
+      recordGateDiscard(gate.markUnavailable().output)
       assembler.clear()
       activeAudioEngineGeneration = nil
       activeAudioEngineHasDeliveredCallback = false
@@ -170,21 +170,12 @@ final class ResidentIoOwner: @unchecked Sendable {
     do {
       recordBufferCadence(snapshot.startHostSeconds)
       let sourceSamples = snapshot.monoSamples.map(pcm16Sample)
-      let stateBeforeConsume = gate.state
       let output = try gate.consume(
         bufferStartingAt: snapshot.startHostSeconds,
         sampleRate: snapshot.sampleRate,
         samples: sourceSamples
       )
-      droppedFrameCount += UInt64(output.droppedFrameCount)
-      switch stateBeforeConsume {
-      case .suppressed:
-        suppressedDroppedFrameCount += UInt64(output.droppedFrameCount)
-      case .discarding, .unavailable:
-        outsidePttDroppedFrameCount += UInt64(output.droppedFrameCount)
-      default:
-        break
-      }
+      recordGateDiscard(output)
       try emit(output)
       activeAudioEngineHasDeliveredCallback = true
       if recovering {
@@ -233,8 +224,7 @@ final class ResidentIoOwner: @unchecked Sendable {
       case .talkPressed:
         if gate.state == .discarding {
           let output = try gate.observePress(sequence: sequence, hostSeconds: hostSeconds)
-          droppedFrameCount += UInt64(output.droppedFrameCount)
-          outsidePttDroppedFrameCount += UInt64(output.droppedFrameCount)
+          recordGateDiscard(output)
           scheduleAdmissionTimeout(sequence: sequence)
         }
       case .talkReleased:
@@ -246,7 +236,7 @@ final class ResidentIoOwner: @unchecked Sendable {
           }
         }
       case .cancelPressed:
-        gate.cancel()
+        recordGateDiscard(gate.cancel())
         assembler.clear()
         pendingReleaseTimestamp = nil
         releaseTimestampByGeneration.removeAll(keepingCapacity: true)
@@ -266,6 +256,12 @@ final class ResidentIoOwner: @unchecked Sendable {
     }
   }
 
+  private func recordGateDiscard(_ output: PttGateOutput) {
+    droppedFrameCount += UInt64(output.droppedFrameCount)
+    outsidePttDroppedFrameCount += UInt64(output.outsidePttDroppedFrameCount)
+    suppressedDroppedFrameCount += UInt64(output.suppressedDroppedFrameCount)
+  }
+
   private func processCommand(_ message: ResidentIoMessage) {
     guard !stopped else { return }
     do {
@@ -273,7 +269,7 @@ final class ResidentIoOwner: @unchecked Sendable {
       case .controlResult(let metadata):
         try applyControlResult(metadata)
       case .suppressCapture(let metadata):
-        gate.suppress()
+        recordGateDiscard(gate.suppress())
         assembler.clear()
         pendingReleaseTimestamp = nil
         releaseTimestampByGeneration.removeAll(keepingCapacity: true)
@@ -286,7 +282,7 @@ final class ResidentIoOwner: @unchecked Sendable {
         writer.write(.resumeCapture(metadata))
       case .cancelGeneration(let metadata):
         if activeGeneration(gate.state) == metadata.generation {
-          gate.cancel()
+          recordGateDiscard(gate.cancel())
           assembler.clear()
           releaseTimestampByGeneration[metadata.generation] = nil
           clearGenerationObservations(metadata.generation)
@@ -340,6 +336,7 @@ final class ResidentIoOwner: @unchecked Sendable {
       result: metadata.result,
       generation: metadata.generation
     )
+    recordGateDiscard(output)
     if metadata.result == .accepted {
       writeTiming(
         .admissionToGate,
@@ -564,8 +561,9 @@ final class ResidentIoOwner: @unchecked Sendable {
         pendingSequence == sequence
       else { return }
       do {
-        _ = try self.gate.resolveAdmission(
+        let output = try self.gate.resolveAdmission(
           sequence: sequence, result: .ignoredStale, generation: nil)
+        self.recordGateDiscard(output)
         do {
           try self.admissionTimeouts.expire(sequence: sequence)
         } catch AdmissionTimeoutTrackerError.backlogExceeded {
@@ -590,7 +588,7 @@ final class ResidentIoOwner: @unchecked Sendable {
     stopped = true
     healthTimer?.cancel()
     healthTimer = nil
-    _ = gate.markUnavailable()
+    recordGateDiscard(gate.markUnavailable().output)
     assembler.clear()
     audioEngine.stop()
     FileHandle.standardError.write(Data("pico macOS resident I/O: \(error)\n".utf8))
@@ -665,7 +663,9 @@ final class ResidentIoOwner: @unchecked Sendable {
   }
 
   private func invalidateCapture() throws {
-    switch gate.markUnavailable() {
+    let transition = gate.markUnavailable()
+    recordGateDiscard(transition.output)
+    switch transition.invalidation {
     case .pendingAdmission(let sequence):
       try admissionTimeouts.expire(sequence: sequence)
     case .activeGeneration(let generation):

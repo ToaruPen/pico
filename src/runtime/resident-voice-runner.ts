@@ -377,6 +377,12 @@ export function createResidentVoiceStageProbe(
       ? {}
       : {
           observe: (observation) => {
+            if (
+              observation.stage === "pi_turn" &&
+              operator.scopeStagesToCurrentTurn !== undefined
+            ) {
+              return;
+            }
             recordResidentVoiceOperatorEvent(operator, {
               kind: "stage",
               stage: observation.stage,

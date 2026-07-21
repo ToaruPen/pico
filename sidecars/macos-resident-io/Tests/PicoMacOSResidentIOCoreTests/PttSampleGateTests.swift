@@ -34,6 +34,9 @@ struct PttSampleGateTests {
       samples: Array(0..<480).map(Int16.init)
     )
     #expect(pending.segments.isEmpty)
+    #expect(pending.droppedFrameCount == 120)
+    #expect(pending.outsidePttDroppedFrameCount == 120)
+    #expect(pending.suppressedDroppedFrameCount == 0)
     let admitted = try gate.resolveAdmission(sequence: 7, result: .accepted, generation: 11)
 
     #expect(admitted.segments.first?.sourceSampleIndex == 120)
@@ -67,6 +70,7 @@ struct PttSampleGateTests {
     let rejected = try gate.resolveAdmission(sequence: 1, result: .ignoredBusy, generation: nil)
 
     #expect(rejected.segments.isEmpty)
+    #expect(rejected.outsidePttDroppedFrameCount == 3)
     #expect(gate.state == .discarding)
     try gate.observePress(sequence: 2, hostSeconds: 2.0)
     #expect(
@@ -85,6 +89,7 @@ struct PttSampleGateTests {
       bufferStartingAt: 1.03, sampleRate: 100, samples: [4, 5])
 
     #expect(timeout.segments.isEmpty)
+    #expect(timeout.outsidePttDroppedFrameCount == 3)
     #expect(gate.state == .discarding)
     #expect(afterTimeout.segments.isEmpty)
     #expect(afterTimeout.droppedFrameCount == 2)
@@ -104,6 +109,9 @@ struct PttSampleGateTests {
 
     #expect(output.segments.first?.samples == [0])
     #expect(output.tailCompletedGeneration == 3)
+    #expect(output.droppedFrameCount == 2)
+    #expect(output.outsidePttDroppedFrameCount == 2)
+    #expect(output.suppressedDroppedFrameCount == 0)
     #expect(gate.state == .discarding)
   }
 
@@ -112,16 +120,23 @@ struct PttSampleGateTests {
     var gate = PttSampleGate(capacityFrames: 100, releaseTailSeconds: 0.250)
     try gate.observePress(sequence: 1, hostSeconds: 1.0)
     _ = try gate.consume(bufferStartingAt: 1.0, sampleRate: 100, samples: [1, 2, 3])
-    gate.cancel()
+    let cancelled = gate.cancel()
+    #expect(cancelled.outsidePttDroppedFrameCount == 3)
     try gate.observePress(sequence: 2, hostSeconds: 1.03)
     #expect(
       try gate.resolveAdmission(sequence: 2, result: .accepted, generation: 2).segments.isEmpty)
 
-    gate.suppress()
+    _ = gate.cancel()
+    try gate.observePress(sequence: 3, hostSeconds: 1.03)
+    _ = try gate.consume(bufferStartingAt: 1.03, sampleRate: 100, samples: [4, 5])
+    let suppressionBoundary = gate.suppress()
+    #expect(suppressionBoundary.outsidePttDroppedFrameCount == 2)
     #expect(gate.state == .suppressed)
-    #expect(
-      try gate.consume(bufferStartingAt: 1.03, sampleRate: 100, samples: [9, 9]).droppedFrameCount
-        == 2)
+    let suppressed = try gate.consume(
+      bufferStartingAt: 1.05, sampleRate: 100, samples: [9, 9])
+    #expect(suppressed.droppedFrameCount == 2)
+    #expect(suppressed.outsidePttDroppedFrameCount == 0)
+    #expect(suppressed.suppressedDroppedFrameCount == 2)
     gate.resume()
     #expect(gate.state == .discarding)
   }
@@ -150,15 +165,18 @@ struct PttSampleGateTests {
   func reportsRecoveryInvalidations() throws {
     var pending = PttSampleGate(capacityFrames: 100, releaseTailSeconds: 0.250)
     try pending.observePress(sequence: 4, hostSeconds: 1)
+    _ = try pending.consume(bufferStartingAt: 1, sampleRate: 100, samples: [1, 2, 3])
 
-    #expect(pending.markUnavailable() == .pendingAdmission(sequence: 4))
+    let pendingUnavailable = pending.markUnavailable()
+    #expect(pendingUnavailable.invalidation == .pendingAdmission(sequence: 4))
+    #expect(pendingUnavailable.output.outsidePttDroppedFrameCount == 3)
     #expect(pending.state == .unavailable)
 
     var active = PttSampleGate(capacityFrames: 100, releaseTailSeconds: 0.250)
     try active.observePress(sequence: 5, hostSeconds: 2)
     _ = try active.resolveAdmission(sequence: 5, result: .accepted, generation: 12)
 
-    #expect(active.markUnavailable() == .activeGeneration(12))
+    #expect(active.markUnavailable().invalidation == .activeGeneration(12))
     #expect(active.state == .unavailable)
 
     var failed = PttSampleGate(capacityFrames: 100, releaseTailSeconds: 0.250)
@@ -167,7 +185,26 @@ struct PttSampleGateTests {
       try failed.consume(bufferStartingAt: -1, sampleRate: 100, samples: [1])
     }
 
-    #expect(failed.markUnavailable() == .pendingAdmission(sequence: 6))
+    #expect(failed.markUnavailable().invalidation == .pendingAdmission(sequence: 6))
+  }
+
+  @Test("recovery reports buffered discard after a fail-closed transition")
+  func reportsFailClosedBufferedDiscard() throws {
+    var gate = PttSampleGate(
+      capacityFrames: 100,
+      reorderingCapacityFrames: 4,
+      releaseTailSeconds: 0.250)
+    _ = try gate.consume(bufferStartingAt: 1, sampleRate: 100, samples: [1, 2, 3, 4])
+    try gate.observePress(sequence: 7, hostSeconds: 1.02)
+
+    #expect(throws: PttSampleGateError.timestampDiscontinuity) {
+      try gate.consume(bufferStartingAt: 1.10, sampleRate: 100, samples: [5, 6])
+    }
+    let unavailable = gate.markUnavailable()
+
+    #expect(unavailable.invalidation == .pendingAdmission(sequence: 7))
+    #expect(unavailable.output.outsidePttDroppedFrameCount == 2)
+    #expect(gate.markUnavailable().output.droppedFrameCount == 0)
   }
 
   @Test("fails closed on overflow, timestamp regression, and mismatched admission")

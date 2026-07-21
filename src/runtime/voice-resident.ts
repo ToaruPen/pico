@@ -21,8 +21,11 @@ import {
 } from "./resident-control-controller.js";
 import {
   type ResidentVoiceOperatorSink,
+  type ResidentVoiceOperatorStageSink,
   type ResidentVoiceTurnPhase,
-  recordResidentVoiceOperatorEvent
+  recordResidentVoiceOperatorEvent,
+  recordResidentVoiceOperatorStageEvent,
+  scopeResidentVoiceOperatorStagesToCurrentTurn
 } from "./resident-voice-operator.js";
 import type { ResidentVoiceValidationSink } from "./resident-voice-validation.js";
 import type { SpeechActivityGate } from "./speech-activity-gate.js";
@@ -134,6 +137,7 @@ type ActiveTurn = {
   readonly capture: ResidentCaptureSession;
   readonly sttSession: Promise<ResidentStreamingSttSession>;
   readonly frameCollection: Promise<StreamingCaptureAdmission>;
+  readonly operatorStages: ResidentVoiceOperatorStageSink | undefined;
   playbackOperation: Promise<TtsPlaybackPipelineResult> | undefined;
   operation: Promise<void> | undefined;
   cancellation: Promise<void> | undefined;
@@ -258,11 +262,15 @@ export function createVoiceResidentRuntime(
           failRuntime(error, generation.id);
         }
       });
+      recordResidentVoiceOperatorEvent(options.operator, {
+        kind: "turn_started"
+      });
       activeTurn = {
         generation,
         capture,
         sttSession,
         frameCollection,
+        operatorStages: scopeResidentVoiceOperatorStagesToCurrentTurn(options.operator),
         playbackOperation: undefined,
         operation: undefined,
         cancellation: undefined,
@@ -270,9 +278,6 @@ export function createVoiceResidentRuntime(
         pttRelease: undefined,
         operatorIdleRecorded: false
       };
-      recordResidentVoiceOperatorEvent(options.operator, {
-        kind: "turn_started"
-      });
       recordTurnPhase(options.operator, "listening");
       counters.acceptedHolds += 1;
     },
@@ -821,14 +826,27 @@ async function processCompletedHoldWork(
   const piSettlementOperation = responseOperation.then((response) =>
     response === undefined
       ? "failed"
-      : settlePiResponse(response, options, piStartedAt, piStartedAtMs, state.monotonicNow)
+      : settlePiResponse(
+          response,
+          options,
+          turn.operatorStages,
+          piStartedAt,
+          piStartedAtMs,
+          state.monotonicNow
+        )
   );
   state.ownPiSettlement(piSettlementOperation.then(() => undefined));
   const response = await responseOperation;
   const responseReadyDurationMs = Math.max(0, state.monotonicNow() - piStartedAtMs);
 
   if (response === undefined) {
-    recordUnavailablePiTurn(turn.generation.signal, options, piStartedAt, responseReadyDurationMs);
+    recordUnavailablePiTurn(
+      turn.generation.signal,
+      options,
+      turn.operatorStages,
+      piStartedAt,
+      responseReadyDurationMs
+    );
     if (isCurrentStage(controller, turn.generation.id, "processing", counters)) {
       finishCurrentTurn(controller, turn, "processing", counters, options);
     }
@@ -1310,11 +1328,13 @@ async function runInteractionFarewell(
   const piStartedAt = now();
   const monotonicNow = options.monotonicNow ?? defaultMonotonicNow;
   const piStartedAtMs = monotonicNow();
+  const operatorStages = scopeResidentVoiceOperatorStagesToCurrentTurn(options.operator);
   const response = await requestFarewellResponse(sessionId, signal, options, counters);
   if (response === undefined) {
     recordUnavailablePiTurn(
       signal,
       options,
+      operatorStages,
       piStartedAt,
       Math.max(0, monotonicNow() - piStartedAtMs)
     );
@@ -1325,7 +1345,7 @@ async function runInteractionFarewell(
     isAbortRequested(signal)
       ? Promise.resolve(undefined)
       : runFarewellPlayback(response.text, ending, options, now, monotonicNow),
-    settlePiResponse(response, options, piStartedAt, piStartedAtMs, monotonicNow)
+    settlePiResponse(response, options, operatorStages, piStartedAt, piStartedAtMs, monotonicNow)
   );
   if (playback?.status === "failed" || (piSettlement === "failed" && !isAbortRequested(signal))) {
     counters.failedTurns += 1;
@@ -1440,32 +1460,68 @@ async function requestFarewellResponse(
 function recordUnavailablePiTurn(
   signal: AbortSignal,
   options: VoiceResidentRuntimeOptions,
+  operatorStages: ResidentVoiceOperatorStageSink | undefined,
   startedAt: string,
   durationMs: number
 ): void {
   const cancelled = signal.aborted;
-  recordStage(options, "pi_turn", cancelled ? "skipped" : "error", startedAt, durationMs, {
-    "pico.voice.error_code": cancelled ? "cancelled" : "pi_agent_prompt_failed"
-  });
+  recordPiTurnStage(
+    options,
+    operatorStages,
+    cancelled ? "skipped" : "error",
+    startedAt,
+    durationMs,
+    { "pico.voice.error_code": cancelled ? "cancelled" : "pi_agent_prompt_failed" }
+  );
 }
 
 async function settlePiResponse(
   response: PiAgentTurnResponse,
   options: VoiceResidentRuntimeOptions,
+  operatorStages: ResidentVoiceOperatorStageSink | undefined,
   startedAt: string,
   startedAtMs: number,
   monotonicNow: () => number
 ): Promise<PiTurnSettlement> {
   try {
     await response.settled;
-    recordStage(options, "pi_turn", "ok", startedAt, Math.max(0, monotonicNow() - startedAtMs));
+    recordPiTurnStage(
+      options,
+      operatorStages,
+      "ok",
+      startedAt,
+      Math.max(0, monotonicNow() - startedAtMs)
+    );
     return "ok";
   } catch {
-    recordStage(options, "pi_turn", "error", startedAt, Math.max(0, monotonicNow() - startedAtMs), {
-      "pico.voice.error_code": "pi_agent_settlement_failed"
-    });
+    recordPiTurnStage(
+      options,
+      operatorStages,
+      "error",
+      startedAt,
+      Math.max(0, monotonicNow() - startedAtMs),
+      { "pico.voice.error_code": "pi_agent_settlement_failed" }
+    );
     return "failed";
   }
+}
+
+function recordPiTurnStage(
+  options: VoiceResidentRuntimeOptions,
+  operatorStages: ResidentVoiceOperatorStageSink | undefined,
+  status: Parameters<typeof recordStage>[2],
+  startedAt: string,
+  durationMs: number,
+  attributes?: Parameters<typeof recordStage>[5]
+): void {
+  recordStage(options, "pi_turn", status, startedAt, durationMs, attributes);
+  recordResidentVoiceOperatorStageEvent(operatorStages, {
+    kind: "stage",
+    stage: "pi_turn",
+    status,
+    durationMs,
+    attributes: attributes ?? {}
+  });
 }
 
 async function cancelStreamingStt(turn: ActiveTurn): Promise<void> {

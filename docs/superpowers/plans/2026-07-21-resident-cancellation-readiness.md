@@ -368,7 +368,7 @@ git commit -m "fix: clarify resident latency and discard telemetry"
 - Review all files changed since `786c57c`
 - Update: draft PR `#109`
 
-- [ ] **Step 1: Run focused and repository gates**
+- [x] **Step 1: Run focused and repository gates**
 
 ```bash
 npm test -- tests/voice-resident.test.ts tests/resident-voice-terminal-display.test.ts tests/resident-voice-terminal-renderer.test.ts tests/resident-io-protocol.test.ts tests/macos-resident-io-bridge.test.ts tests/resident-voice-runner.test.ts
@@ -388,17 +388,22 @@ dead state, duplicate promise ownership, needless wrappers, boundary leaks,
 debug residue, and missing behavior locks. Apply one smell category at a time
 and rerun the focused tests after each material change.
 
-- [ ] **Step 3: Obtain fresh native subagent reviews**
+- [x] **Step 3: Obtain fresh native subagent reviews**
 
 Dispatch correctness and overdesign reviewers with the design, plan, complete
 diff, Red/Green evidence, and gate output. Fix every actionable in-scope
 finding, rerun affected tests, and obtain a fresh verdict.
 
-- [ ] **Step 4: Verify real providers without disturbing the live process**
+- [x] **Step 4: Verify real providers without disturbing the live process**
 
 Run non-exclusive Apple Speech health/provider validation and Aivis/provider
 validation allowed by the existing process. Defer microphone-exclusive field
 capture until the user stops Pico or explicitly coordinates it.
+
+Validated the live Apple Speech `/health` and `/ready` endpoints and the Aivis
+`/version` endpoint. The existing Pico process retained the microphone and
+Apple Speech admission lease; no exclusive capture or transcription smoke was
+started.
 
 - [ ] **Step 5: Push and converge PR #109**
 
