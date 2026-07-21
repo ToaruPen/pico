@@ -12,6 +12,7 @@ import type {
   MacOSResidentIoControlOutcome
 } from "../src/runtime/macos-resident-io-bridge.js";
 import type { ResidentAudioCapture } from "../src/runtime/resident-audio-io.js";
+import type { ResidentVoiceFileLogSink } from "../src/runtime/resident-voice-log-files.js";
 import {
   assertResidentVoiceStartupReadiness,
   createConfiguredOpenTelemetry,
@@ -21,6 +22,7 @@ import {
   requireResidentVoiceEnabled,
   runResidentControlLifecycle,
   runResidentVoiceWithProviders,
+  runWithResidentVoiceFileLog,
   shutdownResidentVoiceTelemetry,
   waitForDirectResidentVoiceRuntime
 } from "../src/runtime/resident-voice-runner.js";
@@ -514,6 +516,60 @@ describe("resident voice startup readiness", () => {
 });
 
 describe("resident voice runner ownership", () => {
+  it("starts providers after file-log readiness and awaits file-log close", async () => {
+    const events: string[] = [];
+    let releaseReady: (() => void) | undefined;
+    let releaseClose: (() => void) | undefined;
+    const ready = new Promise<void>((resolve) => {
+      releaseReady = resolve;
+    });
+    const close = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    const fileLog = inertFileLog({
+      ready,
+      close: () => {
+        events.push("file-log:close");
+        return close;
+      }
+    });
+    const running = runWithResidentVoiceFileLog(fileLog, () => {
+      events.push("providers:start");
+      return Promise.resolve();
+    });
+
+    await Promise.resolve();
+    expect(events).toEqual([]);
+    releaseReady?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(events).toEqual(["providers:start", "file-log:close"]);
+
+    let settled = false;
+    void running.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      }
+    );
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    releaseClose?.();
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  it("preserves a preceding runtime failure when file-log close also fails", async () => {
+    const runtimeFailure = new Error("runtime failed first");
+    const fileLog = inertFileLog({
+      close: () => Promise.reject(new Error("file log close failed later"))
+    });
+
+    await expect(
+      runWithResidentVoiceFileLog(fileLog, () => Promise.reject(runtimeFailure))
+    ).rejects.toBe(runtimeFailure);
+  });
+
   it("constructs OpenTelemetry only when enabled", async () => {
     const constructed: string[] = [];
     const createTelemetry = (options: OpenTelemetryProviderOptions): PicoTelemetry => {
@@ -796,3 +852,17 @@ describe("resident voice runner ownership", () => {
     ).toThrow("pico resident voice runtime requires voice.resident.control config");
   });
 });
+
+function inertFileLog(
+  overrides: Partial<Pick<ResidentVoiceFileLogSink, "ready" | "close">> = {}
+): ResidentVoiceFileLogSink {
+  return {
+    record() {},
+    writeProcessLine() {},
+    writeAuditEvent() {},
+    ready: overrides.ready ?? Promise.resolve(),
+    flush: () => Promise.resolve(),
+    close: overrides.close ?? (() => Promise.resolve()),
+    droppedRecordCount: () => 0
+  };
+}

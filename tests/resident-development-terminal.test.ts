@@ -32,10 +32,10 @@ describe("resident dev terminal", () => {
 
     expect(session.runId).toBe("2026-06-22T01-02-03-000Z-1234");
     expect(session.logDirectory).toBe(
-      "/Users/monsoon/.pico/resident-voice/development/processes/2026-06-22"
+      "/Users/monsoon/.pico/resident-voice/managed/development/processes/2026-06-22"
     );
     expect(session.logPath).toBe(
-      "/Users/monsoon/.pico/resident-voice/development/processes/2026-06-22/2026-06-22T01-02-03-000Z-1234.log"
+      "/Users/monsoon/.pico/resident-voice/managed/development/processes/2026-06-22/2026-06-22T01-02-03-000Z-1234.log"
     );
     expect(session.launcherDirectory).toBe("/Users/monsoon/.pico/dev-terminal");
     expect(session.picoDirectory).toBe("/Users/monsoon/.pico");
@@ -46,7 +46,7 @@ describe("resident dev terminal", () => {
     expect(session.shellCommand).toContain("cd '/Users/monsoon/Dev/pico project'");
     expect(session.shellCommand).toContain("mkdir -p '/Users/monsoon/.pico/dev-terminal'");
     expect(session.shellCommand).toContain(
-      "mkdir -p '/Users/monsoon/.pico/resident-voice/development/processes/2026-06-22'"
+      "mkdir -p '/Users/monsoon/.pico/resident-voice/managed/development/processes/2026-06-22'"
     );
     expect(session.shellCommand).toContain("chmod 700 '/Users/monsoon/.pico'");
     expect(session.shellCommand).toContain(
@@ -61,7 +61,7 @@ describe("resident dev terminal", () => {
       "export PATH='/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin':\"$PATH\""
     );
     expect(session.shellCommand).toContain(
-      "chmod 600 '/Users/monsoon/.pico/resident-voice/development/processes/2026-06-22/2026-06-22T01-02-03-000Z-1234.log'"
+      "chmod 600 '/Users/monsoon/.pico/resident-voice/managed/development/processes/2026-06-22/2026-06-22T01-02-03-000Z-1234.log'"
     );
     expect(session.shellCommand).not.toContain(": >");
     expect(session.shellCommand).toContain("PICO_DEV_TERMINAL_TTY=$(tty)");
@@ -74,7 +74,7 @@ describe("resident dev terminal", () => {
     expect(session.shellCommand).not.toContain("tee -a");
     expect(session.shellCommand).not.toContain("--pico 2>&1");
     expect(session.shellCommand).not.toContain(
-      "> '/Users/monsoon/.pico/resident-voice/development/processes/2026-06-22/2026-06-22T01-02-03-000Z-1234.log'"
+      "> '/Users/monsoon/.pico/resident-voice/managed/development/processes/2026-06-22/2026-06-22T01-02-03-000Z-1234.log'"
     );
     expect(session.shellCommand).toContain("resident voice exited with status");
     expect(session.shellCommand).toContain("exit_code=$?");

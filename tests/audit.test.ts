@@ -70,6 +70,25 @@ describe("operational audit events", () => {
     expect(log.drain()).toEqual([]);
   });
 
+  it("normalizes events without retaining them when retention is disabled", () => {
+    const log = createStructuredAuditLog({ retainEntries: false });
+    const event = log.record({
+      category: "transport_event",
+      name: "voice.runtime.health",
+      severity: "info",
+      occurredAt: "2026-07-21T00:00:00.000Z",
+      summary: "Resident voice health was observed.",
+      attributes: { "pico.voice.running": true }
+    });
+
+    expect(event).toMatchObject({
+      name: "voice.runtime.health",
+      attributes: { "pico.voice.running": true }
+    });
+    expect(log.entries()).toEqual([]);
+    expect(log.drain()).toEqual([]);
+  });
+
   it("rejects raw payload, transcript, and conversation fields", () => {
     const log = createStructuredAuditLog();
 

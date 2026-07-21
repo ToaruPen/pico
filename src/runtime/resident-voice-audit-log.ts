@@ -42,7 +42,7 @@ const voiceStageAttributeNames = {
 export function createResidentVoiceAuditLog(
   options: ResidentVoiceAuditLogOptions
 ): StructuredAuditLog {
-  const log = createStructuredAuditLog();
+  const log = createStructuredAuditLog({ retainEntries: false });
   const writeStdout = options.writeStdout ?? ((line) => process.stdout.write(line));
 
   return {
