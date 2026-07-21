@@ -413,8 +413,8 @@ function residentInput() {
     channels: 1,
     frameMs: 10,
     releaseTailMs: 250,
-    talkKey: "F1",
-    cancelKey: "F2"
+    talkKey: "F13",
+    cancelKey: "F14"
   } as const;
 }
 

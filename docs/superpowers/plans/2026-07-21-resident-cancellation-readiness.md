@@ -301,10 +301,12 @@ git commit -m "fix: distinguish resident control decisions"
 **Files:**
 - Modify: `src/runtime/resident-voice-terminal-renderer.ts`
 - Modify: `src/runtime/resident-voice-runner.ts`
+- Modify: `sidecars/macos-resident-io/Sources/PicoMacOSResidentIO/ResidentIoOwner.swift`
+- Modify: `tests/resident-voice-terminal-display.test.ts`
 - Modify: `tests/resident-voice-terminal-renderer.test.ts`
 - Modify: `tests/resident-voice-runner.test.ts`
 
-- [ ] **Step 1: Write failing renderer and health-line tests**
+- [x] **Step 1: Write failing renderer and health-line tests**
 
 Add `pi_final_response_ready=5_800`, `pi_turn=17_158`, `stt=72`,
 `tts_time_to_first_chunk=1_120`, and root response latency `7_747`. Assert:
@@ -320,7 +322,7 @@ Assert the normal running health line uses
 `suppressed_discarded_sample_frames`, omits unqualified `dropped=`, and the
 non-running line retains an explicit `abnormal_dropped_sample_frames` value.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 npm test -- tests/resident-voice-terminal-renderer.test.ts tests/resident-voice-runner.test.ts
@@ -328,7 +330,7 @@ npm test -- tests/resident-voice-terminal-renderer.test.ts tests/resident-voice-
 
 Expected: FAIL on the old `音声送出`/`最長 Pi` summary and raw `dropped=` line.
 
-- [ ] **Step 3: Implement pure formatting helpers**
+- [x] **Step 3: Implement pure formatting helpers**
 
 Replace longest-stage selection with a compact ordered critical path. Compute
 the settlement tail as:
@@ -340,8 +342,10 @@ Math.max(0, piTurn.durationMs - finalResponse.durationMs)
 only when both stages succeeded. Add one pure health-line formatter that uses
 explicit expected-discard names for running health and an abnormal-drop name
 for non-running health. Preserve `visibleWidth`/`truncateToWidth` guards.
+Every Swift health event carries the expected-discard breakdown so abnormal
+loss can be derived without treating ordinary outside-PTT samples as loss.
 
-- [ ] **Step 4: Run GREEN and identifier inventory**
+- [x] **Step 4: Run GREEN and identifier inventory**
 
 ```bash
 npm test -- tests/resident-voice-terminal-renderer.test.ts tests/resident-voice-runner.test.ts
@@ -351,7 +355,7 @@ rg -n "outside_ptt_discarded_sample_frames|abnormal_dropped_sample_frames|Pi後�
 Expected: focused tests pass and each identifier appears only in its formatter,
 tests, or protocol owner.
 
-- [ ] **Step 5: Commit presentation corrections**
+- [x] **Step 5: Commit presentation corrections**
 
 ```bash
 git add src/runtime/resident-voice-terminal-renderer.ts src/runtime/resident-voice-runner.ts tests/resident-voice-terminal-renderer.test.ts tests/resident-voice-runner.test.ts

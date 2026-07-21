@@ -74,11 +74,6 @@ const phasePresentations: Readonly<Record<ResidentVoiceTerminalPhase, PhasePrese
   ending: { symbol: "◐", label: "セッション終了中", color: "warning" }
 };
 
-const comparableStages = [
-  ["stt", "STT"],
-  ["pi_turn", "Pi"],
-  ["tts_time_to_first_chunk", "TTS"]
-] as const satisfies readonly (readonly [VoiceRuntimeStage, string])[];
 const rolePrefixWidth = 6;
 
 export function renderResidentVoiceTerminal(
@@ -239,30 +234,52 @@ function formatMetrics(
   const responseStart = timings.get("ptt_release_to_first_pcm_write");
 
   if (responseStart?.status === "ok") {
-    values.push(`音声送出 ${formatDuration(responseStart.durationMs)}`);
+    values.push(`応答開始 ${formatDuration(responseStart.durationMs)}`);
   }
 
-  const longest = findLongestComparableTiming(timings);
-  if (longest !== undefined) {
-    values.push(`最長 ${longest.label} ${formatDuration(longest.durationMs)}`);
+  const criticalPath = formatCriticalPath(timings);
+  if (criticalPath !== undefined) {
+    values.push(criticalPath);
+  }
+
+  const piSettlementTail = piSettlementTailDuration(timings);
+  if (piSettlementTail > 0) {
+    values.push(`Pi後処理 ${formatDuration(piSettlementTail)}`);
   }
 
   return values.length === 0 ? undefined : values.join(" · ");
 }
 
-function findLongestComparableTiming(
+function formatCriticalPath(
   timings: ReadonlyMap<VoiceRuntimeStage, StageTimingView>
-): { readonly label: string; readonly durationMs: number } | undefined {
-  let longest: { readonly label: string; readonly durationMs: number } | undefined;
-  for (const [stage, label] of comparableStages) {
+): string | undefined {
+  const stages = [
+    ["stt", "STT"],
+    ["pi_final_response_ready", "Pi確定"],
+    ["tts_time_to_first_chunk", "TTS"]
+  ] as const satisfies readonly (readonly [VoiceRuntimeStage, string])[];
+  const parts: string[] = [];
+
+  for (const [stage, label] of stages) {
     const timing = timings.get(stage);
-    if (timing?.status !== "ok") continue;
-    if (longest === undefined || timing.durationMs > longest.durationMs) {
-      longest = { label, durationMs: timing.durationMs };
+    if (timing?.status === "ok") {
+      parts.push(`${label} ${formatDuration(timing.durationMs)}`);
     }
   }
 
-  return longest;
+  return parts.length === 0 ? undefined : parts.join(" → ");
+}
+
+function piSettlementTailDuration(
+  timings: ReadonlyMap<VoiceRuntimeStage, StageTimingView>
+): number {
+  const turn = timings.get("pi_turn");
+  const response = timings.get("pi_final_response_ready");
+
+  if (turn?.status !== "ok" || response?.status !== "ok") {
+    return 0;
+  }
+  return Math.max(0, turn.durationMs - response.durationMs);
 }
 
 function formatDuration(durationMs: number): string {

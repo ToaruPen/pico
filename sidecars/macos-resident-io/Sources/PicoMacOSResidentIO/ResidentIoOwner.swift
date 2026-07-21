@@ -139,11 +139,7 @@ final class ResidentIoOwner: @unchecked Sendable {
       self.activeAudioEngineGeneration = nil
       self.activeAudioEngineHasDeliveredCallback = false
       self.audioEngine.stop()
-      self.writer.write(
-        .healthEvent(
-          HealthEventMetadata(
-            state: "suspended", code: "sleep", restartCount: self.restartCount,
-            droppedFrameCount: self.droppedFrameCount)))
+      self.writeHealth(state: "suspended", code: "sleep")
     }
   }
 
@@ -203,11 +199,7 @@ final class ResidentIoOwner: @unchecked Sendable {
               engineGeneration: engineGeneration,
               sampleRateHz: configuration.sampleRateHz,
               channels: configuration.channels)))
-        writer.write(
-          .healthEvent(
-            HealthEventMetadata(
-              state: "running", code: "engine_started", restartCount: restartCount,
-              droppedFrameCount: droppedFrameCount)))
+        writeHealth(state: "running", code: "engine_started")
         readySemaphore.signal()
       }
     } catch {
@@ -494,11 +486,7 @@ final class ResidentIoOwner: @unchecked Sendable {
     activeAudioEngineGeneration = nil
     activeAudioEngineHasDeliveredCallback = false
     audioEngine.stop()
-    writer.write(
-      .healthEvent(
-        HealthEventMetadata(
-          state: "recovering", code: code, restartCount: restartCount,
-          droppedFrameCount: droppedFrameCount)))
+    writeHealth(state: "recovering", code: code)
     attemptRecovery()
   }
 
@@ -549,11 +537,7 @@ final class ResidentIoOwner: @unchecked Sendable {
     writeTiming(.engineRestart, seconds: machHostSeconds() - engineStartBeganAt)
     engineGeneration += 1
     restartCount += 1
-    writer.write(
-      .healthEvent(
-        HealthEventMetadata(
-          state: "running", code: "engine_restarted", restartCount: restartCount,
-          droppedFrameCount: droppedFrameCount)))
+    writeHealth(state: "running", code: "engine_restarted")
   }
 
   private func startHealthTimer() {
@@ -591,13 +575,7 @@ final class ResidentIoOwner: @unchecked Sendable {
           return
         }
         self.pendingReleaseTimestamp = nil
-        self.writer.write(
-          .healthEvent(
-            HealthEventMetadata(
-              state: "running",
-              code: "admission_timeout",
-              restartCount: self.restartCount,
-              droppedFrameCount: self.droppedFrameCount)))
+        self.writeHealth(state: "running", code: "admission_timeout")
       } catch {
         self.fatal(code: "admission_timeout_failed", error: error)
       }
@@ -650,18 +628,22 @@ final class ResidentIoOwner: @unchecked Sendable {
     let cadenceMs =
       bufferCadenceSamples == 0
       ? 0 : (bufferCadenceTotalSeconds / Double(bufferCadenceSamples)) * 1_000
+    writeHealth(state: "running", code: "health_sample", bufferCadenceMs: cadenceMs)
+    bufferCadenceTotalSeconds = 0
+    bufferCadenceSamples = 0
+  }
+
+  private func writeHealth(state: String, code: String, bufferCadenceMs: Double = 0) {
     writer.write(
       .healthEvent(
         HealthEventMetadata(
-          state: "running",
-          code: "health_sample",
+          state: state,
+          code: code,
           restartCount: restartCount,
           droppedFrameCount: droppedFrameCount,
-          bufferCadenceMs: cadenceMs,
+          bufferCadenceMs: bufferCadenceMs,
           outsidePttDroppedFrameCount: outsidePttDroppedFrameCount,
           suppressedDroppedFrameCount: suppressedDroppedFrameCount)))
-    bufferCadenceTotalSeconds = 0
-    bufferCadenceSamples = 0
   }
 
   private func clearGenerationObservations(_ generation: UInt64) {

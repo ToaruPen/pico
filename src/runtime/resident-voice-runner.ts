@@ -237,9 +237,7 @@ export async function runResidentVoiceWithProviders(input: {
             handleCaptureInvalidated: handleCaptureUnavailable,
             observeHealth: async (event) => {
               if (!healthPublication.accept(event, performance.now())) return;
-              writeProcessLine(
-                `[pico] macOS resident I/O health: ${event.state}/${event.code} restarts=${String(event.restartCount)} dropped=${String(event.droppedFrameCount)}\n`
-              );
+              writeProcessLine(formatResidentIoHealthLine(event));
               audit?.record({
                 category: "transport_event",
                 name: "voice.resident_io.health",
@@ -344,6 +342,23 @@ export function recordResidentIoTimingEvent(
           }
         })
   });
+}
+
+export function formatResidentIoHealthLine(
+  event: Extract<ResidentIoMessage, { kind: "health_event" }>
+): string {
+  const expectedDiscardedSampleFrames =
+    event.outsidePttDroppedFrameCount + event.suppressedDroppedFrameCount;
+  const abnormalDroppedSampleFrames = Math.max(
+    0,
+    event.droppedFrameCount - expectedDiscardedSampleFrames
+  );
+  const abnormalLoss =
+    event.state !== "running" || abnormalDroppedSampleFrames > 0
+      ? ` abnormal_dropped_sample_frames=${String(abnormalDroppedSampleFrames)}`
+      : "";
+
+  return `[pico] macOS resident I/O health: ${event.state}/${event.code} restarts=${String(event.restartCount)} outside_ptt_discarded_sample_frames=${String(event.outsidePttDroppedFrameCount)} suppressed_discarded_sample_frames=${String(event.suppressedDroppedFrameCount)}${abnormalLoss}\n`;
 }
 
 function resolveStartupReadiness(

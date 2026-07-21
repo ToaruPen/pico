@@ -27,12 +27,13 @@ const completedView: ResidentVoiceTerminalView = {
       picoText: "準備できています。",
       tools: [{ name: "stackchan_get_status", status: "ok", durationMs: 350 }],
       timings: new Map([
-        ["stt", { durationMs: 125, status: "ok" }],
+        ["stt", { durationMs: 72, status: "ok" }],
         ["pi_time_to_first_text", { durationMs: 750, status: "ok" }],
-        ["pi_turn", { durationMs: 20_350, status: "ok" }],
-        ["tts_time_to_first_chunk", { durationMs: 1_450, status: "ok" }],
+        ["pi_final_response_ready", { durationMs: 5_800, status: "ok" }],
+        ["pi_turn", { durationMs: 17_158, status: "ok" }],
+        ["tts_time_to_first_chunk", { durationMs: 1_120, status: "ok" }],
         ["tts_playback", { durationMs: 4_410, status: "ok" }],
-        ["ptt_release_to_first_pcm_write", { durationMs: 22_420, status: "ok" }]
+        ["ptt_release_to_first_pcm_write", { durationMs: 7_747, status: "ok" }]
       ])
     }
   ]
@@ -66,14 +67,16 @@ describe("resident voice terminal renderer", () => {
     expect(output).toContain("PICO  準備できています。");
   });
 
-  it("shows only the user-facing latency and longest comparable stage", () => {
+  it("shows response latency, the critical path, and detached Pi settlement", () => {
     const output = renderResidentVoiceTerminal(completedView, 100, plainTheme).join("\n");
 
-    expect(output).toContain("音声送出 22.42 s");
-    expect(output).toContain("最長 Pi 20.35 s");
+    expect(output).toContain("応答開始 7.75 s");
+    expect(output).toContain("STT 72 ms → Pi確定 5.80 s → TTS 1.12 s");
+    expect(output).toContain("Pi後処理 11.36 s");
     expect(output).not.toContain("Pi初字");
     expect(output).not.toContain("再生 4.41 s");
     expect(output).not.toContain("末尾無音");
+    expect(output).not.toContain("最長");
   });
 
   it.each<[ResidentVoiceTerminalPhase, string]>([
@@ -182,7 +185,7 @@ describe("resident voice terminal renderer", () => {
     const lines = renderResidentVoiceTerminal(completedView, 60, plainTheme);
 
     expect(lines.some((line) => line.includes("F13 話す · F14 中断"))).toBe(true);
-    expect(lines.some((line) => line.trimStart().startsWith("音声送出"))).toBe(true);
+    expect(lines.some((line) => line.trimStart().startsWith("応答開始"))).toBe(true);
     expect(lines.every((line) => visibleWidth(line) <= 60)).toBe(true);
   });
 

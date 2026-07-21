@@ -18,6 +18,7 @@ import {
   createConfiguredOpenTelemetry,
   createConfiguredStt,
   createConfiguredTts,
+  formatResidentIoHealthLine,
   recordResidentIoTimingEvent,
   createResidentVoiceStageProbe,
   requireResidentVoiceEnabled,
@@ -157,6 +158,36 @@ describe("resident voice TTS telemetry wiring", () => {
       })
     ]);
     expect(JSON.stringify(audit.entries())).not.toContain("F13");
+  });
+
+  it("labels expected gate discard separately from abnormal audio loss", () => {
+    const running = formatResidentIoHealthLine({
+      kind: "health_event",
+      state: "running",
+      code: "health_sample",
+      restartCount: 0,
+      droppedFrameCount: 2_928_000,
+      bufferCadenceMs: 10,
+      outsidePttDroppedFrameCount: 2_880_000,
+      suppressedDroppedFrameCount: 48_000
+    });
+    const recovering = formatResidentIoHealthLine({
+      kind: "health_event",
+      state: "recovering",
+      code: "audio_callback_overrun",
+      restartCount: 1,
+      droppedFrameCount: 2_928_005,
+      bufferCadenceMs: 0,
+      outsidePttDroppedFrameCount: 2_880_000,
+      suppressedDroppedFrameCount: 48_000
+    });
+
+    expect(running).toContain("outside_ptt_discarded_sample_frames=2880000");
+    expect(running).toContain("suppressed_discarded_sample_frames=48000");
+    expect(running).not.toContain("abnormal_dropped_sample_frames");
+    expect(running).not.toContain(" dropped=");
+    expect(recovering).toContain("abnormal_dropped_sample_frames=5");
+    expect(recovering).not.toContain(" dropped=");
   });
 
   it("maps successful provider observations to allowlisted voice stage probes", async () => {

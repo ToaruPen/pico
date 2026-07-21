@@ -78,6 +78,7 @@ describe("resident voice terminal display", () => {
     for (const [stage, durationMs] of [
       ["stt", 125],
       ["pi_time_to_first_text", 750],
+      ["pi_final_response_ready", 800],
       ["pi_turn", 1_075],
       ["tts_time_to_first_chunk", 240],
       ["tts_playback", 600],
@@ -96,12 +97,14 @@ describe("resident voice terminal display", () => {
     expect(output).toContain("YOU   スタックチャンの状態を教えて");
     expect(output).toContain("TOOL  ✓ stackchan_get_status  350 ms");
     expect(output).toContain("PICO  準備できています");
-    expect(output).toContain("音声送出 1.40 s · 最長 Pi 1.08 s");
+    expect(output).toContain(
+      "応答開始 1.40 s · STT 125 ms → Pi確定 800 ms → TTS 240 ms · Pi後処理 275 ms"
+    );
     expect(output).not.toContain("detail");
     expect(output).not.toContain("ready");
     expect(output).not.toContain("[stop=stop]");
     expect(output).not.toContain("末尾無音");
-    expect(onChange).toHaveBeenCalledTimes(13);
+    expect(onChange).toHaveBeenCalledTimes(14);
   });
 
   it("shows farewell telemetry in a bounded interaction-ending lifecycle", () => {
