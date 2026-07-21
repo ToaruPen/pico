@@ -11,7 +11,10 @@ describe("voice stage probe", () => {
     expect(voiceRuntimeStagePolicies).toEqual({
       mic_capture: { persisted: false, summary: false },
       resident_key_to_admission: { persisted: true, summary: false },
+      resident_cancel_key_to_admission: { persisted: true, summary: false },
       resident_admission_to_gate: { persisted: true, summary: false },
+      resident_cancel_admission_to_output_stopped: { persisted: true, summary: false },
+      resident_cancel_admission_to_idle: { persisted: true, summary: false },
       resident_gate_to_first_sample: { persisted: true, summary: false },
       resident_first_sample_to_dispatch: { persisted: true, summary: false },
       resident_release_to_tail_complete: { persisted: true, summary: false },
@@ -74,6 +77,35 @@ describe("voice stage probe", () => {
         }
       })
     ]);
+  });
+
+  it("accepts only bounded control results in stage attributes", () => {
+    const audit = createStructuredAuditLog();
+
+    recordVoiceStageProbe(
+      { audit },
+      {
+        stage: "resident_key_to_admission",
+        status: "ok",
+        startedAt: "2026-06-18T00:00:00.000Z",
+        durationMs: 1,
+        attributes: { "pico.voice.control_result": "ignored_busy" }
+      }
+    );
+
+    expect(audit.entries()[0]?.attributes["pico.voice.control_result"]).toBe("ignored_busy");
+    expect(() =>
+      recordVoiceStageProbe(
+        { audit },
+        {
+          stage: "resident_key_to_admission",
+          status: "ok",
+          startedAt: "2026-06-18T00:00:00.000Z",
+          durationMs: 1,
+          attributes: { "pico.voice.control_result": "F13" }
+        }
+      )
+    ).toThrow("pico voice stage probe control result attribute is invalid");
   });
 
   it("notifies a best-effort observer with validated stage metadata", () => {

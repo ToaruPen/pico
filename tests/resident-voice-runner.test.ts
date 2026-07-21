@@ -18,6 +18,7 @@ import {
   createConfiguredOpenTelemetry,
   createConfiguredStt,
   createConfiguredTts,
+  recordResidentIoTimingEvent,
   createResidentVoiceStageProbe,
   requireResidentVoiceEnabled,
   runResidentControlLifecycle,
@@ -129,6 +130,33 @@ describe("resident voice TTS telemetry wiring", () => {
         attributes: { "pico.voice.utterance_duration_ms": 800 }
       }
     ]);
+  });
+
+  it("records resident control timing with only the bounded decision result", () => {
+    const audit = createStructuredAuditLog();
+
+    recordResidentIoTimingEvent(
+      { audit },
+      {
+        kind: "timing_event",
+        stage: "key_to_admission",
+        durationMs: 1.25,
+        controlResult: "ignored_busy"
+      },
+      Date.parse("2026-07-19T00:00:01.000Z")
+    );
+
+    expect(audit.entries()).toEqual([
+      expect.objectContaining({
+        attributes: {
+          "pico.voice.stage": "resident_key_to_admission",
+          "pico.voice.stage_status": "ok",
+          "pico.voice.stage_duration_ms": 1.25,
+          "pico.voice.control_result": "ignored_busy"
+        }
+      })
+    ]);
+    expect(JSON.stringify(audit.entries())).not.toContain("F13");
   });
 
   it("maps successful provider observations to allowlisted voice stage probes", async () => {

@@ -148,6 +148,13 @@ type PttReleaseMeasurement = {
   settled: boolean;
 };
 
+type CancellationMeasurement = {
+  readonly startedAt: string;
+  readonly startedAtMs: number;
+  outputStoppedSettled: boolean;
+  idleSettled: boolean;
+};
+
 type PiTurnSettlement = "ok" | "failed";
 
 type PiAdmissionBarrier = {
@@ -337,7 +344,14 @@ export function createVoiceResidentRuntime(
         turn,
         controller,
         options,
-        turn.pipelineOwnsPlayback
+        turn.pipelineOwnsPlayback,
+        {
+          startedAt: now(),
+          startedAtMs: monotonicNow(),
+          outputStoppedSettled: false,
+          idleSettled: false
+        },
+        monotonicNow
       ).then(() => {
         if (activeTurn === turn) {
           activeTurn = undefined;
@@ -1148,10 +1162,7 @@ async function waitForOwnedTurnOperations(operations: Set<Promise<void>>): Promi
   }
 }
 
-function waitForPiAdmission(
-  barrier: PiAdmissionBarrier,
-  signal: AbortSignal
-): Promise<boolean> {
+function waitForPiAdmission(barrier: PiAdmissionBarrier, signal: AbortSignal): Promise<boolean> {
   if (!barrier.pending) {
     signal.throwIfAborted();
     return Promise.resolve(false);
@@ -1475,30 +1486,96 @@ async function convergeCancellation(
   turn: ActiveTurn,
   controller: ResidentControlController,
   options: VoiceResidentRuntimeOptions,
-  pipelineOwnsPlayback: boolean
+  pipelineOwnsPlayback: boolean,
+  measurement: CancellationMeasurement,
+  monotonicNow: () => number
 ): Promise<void> {
-  const stops = await Promise.allSettled([
-    turn.capture.stop(),
-    cancelStreamingStt(turn),
-    ...(pipelineOwnsPlayback ? [] : [options.playback.stop()])
-  ]);
-  await turn.frameCollection.catch(() => undefined);
-  const [playbackSettlement, echoSettlement] = await Promise.allSettled([
-    turn.playbackOperation ?? Promise.resolve(undefined),
-    pipelineOwnsPlayback ? Promise.resolve() : options.echoControl.flush()
-  ]);
-  const rejected = findRejected([...stops, playbackSettlement, echoSettlement]);
+  try {
+    const stops = await Promise.allSettled([
+      turn.capture.stop(),
+      cancelStreamingStt(turn),
+      ...(pipelineOwnsPlayback ? [] : [options.playback.stop()])
+    ]);
+    await turn.frameCollection.catch(() => undefined);
+    const [playbackSettlement] = await Promise.allSettled([
+      turn.playbackOperation ?? Promise.resolve(undefined)
+    ]);
+    const outputFailure = findRejected([...stops, playbackSettlement]);
 
-  if (rejected !== undefined) {
-    throw rejected.reason;
-  }
-  if (playbackSettlement.status === "fulfilled" && playbackSettlement.value !== undefined) {
-    throwPlaybackInfrastructureError(playbackSettlement.value);
-  }
+    if (outputFailure !== undefined) {
+      throw outputFailure.reason;
+    }
+    if (playbackSettlement.status === "fulfilled" && playbackSettlement.value !== undefined) {
+      throwPlaybackInfrastructureError(playbackSettlement.value);
+    }
+    settleCancellationMeasurement(measurement, "output_stopped", options, "ok", monotonicNow);
 
-  if (controller.completeCancellation(turn.generation.id)) {
-    recordTurnIdle(turn, options);
+    const [echoSettlement] = await Promise.allSettled([
+      pipelineOwnsPlayback ? Promise.resolve() : options.echoControl.flush()
+    ]);
+    const echoFailure = findRejected([echoSettlement]);
+
+    if (echoFailure !== undefined) {
+      throw echoFailure.reason;
+    }
+
+    const completed = controller.completeCancellation(turn.generation.id);
+    settleCancellationMeasurement(
+      measurement,
+      "idle",
+      options,
+      completed ? "ok" : "skipped",
+      monotonicNow,
+      completed ? undefined : "shutdown"
+    );
+    if (completed) {
+      recordTurnIdle(turn, options);
+    }
+  } catch (error) {
+    settleCancellationMeasurement(
+      measurement,
+      "output_stopped",
+      options,
+      "error",
+      monotonicNow,
+      "cancellation_failed"
+    );
+    settleCancellationMeasurement(
+      measurement,
+      "idle",
+      options,
+      "error",
+      monotonicNow,
+      "cancellation_failed"
+    );
+    throw error;
   }
+}
+
+function settleCancellationMeasurement(
+  measurement: CancellationMeasurement,
+  boundary: "output_stopped" | "idle",
+  options: VoiceResidentRuntimeOptions,
+  status: Parameters<typeof recordStage>[2],
+  monotonicNow: () => number,
+  errorCode?: string
+): void {
+  const settledKey = boundary === "output_stopped" ? "outputStoppedSettled" : "idleSettled";
+
+  if (measurement[settledKey]) {
+    return;
+  }
+  measurement[settledKey] = true;
+  recordStage(
+    options,
+    boundary === "output_stopped"
+      ? "resident_cancel_admission_to_output_stopped"
+      : "resident_cancel_admission_to_idle",
+    status,
+    measurement.startedAt,
+    Math.max(0, monotonicNow() - measurement.startedAtMs),
+    errorCode === undefined ? undefined : { "pico.voice.error_code": errorCode }
+  );
 }
 
 // Await each independently owned async boundary before shared resources close.

@@ -52,7 +52,8 @@ describe("resident I/O framed protocol", () => {
     const message: ResidentIoMessage = {
       kind: "timing_event",
       stage: "key_to_admission",
-      durationMs: 1.25
+      durationMs: 1.25,
+      controlResult: "ignored_busy"
     };
     const decoder = new ResidentIoDecoder();
 
@@ -62,9 +63,24 @@ describe("resident I/O framed protocol", () => {
     const encoded = encodeResidentIoMessage(message);
     const metadataLength = encoded.readUInt32BE(8);
     expect(parseJsonRecord(encoded.subarray(16, 16 + metadataLength).toString("utf8"))).toEqual({
+      control_result: "ignored_busy",
       duration_ms: 1.25,
       stage: "key_to_admission"
     });
+  });
+
+  it("round-trips cancel admission timing without control identifiers", () => {
+    const message: ResidentIoMessage = {
+      kind: "timing_event",
+      stage: "cancel_key_to_admission",
+      durationMs: 2.5,
+      controlResult: "accepted"
+    };
+    const decoder = new ResidentIoDecoder();
+
+    decoder.append(encodeResidentIoMessage(message));
+
+    expect(decoder.next()).toEqual(message);
   });
 
   it("encodes Node control responses with the Swift snake-case metadata contract", () => {
@@ -158,6 +174,30 @@ describe("resident I/O framed protocol", () => {
         audio: Buffer.from([1, 2])
       })
     ).toThrow("resident I/O PCM byte length does not match frame metadata");
+  });
+
+  it("rejects timing control results outside the fixed result enum", () => {
+    const valid = encodeResidentIoMessage({
+      kind: "timing_event",
+      stage: "key_to_admission",
+      durationMs: 1.25,
+      controlResult: "accepted"
+    });
+    const metadata = Buffer.from(
+      JSON.stringify({
+        control_result: "F13",
+        duration_ms: 1.25,
+        stage: "key_to_admission"
+      })
+    );
+    const invalid = Buffer.concat([valid.subarray(0, 8), Buffer.alloc(8), metadata]);
+    invalid.writeUInt32BE(metadata.byteLength, 8);
+
+    expect(() => {
+      const decoder = new ResidentIoDecoder();
+      decoder.append(invalid);
+      decoder.next();
+    }).toThrow("resident I/O timing_event metadata is invalid");
   });
 });
 

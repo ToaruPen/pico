@@ -232,12 +232,15 @@ git commit -m "fix: show resident cancellation ownership"
 - Modify: `sidecars/macos-resident-io/Tests/PicoMacOSResidentIOCoreTests/ResidentIoCodecTests.swift`
 - Modify: `src/runtime/resident-io-protocol.ts`
 - Modify: `src/runtime/resident-voice-runner.ts`
+- Modify: `src/runtime/voice-resident.ts`
 - Modify: `src/runtime/voice-stage-probe.ts`
+- Modify: `scripts/field/resident-hold-to-talk.ts`
 - Modify: `tests/resident-io-protocol.test.ts`
 - Modify: `tests/macos-resident-io-bridge.test.ts`
 - Modify: `tests/resident-voice-runner.test.ts`
+- Modify: `tests/voice-resident.test.ts`
 
-- [ ] **Step 1: Write failing Swift and TypeScript protocol tests**
+- [x] **Step 1: Write failing Swift and TypeScript protocol tests**
 
 Extend timing fixtures with optional control results and add
 `cancel_key_to_admission`:
@@ -253,7 +256,7 @@ Extend timing fixtures with optional control results and add
 
 Assert malformed results fail closed and old non-control timings remain valid.
 
-- [ ] **Step 2: Run protocol RED**
+- [x] **Step 2: Run protocol RED**
 
 ```bash
 npm test -- tests/resident-io-protocol.test.ts tests/macos-resident-io-bridge.test.ts
@@ -262,7 +265,7 @@ swift test --package-path sidecars/macos-resident-io
 
 Expected: FAIL on the unknown timing field/stage contract.
 
-- [ ] **Step 3: Implement decision-aware timing**
+- [x] **Step 3: Implement decision-aware timing**
 
 Add optional `controlResult` to timing metadata. In Swift, emit
 `key_to_admission` with the talk result for every talk decision, emit
@@ -271,7 +274,12 @@ Add optional `controlResult` to timing metadata. In Swift, emit
 `pico.voice.control_result` as a fixed enum attribute and never records key
 labels or generation identifiers.
 
-- [ ] **Step 4: Run protocol GREEN and native gate**
+Record `resident_cancel_admission_to_output_stopped` after playback/pipeline
+stop and capture-resume ownership settles, then
+`resident_cancel_admission_to_idle` after echo cleanup and controller idle.
+Settle each measurement once across success, failure, and shutdown.
+
+- [x] **Step 4: Run protocol GREEN and native gate**
 
 ```bash
 npm test -- tests/resident-io-protocol.test.ts tests/macos-resident-io-bridge.test.ts tests/resident-voice-runner.test.ts
@@ -281,7 +289,7 @@ just macos-resident-io-check
 Expected: TypeScript protocol tests and all Swift format/test/release-build
 checks pass.
 
-- [ ] **Step 5: Commit timing semantics**
+- [x] **Step 5: Commit timing semantics**
 
 ```bash
 git add sidecars/macos-resident-io src/runtime/resident-io-protocol.ts src/runtime/resident-voice-runner.ts src/runtime/voice-stage-probe.ts tests/resident-io-protocol.test.ts tests/macos-resident-io-bridge.test.ts tests/resident-voice-runner.test.ts

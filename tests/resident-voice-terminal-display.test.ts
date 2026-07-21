@@ -164,9 +164,7 @@ describe("resident voice terminal display", () => {
     expect(cancelled).toContain("− 中断済み");
 
     display.record({ kind: "turn_phase", phase: "idle" });
-    expect(display.render(100, plainTheme).join("\n")).toContain(
-      "− F13: 中断処理中のため受理せず"
-    );
+    expect(display.render(100, plainTheme).join("\n")).toContain("− F13: 中断処理中のため受理せず");
 
     display.record({ kind: "turn_started" });
     display.record({ kind: "turn_phase", phase: "listening" });

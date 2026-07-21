@@ -44,7 +44,7 @@ import {
   residentPlaybackFinalSilenceMs
 } from "./resident-audio-playback.js";
 import { createResidentHealthPublicationGate } from "./resident-health-publication.js";
-import type { ResidentIoTimingStage } from "./resident-io-protocol.js";
+import type { ResidentIoMessage, ResidentIoTimingStage } from "./resident-io-protocol.js";
 import {
   acquireResidentSingleInstanceLock,
   registerResidentSingleInstanceLockShutdownCleanup
@@ -262,15 +262,7 @@ export async function runResidentVoiceWithProviders(input: {
                 await handleCaptureUnavailable();
               }
             },
-            observeTiming: (event) => {
-              const occurredAtMs = Date.now();
-              recordVoiceStageProbe(stageProbe, {
-                stage: residentIoVoiceStage(event.stage),
-                status: "ok",
-                startedAt: new Date(Math.max(0, occurredAtMs - event.durationMs)).toISOString(),
-                durationMs: event.durationMs
-              });
-            },
+            observeTiming: (event) => recordResidentIoTimingEvent(stageProbe, event),
             signal
           }),
         createRuntime: (bridge) => {
@@ -332,6 +324,26 @@ export async function runWithResidentVoiceFileLog(
 
 function residentIoVoiceStage(stage: ResidentIoTimingStage) {
   return `resident_${stage}` as const;
+}
+
+export function recordResidentIoTimingEvent(
+  stageProbe: VoiceStageProbe,
+  event: Extract<ResidentIoMessage, { kind: "timing_event" }>,
+  occurredAtMs = Date.now()
+): void {
+  recordVoiceStageProbe(stageProbe, {
+    stage: residentIoVoiceStage(event.stage),
+    status: "ok",
+    startedAt: new Date(Math.max(0, occurredAtMs - event.durationMs)).toISOString(),
+    durationMs: event.durationMs,
+    ...(event.controlResult === undefined
+      ? {}
+      : {
+          attributes: {
+            "pico.voice.control_result": event.controlResult
+          }
+        })
+  });
 }
 
 function resolveStartupReadiness(

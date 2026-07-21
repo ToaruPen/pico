@@ -7,7 +7,10 @@ import type {
 export const voiceRuntimeStagePolicies = Object.freeze({
   mic_capture: { persisted: false, summary: false },
   resident_key_to_admission: { persisted: true, summary: false },
+  resident_cancel_key_to_admission: { persisted: true, summary: false },
   resident_admission_to_gate: { persisted: true, summary: false },
+  resident_cancel_admission_to_output_stopped: { persisted: true, summary: false },
+  resident_cancel_admission_to_idle: { persisted: true, summary: false },
   resident_gate_to_first_sample: { persisted: true, summary: false },
   resident_first_sample_to_dispatch: { persisted: true, summary: false },
   resident_release_to_tail_complete: { persisted: true, summary: false },
@@ -76,13 +79,15 @@ const voiceStageAttributeKeys = new Set([
   "pico.voice.error_code",
   "pico.voice.sentence_index",
   "pico.voice.played_chunk_count",
-  "pico.voice.trailing_silence_ms"
+  "pico.voice.trailing_silence_ms",
+  "pico.voice.control_result"
 ]);
 const numericVoiceStageAttributeKeys = new Set([
   "pico.voice.sentence_index",
   "pico.voice.played_chunk_count",
   "pico.voice.trailing_silence_ms"
 ]);
+const voiceStageControlResults = new Set(["accepted", "ignored_busy", "ignored_stale", "noop"]);
 const maxNodeTimeoutMs = 2_147_483_647;
 
 export function recordVoiceStageProbe(
@@ -190,6 +195,13 @@ function normalizeVoiceStageAttributes(
 
     if (numericVoiceStageAttributeKeys.has(key) && typeof value !== "number") {
       throw new Error("pico voice stage probe numeric attribute is invalid");
+    }
+
+    if (
+      key === "pico.voice.control_result" &&
+      (typeof value !== "string" || !voiceStageControlResults.has(value))
+    ) {
+      throw new Error("pico voice stage probe control result attribute is invalid");
     }
 
     if (typeof value === "number" && !Number.isFinite(value)) {

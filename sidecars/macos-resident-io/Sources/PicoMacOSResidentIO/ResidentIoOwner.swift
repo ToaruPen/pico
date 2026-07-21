@@ -316,7 +316,21 @@ final class ResidentIoOwner: @unchecked Sendable {
     guard let pending = pendingControls.remove(sequence: metadata.sequence) else {
       throw ResidentIoRuntimeError.unmatchedControlResult
     }
-    guard pending.kind == .talkPressed else { return }
+    switch pending.kind {
+    case .cancelPressed:
+      writeTiming(
+        .cancelKeyToAdmission,
+        seconds: machHostSeconds() - pending.hostSeconds,
+        controlResult: metadata.result)
+      return
+    case .talkReleased:
+      return
+    case .talkPressed:
+      writeTiming(
+        .keyToAdmission,
+        seconds: machHostSeconds() - pending.hostSeconds,
+        controlResult: metadata.result)
+    }
     guard case .pendingAdmission(let sequence, _, _) = gate.state, sequence == metadata.sequence
     else {
       if let generation = admissionTimeouts.invalidatedGeneration(
@@ -328,14 +342,18 @@ final class ResidentIoOwner: @unchecked Sendable {
       }
       return
     }
-    writeTiming(.keyToAdmission, seconds: machHostSeconds() - pending.hostSeconds)
     let admissionAt = machHostSeconds()
     let output = try gate.resolveAdmission(
       sequence: metadata.sequence,
       result: metadata.result,
       generation: metadata.generation
     )
-    writeTiming(.admissionToGate, seconds: machHostSeconds() - admissionAt)
+    if metadata.result == .accepted {
+      writeTiming(
+        .admissionToGate,
+        seconds: machHostSeconds() - admissionAt,
+        controlResult: metadata.result)
+    }
     if metadata.result == .accepted, let generation = metadata.generation {
       pressHostSecondsByGeneration[generation] = pending.hostSeconds
     }
@@ -603,9 +621,18 @@ final class ResidentIoOwner: @unchecked Sendable {
     stopRunLoop()
   }
 
-  private func writeTiming(_ stage: ResidentIoTimingStage, seconds: Double) {
+  private func writeTiming(
+    _ stage: ResidentIoTimingStage,
+    seconds: Double,
+    controlResult: ResidentIoControlResult? = nil
+  ) {
     guard seconds.isFinite, seconds >= 0 else { return }
-    writer.write(.timingEvent(TimingEventMetadata(stage: stage, durationMs: seconds * 1_000)))
+    writer.write(
+      .timingEvent(
+        TimingEventMetadata(
+          stage: stage,
+          durationMs: seconds * 1_000,
+          controlResult: controlResult)))
   }
 
   private func recordBufferCadence(_ startHostSeconds: Double) {

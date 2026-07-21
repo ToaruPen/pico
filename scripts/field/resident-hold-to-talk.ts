@@ -561,6 +561,7 @@ function requireCompletedAudioCapture(completedHoldsWithFrames: number): void {
 function createResidentIoTimingValues(): Record<ResidentIoTimingStage, number[]> {
   return {
     key_to_admission: [],
+    cancel_key_to_admission: [],
     admission_to_gate: [],
     gate_to_first_sample: [],
     first_sample_to_dispatch: [],
@@ -575,6 +576,7 @@ function summarizeResidentIoTiming(
 ): Readonly<Record<ResidentIoTimingStage, BoundedMetricSummary>> {
   return Object.freeze({
     key_to_admission: summarizeBoundedMetric(values.key_to_admission),
+    cancel_key_to_admission: summarizeBoundedMetric(values.cancel_key_to_admission),
     admission_to_gate: summarizeBoundedMetric(values.admission_to_gate),
     gate_to_first_sample: summarizeBoundedMetric(values.gate_to_first_sample),
     first_sample_to_dispatch: summarizeBoundedMetric(values.first_sample_to_dispatch),

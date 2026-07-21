@@ -100,6 +100,43 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
+  it("measures cancel output stop separately from foreground idle", async () => {
+    const audit = createStructuredAuditLog();
+    const echoFlush = createGate<undefined>();
+    let monotonicTimeMs = 100;
+    const driver = createDriver({
+      audit,
+      monotonicNow: () => monotonicTimeMs,
+      echoFlush: () => echoFlush.promise
+    });
+
+    await driver.press();
+    await expect(driver.cancel()).resolves.toBe("accepted");
+    monotonicTimeMs = 125;
+    await vi.waitFor(() => expect(driver.echoFlushes()).toBe(1));
+
+    expect(voiceStageEvent(audit, "resident_cancel_admission_to_output_stopped")).toMatchObject({
+      attributes: {
+        "pico.voice.stage_status": "ok",
+        "pico.voice.stage_duration_ms": 25
+      }
+    });
+    expect(voiceStageEvents(audit, "resident_cancel_admission_to_idle")).toEqual([]);
+
+    monotonicTimeMs = 140;
+    echoFlush.resolve(undefined);
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    expect(voiceStageEvent(audit, "resident_cancel_admission_to_idle")).toMatchObject({
+      attributes: {
+        "pico.voice.stage_status": "ok",
+        "pico.voice.stage_duration_ms": 40
+      }
+    });
+
+    await driver.runtime.stop();
+  });
+
   it("keeps ready-wait PCM in the capture channel and preserves its order after ready", async () => {
     const ready = createGate<undefined>();
     const driver = createDriver({ sttOpenGate: ready.promise });
@@ -374,7 +411,7 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
-  it("cleans up playback and echo when F2 arrives after playback but before Pi settlement", async () => {
+  it("returns idle after cancel cleanup without waiting for Pi settlement", async () => {
     vi.useFakeTimers();
     const settlement = createGate<undefined>();
     const driver = createDriver({
@@ -390,10 +427,9 @@ describe("resident hold-to-talk voice runtime", () => {
     await expect(driver.cancel()).resolves.toBe("accepted");
     await vi.waitFor(() => expect(driver.echoFlushes()).toBe(1));
     expect(driver.playbackStops()).toBe(1);
-    expect(driver.runtime.state()).toBe("cancelling");
+    expect(driver.runtime.state()).toBe("idle");
 
     settlement.resolve(undefined);
-    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
     await driver.runtime.stop();
   });
 
@@ -2091,6 +2127,7 @@ describe("resident hold-to-talk voice runtime", () => {
   });
 
   it("settles active cancellation cleanup failure through stop and completion", async () => {
+    const audit = createStructuredAuditLog();
     const cancellationFailure = new Error("echo flush failed during cancellation");
     let rejectCancellationFlush: (error: Error) => void = () => undefined;
     const cancellationFlush = new Promise<void>((_resolve, reject) => {
@@ -2098,6 +2135,7 @@ describe("resident hold-to-talk voice runtime", () => {
     });
     let flushCount = 0;
     const driver = createDriver({
+      audit,
       echoFlush: () => {
         flushCount += 1;
         return flushCount === 1 ? cancellationFlush : Promise.resolve();
@@ -2120,6 +2158,13 @@ describe("resident hold-to-talk voice runtime", () => {
     await expect(stopFailure).resolves.toBe(cancellationFailure);
     await expect(completionFailure).resolves.toBe(cancellationFailure);
     expect(flushCount).toBe(2);
+    expect(voiceStageEvents(audit, "resident_cancel_admission_to_output_stopped")).toHaveLength(1);
+    expect(voiceStageEvent(audit, "resident_cancel_admission_to_idle")).toMatchObject({
+      attributes: {
+        "pico.voice.stage_status": "error",
+        "pico.voice.error_code": "cancellation_failed"
+      }
+    });
   });
 
   it("preserves the first shutdown failure across later cancellation failure", async () => {

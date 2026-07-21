@@ -47,6 +47,7 @@ type ResidentIoFatalCode =
   | "admission_timeout_failed";
 export type ResidentIoTimingStage =
   | "key_to_admission"
+  | "cancel_key_to_admission"
   | "admission_to_gate"
   | "gate_to_first_sample"
   | "first_sample_to_dispatch"
@@ -107,6 +108,7 @@ export type ResidentIoMessage =
       readonly kind: "timing_event";
       readonly stage: ResidentIoTimingStage;
       readonly durationMs: number;
+      readonly controlResult?: ResidentIoControlResult;
     };
 
 export function encodeResidentIoMessage(message: ResidentIoMessage): Buffer {
@@ -239,7 +241,11 @@ function encodeMetadata(message: ResidentIoMessage): Buffer {
     case "shutdown":
       return Buffer.alloc(0);
     case "timing_event":
-      metadata = { duration_ms: message.durationMs, stage: message.stage };
+      metadata = {
+        ...(message.controlResult === undefined ? {} : { control_result: message.controlResult }),
+        duration_ms: message.durationMs,
+        stage: message.stage
+      };
       break;
   }
 
@@ -410,11 +416,20 @@ function decodeMessage(
       requireExactKeys(metadata, kind, []);
       return { kind };
     case "timing_event":
-      requireExactKeys(metadata, kind, ["duration_ms", "stage"]);
+      requireExactKeys(
+        metadata,
+        kind,
+        Object.hasOwn(metadata, "control_result")
+          ? ["control_result", "duration_ms", "stage"]
+          : ["duration_ms", "stage"]
+      );
       return {
         kind,
         stage: requireTimingStage(metadata.stage, kind),
-        durationMs: requireNonNegativeFiniteNumber(metadata.duration_ms, kind)
+        durationMs: requireNonNegativeFiniteNumber(metadata.duration_ms, kind),
+        ...(Object.hasOwn(metadata, "control_result")
+          ? { controlResult: requireControlResult(metadata.control_result, kind) }
+          : {})
       };
   }
 }
@@ -522,6 +537,7 @@ function requireFatalCode(value: unknown, kind: ResidentIoMessageKind): Resident
 function requireTimingStage(value: unknown, kind: ResidentIoMessageKind): ResidentIoTimingStage {
   if (
     value === "key_to_admission" ||
+    value === "cancel_key_to_admission" ||
     value === "admission_to_gate" ||
     value === "gate_to_first_sample" ||
     value === "first_sample_to_dispatch" ||
