@@ -1,5 +1,4 @@
 import CoreAudio
-import CoreGraphics
 import Darwin
 import Foundation
 import PicoMacOSResidentIOCore
@@ -7,13 +6,15 @@ import PicoMacOSResidentIOCore
 final class ResidentIoOwner: @unchecked Sendable {
   private static let maximumAdmissionRingFrames = 192_000
   private static let maximumControlReorderingFrames = 16_384
+  private static let maximumControlEventSkewSeconds = 5.0
   let queue = DispatchQueue(label: "jp.toarupen.pico.macos-resident-io.owner")
   private let configuration: ResidentIoConfiguration
   private let writer = ResidentIoWriter()
   private let readySemaphore = DispatchSemaphore(value: 0)
   private let stopRunLoop: @Sendable () -> Void
   private var audioEngine: ResidentAudioEngine!
-  private var clockMapper: HostClockMapper?
+  private let clockMapper = HostClockMapper()
+  private var configurationChangeGate = AudioConfigurationChangeGate()
   private var gate: PttSampleGate
   private let pcmConverter: AVAudioPcm16MonoConverter
   private var assembler: Pcm16FrameAssembler
@@ -35,6 +36,7 @@ final class ResidentIoOwner: @unchecked Sendable {
   private var recoveryCycle: UInt64 = 0
   private var engineGeneration: UInt64 = 1
   private var activeAudioEngineGeneration: UInt64?
+  private var activeAudioEngineHasDeliveredCallback = false
   private var restartCount: UInt32 = 0
   private var droppedFrameCount: UInt64 = 0
   private var outsidePttDroppedFrameCount: UInt64 = 0
@@ -65,7 +67,7 @@ final class ResidentIoOwner: @unchecked Sendable {
         self?.recordDroppedBuffer(engineGeneration: generation, count: count)
       },
       onConfigurationChange: { [weak self] generation in
-        self?.beginRecovery(engineGeneration: generation, code: "configuration_changed")
+        self?.handleConfigurationChange(engineGeneration: generation)
       },
       onFailure: { [weak self] generation, error in
         self?.reportAudioFailure(engineGeneration: generation, error: error)
@@ -75,9 +77,10 @@ final class ResidentIoOwner: @unchecked Sendable {
 
   func start() throws {
     try queue.sync {
-      clockMapper = try calibrateHostClock()
       let deviceID = try CoreAudioDeviceCatalog.resolveInputDevice(uid: configuration.deviceUID)
       engineStartBeganAt = machHostSeconds()
+      configurationChangeGate.reset()
+      activeAudioEngineHasDeliveredCallback = false
       activeAudioEngineGeneration = try audioEngine.start(deviceID: deviceID)
       startHealthTimer()
     }
@@ -134,6 +137,7 @@ final class ResidentIoOwner: @unchecked Sendable {
       self.assembler.clear()
       self.clearAllGenerationObservations()
       self.activeAudioEngineGeneration = nil
+      self.activeAudioEngineHasDeliveredCallback = false
       self.audioEngine.stop()
       self.writer.write(
         .healthEvent(
@@ -160,6 +164,7 @@ final class ResidentIoOwner: @unchecked Sendable {
       _ = gate.markUnavailable()
       assembler.clear()
       activeAudioEngineGeneration = nil
+      activeAudioEngineHasDeliveredCallback = false
       audioEngine.stop()
     }
   }
@@ -185,6 +190,7 @@ final class ResidentIoOwner: @unchecked Sendable {
         break
       }
       try emit(output)
+      activeAudioEngineHasDeliveredCallback = true
       if recovering {
         completeRecoveryAfterFirstCallback()
       }
@@ -219,19 +225,18 @@ final class ResidentIoOwner: @unchecked Sendable {
     _ event: SemanticControlEvent,
     eventTimestampNanoseconds: UInt64
   ) {
-    guard !stopped, !suspended, readySent, !recovering, gate.state != .unavailable,
-      let clockMapper
-    else {
+    guard !stopped, !suspended, readySent, !recovering, gate.state != .unavailable else {
       return
     }
     if gate.state == .suppressed, event != .cancelPressed { return }
     let sequence = nextSequence
     nextSequence += 1
     let kind = residentIoKind(event)
-    let hostSeconds = clockMapper.audioHostSeconds(
-      eventTimestampNanoseconds: eventTimestampNanoseconds)
-
     do {
+      let hostSeconds = try clockMapper.audioHostSeconds(
+        eventTimestampNanoseconds: eventTimestampNanoseconds,
+        currentHostSeconds: machHostSeconds(),
+        maximumSkewSeconds: Self.maximumControlEventSkewSeconds)
       switch event {
       case .talkPressed:
         if gate.state == .discarding {
@@ -383,7 +388,7 @@ final class ResidentIoOwner: @unchecked Sendable {
     }
     assembler.flush(generation: generation).forEach(writePcmFrame)
     let releaseTimestamp = releaseTimestampByGeneration.removeValue(forKey: generation) ?? 0
-    if let clockMapper, releaseTimestamp > 0 {
+    if releaseTimestamp > 0 {
       writeTiming(
         .releaseToTailComplete,
         seconds: machHostSeconds()
@@ -431,6 +436,29 @@ final class ResidentIoOwner: @unchecked Sendable {
     fatal(code: "audio_callback_failed", error: error)
   }
 
+  private func handleConfigurationChange(engineGeneration: UInt64) {
+    guard engineGeneration == activeAudioEngineGeneration else { return }
+    switch configurationChangeGate.action(
+      hasDeliveredFirstCallback: activeAudioEngineHasDeliveredCallback,
+      isEngineRunning: audioEngine.isRunning
+    ) {
+    case .ignoreStartupNotification:
+      return
+    case .invalidateStartingGeneration:
+      if recovering {
+        activeAudioEngineGeneration = nil
+        activeAudioEngineHasDeliveredCallback = false
+        audioEngine.stop()
+      } else {
+        fatal(
+          code: "configuration_changed_during_startup",
+          error: ResidentIoRuntimeError.startupConfigurationChanged)
+      }
+    case .recover:
+      beginRecovery(engineGeneration: engineGeneration, code: "configuration_changed")
+    }
+  }
+
   private func beginRecovery(engineGeneration: UInt64? = nil, code: String) {
     if let engineGeneration, engineGeneration != activeAudioEngineGeneration { return }
     guard !stopped, !suspended, !recovering else { return }
@@ -446,6 +474,7 @@ final class ResidentIoOwner: @unchecked Sendable {
     assembler.clear()
     clearAllGenerationObservations()
     activeAudioEngineGeneration = nil
+    activeAudioEngineHasDeliveredCallback = false
     audioEngine.stop()
     writer.write(
       .healthEvent(
@@ -460,10 +489,11 @@ final class ResidentIoOwner: @unchecked Sendable {
     recoveryAttempt += 1
     let cycle = recoveryCycle
     do {
-      clockMapper = try calibrateHostClock()
       let deviceID = try CoreAudioDeviceCatalog.resolveInputDevice(uid: configuration.deviceUID)
       resetPcmConversion()
       engineStartBeganAt = machHostSeconds()
+      configurationChangeGate.reset()
+      activeAudioEngineHasDeliveredCallback = false
       activeAudioEngineGeneration = try audioEngine.start(deviceID: deviceID)
       let attempt = recoveryAttempt
       queue.asyncAfter(deadline: .now() + .seconds(1)) { [weak self] in
@@ -471,6 +501,7 @@ final class ResidentIoOwner: @unchecked Sendable {
           self.recoveryAttempt == attempt
         else { return }
         self.activeAudioEngineGeneration = nil
+        self.activeAudioEngineHasDeliveredCallback = false
         self.audioEngine.stop()
         if attempt >= 3 {
           self.fatal(
@@ -653,6 +684,7 @@ private final class ResidentIoWriter: @unchecked Sendable {
 
 enum ResidentIoRuntimeError: Error, LocalizedError {
   case firstAudioCallbackTimedOut
+  case startupConfigurationChanged
   case eventTapDisabled
   case recoveryCallbackTimedOut
   case protocolEof
@@ -665,6 +697,8 @@ enum ResidentIoRuntimeError: Error, LocalizedError {
     switch self {
     case .firstAudioCallbackTimedOut:
       "AVAudioEngine did not deliver its first input callback before timeout"
+    case .startupConfigurationChanged:
+      "AVAudioEngine configuration changed before its first input callback"
     case .eventTapDisabled:
       "Core Graphics disabled the resident I/O event tap"
     case .recoveryCallbackTimedOut:
@@ -725,21 +759,6 @@ private func pcm16Sample(_ sample: Float) -> Int16 {
     return Int16(min(Float(Int16.max), (clamped * Float(Int16.max)).rounded()))
   }
   return Int16(max(Float(Int16.min), (clamped * -Float(Int16.min)).rounded()))
-}
-
-private func calibrateHostClock() throws -> HostClockMapper {
-  let samples = try (0..<3).map { _ -> HostClockCalibrationSample in
-    let before = machHostSeconds()
-    guard let event = CGEvent(source: nil) else { throw HostClockMapperError.invalidSample }
-    let timestamp = event.timestamp
-    let after = machHostSeconds()
-    return HostClockCalibrationSample(
-      eventTimestampNanoseconds: timestamp,
-      machHostSecondsBefore: before,
-      machHostSecondsAfter: after
-    )
-  }
-  return try HostClockMapper.calibrate(samples: samples, maximumResidualSeconds: 0.002)
 }
 
 private func machHostSeconds() -> Double {

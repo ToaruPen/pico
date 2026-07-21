@@ -70,11 +70,22 @@ final class ResidentAudioEngine: @unchecked Sendable {
     let input = engine.inputNode
     try input.auAudioUnit.setDeviceID(deviceID)
     let format = input.inputFormat(forBus: 0)
-    guard format.sampleRate > 0, format.channelCount > 0 else {
+    guard
+      format.sampleRate > 0, format.channelCount > 0,
+      input.auAudioUnit.outputBusses.count > 1
+    else {
       throw ResidentAudioEngineError.inputFormatUnavailable
     }
-    input.installTap(onBus: 0, bufferSize: 4_096, format: nil) { [weak self] buffer, time in
+    try input.auAudioUnit.outputBusses[1].setFormat(format)
+    input.installTap(onBus: 0, bufferSize: 4_096, format: format) { [weak self] buffer, time in
       self?.capture(buffer: buffer, time: time, generation: generation)
+    }
+    engine.prepare()
+    do {
+      try engine.start()
+    } catch {
+      input.removeTap(onBus: 0)
+      throw error
     }
     let configurationObservation = ManagedNotificationObservation(
       name: .AVAudioEngineConfigurationChange,
@@ -83,14 +94,6 @@ final class ResidentAudioEngine: @unchecked Sendable {
       guard let self else { return }
       let callback = self.onConfigurationChange
       self.ownerQueue.async { callback(generation) }
-    }
-    engine.prepare()
-    do {
-      try engine.start()
-    } catch {
-      input.removeTap(onBus: 0)
-      configurationObservation.cancel()
-      throw error
     }
     self.configurationObservation = configurationObservation
     self.engine = engine

@@ -140,8 +140,19 @@ private final class KeyboardContext {
 private func startCommandReader(owner: ResidentIoOwner) {
   DispatchQueue.global(qos: .userInitiated).async {
     var decoder = ResidentIoDecoder()
+    var buffer = [UInt8](repeating: 0, count: 65_536)
+    let descriptor = FileHandle.standardInput.fileDescriptor
     do {
-      while let data = try FileHandle.standardInput.read(upToCount: 65_536), !data.isEmpty {
+      while true {
+        let bytesRead = buffer.withUnsafeMutableBytes {
+          Darwin.read(descriptor, $0.baseAddress, $0.count)
+        }
+        if bytesRead == 0 { break }
+        if bytesRead < 0 {
+          if Darwin.errno == EINTR { continue }
+          throw NSError(domain: NSPOSIXErrorDomain, code: Int(Darwin.errno))
+        }
+        let data = Data(buffer.prefix(bytesRead))
         try decoder.append(data)
         while let message = try decoder.next() {
           owner.receive(message)

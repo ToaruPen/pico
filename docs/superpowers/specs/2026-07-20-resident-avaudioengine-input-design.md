@@ -115,9 +115,11 @@ generationに属し、rebuild時に再生成する。
 
 ## 7. host clockとsample admission
 
-`CGEventTimestamp`は起動後nanoseconds、`AVAudioTime.hostTime`はmach host ticksである。Swift内で
-どちらもsecondsへ変換するが、同一epochを仮定せずstartup probeでoffsetを求める。複数sampleの
-residualが許容範囲を超える場合はreadyにならない。wake/restartごとに再較正する。
+`CGEventTimestamp`はsystem startupからのnanoseconds、`AVAudioTime.hostTime`は
+`mach_absolute_time`と同じsystem basic clockのticksである。Swift内ではevent timestampを
+secondsへ直接変換し、audio host secondsと同じepochとして扱う。synthetic `CGEvent`はこの環境で
+timestamp `0`を返すため、clock較正には使わない。各physical control eventでtimestampが非0かつ
+現在のaudio host clockから5秒以内であることを検証し、外れた場合は推定で継続せずfatalへ収束する。
 
 input tapの`when.hostTime`をbuffer先頭sample時刻とし、sample rateから各sample時刻を求める。
 talk pressを含むbufferでは、次を満たす最初のsample indexからだけ受理する。
@@ -178,11 +180,17 @@ health stateは`starting`、`running`、`recovering`、`suspended`、`unavailabl
 - engine unexpectedly not running: health pollで検出し同じrecoveryへ移行
 - configured device unplug: `unavailable`。同UIDだけをboundedに再探索
 - sleep: `suspended`へ移行しpending PCMを破棄
-- wake: device再解決、clock再較正、tap/converter再構築、engine start、valid callback確認
+- wake: device再解決、tap/converter再構築、engine start、valid callback確認。次のphysical control
+  eventでも同じclock整合検証を行う
 - bounded recovery failure: `fatal`を送ってsidecar終了
 
 notification callback内でengineをdeallocateしない。recovery中のtalkはacceptedにせず、queueしない。
 別device、FFmpeg、system default、ALSAへ自動fallbackしない。
+
+各engine generationのfirst PCM前は、engineがrunningのまま届く最初のconfiguration notification
+だけを既知の自己通知として無視する。engineが停止している場合、または2件目のnotificationが届いた
+場合、初回startupはfail-closeし、recovery中はそのattemptを無効化する。current generationのfirst PCM
+後に届くnotificationは上記recoveryへ移行する。
 
 ## 11. observabilityとprivacy
 
@@ -218,7 +226,7 @@ durationはmonotonic値だけを記録し、通常OTelへ次を出さない。
 - 250 ms release tailとcutoff後sample不受理
 - cancel、TTS suppress/resumeのclear
 - bounded ring overflowのfail-closed
-- clock offset/residual、invalid/retrograde timestamp
+- shared host clockの直接変換、zero/divergent event clock、invalid/retrograde timestamp
 - configuration change、engine stop、sleep/wake、device missing recovery state
 - framed IPCのpartial read、oversize、unknown version/kind、ordered delivery
 
