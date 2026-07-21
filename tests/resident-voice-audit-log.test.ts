@@ -32,6 +32,31 @@ describe("resident voice audit log", () => {
       })
     ).not.toThrow();
     expect(writes).toEqual(["first", "session.started"]);
+    expect(audit.entries()).toEqual([]);
+  });
+
+  it("fans out every normalized event without retaining resident history", () => {
+    const writtenNames: string[] = [];
+    const audit = createResidentVoiceAuditLog({
+      stdoutEnabled: false,
+      writeEvent: (event) => {
+        writtenNames.push(event.name);
+      }
+    });
+
+    for (let index = 0; index < 1_000; index += 1) {
+      audit.record({
+        category: "transport_event",
+        name: "voice.runtime.health",
+        severity: "info",
+        occurredAt: "2026-07-21T00:00:00.000Z",
+        summary: "Resident voice health was observed.",
+        attributes: { "pico.voice.restart_count": index }
+      });
+    }
+
+    expect(writtenNames).toHaveLength(1_000);
+    expect(audit.entries()).toEqual([]);
   });
 
   it("mirrors voice runtime summary stage events to stdout when enabled", () => {
@@ -57,7 +82,8 @@ describe("resident voice audit log", () => {
       }
     });
 
-    expect(audit.entries()).toEqual([event]);
+    expect(event.name).toBe("voice.runtime.stage");
+    expect(audit.entries()).toEqual([]);
     expect(writes).toEqual([
       "[pico voice] 2026-06-22T00:00:00.000Z stage=stt status=ok duration_ms=123.4 frame_count=5\n"
     ]);
@@ -86,7 +112,7 @@ describe("resident voice audit log", () => {
       }
     });
 
-    expect(audit.entries()).toHaveLength(1);
+    expect(audit.entries()).toEqual([]);
     expect(writes).toEqual([]);
   });
 

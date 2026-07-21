@@ -43,6 +43,10 @@ export type DrainableStructuredAuditLog = StructuredAuditLog & {
   readonly drain: () => readonly AuditEvent[];
 };
 
+export type StructuredAuditLogOptions = {
+  readonly retainEntries?: boolean;
+};
+
 const auditEventCategories = new Set<AuditEventCategory>([
   "tool_call",
   "external_send",
@@ -112,13 +116,15 @@ export function createAuditModule(): PicoModule {
   };
 }
 
-export function createStructuredAuditLog(): DrainableStructuredAuditLog {
+export function createStructuredAuditLog(
+  options: StructuredAuditLogOptions = {}
+): DrainableStructuredAuditLog {
   const entries: AuditEvent[] = [];
 
   return {
     record(input) {
       const event = normalizeAuditEvent(input);
-      entries.push(event);
+      if (options.retainEntries !== false) entries.push(event);
 
       return event;
     },
