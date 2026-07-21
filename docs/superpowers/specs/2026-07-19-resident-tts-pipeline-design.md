@@ -148,10 +148,10 @@ cancelまたはplayback失敗時は、現行契約どおりplayback停止とecho
 
 ## Telemetry
 
-既存の`ptt_release_to_playback_start`、`tts_request_wall`、`tts_playback`を維持し、意味を
-次のように固定する。
+`tts_request_wall`と`tts_playback`を維持する。2026-07-21のoperability修正により、旧
+`ptt_release_to_playback_start`は`ptt_release_to_first_pcm_write`へ置き換える。
 
-- `ptt_release_to_playback_start`: PTT releaseから最初のplayback provider dispatchまで。
+- `ptt_release_to_first_pcm_write`: PTT releaseから最初のplayback session write成功まで。
 - `tts_request_wall`: 最初のTTS request開始からTTS event streamのterminal eventまで。
 - `tts_playback`: 最初のplayback dispatchからplayback childのterminal completionまで。
 
@@ -214,7 +214,7 @@ TDDで次の順に追加する。
 
 focused unit test後に`just check`を通し、実機では既存の疑似音声fixtureを注入して次を比較する。
 
-- `ptt_release_to_playback_start`がbaselineより1秒以上短い。
+- `ptt_release_to_first_pcm_write`の新しいbaselineを取得する。旧stageのbaselineとは直接比較しない。
 - 第2文の合成が第1文のplayback期間内に重なる。
 - 文境界で別playback childを生成しない。
 - tool callと最終assistant本文が正しく、reasoning effortが`medium`のままである。

@@ -16,7 +16,7 @@ The changes are delivered as three independently testable pull requests. They pr
 
 ## 2. Evidence and Constraints
 
-- `src/runtime/resident-voice-terminal-renderer.ts` renders `F1 話す · F2 中断` as a literal.
+- Before PR 1, `src/runtime/resident-voice-terminal-renderer.ts` rendered `F1 話す · F2 中断` as a literal.
 - `src/runtime/resident-voice-runner.ts` passes configured `talkKey` and `cancelKey` values to the Swift sidecar.
 - Pico startup and `createResidentVoiceService` currently load the YAML config independently.
 - `~/.pico/resident-voice` contains approximately 4.2 GB. About 97 percent is two legacy metrics files created by the removed continuous-listening `speech_gate` path.
@@ -61,7 +61,7 @@ Every rendered line remains within the terminal width. Long supported key names 
 
 ### 4.3 Honest playback latency
 
-The existing `ptt_release_to_playback_start` stage is not a playback-start measurement: it settles before `playback.open` and before the first PCM write.
+The historical `ptt_release_to_playback_start` stage was not a playback-start measurement: it settled before `playback.open` and before the first PCM write.
 
 It is replaced with `ptt_release_to_first_pcm_write`. The stage settles successfully only after the first committed `VoicePlaybackSession.write` completes. If the turn is cancelled or fails before a write, the same PTT measurement settles once with `skipped` or `error`.
 
