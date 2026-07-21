@@ -341,7 +341,7 @@ displays Pi's interactive output in that terminal window. The non-persistent
 host follows the same interaction-session lifecycle as the normal `pico`
 command. The Pico wrapper does not duplicate that output into a file. Pico
 persists only output produced by its metadata-only log sink under
-`~/.pico/resident-voice/development/processes/YYYY-MM-DD/<run-id>.log`. Use
+`~/.pico/resident-voice/managed/development/processes/YYYY-MM-DD/<run-id>.log`. Use
 `pico dev --terminal=terminal` to open Terminal.app instead. Stop it from the
 opened terminal with `Ctrl-C`; the development terminal closes after the
 resident process exits. This is a visible development helper around the same
@@ -363,17 +363,17 @@ permissions. Development and normal resident runs are separated:
 ```text
 ~/.pico/
   resident-voice/
-    development/
-      processes/YYYY-MM-DD/<run-id>.log
-      metrics/YYYY-MM-DD/<run-id>.jsonl
-      events/YYYY-MM-DD.jsonl
-      sessions/YYYY-MM-DD/<run-id>/<session-id>.jsonl
-    normal/
-      processes/resident-voice.out.log
-      processes/resident-voice.err.log
-      processes/YYYY-MM-DD/<run-id>.log
-      events/YYYY-MM-DD.jsonl
-      sessions/YYYY-MM-DD/<run-id>/<session-id>.jsonl
+    managed/
+      development/
+        processes/YYYY-MM-DD/<run-id>.log
+        metrics/YYYY-MM-DD/<run-id>.jsonl
+        events/YYYY-MM-DD.jsonl
+        sessions/YYYY-MM-DD/<run-id>/<session-id>.jsonl
+      normal/
+        processes/YYYY-MM-DD/<run-id>.log
+        metrics/YYYY-MM-DD/<run-id>.jsonl
+        events/YYYY-MM-DD.jsonl
+        sessions/YYYY-MM-DD/<run-id>/<session-id>.jsonl
 ```
 
 Process logs contain stage summaries, durations, and errors. Daily and session
@@ -383,6 +383,11 @@ relevant. They contain no text field and do not store staff input or Pi Agent
 responses. Raw audio is never persisted by the resident
 runtime. The bounded hold-to-talk field harness reports aggregate timing,
 frame-count, CPU, and RSS metadata only.
+
+Each managed run mode is capped at 128 MiB. The asynchronous writer keeps at
+most 1 MiB queued, removes only its oldest recognized closed files, and never
+touches paths outside `managed`. Existing legacy logs are reported once but are
+not read, moved, or deleted automatically.
 
 Resident voice is explicit hold-to-talk. Pressing the configured talk control
 starts microphone capture, releasing it keeps a fixed 250 ms speech tail and
@@ -413,11 +418,14 @@ PICO_CONFIG_PATH=config/pico.local.yaml npm run resident:voice:launchd -- uninst
 The LaunchAgent label is `dev.toarupen.pico.resident-voice`. It runs the
 resident voice script through the current Node executable and local `jiti` with
 `PICO_CONFIG_PATH` set to the resolved local config path, writes the plist to
-`~/Library/LaunchAgents/dev.toarupen.pico.resident-voice.plist`, and writes logs
-under `~/.pico/resident-voice/normal/`. The normal LaunchAgent session keeps
+`~/Library/LaunchAgents/dev.toarupen.pico.resident-voice.plist`, and writes its
+launchd stdout/stderr logs under `~/.pico/resident-voice/normal/`. The normal
+LaunchAgent session keeps
 process stdout/stderr in `processes/resident-voice.out.log` and
 `processes/resident-voice.err.log`, and the resident runtime writes dated
-process, event, and session logs under the same normal run mode. `stop` boots
+process, metric, event, and session logs under the separate
+`managed/normal/` root. The fixed managed cap does not migrate or delete the
+launchd-owned stdout/stderr files. `stop` boots
 the KeepAlive service out of the user launchd domain while leaving the plist
 installed; use `install` to bootstrap it again or `uninstall` to remove the
 plist. `install` also builds the project-owned macOS control bridge at its stable
