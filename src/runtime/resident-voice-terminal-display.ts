@@ -5,6 +5,8 @@ import type {
 } from "./resident-voice-operator.js";
 import {
   type ResidentVoiceTerminalControls,
+  type ResidentVoiceTerminalControlNotice,
+  type ResidentVoiceTerminalPhase,
   type ResidentVoiceTerminalTheme,
   type ResidentVoiceTerminalToolView,
   type ResidentVoiceTerminalTurnView,
@@ -46,6 +48,7 @@ type MutableTurn = {
   staffText?: string;
   picoText?: string;
   failure?: string;
+  cancelled?: boolean;
   readonly tools: ResidentVoiceTerminalToolView[];
   readonly timings: Map<VoiceRuntimeStage, StageTimingView>;
 };
@@ -57,6 +60,8 @@ type PendingTool = {
 type DisplayTurnLifecycle = {
   active: boolean;
   phase: ResidentVoiceTurnPhase;
+  ending: boolean;
+  notice?: ResidentVoiceTerminalControlNotice;
 };
 
 type TextBudget = {
@@ -79,8 +84,24 @@ const phases = new Set<ResidentVoiceTurnPhase>([
   "listening",
   "transcribing",
   "processing",
+  "waiting_for_previous_turn",
   "synthesizing",
-  "speaking"
+  "speaking",
+  "cancelling"
+]);
+const controlResults = new Set(["accepted", "ignored_busy", "ignored_stale", "noop"]);
+const controlStates = new Set([
+  "idle",
+  "listening",
+  "tailing",
+  "transcribing",
+  "processing",
+  "synthesizing",
+  "speaking",
+  "cancelling",
+  "error",
+  "stopped",
+  "interaction_ending"
 ]);
 const statuses = new Set<VoiceStageStatus>(["ok", "error", "skipped", "suppressed"]);
 const terminalAssistantFailures = new Set(["error", "aborted"]);
@@ -147,7 +168,7 @@ export function createResidentVoiceTerminalDisplay(
   );
   const turns: MutableTurn[] = [];
   const pendingTools = new Map<string, PendingTool>();
-  const lifecycle: DisplayTurnLifecycle = { active: false, phase: "idle" };
+  const lifecycle: DisplayTurnLifecycle = { active: false, phase: "idle", ending: false };
 
   const notifyChange = (): void => {
     try {
@@ -170,7 +191,7 @@ export function createResidentVoiceTerminalDisplay(
     render(width, theme) {
       try {
         return renderResidentVoiceTerminal(
-          createView(options.controls, lifecycle.phase, turns, pendingTools),
+          createView(options.controls, lifecycle, turns, pendingTools),
           width,
           theme
         );
@@ -194,6 +215,24 @@ function applyEvent(
     appendTurn(turns);
     pendingTools.clear();
     lifecycle.active = true;
+    lifecycle.ending = false;
+    delete lifecycle.notice;
+    return true;
+  }
+
+  if (event.kind === "interaction_ending_started") {
+    appendTurn(turns);
+    pendingTools.clear();
+    lifecycle.active = true;
+    lifecycle.ending = true;
+    return true;
+  }
+
+  if (event.kind === "interaction_ending_finished") {
+    pendingTools.clear();
+    lifecycle.active = false;
+    lifecycle.ending = false;
+    lifecycle.phase = "idle";
     return true;
   }
 
@@ -203,13 +242,27 @@ function applyEvent(
     if (event.phase === "idle") {
       pendingTools.clear();
       lifecycle.active = false;
+      lifecycle.ending = false;
     }
+    return true;
+  }
+
+  if (event.kind === "control_decision") {
+    if (!isControlDecision(event)) return false;
+    lifecycle.notice = {
+      control: event.control,
+      result: event.result,
+      state: event.state
+    };
     return true;
   }
 
   if (!lifecycle.active) return false;
 
   switch (event.kind) {
+    case "turn_cancelled":
+      currentTurn(turns).cancelled = true;
+      return true;
     case "staff_transcript":
       if (typeof event.text !== "string") return false;
       currentTurn(turns).staffText = formatOperatorText(event.text, maximumTextBytes);
@@ -288,17 +341,25 @@ function applyEvent(
 
 function createView(
   controls: ResidentVoiceTerminalControls,
-  phase: ResidentVoiceTurnPhase,
+  lifecycle: DisplayTurnLifecycle,
   turns: readonly MutableTurn[],
   pendingTools: ReadonlyMap<string, PendingTool>
 ): ResidentVoiceTerminalView {
   const activeToolName = Array.from(pendingTools.values()).at(-1)?.toolName;
   return {
     controls,
-    phase,
+    phase: terminalPhase(lifecycle, lifecycle.phase),
     ...(activeToolName === undefined ? {} : { activeToolName }),
+    ...(lifecycle.notice === undefined ? {} : { notice: lifecycle.notice }),
     turns: turns.map(toTurnView)
   };
+}
+
+function terminalPhase(
+  lifecycle: DisplayTurnLifecycle,
+  turnPhase: ResidentVoiceTurnPhase
+): ResidentVoiceTerminalPhase {
+  return lifecycle.ending ? "ending" : turnPhase;
 }
 
 function toTurnView(turn: MutableTurn): ResidentVoiceTerminalTurnView {
@@ -306,6 +367,7 @@ function toTurnView(turn: MutableTurn): ResidentVoiceTerminalTurnView {
     ...(turn.staffText === undefined ? {} : { staffText: turn.staffText }),
     ...(turn.picoText === undefined ? {} : { picoText: turn.picoText }),
     ...(turn.failure === undefined ? {} : { failure: turn.failure }),
+    ...(turn.cancelled === undefined ? {} : { cancelled: turn.cancelled }),
     tools: turn.tools,
     timings: turn.timings
   };
@@ -335,6 +397,18 @@ function readStageErrorCode(attributes: Readonly<Record<string, unknown>>): stri
 
 function isPhase(value: unknown): value is ResidentVoiceTurnPhase {
   return typeof value === "string" && phases.has(value as ResidentVoiceTurnPhase);
+}
+
+function isControlDecision(
+  event: Extract<ResidentVoiceOperatorEvent, { readonly kind: "control_decision" }>
+): boolean {
+  return (
+    event.control === "talk" &&
+    typeof event.result === "string" &&
+    controlResults.has(event.result) &&
+    typeof event.state === "string" &&
+    controlStates.has(event.state)
+  );
 }
 
 function isRuntimeStage(value: unknown): value is VoiceRuntimeStage {

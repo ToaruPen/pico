@@ -287,8 +287,12 @@ export function createVoiceResidentRuntime(
         setActiveSessionId: (sessionId) => {
           activeSessionId = sessionId;
         },
-        waitForPiAdmission: (signal) =>
-          waitForPiAdmission(piAdmissionBarrier, signal),
+        waitForPiAdmission: async (signal) => {
+          if (piAdmissionBarrier.pending) {
+            recordTurnPhase(options.operator, "waiting_for_previous_turn");
+          }
+          return waitForPiAdmission(piAdmissionBarrier, signal);
+        },
         ownPiSettlement: (settlement) => {
           const barrier: PiAdmissionBarrier = {
             pending: true,
@@ -326,6 +330,8 @@ export function createVoiceResidentRuntime(
       }
 
       counters.cancelledTurns += 1;
+      recordResidentVoiceOperatorEvent(options.operator, { kind: "turn_cancelled" });
+      recordTurnPhase(options.operator, "cancelling");
       settlePttReleaseToFirstPcmWrite(turn, options, "skipped", monotonicNow, "cancelled");
       turn.cancellation = convergeCancellation(
         turn,
@@ -383,6 +389,9 @@ export function createVoiceResidentRuntime(
       try {
         await waitForTurnBoundary(turn);
         await waitForOwnedTurnOperations(ownedTurnOperations);
+        recordResidentVoiceOperatorEvent(options.operator, {
+          kind: "interaction_ending_started"
+        });
         await finalizeEndedInteraction(
           ending,
           options,
@@ -401,6 +410,9 @@ export function createVoiceResidentRuntime(
         settlement = { status: "error", errorCode: "interaction_end_failed" };
         throw error;
       } finally {
+        recordResidentVoiceOperatorEvent(options.operator, {
+          kind: "interaction_ending_finished"
+        });
         recordStage(
           options,
           "interaction_end",
@@ -493,6 +505,12 @@ export function createVoiceResidentRuntime(
   const processControlEvent = (event: ResidentControlEvent): ResidentControlResult => {
     if (event.kind === "talk_pressed" && activeInteractionEnding !== undefined) {
       counters.ignoredBusyTalkPresses += 1;
+      recordResidentVoiceOperatorEvent(options.operator, {
+        kind: "control_decision",
+        control: "talk",
+        result: "ignored_busy",
+        state: "interaction_ending"
+      });
       return "ignored_busy";
     }
 
@@ -505,6 +523,20 @@ export function createVoiceResidentRuntime(
 
     if (event.kind === "talk_pressed" && result === "ignored_busy") {
       counters.ignoredBusyTalkPresses += 1;
+    }
+    const controlState = controller.state();
+    if (
+      event.kind === "talk_pressed" &&
+      result !== "accepted" &&
+      controlState !== "error" &&
+      controlState !== "stopped"
+    ) {
+      recordResidentVoiceOperatorEvent(options.operator, {
+        kind: "control_decision",
+        control: "talk",
+        result,
+        state: controlState
+      });
     }
 
     return result;
@@ -651,7 +683,7 @@ async function processCompletedHold(
     readonly getActiveSessionId: () => string | undefined;
     readonly getEndingSessionId: () => string | undefined;
     readonly setActiveSessionId: (sessionId: string | undefined) => void;
-    readonly waitForPiAdmission: (signal: AbortSignal) => Promise<void>;
+    readonly waitForPiAdmission: (signal: AbortSignal) => Promise<boolean>;
     readonly ownPiSettlement: (settlement: Promise<void>) => void;
   }
 ): Promise<void> {
@@ -690,7 +722,7 @@ async function processCompletedHoldWork(
     readonly getActiveSessionId: () => string | undefined;
     readonly getEndingSessionId: () => string | undefined;
     readonly setActiveSessionId: (sessionId: string | undefined) => void;
-    readonly waitForPiAdmission: (signal: AbortSignal) => Promise<void>;
+    readonly waitForPiAdmission: (signal: AbortSignal) => Promise<boolean>;
     readonly ownPiSettlement: (settlement: Promise<void>) => void;
   }
 ): Promise<void> {
@@ -756,9 +788,12 @@ async function processCompletedHoldWork(
     occurredAt: transcriptOccurredAt,
     sessionId
   });
-  await state.waitForPiAdmission(turn.generation.signal);
+  const waitedForPiAdmission = await state.waitForPiAdmission(turn.generation.signal);
   if (!isCurrentStage(controller, turn.generation.id, "processing", counters)) {
     return;
+  }
+  if (waitedForPiAdmission) {
+    recordTurnPhase(options.operator, "processing");
   }
   const piStartedAt = state.now();
   const piStartedAtMs = state.monotonicNow();
@@ -1116,13 +1151,13 @@ async function waitForOwnedTurnOperations(operations: Set<Promise<void>>): Promi
 function waitForPiAdmission(
   barrier: PiAdmissionBarrier,
   signal: AbortSignal
-): Promise<void> {
+): Promise<boolean> {
   if (!barrier.pending) {
     signal.throwIfAborted();
-    return Promise.resolve();
+    return Promise.resolve(false);
   }
 
-  return waitForCompletionOrAbort(barrier.completion, signal);
+  return waitForCompletionOrAbort(barrier.completion, signal).then(() => true);
 }
 
 function waitForCompletionOrAbort(completion: Promise<void>, signal: AbortSignal): Promise<void> {

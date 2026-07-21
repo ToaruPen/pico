@@ -142,7 +142,7 @@ git commit -m "fix: admit voice after foreground cancellation"
 - Modify: `tests/resident-voice-terminal-display.test.ts`
 - Modify: `tests/resident-voice-terminal-renderer.test.ts`
 
-- [ ] **Step 1: Write failing runtime operator tests**
+- [x] **Step 1: Write failing runtime operator tests**
 
 Add assertions that accepted cancellation emits:
 
@@ -159,7 +159,7 @@ Add a prior-settlement test asserting the second turn emits
 `waiting_for_previous_turn` after STT and returns to `processing` before its Pi
 prompt.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 npm test -- tests/voice-resident.test.ts -t "operator|previous turn|inactivity farewell"
@@ -167,7 +167,7 @@ npm test -- tests/voice-resident.test.ts -t "operator|previous turn|inactivity f
 
 Expected: FAIL because the new phases and lifecycle events do not exist.
 
-- [ ] **Step 3: Write failing display and renderer tests**
+- [x] **Step 3: Write failing display and renderer tests**
 
 Use `configuredControls = { talkKey: "F13", cancelKey: "F14" }`. Assert the
 following text-only states and bounded notices:
@@ -184,7 +184,7 @@ Exercise ending start, farewell `pi_response`, ending finish, 40/60/100-column
 widths, and a subsequent accepted turn that clears the notice. Assert the
 output never contains `F1 話す`.
 
-- [ ] **Step 4: Run display RED**
+- [x] **Step 4: Run display RED**
 
 ```bash
 npm test -- tests/resident-voice-terminal-display.test.ts tests/resident-voice-terminal-renderer.test.ts
@@ -192,7 +192,7 @@ npm test -- tests/resident-voice-terminal-display.test.ts tests/resident-voice-t
 
 Expected: FAIL on missing event variants, phases, and labels.
 
-- [ ] **Step 5: Implement the bounded operator state**
+- [x] **Step 5: Implement the bounded operator state**
 
 Add phases `cancelling` and `waiting_for_previous_turn`. Add events:
 
@@ -208,7 +208,7 @@ an ending lifecycle card without a staff transcript. It clears the notice on
 the next `turn_started`. Interaction ending becomes active only after the
 preceding owned-turn boundary has drained.
 
-- [ ] **Step 6: Run GREEN and width regressions**
+- [x] **Step 6: Run GREEN and width regressions**
 
 ```bash
 npm test -- tests/voice-resident.test.ts tests/resident-voice-terminal-display.test.ts tests/resident-voice-terminal-renderer.test.ts
@@ -217,7 +217,7 @@ npm test -- tests/voice-resident.test.ts tests/resident-voice-terminal-display.t
 Expected: all selected tests pass and every rendered line remains within its
 viewport.
 
-- [ ] **Step 7: Commit operator visibility**
+- [x] **Step 7: Commit operator visibility**
 
 ```bash
 git add src/runtime/resident-voice-operator.ts src/runtime/voice-resident.ts src/runtime/resident-voice-terminal-display.ts src/runtime/resident-voice-terminal-renderer.ts tests/voice-resident.test.ts tests/resident-voice-terminal-display.test.ts tests/resident-voice-terminal-renderer.test.ts

@@ -1,4 +1,6 @@
 import type { AuditAttributeValue } from "../modules/audit/index.js";
+import type { ResidentControlResult } from "./resident-control.js";
+import type { ResidentControlState } from "./resident-control-controller.js";
 import type { VoiceRuntimeStage, VoiceStageStatus } from "./voice-stage-probe.js";
 
 export type ResidentVoiceTurnPhase =
@@ -6,8 +8,10 @@ export type ResidentVoiceTurnPhase =
   | "listening"
   | "transcribing"
   | "processing"
+  | "waiting_for_previous_turn"
   | "synthesizing"
-  | "speaking";
+  | "speaking"
+  | "cancelling";
 
 export type ResidentVoiceOperatorEvent =
   | {
@@ -16,6 +20,21 @@ export type ResidentVoiceOperatorEvent =
   | {
       readonly kind: "turn_phase";
       readonly phase: ResidentVoiceTurnPhase;
+    }
+  | {
+      readonly kind: "turn_cancelled";
+    }
+  | {
+      readonly kind: "control_decision";
+      readonly control: "talk";
+      readonly result: ResidentControlResult;
+      readonly state: ResidentControlState | "interaction_ending";
+    }
+  | {
+      readonly kind: "interaction_ending_started";
+    }
+  | {
+      readonly kind: "interaction_ending_finished";
     }
   | {
       readonly kind: "staff_transcript";

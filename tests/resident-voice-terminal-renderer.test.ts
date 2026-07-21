@@ -81,8 +81,11 @@ describe("resident voice terminal renderer", () => {
     ["listening", "● 聞き取り中"],
     ["transcribing", "◐ 文字起こし中"],
     ["processing", "◐ 考えています"],
+    ["waiting_for_previous_turn", "◐ 前の処理を整理中"],
     ["synthesizing", "◐ 音声準備中"],
-    ["speaking", "● 話しています"]
+    ["speaking", "● 話しています"],
+    ["cancelling", "◐ 中断処理中"],
+    ["ending", "◐ セッション終了中"]
   ])("identifies the %s phase without relying on color", (phase, label) => {
     const output = renderResidentVoiceTerminal(
       { controls: configuredControls, phase, turns: [] },
@@ -93,6 +96,30 @@ describe("resident voice terminal renderer", () => {
     expect(output).toContain(label);
     expect(output).toContain("F13 話す");
     expect(output).toContain("F14 中断");
+    expect(output).not.toContain("F1 話す");
+  });
+
+  it("explains a configured talk rejection during cancellation without color", () => {
+    const output = renderResidentVoiceTerminal(
+      {
+        controls: configuredControls,
+        phase: "cancelling",
+        notice: { control: "talk", result: "ignored_busy", state: "cancelling" },
+        turns: [
+          {
+            cancelled: true,
+            tools: [],
+            timings: new Map()
+          }
+        ]
+      },
+      100,
+      plainTheme
+    ).join("\n");
+
+    expect(output).toContain("◐ 中断処理中");
+    expect(output).toContain("− F13: 中断処理中のため受理せず");
+    expect(output).toContain("− 中断済み");
     expect(output).not.toContain("F1 話す");
   });
 

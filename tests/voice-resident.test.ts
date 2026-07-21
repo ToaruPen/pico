@@ -312,6 +312,7 @@ describe("resident hold-to-talk voice runtime", () => {
     const firstPlayback = createGate<undefined>();
     const firstSettlement = createGate<undefined>();
     const captureBoundaries: string[] = [];
+    const operatorEvents: ResidentVoiceOperatorEvent[] = [];
     let promptCount = 0;
     const driver = createDriver({
       piResponse: () => {
@@ -323,6 +324,7 @@ describe("resident hold-to-talk voice runtime", () => {
         );
       },
       playbackCompletion: () => firstPlayback.promise,
+      operatorEvents,
       captureBoundary: {
         suppress() {
           captureBoundaries.push("suppress");
@@ -339,6 +341,15 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
     await expect(driver.cancel()).resolves.toBe("accepted");
+    await expect(driver.press()).resolves.toBe("ignored_busy");
+    expect(operatorEvents).toContainEqual({ kind: "turn_cancelled" });
+    expect(operatorEvents).toContainEqual({ kind: "turn_phase", phase: "cancelling" });
+    expect(operatorEvents).toContainEqual({
+      kind: "control_decision",
+      control: "talk",
+      result: "ignored_busy",
+      state: "cancelling"
+    });
     firstPlayback.resolve(undefined);
     await vi.waitFor(() => expect(captureBoundaries).toEqual(["suppress", "resume"]));
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
@@ -350,9 +361,14 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.tailComplete();
     await vi.waitFor(() => expect(driver.sttRequests).toHaveLength(2));
     expect(driver.piRequests).toHaveLength(1);
+    expect(operatorEvents.at(-1)).toEqual({
+      kind: "turn_phase",
+      phase: "waiting_for_previous_turn"
+    });
 
     firstSettlement.resolve(undefined);
     await vi.waitFor(() => expect(driver.piRequests).toHaveLength(2));
+    expect(operatorEvents).toContainEqual({ kind: "turn_phase", phase: "processing" });
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
     await driver.runtime.stop();
@@ -915,6 +931,8 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(operatorEvents).toEqual([
       { kind: "turn_started" },
       { kind: "turn_phase", phase: "listening" },
+      { kind: "turn_cancelled" },
+      { kind: "turn_phase", phase: "cancelling" },
       { kind: "turn_phase", phase: "idle" }
     ]);
     expect(
@@ -1389,9 +1407,11 @@ describe("resident hold-to-talk voice runtime", () => {
   it("runs farewell and cleanup when inactivity ends the interaction", async () => {
     vi.useFakeTimers();
     const lifecycleEvents: string[] = [];
+    const operatorEvents: ResidentVoiceOperatorEvent[] = [];
     const driver = createDriver({
       farewellEnabled: true,
       lifecycleEvents,
+      operatorEvents,
       sessionDurationMs: 1_000
     });
 
@@ -1404,6 +1424,8 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(driver.piRequests[1]?.text).toContain("voice session is ending");
     expect(driver.playedChunks).toHaveLength(2);
     expect(lifecycleEvents).toContain("cancel_session");
+    expect(operatorEvents).toContainEqual({ kind: "interaction_ending_started" });
+    expect(operatorEvents.at(-1)).toEqual({ kind: "interaction_ending_finished" });
     await driver.runtime.stop();
   });
 
@@ -2050,6 +2072,8 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(operatorEvents).toEqual([
       { kind: "turn_started" },
       { kind: "turn_phase", phase: "listening" },
+      { kind: "turn_cancelled" },
+      { kind: "turn_phase", phase: "cancelling" },
       { kind: "turn_phase", phase: "idle" }
     ]);
   });

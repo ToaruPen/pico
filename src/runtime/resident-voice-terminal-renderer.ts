@@ -1,10 +1,12 @@
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 import type { PicoMacKey } from "../config/index.js";
+import type { ResidentControlResult } from "./resident-control.js";
+import type { ResidentControlState } from "./resident-control-controller.js";
 import type { ResidentVoiceTurnPhase } from "./resident-voice-operator.js";
 import type { VoiceRuntimeStage, VoiceStageStatus } from "./voice-stage-probe.js";
 
-export type ResidentVoiceTerminalPhase = ResidentVoiceTurnPhase;
+export type ResidentVoiceTerminalPhase = ResidentVoiceTurnPhase | "ending";
 
 export type ResidentVoiceTerminalTheme = {
   readonly fg: (
@@ -30,14 +32,22 @@ export type ResidentVoiceTerminalTurnView = {
   readonly staffText?: string;
   readonly picoText?: string;
   readonly failure?: string;
+  readonly cancelled?: boolean;
   readonly tools: readonly ResidentVoiceTerminalToolView[];
   readonly timings: ReadonlyMap<VoiceRuntimeStage, StageTimingView>;
+};
+
+export type ResidentVoiceTerminalControlNotice = {
+  readonly control: "talk";
+  readonly result: ResidentControlResult;
+  readonly state: ResidentControlState | "interaction_ending";
 };
 
 export type ResidentVoiceTerminalView = {
   readonly controls: ResidentVoiceTerminalControls;
   readonly phase: ResidentVoiceTerminalPhase;
   readonly activeToolName?: string;
+  readonly notice?: ResidentVoiceTerminalControlNotice;
   readonly turns: readonly ResidentVoiceTerminalTurnView[];
 };
 
@@ -57,8 +67,11 @@ const phasePresentations: Readonly<Record<ResidentVoiceTerminalPhase, PhasePrese
   listening: { symbol: "●", label: "聞き取り中", color: "accent" },
   transcribing: { symbol: "◐", label: "文字起こし中", color: "warning" },
   processing: { symbol: "◐", label: "考えています", color: "warning" },
+  waiting_for_previous_turn: { symbol: "◐", label: "前の処理を整理中", color: "warning" },
   synthesizing: { symbol: "◐", label: "音声準備中", color: "warning" },
-  speaking: { symbol: "●", label: "話しています", color: "accent" }
+  speaking: { symbol: "●", label: "話しています", color: "accent" },
+  cancelling: { symbol: "◐", label: "中断処理中", color: "warning" },
+  ending: { symbol: "◐", label: "セッション終了中", color: "warning" }
 };
 
 const comparableStages = [
@@ -78,6 +91,10 @@ export function renderResidentVoiceTerminal(
   const turns = view.turns.slice(-2);
   const currentTurn = turns.at(-1);
   const lines = renderHeader(view, currentTurn, width, theme);
+  const notice = formatControlNotice(view);
+  if (notice !== undefined) {
+    lines.push(theme.fg("muted", notice));
+  }
 
   if (width >= 48) {
     lines.push(theme.fg("dim", "─".repeat(width)));
@@ -147,6 +164,10 @@ function renderTurn(
     renderRoleText(lines, "PICO", theme.fg("error", `✗ ${turn.failure}`), width, theme);
   }
 
+  if (turn.cancelled === true) {
+    lines.push(`${" ".repeat(rolePrefixWidth)}${theme.fg("muted", "− 中断済み")}`);
+  }
+
   const metrics = formatMetrics(turn.timings);
   if (metrics !== undefined) {
     const styled = theme.fg("muted", metrics);
@@ -156,6 +177,23 @@ function renderTurn(
       lines.push(`${" ".repeat(rolePrefixWidth)}${styled}`);
     }
   }
+}
+
+function formatControlNotice(view: ResidentVoiceTerminalView): string | undefined {
+  const notice = view.notice;
+  if (notice === undefined || notice.control !== "talk") return undefined;
+
+  if (notice.result === "noop" && notice.state === "listening") {
+    return `− ${view.controls.talkKey}: 既に聞き取り中`;
+  }
+
+  const reason =
+    notice.state === "cancelling"
+      ? "中断処理中"
+      : notice.state === "interaction_ending"
+        ? "セッション終了中"
+        : "現在の処理中";
+  return `− ${view.controls.talkKey}: ${reason}のため受理せず`;
 }
 
 function renderRoleText(

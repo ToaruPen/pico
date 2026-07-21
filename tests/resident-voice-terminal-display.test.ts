@@ -104,7 +104,7 @@ describe("resident voice terminal display", () => {
     expect(onChange).toHaveBeenCalledTimes(13);
   });
 
-  it("ignores farewell telemetry after a resident turn becomes idle", () => {
+  it("shows farewell telemetry in a bounded interaction-ending lifecycle", () => {
     const display = createResidentVoiceTerminalDisplay({ controls: configuredControls });
 
     display.record({ kind: "turn_started" });
@@ -125,8 +125,8 @@ describe("resident voice terminal display", () => {
       attributes: {}
     });
     display.record({ kind: "turn_phase", phase: "idle" });
-    const completedCard = display.render(100, plainTheme);
-
+    display.record({ kind: "interaction_ending_started" });
+    display.record({ kind: "pi_response", text: "またお手伝いします" });
     display.record({
       kind: "stage",
       stage: "pi_turn",
@@ -134,23 +134,44 @@ describe("resident voice terminal display", () => {
       durationMs: 9_000,
       attributes: {}
     });
+    const duringFarewell = display.render(100, plainTheme).join("\n");
+    expect(duringFarewell).toContain("◐ セッション終了中");
+    expect(duringFarewell).toContain("PICO  またお手伝いします");
+
+    display.record({ kind: "interaction_ending_finished" });
+    const afterFarewell = display.render(100, plainTheme).join("\n");
+    expect(afterFarewell).toContain("● 待機中");
+    expect(afterFarewell).toContain("PICO  またお手伝いします");
+  });
+
+  it("retains one configured busy notice until the next accepted turn", () => {
+    const display = createResidentVoiceTerminalDisplay({ controls: configuredControls });
+
+    display.record({ kind: "turn_started" });
+    display.record({ kind: "turn_phase", phase: "speaking" });
+    display.record({ kind: "turn_cancelled" });
+    display.record({ kind: "turn_phase", phase: "cancelling" });
     display.record({
-      kind: "tool_execution_start",
-      toolCallId: "farewell-tool",
-      toolName: "farewell_status",
-      args: undefined
-    });
-    display.record({
-      kind: "tool_execution_end",
-      toolCallId: "farewell-tool",
-      toolName: "farewell_status",
-      status: "ok",
-      durationMs: 250
+      kind: "control_decision",
+      control: "talk",
+      result: "ignored_busy",
+      state: "cancelling"
     });
 
-    const afterFarewell = display.render(100, plainTheme);
-    expect(afterFarewell).toEqual(completedCard);
-    expect(afterFarewell.join("\n")).not.toContain("farewell_status");
+    const cancelled = display.render(100, plainTheme).join("\n");
+    expect(cancelled).toContain("◐ 中断処理中");
+    expect(cancelled).toContain("− F13: 中断処理中のため受理せず");
+    expect(cancelled).toContain("− 中断済み");
+
+    display.record({ kind: "turn_phase", phase: "idle" });
+    expect(display.render(100, plainTheme).join("\n")).toContain(
+      "− F13: 中断処理中のため受理せず"
+    );
+
+    display.record({ kind: "turn_started" });
+    display.record({ kind: "turn_phase", phase: "listening" });
+    const nextTurn = display.render(100, plainTheme).join("\n");
+    expect(nextTurn).not.toContain("中断処理中のため受理せず");
   });
 
   it("shows a post-response audio failure while preserving the response", () => {
