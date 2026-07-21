@@ -43,8 +43,8 @@ import {
   type ResidentAudioOutputPlan,
   residentPlaybackFinalSilenceMs
 } from "./resident-audio-playback.js";
-import type { ResidentIoTimingStage } from "./resident-io-protocol.js";
 import { createResidentHealthPublicationGate } from "./resident-health-publication.js";
+import type { ResidentIoTimingStage } from "./resident-io-protocol.js";
 import {
   acquireResidentSingleInstanceLock,
   registerResidentSingleInstanceLockShutdownCleanup

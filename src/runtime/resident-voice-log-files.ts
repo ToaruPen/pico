@@ -1,4 +1,4 @@
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
 
@@ -447,7 +447,7 @@ async function ensureManagedChildDirectory(
 
 async function ensureDirectorySequence(directories: readonly string[]): Promise<void> {
   for (const directory of directories) {
-    let metadata;
+    let metadata: Stats;
     try {
       metadata = await lstat(directory);
     } catch (error) {

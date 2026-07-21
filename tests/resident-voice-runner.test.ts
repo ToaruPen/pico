@@ -12,6 +12,7 @@ import type {
   MacOSResidentIoControlOutcome
 } from "../src/runtime/macos-resident-io-bridge.js";
 import type { ResidentAudioCapture } from "../src/runtime/resident-audio-io.js";
+import type { ResidentVoiceFileLogSink } from "../src/runtime/resident-voice-log-files.js";
 import {
   assertResidentVoiceStartupReadiness,
   createConfiguredOpenTelemetry,
@@ -25,7 +26,6 @@ import {
   shutdownResidentVoiceTelemetry,
   waitForDirectResidentVoiceRuntime
 } from "../src/runtime/resident-voice-runner.js";
-import type { ResidentVoiceFileLogSink } from "../src/runtime/resident-voice-log-files.js";
 import { recordVoiceStageProbe } from "../src/runtime/voice-stage-probe.js";
 
 const aivisBaseUrl = "http://127.0.0.1:10101";

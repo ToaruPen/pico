@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
-
-import type { ResidentIoMessage } from "../src/runtime/resident-io-protocol.js";
 import { createResidentHealthPublicationGate } from "../src/runtime/resident-health-publication.js";
+import type { ResidentIoMessage } from "../src/runtime/resident-io-protocol.js";
 
 type ResidentHealthEvent = Extract<ResidentIoMessage, { kind: "health_event" }>;
 
