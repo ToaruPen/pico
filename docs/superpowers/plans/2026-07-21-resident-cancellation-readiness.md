@@ -405,7 +405,7 @@ Validated the live Apple Speech `/health` and `/ready` endpoints and the Aivis
 Apple Speech admission lease; no exclusive capture or transcription smoke was
 started.
 
-- [ ] **Step 5: Push and converge PR #109**
+- [x] **Step 5: Push and converge PR #109**
 
 ```bash
 git push origin codex/resident-voice-final-response
