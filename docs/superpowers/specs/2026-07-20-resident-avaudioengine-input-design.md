@@ -187,6 +187,11 @@ health stateは`starting`、`running`、`recovering`、`suspended`、`unavailabl
 notification callback内でengineをdeallocateしない。recovery中のtalkはacceptedにせず、queueしない。
 別device、FFmpeg、system default、ALSAへ自動fallbackしない。
 
+各engine generationのfirst PCM前は、engineがrunningのまま届く最初のconfiguration notification
+だけを既知の自己通知として無視する。engineが停止している場合、または2件目のnotificationが届いた
+場合、初回startupはfail-closeし、recovery中はそのattemptを無効化する。current generationのfirst PCM
+後に届くnotificationは上記recoveryへ移行する。
+
 ## 11. observabilityとprivacy
 
 必要なstage/eventは次とする。

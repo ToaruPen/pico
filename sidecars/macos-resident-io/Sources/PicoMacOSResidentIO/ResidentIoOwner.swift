@@ -14,6 +14,7 @@ final class ResidentIoOwner: @unchecked Sendable {
   private let stopRunLoop: @Sendable () -> Void
   private var audioEngine: ResidentAudioEngine!
   private let clockMapper = HostClockMapper()
+  private var configurationChangeGate = AudioConfigurationChangeGate()
   private var gate: PttSampleGate
   private let pcmConverter: AVAudioPcm16MonoConverter
   private var assembler: Pcm16FrameAssembler
@@ -35,6 +36,7 @@ final class ResidentIoOwner: @unchecked Sendable {
   private var recoveryCycle: UInt64 = 0
   private var engineGeneration: UInt64 = 1
   private var activeAudioEngineGeneration: UInt64?
+  private var activeAudioEngineHasDeliveredCallback = false
   private var restartCount: UInt32 = 0
   private var droppedFrameCount: UInt64 = 0
   private var outsidePttDroppedFrameCount: UInt64 = 0
@@ -65,8 +67,7 @@ final class ResidentIoOwner: @unchecked Sendable {
         self?.recordDroppedBuffer(engineGeneration: generation, count: count)
       },
       onConfigurationChange: { [weak self] generation in
-        guard let self, self.readySent else { return }
-        self.beginRecovery(engineGeneration: generation, code: "configuration_changed")
+        self?.handleConfigurationChange(engineGeneration: generation)
       },
       onFailure: { [weak self] generation, error in
         self?.reportAudioFailure(engineGeneration: generation, error: error)
@@ -78,6 +79,8 @@ final class ResidentIoOwner: @unchecked Sendable {
     try queue.sync {
       let deviceID = try CoreAudioDeviceCatalog.resolveInputDevice(uid: configuration.deviceUID)
       engineStartBeganAt = machHostSeconds()
+      configurationChangeGate.reset()
+      activeAudioEngineHasDeliveredCallback = false
       activeAudioEngineGeneration = try audioEngine.start(deviceID: deviceID)
       startHealthTimer()
     }
@@ -134,6 +137,7 @@ final class ResidentIoOwner: @unchecked Sendable {
       self.assembler.clear()
       self.clearAllGenerationObservations()
       self.activeAudioEngineGeneration = nil
+      self.activeAudioEngineHasDeliveredCallback = false
       self.audioEngine.stop()
       self.writer.write(
         .healthEvent(
@@ -160,6 +164,7 @@ final class ResidentIoOwner: @unchecked Sendable {
       _ = gate.markUnavailable()
       assembler.clear()
       activeAudioEngineGeneration = nil
+      activeAudioEngineHasDeliveredCallback = false
       audioEngine.stop()
     }
   }
@@ -185,6 +190,7 @@ final class ResidentIoOwner: @unchecked Sendable {
         break
       }
       try emit(output)
+      activeAudioEngineHasDeliveredCallback = true
       if recovering {
         completeRecoveryAfterFirstCallback()
       }
@@ -430,6 +436,29 @@ final class ResidentIoOwner: @unchecked Sendable {
     fatal(code: "audio_callback_failed", error: error)
   }
 
+  private func handleConfigurationChange(engineGeneration: UInt64) {
+    guard engineGeneration == activeAudioEngineGeneration else { return }
+    switch configurationChangeGate.action(
+      hasDeliveredFirstCallback: activeAudioEngineHasDeliveredCallback,
+      isEngineRunning: audioEngine.isRunning
+    ) {
+    case .ignoreStartupNotification:
+      return
+    case .invalidateStartingGeneration:
+      if recovering {
+        activeAudioEngineGeneration = nil
+        activeAudioEngineHasDeliveredCallback = false
+        audioEngine.stop()
+      } else {
+        fatal(
+          code: "configuration_changed_during_startup",
+          error: ResidentIoRuntimeError.startupConfigurationChanged)
+      }
+    case .recover:
+      beginRecovery(engineGeneration: engineGeneration, code: "configuration_changed")
+    }
+  }
+
   private func beginRecovery(engineGeneration: UInt64? = nil, code: String) {
     if let engineGeneration, engineGeneration != activeAudioEngineGeneration { return }
     guard !stopped, !suspended, !recovering else { return }
@@ -445,6 +474,7 @@ final class ResidentIoOwner: @unchecked Sendable {
     assembler.clear()
     clearAllGenerationObservations()
     activeAudioEngineGeneration = nil
+    activeAudioEngineHasDeliveredCallback = false
     audioEngine.stop()
     writer.write(
       .healthEvent(
@@ -462,6 +492,8 @@ final class ResidentIoOwner: @unchecked Sendable {
       let deviceID = try CoreAudioDeviceCatalog.resolveInputDevice(uid: configuration.deviceUID)
       resetPcmConversion()
       engineStartBeganAt = machHostSeconds()
+      configurationChangeGate.reset()
+      activeAudioEngineHasDeliveredCallback = false
       activeAudioEngineGeneration = try audioEngine.start(deviceID: deviceID)
       let attempt = recoveryAttempt
       queue.asyncAfter(deadline: .now() + .seconds(1)) { [weak self] in
@@ -469,6 +501,7 @@ final class ResidentIoOwner: @unchecked Sendable {
           self.recoveryAttempt == attempt
         else { return }
         self.activeAudioEngineGeneration = nil
+        self.activeAudioEngineHasDeliveredCallback = false
         self.audioEngine.stop()
         if attempt >= 3 {
           self.fatal(
@@ -651,6 +684,7 @@ private final class ResidentIoWriter: @unchecked Sendable {
 
 enum ResidentIoRuntimeError: Error, LocalizedError {
   case firstAudioCallbackTimedOut
+  case startupConfigurationChanged
   case eventTapDisabled
   case recoveryCallbackTimedOut
   case protocolEof
@@ -663,6 +697,8 @@ enum ResidentIoRuntimeError: Error, LocalizedError {
     switch self {
     case .firstAudioCallbackTimedOut:
       "AVAudioEngine did not deliver its first input callback before timeout"
+    case .startupConfigurationChanged:
+      "AVAudioEngine configuration changed before its first input callback"
     case .eventTapDisabled:
       "Core Graphics disabled the resident I/O event tap"
     case .recoveryCallbackTimedOut:
