@@ -99,6 +99,10 @@ public struct TailCompleteMetadata: Codable, Equatable, Sendable {
 public struct CaptureBoundaryMetadata: Codable, Equatable, Sendable {
   public let commandID: UInt64
 
+  private enum CodingKeys: String, CodingKey {
+    case commandID = "commandId"
+  }
+
   public init(commandID: UInt64) {
     self.commandID = commandID
   }
