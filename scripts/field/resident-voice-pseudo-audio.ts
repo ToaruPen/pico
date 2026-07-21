@@ -136,7 +136,7 @@ export function createResidentVoicePseudoAudioPlaybackMeasurement(
 const singletonMeasuredStages = new Set([
   "tts_time_to_first_chunk",
   "tts_request_wall",
-  "ptt_release_to_playback_start",
+  "ptt_release_to_first_pcm_write",
   "tts_playback"
 ]);
 const repeatedMeasuredStages = new Set(["tts_audio_query", "tts_synthesize"]);

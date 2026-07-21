@@ -413,15 +413,17 @@ describe("resident hold-to-talk voice runtime", () => {
     });
   });
 
-  it("records wall time from an accepted PTT release to first playback", async () => {
+  it("records wall time from an accepted PTT release to the first accepted PCM write", async () => {
     vi.useFakeTimers();
     const audit = createStructuredAuditLog();
     const ttsGate = createGate<TtsSynthesisResult>();
+    const playbackGate = createGate<undefined>();
     let monotonicTimeMs = 100;
     const driver = createDriver({
       audit,
       monotonicNow: () => monotonicTimeMs,
-      ttsResponse: () => ttsGate.promise
+      ttsResponse: () => ttsGate.promise,
+      playbackCompletion: () => playbackGate.promise
     });
 
     await startReleasedHold(driver);
@@ -429,12 +431,17 @@ describe("resident hold-to-talk voice runtime", () => {
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("synthesizing"));
     monotonicTimeMs = 850;
     ttsGate.resolve(successfulSynthesis());
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("speaking"));
+    expect(voiceStageEvents(audit, "ptt_release_to_first_pcm_write")).toEqual([]);
+
+    monotonicTimeMs = 925;
+    playbackGate.resolve(undefined);
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
-    expect(voiceStageEvent(audit, "ptt_release_to_playback_start")).toMatchObject({
+    expect(voiceStageEvent(audit, "ptt_release_to_first_pcm_write")).toMatchObject({
       attributes: {
         "pico.voice.stage_status": "ok",
-        "pico.voice.stage_duration_ms": 750
+        "pico.voice.stage_duration_ms": 825
       }
     });
 
@@ -450,7 +457,7 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.tailComplete();
     await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
 
-    expect(voiceStageEvent(audit, "ptt_release_to_playback_start")).toMatchObject({
+    expect(voiceStageEvent(audit, "ptt_release_to_first_pcm_write")).toMatchObject({
       attributes: {
         "pico.voice.stage_status": "skipped",
         "pico.voice.error_code": "playback_not_started"
@@ -458,6 +465,35 @@ describe("resident hold-to-talk voice runtime", () => {
     });
 
     await driver.runtime.stop();
+  });
+
+  it("settles the first PCM write measurement once when playback write fails", async () => {
+    vi.useFakeTimers();
+    const audit = createStructuredAuditLog();
+    let monotonicTimeMs = 100;
+    const driver = createDriver({
+      audit,
+      monotonicNow: () => monotonicTimeMs,
+      playbackWriteError: new Error("speaker write failed")
+    });
+    const completionFailure = driver.runtime.completion.catch((error: unknown) => error);
+
+    await startReleasedHold(driver);
+    monotonicTimeMs = 475;
+    await driver.tailComplete();
+    await vi.waitFor(() => expect(driver.runtime.state()).toBe("idle"));
+
+    const events = voiceStageEvents(audit, "ptt_release_to_first_pcm_write");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      attributes: {
+        "pico.voice.stage_status": "error",
+        "pico.voice.stage_duration_ms": 375,
+        "pico.voice.error_code": "playback_write_failed"
+      }
+    });
+    await driver.runtime.stop();
+    await expect(completionFailure).resolves.toMatchObject({ failedTurns: 1 });
   });
 
   it("records Pi prompt failure wall time", async () => {
@@ -761,7 +797,7 @@ describe("resident hold-to-talk voice runtime", () => {
     expect(driver.piRequests).toEqual([]);
     const pttEvents = audit
       .entries()
-      .filter((event) => event.attributes["pico.voice.stage"] === "ptt_release_to_playback_start");
+      .filter((event) => event.attributes["pico.voice.stage"] === "ptt_release_to_first_pcm_write");
     expect(pttEvents).toHaveLength(1);
     expect(pttEvents[0]?.attributes).toMatchObject({
       "pico.voice.stage_status": "skipped",
@@ -824,6 +860,16 @@ describe("resident hold-to-talk voice runtime", () => {
     const playbackEvents = voiceStageEvents(audit, "tts_playback");
     expect(playbackEvents).toHaveLength(1);
     expect(playbackEvents[0]).toMatchObject({
+      attributes: {
+        "pico.voice.stage_status": "skipped",
+        "pico.voice.stage_duration_ms": 500,
+        "pico.voice.error_code": "cancelled"
+      }
+    });
+
+    const pttEvents = voiceStageEvents(audit, "ptt_release_to_first_pcm_write");
+    expect(pttEvents).toHaveLength(1);
+    expect(pttEvents[0]).toMatchObject({
       attributes: {
         "pico.voice.stage_status": "skipped",
         "pico.voice.stage_duration_ms": 500,
@@ -1898,6 +1944,7 @@ function createDriver(
     readonly ttsResponse?: (signal: AbortSignal | undefined) => Promise<TtsSynthesisResult>;
     readonly ttsEvents?: (signal: AbortSignal | undefined) => AsyncIterable<TtsSynthesisEvent>;
     readonly playbackCompletion?: (signal: AbortSignal | undefined) => Promise<void>;
+    readonly playbackWriteError?: Error;
     readonly playbackStopCompletion?: () => Promise<void>;
     readonly disposalCompletion?: () => Promise<void>;
     readonly beforeSessionRemove?: (sessionId: string) => void;
@@ -2023,6 +2070,7 @@ function createDriver(
       return {
         async write(chunk) {
           playedChunks.push(chunk);
+          if (options.playbackWriteError !== undefined) throw options.playbackWriteError;
           await options.playbackCompletion?.(signal);
         },
         finish() {

@@ -101,7 +101,7 @@ exportまたはshutdownの失敗はprocess logへ残すが、既存の音声runt
 
 | Stage | 開始 | 終了 |
 |---|---|---|
-| `ptt_release_to_playback_start` | accepted `talk_released` | 最初のplayback provider呼び出し直前 |
+| `ptt_release_to_first_pcm_write` | accepted `talk_released` | 最初のplayback session write成功直後 |
 | `pi_time_to_first_text` | Pi prompt受付 | 最初のnon-empty text delta |
 | `pi_session_resource_load` | child resource reload開始 | reload settlement |
 | `pi_session_create` | Pi SDK child session生成開始 | factory settlement |
@@ -110,9 +110,10 @@ exportまたはshutdownの失敗はprocess logへ残すが、既存の音声runt
 | `pi_session_dispose` | session shutdown通知開始 | `dispose()`完了 |
 | `interaction_end` | lifecycleのended通知受付 | farewell、deferred cancellation、Pi dispose、record removal完了 |
 
-`ptt_release_to_playback_start`はPicoが観測できる出力provider dispatchまでを表す。speaker driver
-または物理デバイスが実際に発音を開始する時刻とは呼ばない。OS/driver latency metadataを取得
-できるproviderへ交換した場合は、別属性または別stageとして明示する。
+`ptt_release_to_first_pcm_write`はPicoが観測できる最初のPCM write受理までを表す。speaker
+driverまたは物理デバイスが実際に発音を開始する時刻とは呼ばない。write前のcancelまたは
+失敗でも一度だけsettleする。2026-07-21以前の`ptt_release_to_playback_start`はplayback
+admission前にsettleしていたため、このstageと直接比較しない。
 
 `pi_time_to_first_text`はsession準備、plugin hook、model first-token latencyを包含する。
 個別plugin、特にMem0の内部処理時間はPicoで計測しない。Pi-level pluginが自身のtelemetryを

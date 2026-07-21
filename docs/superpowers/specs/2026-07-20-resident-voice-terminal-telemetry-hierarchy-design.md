@@ -27,8 +27,8 @@
 ## 目的
 
 - 通常利用で現在状態、認識文、応答、tool成否を一目で追えるようにする。
-- ユーザー体感の応答開始時間を一つの代表値として示す。
-- 遅延の内訳は、応答開始へ寄与する最長区間だけを要約する。
+- PTT releaseから最初のPCM write受理までを一つの代表値として示す。
+- 遅延の内訳は、音声送出へ寄与する最長区間だけを要約する。
 - 端末幅とPi themeへ追従し、すべての描画行をviewport内へ収める。
 - 既存の安全な文字列化、上限、best-effort境界を維持する。
 
@@ -45,19 +45,19 @@
 ### 常時表示
 
 - 状態記号と日本語ラベル
-- `F1 話す` と `F2 中断`
+- 検証済み設定の `<talkKey> 話す` と `<cancelKey> 中断`
 - 認識済みstaff発話
 - Picoの返答
 - 実行されたtool名、成否、所要時間
-- `ptt_release_to_playback_start` を「応答開始」とした実測値
+- `ptt_release_to_first_pcm_write` を「音声送出」とした実測値
 - 明示的な失敗箇所と、既存error codeから得られる短い理由
 
 ### 一行へ要約
 
-応答開始へ寄与する比較可能な区間から最長のものを選び、
+音声送出へ寄与する比較可能な区間から最長のものを選び、
 `最長 Pi 20.35 s` の形式で示す。候補は `stt`、`pi_turn`、
 `tts_time_to_first_chunk` とする。end-to-end値、`pi_time_to_first_text` のような
-区間内milestone、応答開始後の `tts_playback` は候補に含めない。
+区間内milestone、音声送出後の `tts_playback` は候補に含めない。
 
 ### 通常画面へ出さない
 
@@ -95,12 +95,12 @@ controllerが確定した遷移だけを通知し、表示側の推測で待機�
 各turnは構造化状態として保持し、最終描画時に次の順で出力する。
 
 ```text
-● 待機中  Pico voice                       F1 話す · F2 中断
+● 待機中  Pico voice                     F13 話す · F14 中断
 ────────────────────────────────────────────────────────
 YOU   スタックチャンの状態を教えて
 TOOL  ✓ stackchan_get_status  350 ms
 PICO  準備できています。
-      応答開始 22.42 s · 最長 Pi 20.35 s
+      音声送出 22.42 s · 最長 Pi 20.35 s
 ```
 
 tool失敗では `✗` と短いerror codeを表示する。成功したtoolのraw引数と結果は
@@ -112,7 +112,7 @@ tool失敗では `✗` と短いerror codeを表示する。成功したtoolのr
 Piのcustom widget componentを使い、`render(width)` のたびにviewport幅へ合わせる。
 Pi themeで色を適用し、`@earendil-works/pi-tui` のANSI-awareな幅処理を使う。
 
-- 72 column以上: header、操作、応答開始要約を可能な範囲で一行表示する。
+- 72 column以上: header、操作、音声送出要約を可能な範囲で一行表示する。
 - 48〜71 column: 操作と計測要約を次行へ送る。
 - 48 column未満: 罫線を省略し、role labelの後続行へ本文を折り返す。
 - 長文は安全なUTF-8 byte上限を先に適用し、その後terminal column単位で折り返す。

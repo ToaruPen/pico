@@ -18,13 +18,15 @@ export default function registerPicoExtension(pi: ExtensionAPI): void {
   registerPicoExtensionWithRuntime(pi);
 
   registerPicoStartup(pi, {
-    createController: (context, agentSettings) => {
-      const operator = createResidentVoiceTerminalOperator({
-        mode: context.mode,
-        setWidget: (key, factory, options) => context.ui.setWidget(key, factory, options)
-      });
-
+    createController: (context, agentSettings, config) => {
       return createResidentVoiceService({
+        config,
+        createOperator: (keyboard) =>
+          createResidentVoiceTerminalOperator({
+            controls: keyboard,
+            mode: context.mode,
+            setWidget: (key, factory, options) => context.ui.setWidget(key, factory, options)
+          }),
         createPiAgent: (options) =>
           createPiAgentTurnClient({
             ...options,
@@ -36,8 +38,7 @@ export default function registerPicoExtension(pi: ExtensionAPI): void {
         onError: (error) => {
           context.ui.notify(error.message, "error");
           context.shutdown();
-        },
-        ...(operator === undefined ? {} : { operator })
+        }
       });
     }
   });

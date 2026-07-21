@@ -16,8 +16,10 @@ const ansiTheme: ResidentVoiceTerminalTheme = {
   fg: (_color, text) => `\u001B[36m${text}\u001B[39m`,
   bold: (text) => `\u001B[1m${text}\u001B[22m`
 };
+const configuredControls = { talkKey: "F13", cancelKey: "F14" } as const;
 
 const completedView: ResidentVoiceTerminalView = {
+  controls: configuredControls,
   phase: "idle",
   turns: [
     {
@@ -30,7 +32,7 @@ const completedView: ResidentVoiceTerminalView = {
         ["pi_turn", { durationMs: 20_350, status: "ok" }],
         ["tts_time_to_first_chunk", { durationMs: 1_450, status: "ok" }],
         ["tts_playback", { durationMs: 4_410, status: "ok" }],
-        ["ptt_release_to_playback_start", { durationMs: 22_420, status: "ok" }]
+        ["ptt_release_to_first_pcm_write", { durationMs: 22_420, status: "ok" }]
       ])
     }
   ]
@@ -67,7 +69,7 @@ describe("resident voice terminal renderer", () => {
   it("shows only the user-facing latency and longest comparable stage", () => {
     const output = renderResidentVoiceTerminal(completedView, 100, plainTheme).join("\n");
 
-    expect(output).toContain("応答開始 22.42 s");
+    expect(output).toContain("音声送出 22.42 s");
     expect(output).toContain("最長 Pi 20.35 s");
     expect(output).not.toContain("Pi初字");
     expect(output).not.toContain("再生 4.41 s");
@@ -82,16 +84,22 @@ describe("resident voice terminal renderer", () => {
     ["synthesizing", "◐ 音声準備中"],
     ["speaking", "● 話しています"]
   ])("identifies the %s phase without relying on color", (phase, label) => {
-    const output = renderResidentVoiceTerminal({ phase, turns: [] }, 100, plainTheme).join("\n");
+    const output = renderResidentVoiceTerminal(
+      { controls: configuredControls, phase, turns: [] },
+      100,
+      plainTheme
+    ).join("\n");
 
     expect(output).toContain(label);
-    expect(output).toContain("F1 話す");
-    expect(output).toContain("F2 中断");
+    expect(output).toContain("F13 話す");
+    expect(output).toContain("F14 中断");
+    expect(output).not.toContain("F1 話す");
   });
 
   it("identifies an active tool and failed tool without exposing internal payloads", () => {
     const output = renderResidentVoiceTerminal(
       {
+        controls: configuredControls,
         phase: "processing",
         activeToolName: "status_tool",
         turns: [
@@ -123,6 +131,7 @@ describe("resident voice terminal renderer", () => {
   it("wraps Japanese role text below 48 columns and omits the divider", () => {
     const output = renderResidentVoiceTerminal(
       {
+        controls: configuredControls,
         phase: "listening",
         turns: [
           {
@@ -145,14 +154,15 @@ describe("resident voice terminal renderer", () => {
   it("wraps controls and metrics at medium width", () => {
     const lines = renderResidentVoiceTerminal(completedView, 60, plainTheme);
 
-    expect(lines.some((line) => line.includes("F1 話す · F2 中断"))).toBe(true);
-    expect(lines.some((line) => line.trimStart().startsWith("応答開始"))).toBe(true);
+    expect(lines.some((line) => line.includes("F13 話す · F14 中断"))).toBe(true);
+    expect(lines.some((line) => line.trimStart().startsWith("音声送出"))).toBe(true);
     expect(lines.every((line) => visibleWidth(line) <= 60)).toBe(true);
   });
 
   it("renders only the current and previous turn and hides internal fields", () => {
     const output = renderResidentVoiceTerminal(
       {
+        controls: configuredControls,
         phase: "idle",
         turns: [
           { staffText: "古いturn", tools: [], timings: new Map() },
@@ -184,5 +194,20 @@ describe("resident voice terminal renderer", () => {
         (line) => visibleWidth(line) <= 1
       )
     ).toBe(true);
+  });
+
+  it.each([24, 40, 100])("bounds long configured control names at %i columns", (width) => {
+    const lines = renderResidentVoiceTerminal(
+      {
+        controls: { talkKey: "RightArrow", cancelKey: "LeftArrow" },
+        phase: "idle",
+        turns: []
+      },
+      width,
+      plainTheme
+    );
+
+    expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+    expect(lines.join("\n")).not.toContain("F1 話す");
   });
 });

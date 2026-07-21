@@ -176,6 +176,12 @@ removed. The configured speech gate remains only for empty/no-speech rejection.
 Normal character keys may be configured intentionally. The bridge consumes
 configured controls globally so they do not type into other applications.
 
+The Pico startup boundary resolves this configuration once. The Pi model,
+resident service, macOS sidecar, and terminal operator all receive values from
+that exact resolved object; the service does not reload the environment. The
+terminal renders the configured `talkKey` and `cancelKey` and has no F-key
+fallback.
+
 ## Runtime State Machine
 
 ```text

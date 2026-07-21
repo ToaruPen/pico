@@ -506,12 +506,12 @@ function resolveResidentPiAgent(
   return resolvedPiAgent;
 }
 
-export function requireResidentVoiceEnabled(config: PicoConfig): void {
+export function requireResidentVoiceEnabled(config: PicoConfig): PicoResidentControlConfig {
   if (!config.voice.resident.enabled) {
     throw new Error("pico resident voice runtime requires voice.resident.enabled=true");
   }
 
-  requireResidentControlConfig(config);
+  return requireResidentControlConfig(config);
 }
 
 function requireResidentControlConfig(config: PicoConfig): PicoResidentControlConfig {

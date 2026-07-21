@@ -1,5 +1,6 @@
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
+import type { PicoMacKey } from "../config/index.js";
 import type { ResidentVoiceTurnPhase } from "./resident-voice-operator.js";
 import type { VoiceRuntimeStage, VoiceStageStatus } from "./voice-stage-probe.js";
 
@@ -34,9 +35,15 @@ export type ResidentVoiceTerminalTurnView = {
 };
 
 export type ResidentVoiceTerminalView = {
+  readonly controls: ResidentVoiceTerminalControls;
   readonly phase: ResidentVoiceTerminalPhase;
   readonly activeToolName?: string;
   readonly turns: readonly ResidentVoiceTerminalTurnView[];
+};
+
+export type ResidentVoiceTerminalControls = {
+  readonly talkKey: PicoMacKey;
+  readonly cancelKey: PicoMacKey;
 };
 
 type PhasePresentation = {
@@ -93,7 +100,10 @@ function renderHeader(
   const phase = resolvePhasePresentation(view, currentTurn);
   const status = theme.fg(phase.color, `${phase.symbol} ${phase.label}`);
   const title = theme.bold("Pico voice");
-  const controls = theme.fg("muted", "F1 話す · F2 中断");
+  const controls = theme.fg(
+    "muted",
+    `${view.controls.talkKey} 話す · ${view.controls.cancelKey} 中断`
+  );
 
   if (width < 72) {
     return [`${status}  ${title}`, controls];
@@ -188,10 +198,10 @@ function formatMetrics(
   timings: ReadonlyMap<VoiceRuntimeStage, StageTimingView>
 ): string | undefined {
   const values: string[] = [];
-  const responseStart = timings.get("ptt_release_to_playback_start");
+  const responseStart = timings.get("ptt_release_to_first_pcm_write");
 
   if (responseStart?.status === "ok") {
-    values.push(`応答開始 ${formatDuration(responseStart.durationMs)}`);
+    values.push(`音声送出 ${formatDuration(responseStart.durationMs)}`);
   }
 
   const longest = findLongestComparableTiming(timings);

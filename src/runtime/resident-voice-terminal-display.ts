@@ -4,6 +4,7 @@ import type {
   ResidentVoiceTurnPhase
 } from "./resident-voice-operator.js";
 import {
+  type ResidentVoiceTerminalControls,
   type ResidentVoiceTerminalTheme,
   type ResidentVoiceTerminalToolView,
   type ResidentVoiceTerminalTurnView,
@@ -18,6 +19,7 @@ import {
 } from "./voice-stage-probe.js";
 
 export type ResidentVoiceTerminalDisplayOptions = {
+  readonly controls: ResidentVoiceTerminalControls;
   readonly onChange?: () => void;
   readonly maximumTextBytes?: number;
 };
@@ -91,6 +93,7 @@ const stageFailureLabels: Partial<Readonly<Record<VoiceRuntimeStage, string>>> =
 };
 
 export function createResidentVoiceTerminalOperator(input: {
+  readonly controls: ResidentVoiceTerminalControls;
   readonly mode: string;
   readonly setWidget: (
     key: string,
@@ -102,6 +105,7 @@ export function createResidentVoiceTerminalOperator(input: {
 
   let activeTui: ResidentVoiceTerminalTui | undefined;
   const display = createResidentVoiceTerminalDisplay({
+    controls: input.controls,
     onChange: () => {
       try {
         activeTui?.requestRender();
@@ -133,7 +137,7 @@ export function createResidentVoiceTerminalOperator(input: {
 }
 
 export function createResidentVoiceTerminalDisplay(
-  options: ResidentVoiceTerminalDisplayOptions = {}
+  options: ResidentVoiceTerminalDisplayOptions
 ): ResidentVoiceTerminalDisplay {
   const maximumTextBytes = requireBoundedInteger(
     options.maximumTextBytes ?? defaultMaximumTextBytes,
@@ -166,7 +170,7 @@ export function createResidentVoiceTerminalDisplay(
     render(width, theme) {
       try {
         return renderResidentVoiceTerminal(
-          createView(lifecycle.phase, turns, pendingTools),
+          createView(options.controls, lifecycle.phase, turns, pendingTools),
           width,
           theme
         );
@@ -283,12 +287,14 @@ function applyEvent(
 }
 
 function createView(
+  controls: ResidentVoiceTerminalControls,
   phase: ResidentVoiceTurnPhase,
   turns: readonly MutableTurn[],
   pendingTools: ReadonlyMap<string, PendingTool>
 ): ResidentVoiceTerminalView {
   const activeToolName = Array.from(pendingTools.values()).at(-1)?.toolName;
   return {
+    controls,
     phase,
     ...(activeToolName === undefined ? {} : { activeToolName }),
     turns: turns.map(toTurnView)

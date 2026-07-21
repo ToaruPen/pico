@@ -136,11 +136,8 @@ struct WebSocketSpeechHandlerTests {
       inactivityTimeout: .milliseconds(20)
     )
 
-    try await Task.sleep(for: .milliseconds(30))
-    #expect(await exchange.status.finished)
-
-    exchange.client.finish()
     let frames = await exchange.server.value
+    exchange.client.finish()
     #expect(textPayloads(frames) == [failedJSON(code: "timeout")])
   }
 

@@ -11,13 +11,24 @@ const plainTheme: ResidentVoiceTerminalTheme = {
   fg: (_color, text) => text,
   bold: (text) => text
 };
+const configuredControls = { talkKey: "F13", cancelKey: "F14" } as const;
 
 describe("resident voice terminal display", () => {
   it("registers one custom component only in TUI mode and refreshes accepted events", () => {
     const setWidget = vi.fn();
 
-    expect(createResidentVoiceTerminalOperator({ mode: "print", setWidget })).toBeUndefined();
-    const operator = createResidentVoiceTerminalOperator({ mode: "tui", setWidget });
+    expect(
+      createResidentVoiceTerminalOperator({
+        controls: configuredControls,
+        mode: "print",
+        setWidget
+      })
+    ).toBeUndefined();
+    const operator = createResidentVoiceTerminalOperator({
+      controls: configuredControls,
+      mode: "tui",
+      setWidget
+    });
 
     expect(setWidget).toHaveBeenCalledOnce();
     const factory = setWidget.mock.calls[0]?.[1] as
@@ -34,6 +45,7 @@ describe("resident voice terminal display", () => {
     operator?.record({ kind: "staff_transcript", text: "表示する" });
 
     expect(requestRender).toHaveBeenCalledTimes(3);
+    expect(component?.render(100).join("\n")).toContain("F13 話す · F14 中断");
     expect(component?.render(100).join("\n")).toContain("YOU   表示する");
     expect(setWidget).toHaveBeenCalledWith("pico-resident-voice", expect.any(Function), {
       placement: "aboveEditor"
@@ -42,7 +54,7 @@ describe("resident voice terminal display", () => {
 
   it("renders structured conversation, safe tool evidence, and priority timings", () => {
     const onChange = vi.fn();
-    const display = createResidentVoiceTerminalDisplay({ onChange });
+    const display = createResidentVoiceTerminalDisplay({ controls: configuredControls, onChange });
 
     display.record({ kind: "turn_started" });
     display.record({ kind: "turn_phase", phase: "processing" });
@@ -69,7 +81,7 @@ describe("resident voice terminal display", () => {
       ["pi_turn", 1_075],
       ["tts_time_to_first_chunk", 240],
       ["tts_playback", 600],
-      ["ptt_release_to_playback_start", 1_400]
+      ["ptt_release_to_first_pcm_write", 1_400]
     ] as const) {
       display.record({
         kind: "stage",
@@ -84,7 +96,7 @@ describe("resident voice terminal display", () => {
     expect(output).toContain("YOU   スタックチャンの状態を教えて");
     expect(output).toContain("TOOL  ✓ stackchan_get_status  350 ms");
     expect(output).toContain("PICO  準備できています");
-    expect(output).toContain("応答開始 1.40 s · 最長 Pi 1.08 s");
+    expect(output).toContain("音声送出 1.40 s · 最長 Pi 1.08 s");
     expect(output).not.toContain("detail");
     expect(output).not.toContain("ready");
     expect(output).not.toContain("[stop=stop]");
@@ -93,14 +105,14 @@ describe("resident voice terminal display", () => {
   });
 
   it("ignores farewell telemetry after a resident turn becomes idle", () => {
-    const display = createResidentVoiceTerminalDisplay();
+    const display = createResidentVoiceTerminalDisplay({ controls: configuredControls });
 
     display.record({ kind: "turn_started" });
     display.record({ kind: "turn_phase", phase: "processing" });
     display.record({ kind: "staff_transcript", text: "今日の予定を教えて" });
     display.record({
       kind: "stage",
-      stage: "ptt_release_to_playback_start",
+      stage: "ptt_release_to_first_pcm_write",
       status: "ok",
       durationMs: 1_400,
       attributes: {}
@@ -142,7 +154,7 @@ describe("resident voice terminal display", () => {
   });
 
   it("shows a post-response audio failure while preserving the response", () => {
-    const display = createResidentVoiceTerminalDisplay();
+    const display = createResidentVoiceTerminalDisplay({ controls: configuredControls });
 
     display.record({ kind: "turn_started" });
     display.record({ kind: "turn_phase", phase: "synthesizing" });
@@ -184,7 +196,7 @@ describe("resident voice terminal display", () => {
         return [];
       }
     });
-    const display = createResidentVoiceTerminalDisplay();
+    const display = createResidentVoiceTerminalDisplay({ controls: configuredControls });
 
     display.record({ kind: "turn_started" });
     display.record({
@@ -207,7 +219,10 @@ describe("resident voice terminal display", () => {
   });
 
   it("sanitizes terminal controls and truncates text at UTF-8 character boundaries", () => {
-    const display = createResidentVoiceTerminalDisplay({ maximumTextBytes: 32 });
+    const display = createResidentVoiceTerminalDisplay({
+      controls: configuredControls,
+      maximumTextBytes: 32
+    });
 
     display.record({ kind: "turn_started" });
     display.record({ kind: "staff_transcript", text: `${"あ".repeat(11)}\n偽装\u001B[31m` });
@@ -232,7 +247,7 @@ describe("resident voice terminal display", () => {
   });
 
   it("shows only response-less terminal failures", () => {
-    const display = createResidentVoiceTerminalDisplay();
+    const display = createResidentVoiceTerminalDisplay({ controls: configuredControls });
 
     display.record({ kind: "turn_started" });
     display.record({ kind: "assistant_settled", stopReason: "stop" });
@@ -248,7 +263,7 @@ describe("resident voice terminal display", () => {
   });
 
   it("keeps only the current and previous turn", () => {
-    const display = createResidentVoiceTerminalDisplay();
+    const display = createResidentVoiceTerminalDisplay({ controls: configuredControls });
 
     for (const text of ["最初", "前", "現在"] as const) {
       display.record({ kind: "turn_started" });
@@ -262,7 +277,7 @@ describe("resident voice terminal display", () => {
   });
 
   it("caps pending tools at 32 safe names", () => {
-    const display = createResidentVoiceTerminalDisplay();
+    const display = createResidentVoiceTerminalDisplay({ controls: configuredControls });
 
     display.record({ kind: "turn_started" });
     for (let index = 0; index < 33; index += 1) {
@@ -296,6 +311,7 @@ describe("resident voice terminal display", () => {
 
   it("contains change, refresh, registration, render, theme, and malformed-event failures", () => {
     const display = createResidentVoiceTerminalDisplay({
+      controls: configuredControls,
       onChange: vi.fn(() => {
         throw new Error("change unavailable");
       })
@@ -318,6 +334,7 @@ describe("resident voice terminal display", () => {
     expect(display.render(100, brokenTheme)).toEqual([]);
     expect(() =>
       createResidentVoiceTerminalOperator({
+        controls: configuredControls,
         mode: "tui",
         setWidget: () => {
           throw new Error("registration unavailable");
@@ -326,7 +343,11 @@ describe("resident voice terminal display", () => {
     ).not.toThrow();
 
     const setWidget = vi.fn();
-    const operator = createResidentVoiceTerminalOperator({ mode: "tui", setWidget });
+    const operator = createResidentVoiceTerminalOperator({
+      controls: configuredControls,
+      mode: "tui",
+      setWidget
+    });
     const factory = setWidget.mock.calls[0]?.[1] as (
       tui: { requestRender: () => void },
       theme: ResidentVoiceTerminalTheme

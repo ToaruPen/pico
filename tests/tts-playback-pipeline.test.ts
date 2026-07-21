@@ -63,6 +63,50 @@ describe("TTS playback pipeline", () => {
     await expect(running).resolves.toMatchObject({ status: "completed", playedChunkCount: 2 });
   });
 
+  it("notifies the first accepted playback write after it resolves exactly once", async () => {
+    const events: string[] = [];
+    const firstWrite = createSignalGate();
+    const playback = recordingPlayback({
+      onOpen: () => {
+        events.push("open-playback");
+      },
+      onWrite: async (chunk) => {
+        events.push(`write:${String(chunk.sentenceIndex)}`);
+        if (chunk.sentenceIndex === 0) await firstWrite.promise;
+      }
+    });
+    const running = runTtsPlaybackPipeline(
+      pipelineInput({
+        tts: ttsFromArray([chunkEvent(0), chunkEvent(1), completedEvent(2)]),
+        playback,
+        onFirstPlaybackStart: () => {
+          events.push("admit-playback");
+          return true;
+        },
+        onFirstPlaybackWriteAccepted: () => {
+          events.push("first-write-accepted");
+          throw new Error("observer unavailable");
+        }
+      })
+    );
+
+    await vi.waitFor(() => expect(events).toEqual(["admit-playback", "open-playback", "write:0"]));
+    firstWrite.resolve();
+
+    await expect(running).resolves.toEqual({
+      status: "completed",
+      playedChunkCount: 2,
+      durationMs: 20
+    });
+    expect(events).toEqual([
+      "admit-playback",
+      "open-playback",
+      "write:0",
+      "first-write-accepted",
+      "write:1"
+    ]);
+  });
+
   it("pulls at most one event ahead while the current chunk is pending playback", async () => {
     const writeGate = createSignalGate();
     let pullCount = 0;
@@ -2099,6 +2143,7 @@ function requireSynthesisEvent(event: TtsSynthesisEvent | undefined): TtsSynthes
 
 function recordingPlayback(
   options: {
+    readonly onOpen?: () => void;
     readonly onWrite?: (chunk: TtsAudioChunk) => void | Promise<void>;
     readonly onFinish?: () => void | Promise<void>;
     readonly onStop?: () => void | Promise<void>;
@@ -2142,6 +2187,7 @@ function recordingPlayback(
     ...sink,
     open(firstChunk, signal) {
       state.opens += 1;
+      options.onOpen?.();
       if (options.openError !== undefined) {
         throw options.openError;
       }
@@ -2335,6 +2381,7 @@ function pipelineInput(input: {
   readonly probe?: VoiceStageProbe;
   readonly monotonicNow?: () => number;
   readonly onFirstPlaybackStart?: () => boolean | Promise<boolean>;
+  readonly onFirstPlaybackWriteAccepted?: () => void;
   readonly text?: string;
 }) {
   return {
@@ -2348,7 +2395,10 @@ function pipelineInput(input: {
     monotonicNow: input.monotonicNow ?? (() => 0),
     ...(input.onFirstPlaybackStart === undefined
       ? {}
-      : { onFirstPlaybackStart: input.onFirstPlaybackStart })
+      : { onFirstPlaybackStart: input.onFirstPlaybackStart }),
+    ...(input.onFirstPlaybackWriteAccepted === undefined
+      ? {}
+      : { onFirstPlaybackWriteAccepted: input.onFirstPlaybackWriteAccepted })
   };
 }
 
