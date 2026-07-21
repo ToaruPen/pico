@@ -326,7 +326,7 @@ export function defineVoicePcmFrame(input: VoicePcmFrame): VoicePcmFrame {
     sampleRateHz: requirePositiveInteger(input.sampleRateHz, "pico voice frame sampleRateHz"),
     channels: requirePositiveInteger(input.channels, "pico voice frame channels"),
     capturedAt: requireIsoText(input.capturedAt, "pico voice frame capturedAt is required"),
-    durationMs: requirePositiveInteger(input.durationMs, "pico voice frame durationMs")
+    durationMs: requirePositiveNumber(input.durationMs, "pico voice frame durationMs")
   });
 }
 
@@ -607,6 +607,14 @@ function requireRecord(value: unknown, message: string): Record<string, unknown>
 function requirePositiveInteger(value: unknown, message: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
     throw new Error(`${message} must be a positive integer`);
+  }
+
+  return value;
+}
+
+function requirePositiveNumber(value: unknown, message: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error(`${message} must be a positive finite number`);
   }
 
   return value;

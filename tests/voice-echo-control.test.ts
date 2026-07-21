@@ -8,6 +8,21 @@ import {
 } from "../src/modules/voice/echo-control.js";
 
 describe("voice echo control", () => {
+  it("accepts a sub-millisecond PCM duration derived from the frame sample count", () => {
+    const frame = defineVoicePcmFrame({
+      id: "partial-tail-frame",
+      direction: "near_end",
+      audio: new Uint8Array([1, 0, 2, 0]),
+      encoding: "pcm16le",
+      sampleRateHz: 16_000,
+      channels: 1,
+      capturedAt: "2026-07-21T05:28:10.000Z",
+      durationMs: 0.125
+    });
+
+    expect(frame.durationMs).toBe(0.125);
+  });
+
   it("suppresses near-end frames while the TTS tail mute window is active", async () => {
     const echoControl = createHalfDuplexEchoControl({ tailMuteMs: 700 });
     const farEnd = defineVoicePcmFrame({
