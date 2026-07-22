@@ -38,11 +38,11 @@ describe("pico cli", () => {
     });
   });
 
-  it("routes dev to a Ghostty-backed development terminal", () => {
+  it("routes dev to a Terminal.app-backed development terminal by default", () => {
     expect(createPicoCliPlan(["dev"])).toEqual({
       kind: "script",
       scriptPath: "scripts/resident/development-terminal.ts",
-      args: ["--terminal=ghostty"]
+      args: ["--terminal=terminal"]
     });
   });
 
@@ -111,6 +111,7 @@ describe("pico cli", () => {
 
     expect(help).toContain("pico dev");
     expect(help).toContain("--terminal=ghostty|kitty|terminal");
+    expect(help).toContain("Terminal.app by default");
     expect(help).toContain("pico roster");
     expect(help).toContain("Pi Agent");
     expect(help).toContain("non-persistent host session");

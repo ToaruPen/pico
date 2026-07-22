@@ -91,12 +91,28 @@ describe("resident dev terminal", () => {
     expect(session.appleScript).not.toContain("npm run resident:voice");
   });
 
-  it("builds a Ghostty session by default through the macOS app launcher", () => {
+  it("builds a Terminal.app session by default", () => {
     const session = defineResidentDevelopmentTerminalSession({
       repoRoot: "/Users/monsoon/Dev/pico",
       homeDirectory: "/Users/monsoon",
       configPath: "/Users/monsoon/Dev/pico/config/pico.local.yaml",
       pathEnvironment: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    });
+
+    expect(session.terminal).toBe("terminal");
+    expect(session.appleScript).toContain('tell application "Terminal"');
+    expect(session.shellCommand).toContain("PICO_DEV_TERMINAL_TTY=$(tty)");
+    expect(session.ghosttyCommand).toBeUndefined();
+    expect(session.kittyCommand).toBeUndefined();
+  });
+
+  it("builds a Ghostty session only when selected explicitly", () => {
+    const session = defineResidentDevelopmentTerminalSession({
+      repoRoot: "/Users/monsoon/Dev/pico",
+      homeDirectory: "/Users/monsoon",
+      configPath: "/Users/monsoon/Dev/pico/config/pico.local.yaml",
+      pathEnvironment: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+      terminal: "ghostty"
     });
 
     expect(session.terminal).toBe("ghostty");
