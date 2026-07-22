@@ -70,6 +70,7 @@ export function formatPicoCliHelp(): string {
     "  roster      Manage the local child identity roster.",
     "",
     "Notes:",
+    "  pico dev opens Terminal.app by default; use --terminal to select another terminal.",
     "  pico delegates production startup to Pi Agent with --pico and a non-persistent host session.",
     "  Pico model selection is loaded from YAML, not CLI model arguments."
   ].join("\n");
@@ -82,7 +83,7 @@ function createDevelopmentTerminalPlan(arguments_: readonly string[]): PicoCliPl
     options: {
       terminal: {
         type: "string",
-        default: "ghostty"
+        default: "terminal"
       }
     }
   });

@@ -116,7 +116,7 @@ function readDevelopmentTerminal(
   environment: NodeJS.ProcessEnv
 ): ResidentDevelopmentTerminal {
   const option = arguments_.find((argument) => argument.startsWith("--terminal="));
-  const value = option?.slice("--terminal=".length) ?? environment.PICO_DEV_TERMINAL ?? "ghostty";
+  const value = option?.slice("--terminal=".length) ?? environment.PICO_DEV_TERMINAL ?? "terminal";
 
   if (value === "ghostty" || value === "kitty" || value === "terminal") {
     return value;

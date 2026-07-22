@@ -336,18 +336,17 @@ the voice resident process:
 PICO_CONFIG_PATH=config/pico.local.yaml pico dev
 ```
 
-This opens Ghostty by default, starts Pi Agent with `--no-session --pico`, and
+This opens Terminal.app by default, starts Pi Agent with `--no-session --pico`, and
 displays Pi's interactive output in that terminal window. The non-persistent
 host follows the same interaction-session lifecycle as the normal `pico`
 command. The Pico wrapper does not duplicate that output into a file. Pico
 persists only output produced by its metadata-only log sink under
 `~/.pico/resident-voice/managed/development/processes/YYYY-MM-DD/<run-id>.log`. Use
-`pico dev --terminal=kitty` or `pico dev --terminal=terminal` to select either
-alternative explicitly. Stop it from the opened terminal with `Ctrl-C`.
-Ghostty keeps the window open after the resident process exits until a key is
-pressed, so startup and shutdown failures remain visible. This is a visible
-development helper around the same Pi-hosted ownership path. The direct
-resident harness remains available separately for bounded field validation.
+`pico dev --terminal=ghostty` or `pico dev --terminal=kitty` to select either
+alternative explicitly. Stop it from the opened terminal with `Ctrl-C`. This is
+a visible development helper around the same Pi-hosted ownership path. The
+direct resident harness remains available separately for bounded field
+validation.
 
 The development terminal uses concise voice probe logs by default and does not
 support verbose mode. It shows admitted STT completion, Pi Agent turn and

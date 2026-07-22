@@ -61,7 +61,7 @@ export function defineResidentDevelopmentTerminalSession(
     options.pathEnvironment,
     "resident dev terminal pathEnvironment"
   );
-  const terminal = options.terminal ?? "ghostty";
+  const terminal = options.terminal ?? "terminal";
   const title = requireNonEmpty(options.title ?? defaultTitle, "resident dev terminal title");
   const occurredAt = options.now?.() ?? new Date().toISOString();
   const runId =
