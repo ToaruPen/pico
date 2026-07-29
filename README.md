@@ -96,8 +96,7 @@ ffmpeg -y -hide_banner -loglevel error \
   -f s16le \
   /tmp/pico-known-ja.pcm
 
-# Choose an Aivis Speech style id from:
-# curl -s http://127.0.0.1:10101/speakers
+# Confirm the configured TTS provider and its protected local endpoint are healthy.
 just smoke-milestone
 ```
 
@@ -175,8 +174,11 @@ just smoke-camera-vlm-scene
 
 Configure these sections in `config/pico.local.yaml` as needed:
 
-- `voice.tts.aivis` for Aivis Speech TTS. Choose a style id from
-  `curl -s http://127.0.0.1:10101/speakers`.
+- `voice.tts.provider` selects exactly one of `irodori` or `aivis-speech` at
+  startup. `voice.tts.irodori` uses the protected loopback tunnel and a fixed
+  VoiceDesign style (`neutral`, `calm`, `cheerful`, or `clear`).
+  `voice.tts.aivis` may remain for an explicit rollback; Pico never falls back
+  automatically.
 - `voice.stt.appleSpeech` for the local Apple Speech sidecar. The resident and
   real-microphone field paths do not require a sample file;
   `samplePcm16lePath` is optional and, when set for provider smoke, must point
@@ -281,7 +283,8 @@ startup contract.
 
 For a repeatable full-turn measurement, inject one finite PCM16LE mono 16 kHz
 WAV or raw PCM fixture through the explicit field harness. This path invokes the
-configured Apple Speech STT, Pi Agent, Aivis Speech TTS, and playback providers:
+configured Apple Speech STT, Pi Agent, selected TTS provider, and playback
+provider:
 
 ```bash
 validation_dir="$(mktemp -d /tmp/pico-voice-validation.XXXXXX)"

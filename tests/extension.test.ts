@@ -14,6 +14,11 @@ import picoExtension, {
   picoExtensionMetadata,
   registerPicoExtensionWithRuntime
 } from "../src/index.js";
+import {
+  createVoiceDesignSpeechPlanCache,
+  formatVoiceDesignEnvelope,
+  irodoriVoiceDesignSpeechProfile
+} from "../src/modules/voice-design/index.js";
 
 type PicoBeforeAgentStartHandler = (
   event: BeforeAgentStartEvent,
@@ -124,6 +129,17 @@ describe("pico extension", () => {
     );
   });
 
+  it("marks Irodori as the selected TTS provider with explicit Aivis rollback", () => {
+    const voice = picoExtensionMetadata.futureModules.find((module) => module.kind === "voice");
+
+    expect(voice?.summary).toBe(
+      "Voice input through Apple Speech and output through Irodori VoiceDesign."
+    );
+    expect(voice?.selectedProvider).toBe(
+      "Apple Speech for STT and Irodori VoiceDesign for TTS; Aivis Speech is an explicit rollback"
+    );
+  });
+
   it("creates an independent registry for each call", () => {
     expect(createPicoRegistry()).not.toBe(createPicoRegistry());
   });
@@ -217,6 +233,88 @@ describe("pico extension", () => {
     expect(capture.tools.map((tool) => tool.name).sort()).toEqual([
       "pico_camera_scene_description_deferred"
     ]);
+  });
+
+  it("strips and records a nonce-bound speech plan only for resident VoiceDesign sessions", async () => {
+    const capture = createCapturedExtensionApi();
+    const cache = createVoiceDesignSpeechPlanCache();
+    const nonce = "5LZJ29aPpA3MLBfC0c8VGnN6";
+
+    registerPicoExtensionWithRuntime(extensionApiFromCapture(capture) as never, {
+      perceptionMode: "resident_deferred",
+      speechPlan: {
+        profile: irodoriVoiceDesignSpeechProfile,
+        cache,
+        createNonce: () => nonce
+      }
+    });
+
+    const beforeAgentStart = capture.handlers.get("before_agent_start")?.[0] as
+      | PicoBeforeAgentStartHandler
+      | undefined;
+    const messageEnd = capture.handlers.get("message_end")?.[0] as
+      | ((event: { readonly message: unknown }) => unknown)
+      | undefined;
+    const agentSettled = capture.handlers.get("agent_settled")?.[0] as (() => unknown) | undefined;
+    if (beforeAgentStart === undefined || messageEnd === undefined || agentSettled === undefined) {
+      throw new Error("resident VoiceDesign hooks were not registered");
+    }
+
+    const startResult = beforeAgentStart(
+      {
+        type: "before_agent_start",
+        prompt: "案内して",
+        systemPrompt: "Base prompt.",
+        systemPromptOptions: { cwd: process.cwd() }
+      } satisfies BeforeAgentStartEvent,
+      {} as ExtensionContext
+    );
+    expect(startResult.systemPrompt).toContain(nonce);
+    expect(startResult.systemPrompt).toContain("neutral | calm | cheerful | clear");
+
+    const text = "施設の入口は右手です。";
+    const rendered = `${text}${formatVoiceDesignEnvelope(nonce, {
+      v: 1,
+      style: "clear",
+      annotations: []
+    })}`;
+    const result = (await messageEnd({
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: rendered }],
+        timestamp: 12_345
+      }
+    })) as {
+      readonly message: {
+        readonly content: readonly { readonly type: string; readonly text: string }[];
+      };
+    };
+
+    expect(result.message.content).toEqual([{ type: "text", text }]);
+    expect(cache.resolve({ assistantTimestamp: 12_345, text })).toEqual({
+      v: 1,
+      style: "clear",
+      annotations: []
+    });
+
+    await messageEnd({
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text: `${text}${formatVoiceDesignEnvelope(nonce, {
+              v: 1,
+              style: "calm",
+              annotations: []
+            })}`
+          }
+        ],
+        timestamp: 12_346
+      }
+    });
+    await agentSettled();
+    expect(cache.resolve({ assistantTimestamp: 12_346, text })).toBeUndefined();
   });
 
   it("passes injected config loading into default perception tools", async () => {

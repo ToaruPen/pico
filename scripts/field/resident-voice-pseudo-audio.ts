@@ -647,6 +647,27 @@ export async function runResidentVoicePseudoAudio(
   });
 }
 
+export async function driveResidentVoicePseudoAudioTurn(
+  runtime: Pick<VoiceResidentRuntime, "handleControl" | "generationId">,
+  occurredAt: string
+): Promise<void> {
+  requireAccepted(await runtime.handleControl({ kind: "talk_pressed", occurredAt }), "press");
+  const generationId = runtime.generationId();
+  if (generationId === undefined) {
+    throw new Error("pico pseudo-audio validation did not create a resident generation");
+  }
+
+  requireAccepted(await runtime.handleControl({ kind: "talk_released", occurredAt }), "release");
+  requireAccepted(
+    await runtime.handleControl({
+      kind: "tail_complete",
+      generationId,
+      occurredAt
+    }),
+    "tail completion"
+  );
+}
+
 // This field-only graph intentionally mirrors the real providers while exposing no production hook.
 // eslint-disable-next-line complexity
 async function executeResidentVoicePseudoAudio(input: {
@@ -703,8 +724,7 @@ async function executeResidentVoicePseudoAudio(input: {
       validation
     });
     const occurredAt = new Date().toISOString();
-    requireAccepted(await runtime.handleControl({ kind: "talk_pressed", occurredAt }), "press");
-    requireAccepted(await runtime.handleControl({ kind: "talk_released", occurredAt }), "release");
+    await driveResidentVoicePseudoAudioTurn(runtime, occurredAt);
     await waitForIdle(runtime, arguments_.timeoutMs);
     await withDeadline(runtime.stop(), arguments_.timeoutMs, "runtime_stop_timeout");
     const runtimeResult = await runtime.completion;

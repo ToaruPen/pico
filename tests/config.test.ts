@@ -575,6 +575,117 @@ telemetry:
         }
       })
     ).toThrow("pico config voice.tts.aivis.localBaseUrl must use a local SSH tunnel URL");
+
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          tts: {
+            provider: "irodori",
+            irodori: {
+              localBaseUrl: "https://tts.example.com",
+              speaker: "カスミ",
+              style: "calm",
+              numSteps: 30,
+              seed: 42
+            }
+          }
+        }
+      })
+    ).toThrow("pico config voice.tts.irodori.localBaseUrl must use an http://127.0.0.1 origin");
+  });
+
+  it("defaults the TTS provider to Aivis Speech for existing configs", () => {
+    expect(definePicoConfig({}).voice.tts).toEqual({
+      provider: "aivis-speech"
+    });
+  });
+
+  it("parses a strict Irodori VoiceDesign provider config", () => {
+    expect(
+      definePicoConfig({
+        voice: {
+          tts: {
+            provider: "irodori",
+            aivis: {
+              localBaseUrl: "http://127.0.0.1:10101",
+              speakerId: 1
+            },
+            irodori: {
+              id: " windows-irodori-voicedesign ",
+              localBaseUrl: " http://127.0.0.1:18923 ",
+              speaker: " カスミ ",
+              style: "calm",
+              numSteps: 30,
+              seed: 42,
+              text: " こんにちは。 "
+            }
+          }
+        }
+      }).voice.tts
+    ).toEqual({
+      provider: "irodori",
+      aivis: {
+        localBaseUrl: "http://127.0.0.1:10101",
+        speakerId: 1
+      },
+      irodori: {
+        id: "windows-irodori-voicedesign",
+        localBaseUrl: "http://127.0.0.1:18923",
+        speaker: "カスミ",
+        style: "calm",
+        numSteps: 30,
+        seed: 42,
+        text: "こんにちは。"
+      }
+    });
+  });
+
+  it.each([
+    "http://localhost:18923",
+    "http://[::1]:18923",
+    "https://127.0.0.1:18923"
+  ])("rejects Irodori URLs outside the IPv4 HTTP tunnel boundary: %s", (localBaseUrl) => {
+    expect(() =>
+      definePicoConfig({
+        voice: {
+          tts: {
+            provider: "irodori",
+            irodori: {
+              localBaseUrl,
+              speaker: "カスミ",
+              style: "calm",
+              numSteps: 30,
+              seed: 42
+            }
+          }
+        }
+      })
+    ).toThrow("pico config voice.tts.irodori.localBaseUrl must use an http://127.0.0.1 origin");
+  });
+
+  it.each([
+    ["provider", "automatic", "pico config voice.tts.provider must be aivis-speech or irodori"],
+    ["style", "dramatic", "pico config voice.tts.irodori.style is invalid"],
+    ["timeoutMs", 30_000, "pico config voice.tts.irodori has unknown field timeoutMs"],
+    ["numSteps", 0, "pico config voice.tts.irodori.numSteps must be a positive integer"],
+    ["seed", -1, "pico config voice.tts.irodori.seed must be a non-negative integer"]
+  ])("rejects invalid Irodori TTS %s", (field, value, message) => {
+    const tts =
+      field === "provider"
+        ? { provider: value }
+        : {
+            provider: "irodori",
+            irodori: {
+              localBaseUrl: "http://127.0.0.1:18923",
+              speaker: "カスミ",
+              style: "calm",
+              numSteps: 30,
+              seed: 42,
+              [field]: value
+            }
+          };
+
+    expect(() => definePicoConfig({ voice: { tts } })).toThrow(message);
   });
 
   it("accepts minimal Apple Speech config without a smoke sample", () => {

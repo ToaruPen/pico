@@ -6,7 +6,11 @@ import {
   getAgentDir,
   SessionManager
 } from "@earendil-works/pi-coding-agent";
-
+import {
+  createVoiceDesignSpeechPlanCache,
+  type VoiceDesignSpeechPlanCache,
+  type VoiceDesignSpeechProfile
+} from "../modules/voice-design/index.js";
 import type {
   DeferredToolCoordinator,
   DeferredToolDeliverableResult
@@ -104,6 +108,10 @@ export type PiAgentTurnClientOptions = {
   };
   readonly validation?: ResidentVoiceValidationSink;
   readonly operator?: ResidentVoiceOperatorSink;
+  readonly speechPlan?: {
+    readonly profile: VoiceDesignSpeechProfile;
+    readonly createNonce?: () => string;
+  };
   readonly createAgentSession?: PiAgentSessionFactory;
   readonly createResourceLoader?: (
     input: PiAgentResourceLoaderFactoryInput
@@ -115,6 +123,7 @@ export type PiAgentTurnClientOptions = {
 
 const defaultNow = (): string => new Date().toISOString();
 const defaultMonotonicNow = (): number => performance.now();
+const sessionSpeechPlanCaches = new WeakMap<PiAgentSdkSession, VoiceDesignSpeechPlanCache>();
 
 export function createPiAgentTurnClient(options: PiAgentTurnClientOptions): PiAgentTurnClient {
   const sessions = new Map<string, Promise<PiAgentSdkSession>>();
@@ -231,12 +240,20 @@ function startPiAgentPrompt(
     resolveResponse = resolve;
     rejectResponse = reject;
   });
-  const publishResponse = (text: string): void => {
+  const publishResponse = (text: string, assistantTimestamp?: number): void => {
     if (responseState.published) return;
     responseState.published = true;
     abortHandle?.remove();
     recordFinalResponseReady(options, promptStarted, "ok");
-    resolveResponse({ text, settled });
+    const speechPlan =
+      assistantTimestamp === undefined
+        ? undefined
+        : sessionSpeechPlanCaches.get(session)?.resolve({ assistantTimestamp, text });
+    resolveResponse({
+      text,
+      ...(speechPlan === undefined ? {} : { speechPlan }),
+      settled
+    });
   };
   const observation = createPromptObservation(
     options,
@@ -248,7 +265,7 @@ function startPiAgentPrompt(
         !session.agent.hasQueuedMessages() &&
         input.signal?.aborted !== true
       ) {
-        publishResponse(assistant.text);
+        publishResponse(assistant.text, assistant.timestamp);
       }
     },
     promptStarted
@@ -512,7 +529,9 @@ async function createTurnSession(
   sessionId: string
 ): Promise<PiAgentSdkSession> {
   const requiredToolNames = requiredResidentPiAgentToolNames(options);
-  const resourceLoader = createTurnResourceLoader(options, sessionId);
+  const speechPlanCache =
+    options.speechPlan === undefined ? undefined : createVoiceDesignSpeechPlanCache();
+  const resourceLoader = createTurnResourceLoader(options, sessionId, speechPlanCache);
   if (resourceLoader.reload !== undefined) {
     await measurePiStage(options, "pi_session_resource_load", "resource_load_failed", () =>
       resourceLoader.reload?.()
@@ -546,6 +565,9 @@ async function createTurnSession(
     throw error;
   }
 
+  if (speechPlanCache !== undefined) {
+    sessionSpeechPlanCaches.set(session, speechPlanCache);
+  }
   return session;
 }
 
@@ -602,25 +624,38 @@ function enforceResidentPiAgentTools(
 
 function createTurnResourceLoader(
   options: PiAgentTurnClientOptions,
-  sessionId: string
+  sessionId: string,
+  speechPlanCache: VoiceDesignSpeechPlanCache | undefined
 ): PiAgentResourceLoader {
   return (
     options.createResourceLoader?.({
       cwd: options.cwd,
       sessionId,
-      extensionFactories: [createResidentPicoExtensionFactory(options, sessionId)]
-    }) ?? createDefaultResourceLoader(options, sessionId)
+      extensionFactories: [createResidentPicoExtensionFactory(options, sessionId, speechPlanCache)]
+    }) ?? createDefaultResourceLoader(options, sessionId, speechPlanCache)
   );
 }
 
 function createResidentPicoExtensionFactory(
   options: PiAgentTurnClientOptions,
-  sessionId: string
+  sessionId: string,
+  speechPlanCache: VoiceDesignSpeechPlanCache | undefined
 ): (pi: ExtensionAPI) => void {
   return (pi) =>
     registerPicoExtensionWithRuntime(pi, {
       ...(options.voiceProbe === undefined ? {} : { voiceProbe: options.voiceProbe }),
       perceptionMode: options.perceptionMode ?? "resident_deferred",
+      ...(options.speechPlan === undefined || speechPlanCache === undefined
+        ? {}
+        : {
+            speechPlan: {
+              profile: options.speechPlan.profile,
+              cache: speechPlanCache,
+              ...(options.speechPlan.createNonce === undefined
+                ? {}
+                : { createNonce: options.speechPlan.createNonce })
+            }
+          }),
       ...(options.deferredTools === undefined
         ? {}
         : {
@@ -902,12 +937,13 @@ function throwIfSignalAborted(signal: AbortSignal | undefined): void {
 
 function createDefaultResourceLoader(
   options: PiAgentTurnClientOptions,
-  sessionId: string
+  sessionId: string,
+  speechPlanCache: VoiceDesignSpeechPlanCache | undefined
 ): PiAgentResourceLoader {
   return new DefaultResourceLoader({
     cwd: options.cwd,
     agentDir: getAgentDir(),
-    extensionFactories: [createResidentPicoExtensionFactory(options, sessionId)]
+    extensionFactories: [createResidentPicoExtensionFactory(options, sessionId, speechPlanCache)]
   });
 }
 
@@ -1033,6 +1069,7 @@ function readTextDelta(event: unknown): string | undefined {
 type SettledAssistant = {
   readonly text: string;
   readonly stopReason: unknown;
+  readonly timestamp?: number;
 };
 
 function readSettledAssistant(event: unknown): SettledAssistant | undefined {
@@ -1091,6 +1128,7 @@ function readAssistantMessage(message: unknown): SettledAssistant | undefined {
     readonly role?: unknown;
     readonly content?: unknown;
     readonly stopReason?: unknown;
+    readonly timestamp?: unknown;
   };
   if (assistant.role !== "assistant" || !Array.isArray(assistant.content)) {
     return undefined;
@@ -1101,7 +1139,8 @@ function readAssistantMessage(message: unknown): SettledAssistant | undefined {
       .filter(isTextContent)
       .map((part) => part.text)
       .join(""),
-    stopReason: assistant.stopReason
+    stopReason: assistant.stopReason,
+    ...(typeof assistant.timestamp === "number" ? { timestamp: assistant.timestamp } : {})
   };
 }
 

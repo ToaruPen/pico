@@ -9,6 +9,7 @@ import { createInProcessTelemetryCapture } from "../scripts/field/in-process-tel
 import {
   createResidentVoicePseudoAudioPlaybackMeasurement,
   createResidentVoicePseudoAudioTts,
+  driveResidentVoicePseudoAudioTurn,
   evaluateResidentVoicePseudoAudioEvidence,
   formatResidentVoicePseudoAudioHelp,
   type ResidentVoicePseudoAudioReport,
@@ -29,6 +30,31 @@ import type {
 import type { VoicePlaybackSink } from "../src/runtime/voice-playback.js";
 
 describe("resident voice pseudo-audio field contract", () => {
+  it("completes the synthetic native tail boundary before processing the fixture", async () => {
+    const events: unknown[] = [];
+
+    await driveResidentVoicePseudoAudioTurn(
+      {
+        handleControl(event) {
+          events.push(event);
+          return Promise.resolve("accepted");
+        },
+        generationId: () => 7
+      },
+      "2026-07-27T13:00:00.000Z"
+    );
+
+    expect(events).toEqual([
+      { kind: "talk_pressed", occurredAt: "2026-07-27T13:00:00.000Z" },
+      { kind: "talk_released", occurredAt: "2026-07-27T13:00:00.000Z" },
+      {
+        kind: "tail_complete",
+        generationId: 7,
+        occurredAt: "2026-07-27T13:00:00.000Z"
+      }
+    ]);
+  });
+
   it("records Aivis substages through the field audit without exporting content", async () => {
     const capture = createInProcessTelemetryCapture();
     const auditEvents: unknown[] = [];

@@ -11,6 +11,14 @@ import { createIdentityRegistryModule } from "../modules/identity-registry/index
 import { createLocalModelsModule } from "../modules/local-models/index.js";
 import { createSessionModule } from "../modules/session/index.js";
 import { createTransportModule } from "../modules/transport/index.js";
+import {
+  buildVoiceDesignSpeechInstruction,
+  createVoiceDesignSpeechNonce,
+  hashVoiceDesignSpeechText,
+  inspectVoiceDesignEnvelope,
+  type VoiceDesignSpeechPlanCache,
+  type VoiceDesignSpeechProfile
+} from "../modules/voice-design/index.js";
 import { PicoModuleRegistry } from "../orchestrator/registry.js";
 import type { DeferredToolCoordinator } from "./deferred-tool-coordinator.js";
 import {
@@ -83,6 +91,11 @@ export type PicoExtensionRuntimeOptions = {
     readonly sessionId: string;
     readonly coordinator: Pick<DeferredToolCoordinator, "enqueue">;
   };
+  readonly speechPlan?: {
+    readonly profile: VoiceDesignSpeechProfile;
+    readonly cache: VoiceDesignSpeechPlanCache;
+    readonly createNonce?: () => string;
+  };
 };
 
 export function registerPicoExtensionWithRuntime(
@@ -90,9 +103,123 @@ export function registerPicoExtensionWithRuntime(
   options: PicoExtensionRuntimeOptions = {}
 ): void {
   registerPerceptionRuntimeTools(pi, options);
-  pi.on("before_agent_start", (event: BeforeAgentStartEvent) => ({
-    systemPrompt: buildPicoExtensionSystemPrompt(event.systemPrompt)
-  }));
+  registerPicoSystemPrompt(pi, options);
+}
+
+function registerPicoSystemPrompt(pi: ExtensionAPI, options: PicoExtensionRuntimeOptions): void {
+  let speechNonce: string | undefined;
+
+  pi.on("before_agent_start", (event: BeforeAgentStartEvent) => {
+    const picoSystemPrompt = buildPicoExtensionSystemPrompt(event.systemPrompt);
+    if (options.speechPlan === undefined) {
+      return { systemPrompt: picoSystemPrompt };
+    }
+
+    speechNonce = (options.speechPlan.createNonce ?? createVoiceDesignSpeechNonce)();
+    return {
+      systemPrompt: [
+        picoSystemPrompt,
+        "",
+        buildVoiceDesignSpeechInstruction(speechNonce, options.speechPlan.profile)
+      ].join("\n")
+    };
+  });
+
+  registerVoiceDesignSpeechPlanHandlers(
+    pi,
+    options,
+    () => speechNonce,
+    () => {
+      speechNonce = undefined;
+    }
+  );
+}
+
+function registerVoiceDesignSpeechPlanHandlers(
+  pi: ExtensionAPI,
+  options: PicoExtensionRuntimeOptions,
+  readNonce: () => string | undefined,
+  clearNonce: () => void
+): void {
+  const speechPlan = options.speechPlan;
+  if (speechPlan === undefined) {
+    return;
+  }
+
+  pi.on("message_end", (event) => {
+    if (event.message.role !== "assistant") {
+      return;
+    }
+
+    const nonce = readNonce();
+    if (nonce === undefined) {
+      return;
+    }
+
+    const renderedText = readAssistantText(event.message.content);
+    const inspection = inspectVoiceDesignEnvelope(renderedText, nonce, speechPlan.profile);
+    if (inspection.status === "absent") {
+      return;
+    }
+
+    if (inspection.status === "accepted") {
+      speechPlan.cache.record({
+        assistantTimestamp: event.message.timestamp,
+        textSha256: hashVoiceDesignSpeechText(inspection.text),
+        plan: inspection.plan
+      });
+    }
+
+    return {
+      message: {
+        ...event.message,
+        content: stripAssistantTextSuffix(
+          event.message.content,
+          renderedText.length - inspection.text.length
+        )
+      }
+    };
+  });
+
+  pi.on("agent_settled", () => {
+    clearNonce();
+    speechPlan.cache.clear();
+  });
+}
+
+function readAssistantText(
+  content: readonly { readonly type: string; readonly text?: string }[]
+): string {
+  return content
+    .filter(
+      (part): part is { readonly type: "text"; readonly text: string } =>
+        part.type === "text" && typeof part.text === "string"
+    )
+    .map((part) => part.text)
+    .join("");
+}
+
+function stripAssistantTextSuffix<
+  ContentPart extends { readonly type: string; readonly text?: string }
+>(content: readonly ContentPart[], suffixLength: number): ContentPart[] {
+  let remaining = suffixLength;
+  const stripped = [...content];
+
+  for (let index = stripped.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const part = stripped[index];
+    if (part?.type !== "text" || typeof part.text !== "string") {
+      continue;
+    }
+
+    const removedLength = Math.min(remaining, part.text.length);
+    stripped[index] = {
+      ...part,
+      text: part.text.slice(0, part.text.length - removedLength)
+    };
+    remaining -= removedLength;
+  }
+
+  return stripped;
 }
 
 function registerPerceptionRuntimeTools(

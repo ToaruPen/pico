@@ -9,9 +9,13 @@ import {
   collectTtsSynthesisEvents,
   createAivisSpeechTtsClient,
   createAppleSpeechSttClient,
+  createIrodoriTtsClient,
   defineAivisSpeechService,
   defineAppleSpeechSidecar,
-  type SttTranscriptionRequest
+  defineIrodoriService,
+  type IrodoriServiceConfig,
+  type SttTranscriptionRequest,
+  type TtsAudioChunk
 } from "../../src/modules/voice/index.js";
 
 const defaultLanguage = "ja-JP";
@@ -30,9 +34,13 @@ export type VoiceSmokeReport = {
 
 export type VoiceSmokeSectionReport = {
   readonly status: VoiceSmokeStatus;
-  readonly provider: "apple-speech" | "aivis-speech";
+  readonly provider: "apple-speech" | "aivis-speech" | "irodori";
   readonly reason?: string;
   readonly details?: Record<string, unknown>;
+};
+
+export type VoiceSmokeOptions = {
+  readonly monotonicNow?: () => number;
 };
 
 type SttSmokePlan =
@@ -51,11 +59,12 @@ type SttSmokePlan =
 type TtsSmokePlan =
   | {
       readonly status: "run";
-      readonly service: AivisSpeechServiceConfig;
+      readonly service: AivisSpeechServiceConfig | IrodoriServiceConfig;
       readonly text: string;
     }
   | {
       readonly status: "skip";
+      readonly provider: "aivis-speech" | "irodori";
       readonly reason: string;
     };
 
@@ -65,13 +74,14 @@ type VoiceSmokePlan = {
 };
 
 export async function runVoiceProviderSmoke(
-  config: PicoConfig = loadPicoConfigFromEnvironment()
+  config: PicoConfig = loadPicoConfigFromEnvironment(),
+  options: VoiceSmokeOptions = {}
 ): Promise<VoiceSmokeReport> {
   const plan = buildVoiceSmokePlan(config);
 
   return {
     stt: await runSttSmoke(plan.stt),
-    tts: await runTtsSmoke(plan.tts)
+    tts: await runTtsSmoke(plan.tts, options.monotonicNow ?? (() => performance.now()))
   };
 }
 
@@ -139,50 +149,107 @@ async function runSttSmoke(plan: SttSmokePlan): Promise<VoiceSmokeSectionReport>
   };
 }
 
-async function runTtsSmoke(plan: TtsSmokePlan): Promise<VoiceSmokeSectionReport> {
+async function runTtsSmoke(
+  plan: TtsSmokePlan,
+  monotonicNow: () => number
+): Promise<VoiceSmokeSectionReport> {
   if (plan.status === "skip") {
     return {
       status: "skipped",
-      provider: "aivis-speech",
+      provider: plan.provider,
       reason: plan.reason
     };
   }
 
+  const startedAtMs = monotonicNow();
   const result = await collectTtsSynthesisEvents(
-    createAivisSpeechTtsClient(plan.service).synthesize({ text: plan.text })
+    createTtsSmokeClient(plan.service).synthesize({ text: plan.text })
   );
+  const wallTimeMs = Math.max(0, monotonicNow() - startedAtMs);
 
   if (!result.ok) {
     return voiceSmokeFailure(
-      "aivis-speech",
+      plan.service.provider,
       `pico voice TTS smoke failed at sentence ${result.sentenceIndex}: ${result.reason}: ${result.message}`
     );
   }
 
   if (result.chunks.length === 0) {
-    return voiceSmokeFailure("aivis-speech", "pico voice TTS smoke produced no audio chunks");
+    return voiceSmokeFailure(
+      plan.service.provider,
+      "pico voice TTS smoke produced no audio chunks"
+    );
   }
 
   const totalAudioBytes = result.chunks.reduce((total, chunk) => total + chunk.audio.byteLength, 0);
 
   if (totalAudioBytes === 0) {
-    return voiceSmokeFailure("aivis-speech", "pico voice TTS smoke produced empty audio");
+    return voiceSmokeFailure(plan.service.provider, "pico voice TTS smoke produced empty audio");
   }
 
   return {
     status: "passed",
-    provider: "aivis-speech",
+    provider: plan.service.provider,
     details: {
       serviceId: result.source.serviceId,
-      speakerId: result.source.speakerId,
+      ...ttsSmokeVoiceDetails(result.source),
       chunkCount: result.chunks.length,
       totalAudioBytes,
       totalDurationMs: result.totalDurationMs,
+      ...irodoriSmokePerformanceDetails(
+        plan.service,
+        result.chunks,
+        result.totalDurationMs,
+        wallTimeMs
+      ),
       sampleRateHz: result.chunks[0]?.sampleRateHz,
       channels: result.chunks[0]?.channels,
       encoding: result.chunks[0]?.encoding
     }
   };
+}
+
+function irodoriSmokePerformanceDetails(
+  service: AivisSpeechServiceConfig | IrodoriServiceConfig,
+  chunks: readonly TtsAudioChunk[],
+  totalDurationMs: number,
+  wallTimeMs: number
+): Record<string, number> {
+  if (service.provider !== "irodori") {
+    return {};
+  }
+
+  const serviceSynthesisMs = chunks.reduce(
+    (total, chunk) => total + (chunk.serviceElapsedMs ?? 0),
+    0
+  );
+
+  return {
+    wallTimeMs: Math.round(wallTimeMs),
+    serviceSynthesisMs,
+    realTimeFactor: Number((wallTimeMs / totalDurationMs).toFixed(3))
+  };
+}
+
+function createTtsSmokeClient(service: AivisSpeechServiceConfig | IrodoriServiceConfig) {
+  return service.provider === "irodori"
+    ? createIrodoriTtsClient(service)
+    : createAivisSpeechTtsClient(service);
+}
+
+function ttsSmokeVoiceDetails(
+  source:
+    | { readonly provider: "aivis-speech"; readonly speakerId: number }
+    | { readonly provider: "irodori"; readonly speaker: string; readonly style: string }
+): Record<string, unknown> {
+  return source.provider === "irodori"
+    ? {
+        speaker: source.speaker,
+        style: source.style
+      }
+    : {
+        speakerId: source.speakerId
+      };
 }
 
 function buildSttSmokePlan(config: PicoConfig): SttSmokePlan {
@@ -212,11 +279,18 @@ function buildSttSmokePlan(config: PicoConfig): SttSmokePlan {
 }
 
 function buildTtsSmokePlan(config: PicoConfig): TtsSmokePlan {
+  return config.voice.tts.provider === "irodori"
+    ? buildIrodoriTtsSmokePlan(config)
+    : buildAivisTtsSmokePlan(config);
+}
+
+function buildAivisTtsSmokePlan(config: PicoConfig): TtsSmokePlan {
   const aivis = config.voice.tts.aivis;
 
   if (aivis === undefined) {
     return {
       status: "skip",
+      provider: "aivis-speech",
       reason: "Set voice.tts.aivis in pico config to run the Aivis Speech TTS smoke."
     };
   }
@@ -231,6 +305,32 @@ function buildTtsSmokePlan(config: PicoConfig): TtsSmokePlan {
       timeoutMs: aivis.timeoutMs ?? defaultTimeoutMs
     }),
     text: aivis.text ?? defaultTtsText
+  };
+}
+
+function buildIrodoriTtsSmokePlan(config: PicoConfig): TtsSmokePlan {
+  const irodori = config.voice.tts.irodori;
+
+  if (irodori === undefined) {
+    return {
+      status: "skip",
+      provider: "irodori",
+      reason: "Set voice.tts.irodori in pico config to run the Irodori TTS smoke."
+    };
+  }
+
+  return {
+    status: "run",
+    service: defineIrodoriService({
+      id: irodori.id ?? "windows-irodori-voicedesign",
+      provider: "irodori",
+      localBaseUrl: irodori.localBaseUrl,
+      speaker: irodori.speaker,
+      style: irodori.style,
+      numSteps: irodori.numSteps,
+      seed: irodori.seed
+    }),
+    text: irodori.text ?? defaultTtsText
   };
 }
 
