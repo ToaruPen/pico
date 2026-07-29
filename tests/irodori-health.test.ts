@@ -110,17 +110,25 @@ describe("Irodori health boundary", () => {
   });
 
   it("rejects an oversized chunked health response", async () => {
-    const result = await checkIrodoriServiceHealth(service, () =>
-      Promise.resolve(
-        new Response(
-          JSON.stringify({
-            status: "ok",
-            model_loaded: true,
-            padding: "x".repeat(64 * 1024)
-          })
-        )
-      )
+    const oversizedPayload = new TextEncoder().encode(
+      JSON.stringify({
+        status: "ok",
+        model_loaded: true,
+        padding: "x".repeat(64 * 1024)
+      })
     );
+    const response = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(oversizedPayload.slice(0, 32 * 1024));
+          controller.enqueue(oversizedPayload.slice(32 * 1024));
+          controller.close();
+        }
+      })
+    );
+    expect(response.headers.get("content-length")).toBeNull();
+
+    const result = await checkIrodoriServiceHealth(service, () => Promise.resolve(response));
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected oversized chunked Irodori health");

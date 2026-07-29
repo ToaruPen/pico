@@ -20,6 +20,7 @@ import {
   type TtsSynthesisFailure,
   type TtsSynthesisSource
 } from "../src/modules/voice/index.js";
+import { buildIrodoriStreamResponse } from "./support/irodori-stream-fixtures.js";
 
 const sidecar = defineAppleSpeechSidecar({
   id: "local-apple-speech",
@@ -74,35 +75,6 @@ function buildWav(
   Buffer.from(samples).copy(buffer, 44);
 
   return buffer;
-}
-
-function buildIrodoriStreamResponse(wav: Uint8Array, splitAt = wav.byteLength): Response {
-  const chunks = splitAt < wav.byteLength ? [wav.slice(0, splitAt), wav.slice(splitAt)] : [wav];
-  const frames: Uint8Array[] = [
-    Buffer.from(`${JSON.stringify({ kind: "handshake", v: 1, max_chunk_size: 4 * 1024 * 1024 })}\n`)
-  ];
-
-  for (const [index, chunk] of chunks.entries()) {
-    frames.push(
-      Buffer.from(
-        `${JSON.stringify({
-          kind: "chunk",
-          v: 1,
-          index,
-          nbytes: chunk.byteLength,
-          final: index === chunks.length - 1,
-          elapsed: 0.25
-        })}\n`
-      ),
-      chunk
-    );
-  }
-
-  return new Response(bytesToArrayBuffer(Buffer.concat(frames)), {
-    headers: {
-      "content-type": "application/octet-stream"
-    }
-  });
 }
 
 function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -2020,7 +1992,7 @@ describe("Irodori TTS boundary", () => {
             : Buffer.from([0x30, 0, 0x40, 0]);
         const wav = buildWav(samples, { sampleRateHz: 24_000, channels: 1 });
 
-        return Promise.resolve(buildIrodoriStreamResponse(wav, 45));
+        return Promise.resolve(buildIrodoriStreamResponse(wav, { splitAt: 45 }));
       }
     });
 
@@ -2150,6 +2122,34 @@ describe("Irodori TTS boundary", () => {
     expect(irodoriService.style).toBe("calm");
   });
 
+  it("rejects inconsistent elapsed metadata and streams above the frame cap", async () => {
+    const wav = buildWav(Buffer.from([0x10, 0]), { sampleRateHz: 24_000, channels: 1 });
+    const responses = [
+      buildIrodoriStreamResponse(wav, {
+        splitAt: 45,
+        elapsed: [0.25, 0.5]
+      }),
+      buildIrodoriStreamResponse(wav, {
+        chunks: [...Array.from({ length: 16 }, () => new Uint8Array()), wav]
+      })
+    ];
+    const client = createIrodoriTtsClient(irodoriService, {
+      fetch: () => Promise.resolve(responses.shift() ?? buildIrodoriStreamResponse(wav))
+    });
+
+    for (const text of ["elapsed。", "frame cap。"]) {
+      await expect(collectEvents(client.synthesize({ text }))).resolves.toMatchObject([
+        {
+          kind: "failed",
+          failure: {
+            reason: "invalid_response",
+            message: "pico TTS Irodori response is malformed"
+          }
+        }
+      ]);
+    }
+  });
+
   it.each([
     ["sample rate", 0xffffffff, 1],
     ["channel count", 24_000, 9]
@@ -2177,7 +2177,7 @@ describe("Irodori TTS boundary", () => {
     ]);
   });
 
-  it("reports malformed Irodori stream frames without exposing their payload", async () => {
+  it("rejects an Irodori JSON response without exposing its payload", async () => {
     const client = createIrodoriTtsClient(irodoriService, {
       fetch: () => Promise.resolve(buildSidecarResponse({ wav_bytes: "not base64!" }))
     });
@@ -2194,6 +2194,63 @@ describe("Irodori TTS boundary", () => {
         }
       }
     ]);
+  });
+
+  it("reports a truncated Irodori stream frame without exposing its payload", async () => {
+    const client = createIrodoriTtsClient(irodoriService, {
+      fetch: () =>
+        Promise.resolve(
+          new Response('{"kind":"handshake","v":1,"max_chunk_size":4194304}\n{"kind":"chunk"', {
+            headers: {
+              "content-type": "application/octet-stream"
+            }
+          })
+        )
+    });
+
+    await expect(collectEvents(client.synthesize({ text: "本文。" }))).resolves.toEqual([
+      {
+        kind: "failed",
+        failure: {
+          ok: false,
+          reason: "invalid_response",
+          message: "pico TTS Irodori response is malformed",
+          sentenceIndex: 0,
+          source: irodoriSource
+        }
+      }
+    ]);
+  });
+
+  it("rejects a wrong Irodori content type before reading its body", async () => {
+    let bodyReadCount = 0;
+    const response = new Response("not a stream", {
+      headers: {
+        "content-type": "application/json"
+      }
+    });
+    const guardedResponse = new Proxy(response, {
+      get(target, property) {
+        if (property === "body") {
+          bodyReadCount += 1;
+        }
+        return Reflect.get(target, property, target) as unknown;
+      }
+    });
+    const client = createIrodoriTtsClient(irodoriService, {
+      fetch: () => Promise.resolve(guardedResponse)
+    });
+
+    await expect(collectEvents(client.synthesize({ text: "本文。" }))).resolves.toMatchObject([
+      {
+        kind: "failed",
+        failure: {
+          reason: "invalid_response",
+          message: "pico TTS Irodori response is malformed"
+        }
+      }
+    ]);
+    expect(bodyReadCount).toBe(0);
   });
 
   it("rejects an oversized Irodori stream before reading its body", async () => {

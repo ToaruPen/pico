@@ -126,6 +126,23 @@ describe("VoiceDesign speech envelope", () => {
     });
   });
 
+  it.each([
+    `\n\n<!--pico-voice-design:${nonce}`,
+    `\n\n<!--pico-voice-design:${nonce.slice(0, 12)}`,
+    `\n\n<!--pico-voice-design:${nonce}\n{"v":1`,
+    `\n\n<!--pico-voice-design:${nonce}\r\n{"v":1,"style":"calm","annotations":[]}\r\n-->`,
+    `\n\n<!--pico-voice-design:${nonce}\n{"v":1,"style":"calm","annotations":[]}`
+  ])("strips but rejects a malformed trailing suffix", (suffix) => {
+    const text = "不完全な制御情報は読み上げません。";
+
+    expect(
+      inspectVoiceDesignEnvelope(`${text}${suffix}`, nonce, irodoriVoiceDesignSpeechProfile)
+    ).toEqual({
+      text,
+      status: "rejected"
+    });
+  });
+
   it("preserves an embedded marker when a valid envelope follows at the final suffix", () => {
     const text = `説明例: ${formatVoiceDesignEnvelope(nonce, {
       v: 1,
@@ -184,6 +201,8 @@ describe("VoiceDesign speech envelope", () => {
     const instruction = buildVoiceDesignSpeechInstruction(nonce, irodoriVoiceDesignSpeechProfile);
 
     expect(instruction).toContain("neutral | calm | cheerful | clear");
+    expect(instruction).toContain("Use calm when no other style is clearly justified.");
+    expect(instruction).toContain('{"v":1,"style":"calm","annotations":[]}');
     expect(instruction).toContain('"annotations":[]');
     expect(instruction).toContain(nonce);
     expect(instruction).toContain("Do not add any other fields");

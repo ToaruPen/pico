@@ -244,7 +244,7 @@ skill の責務に含めない。
 ## 配置と切り戻し
 
 skill の canonical source は
-`/Users/monsoon/Dev/dotfiles/home/.codex/skills` とする。`skill-index.json` が管理する
+`$HOME/Dev/dotfiles/home/.codex/skills` とする。`skill-index.json` が管理する
 symlink 配布だけを使い、重複コピーを作らない。
 
 Pico 統合は skill と API contract の実測完了後に行う。Irodori からの切り戻しは

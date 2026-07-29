@@ -160,7 +160,7 @@ extractor を追加した同一 benchmark の再実行が必要である。
 ## Codex skill
 
 canonical source は
-`/Users/monsoon/Dev/dotfiles/home/.codex/skills/irodori-voicedesign-speech-plan` である。
+`$HOME/Dev/dotfiles/home/.codex/skills/irodori-voicedesign-speech-plan` である。
 `~/.codex/skills` には canonical への symlink だけを置き、重複コピーは作っていない。
 
 skill は exact profile、target、preset、annotation ID の4 fieldだけを受け取る。
@@ -230,6 +230,6 @@ block、rollback では `aivis-speech` と既存 `aivis` block を選ぶ。runti
 - benchmark harness:
   `.codex/benchmarks/voicedesign_operational/`
 - canonical skill:
-  `/Users/monsoon/Dev/dotfiles/home/.codex/skills/irodori-voicedesign-speech-plan/`
+  `$HOME/Dev/dotfiles/home/.codex/skills/irodori-voicedesign-speech-plan/`
 
 raw fixture text と WAV は private artifact のまま保管する。公開用 report には本文を複製しない。

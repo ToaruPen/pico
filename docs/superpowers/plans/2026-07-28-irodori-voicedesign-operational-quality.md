@@ -208,7 +208,7 @@ NVML/nvidia-smi, and Codex `skill-creator` plus `skill-eval-orchestrator`.
 
 **Canonical directory:**
 
-- `/Users/monsoon/Dev/dotfiles/home/.codex/skills/<approved-skill-name>/`
+- `$HOME/Dev/dotfiles/home/.codex/skills/<approved-skill-name>/`
 
 Follow the required `skill-creator` order exactly:
 

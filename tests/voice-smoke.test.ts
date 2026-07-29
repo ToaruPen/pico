@@ -7,6 +7,7 @@ import {
   voiceSmokeExitCode
 } from "../scripts/smoke/voice-providers.js";
 import { definePicoConfig } from "../src/config/index.js";
+import { buildIrodoriStreamResponse } from "./support/irodori-stream-fixtures.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -35,27 +36,6 @@ function buildWav(samples: Uint8Array): ArrayBuffer {
   Buffer.from(samples).copy(buffer, 44);
 
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
-}
-
-function buildIrodoriStreamResponse(wav: ArrayBuffer): Response {
-  const wavBytes = Buffer.from(wav);
-  const handshake = Buffer.from(
-    `${JSON.stringify({ kind: "handshake", v: 1, max_chunk_size: 4 * 1024 * 1024 })}\n`
-  );
-  const header = Buffer.from(
-    `${JSON.stringify({
-      kind: "chunk",
-      v: 1,
-      index: 0,
-      nbytes: wavBytes.byteLength,
-      final: true,
-      elapsed: 0.1
-    })}\n`
-  );
-
-  return new Response(Buffer.concat([handshake, header, wavBytes]), {
-    headers: { "content-type": "application/octet-stream" }
-  });
 }
 
 function requestUrl(input: RequestInfo | URL): string {
@@ -159,7 +139,7 @@ describe("voice provider smoke configuration", () => {
 
   it("smokes the selected Irodori provider and reports its voice identity", async () => {
     vi.stubGlobal("fetch", () =>
-      Promise.resolve(buildIrodoriStreamResponse(buildWav(Buffer.from([1, 0]))))
+      Promise.resolve(buildIrodoriStreamResponse(buildWav(Buffer.from([1, 0])), { elapsed: 0.1 }))
     );
 
     const monotonicNow = vi.fn().mockReturnValueOnce(1_000).mockReturnValueOnce(1_125);

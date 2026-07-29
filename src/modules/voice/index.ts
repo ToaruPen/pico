@@ -1,5 +1,9 @@
 import type { FuturePicoModuleMetadata } from "../../orchestrator/contracts.js";
-import type { VoiceDesignSpeechPlan } from "../voice-design/index.js";
+import {
+  type VoiceDesignSpeechPlan,
+  type VoiceDesignStyle,
+  voiceDesignStyles
+} from "../voice-design/index.js";
 
 export const voiceModuleMetadata = {
   kind: "voice",
@@ -116,7 +120,7 @@ export type AivisSpeechVoiceParameters = {
   readonly volumeScale: number;
 };
 
-export type IrodoriStyle = "neutral" | "calm" | "cheerful" | "clear";
+export type IrodoriStyle = VoiceDesignStyle;
 
 export type IrodoriServiceConfigInput = {
   readonly id: string;
@@ -1833,11 +1837,11 @@ async function synthesizeSentenceWithIrodori(
 }
 
 async function decodeIrodoriStreamResponse(response: Response): Promise<DecodedIrodoriStream> {
-  const bytes = await readBoundedIrodoriStreamBody(response);
-
   if (response.headers.get("content-type")?.split(";", 1)[0] !== "application/octet-stream") {
     throw new Error("pico TTS Irodori response is malformed");
   }
+
+  const bytes = await readBoundedIrodoriStreamBody(response);
 
   return decodeIrodoriStreamBytes(bytes);
 }
@@ -2662,11 +2666,15 @@ function requireIrodoriProvider(value: unknown): "irodori" {
 }
 
 function requireIrodoriStyle(value: unknown): IrodoriStyle {
-  if (value === "neutral" || value === "calm" || value === "cheerful" || value === "clear") {
+  if (isIrodoriStyle(value)) {
     return value;
   }
 
   throw new Error("pico Irodori TTS service style is invalid");
+}
+
+function isIrodoriStyle(value: unknown): value is IrodoriStyle {
+  return voiceDesignStyles.some((style) => style === value);
 }
 
 function requireLocalAivisSpeechBaseUrl(value: unknown): string {

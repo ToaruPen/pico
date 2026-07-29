@@ -81,7 +81,9 @@ export function inspectVoiceDesignEnvelope(
   const suffix = renderedText.slice(markerIndex);
   const match = envelopePattern.exec(suffix);
   if (match === null) {
-    return { text: renderedText, status: "absent" };
+    return isMalformedTrailingEnvelope(suffix, expectedNonce)
+      ? { text: renderedText.slice(0, markerIndex), status: "rejected" }
+      : { text: renderedText, status: "absent" };
   }
 
   const text = renderedText.slice(0, markerIndex);
@@ -118,14 +120,14 @@ export function buildVoiceDesignSpeechInstruction(
   return [
     "## Pico VoiceDesign speech plan (resident voice only)",
     "For each final assistant response, keep the reader-facing response unchanged and append exactly one hidden speech-plan suffix.",
-    "Choose the delivery style that best matches the response. Use neutral when no other style is clearly justified.",
+    `Choose the delivery style that best matches the response. Use ${profile.defaultStyle} when no other style is clearly justified.`,
     `Allowed styles: ${styles}`,
     `${annotationRule}.`,
     "The JSON object must contain exactly v, style, and annotations. Do not add any other fields.",
     "Do not use free-form captions, descriptions, emoji, kaomoji, speed, seed, steps, or provider parameters.",
     "Append this exact shape as the final bytes of the response:",
     `<!--pico-voice-design:${nonce}`,
-    '{"v":1,"style":"neutral","annotations":[]}',
+    `{"v":1,"style":"${profile.defaultStyle}","annotations":[]}`,
     "-->",
     "Never mention or explain this suffix in the reader-facing response."
   ].join("\n");
@@ -191,6 +193,16 @@ function parseVoiceDesignSpeechPlan(
     style: value.style,
     annotations
   });
+}
+
+function isMalformedTrailingEnvelope(suffix: string, expectedNonce: string): boolean {
+  const nonceLineEnd = suffix.indexOf("\n", envelopeMarker.length);
+  if (nonceLineEnd === -1) {
+    return expectedNonce.startsWith(suffix.slice(envelopeMarker.length));
+  }
+
+  const terminatorIndex = suffix.indexOf("\n-->", nonceLineEnd);
+  return terminatorIndex === -1 || terminatorIndex + "\n-->".length === suffix.length;
 }
 
 function readAllowedAnnotations(
