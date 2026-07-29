@@ -8,6 +8,7 @@ import {
   type VoicePcmFrame
 } from "../modules/voice/echo-control.js";
 import type { TtsAudioChunk, TtsClient, TtsSynthesisEvent } from "../modules/voice/index.js";
+import type { VoiceDesignSpeechPlan } from "../modules/voice-design/index.js";
 import type { VoicePlaybackSession, VoicePlaybackSink } from "./voice-playback.js";
 import {
   recordVoiceStageProbe,
@@ -17,6 +18,7 @@ import {
 
 export type TtsPlaybackPipelineOptions = {
   readonly text: string;
+  readonly speechPlan?: VoiceDesignSpeechPlan;
   readonly signal: AbortSignal;
   readonly tts: TtsClient;
   readonly playback: VoicePlaybackSink;
@@ -159,6 +161,7 @@ async function executePipeline(state: PipelineState): Promise<TtsPlaybackPipelin
     Promise.resolve().then(() => {
       const events = state.options.tts.synthesize({
         text: state.options.text,
+        ...(state.options.speechPlan === undefined ? {} : { speechPlan: state.options.speechPlan }),
         signal: state.producerController.signal
       });
       return events[Symbol.asyncIterator]();

@@ -64,8 +64,8 @@ consume a benchmark series or become accepted evidence:
 3. Run the bounded resident audio probe, then
    `npm run field:resident-hold-to-talk`, and retain only aggregate timing,
    cadence, health, dropped-frame, CPU, and memory metadata. Do not retain PCM.
-4. Run `just smoke-voice-providers` for Apple Speech and AivisSpeech
-   reachability. Inspect its JSON and require both sections to have
+4. Run `just smoke-voice-providers` for Apple Speech and the configured TTS
+   provider. Inspect its JSON and require both sections to have
    `status: passed`; `skipped` is not a successful preflight and stops the
    validation ladder even though the generic smoke command exits zero.
 5. Run one strict full-turn pseudo-audio smoke with the canonical fixture hash,
@@ -97,7 +97,8 @@ metadata evidence. If a diagnostic display pipeline uses `tee`, enable
 - macOS resident input and physical F-key control: one managed
   `pico-macos-resident-io` Swift sidecar with a continuously running
   AVAudioEngine, stable Core Audio UID selection, and binary stdin/stdout IPC.
-- TTS candidate: Aivis Speech.
+- TTS provider: Irodori VoiceDesign through the protected Windows tunnel.
+  Aivis Speech remains an explicit configuration rollback.
 - Camera candidate: Tapo C210 through RTSP first, ONVIF only when bounded PTZ is
   needed.
 - Identity Registry XLSX processing: use ExcelJS with the fixed local roster

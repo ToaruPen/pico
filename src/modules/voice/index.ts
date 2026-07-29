@@ -1,10 +1,12 @@
 import type { FuturePicoModuleMetadata } from "../../orchestrator/contracts.js";
+import type { VoiceDesignSpeechPlan } from "../voice-design/index.js";
 
 export const voiceModuleMetadata = {
   kind: "voice",
   status: "planned",
-  summary: "Voice input and output through Apple Speech and Aivis Speech.",
-  selectedProvider: "Apple Speech for STT and Aivis Speech for TTS",
+  summary: "Voice input through Apple Speech and output through Irodori VoiceDesign.",
+  selectedProvider:
+    "Apple Speech for STT and Irodori VoiceDesign for TTS; Aivis Speech is an explicit rollback",
   capabilities: []
 } as const satisfies FuturePicoModuleMetadata;
 
@@ -114,8 +116,23 @@ export type AivisSpeechVoiceParameters = {
   readonly volumeScale: number;
 };
 
+export type IrodoriStyle = "neutral" | "calm" | "cheerful" | "clear";
+
+export type IrodoriServiceConfigInput = {
+  readonly id: string;
+  readonly provider: "irodori";
+  readonly localBaseUrl: string;
+  readonly speaker: string;
+  readonly style: IrodoriStyle;
+  readonly numSteps: number;
+  readonly seed: number;
+};
+
+export type IrodoriServiceConfig = IrodoriServiceConfigInput;
+
 export type TtsSynthesisRequest = {
   readonly text: string;
+  readonly speechPlan?: VoiceDesignSpeechPlan;
   readonly signal?: AbortSignal;
 };
 
@@ -127,6 +144,7 @@ export type TtsAudioChunk = {
   readonly sampleRateHz: number;
   readonly channels: number;
   readonly durationMs: number;
+  readonly serviceElapsedMs?: number;
   readonly source: TtsSynthesisSource;
 };
 
@@ -184,11 +202,29 @@ export type AivisSpeechTtsClientOptions = {
   readonly observeStage?: (observation: TtsProviderStageObservation) => void;
 };
 
+export type IrodoriTtsClientOptions = AivisSpeechTtsClientOptions;
+
 type AivisSpeechTtsRuntime = {
   readonly fetch: typeof fetch;
   readonly now: () => string;
   readonly monotonicNow: () => number;
   readonly observeStage?: (observation: TtsProviderStageObservation) => void;
+};
+
+type IrodoriTtsRuntime = AivisSpeechTtsRuntime;
+type DecodedIrodoriStream =
+  | {
+      readonly ok: true;
+      readonly wavBytes: Uint8Array;
+      readonly serviceElapsedMs: number;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: "backend_unavailable" | "backpressure";
+    };
+type ParsedIrodoriStreamLine = {
+  readonly payload: Record<string, unknown>;
+  readonly nextOffset: number;
 };
 
 export type AivisSpeechServiceHealth =
@@ -200,17 +236,28 @@ export type AivisSpeechServiceHealth =
       readonly message: string;
     };
 
+export type IrodoriServiceHealth = AivisSpeechServiceHealth;
+
 type SttTranscriptionSource = {
   readonly sidecarId: string;
   readonly provider: "apple-speech";
   readonly language: string;
 };
 
-export type TtsSynthesisSource = {
-  readonly serviceId: string;
-  readonly provider: "aivis-speech";
-  readonly speakerId: number;
-};
+export type TtsSynthesisSource =
+  | {
+      readonly serviceId: string;
+      readonly provider: "aivis-speech";
+      readonly speakerId: number;
+    }
+  | {
+      readonly serviceId: string;
+      readonly provider: "irodori";
+      readonly speaker: string;
+      readonly style: IrodoriStyle;
+    };
+
+type TtsServiceConfig = AivisSpeechServiceConfig | IrodoriServiceConfig;
 
 type ParsedAppleSpeechSidecarResponse =
   | {
@@ -234,6 +281,13 @@ const STREAMING_WEBSOCKET_HIGH_WATER_BYTES = 256 * 1_024;
 const STREAMING_WEBSOCKET_POLL_MILLISECONDS = 10;
 const STREAMING_WEBSOCKET_BACKPRESSURE_TIMEOUT_MILLISECONDS = 1_000;
 const STREAMING_WEBSOCKET_READY_TIMEOUT_MILLISECONDS = 1_000;
+const IRODORI_MAX_HEALTH_RESPONSE_BYTES = 64 * 1024;
+const IRODORI_MAX_STREAM_RESPONSE_BYTES = 16 * 1024 * 1024;
+const IRODORI_MAX_STREAM_FRAMES = 16;
+const IRODORI_MAX_STREAM_HEADER_BYTES = 1_024;
+const MIN_PCM_SAMPLE_RATE_HZ = 8_000;
+const MAX_PCM_SAMPLE_RATE_HZ = 192_000;
+const MAX_PCM_CHANNELS = 8;
 const AIVIS_DEFAULT_VOICE: AivisSpeechVoiceParameters = {
   speedScale: 1,
   pitchScale: 0,
@@ -321,6 +375,27 @@ export function defineAivisSpeechService(input: unknown): AivisSpeechServiceConf
     ),
     timeoutMs: requirePositiveInteger(config.timeoutMs, "pico TTS service timeoutMs is required"),
     voice: defineAivisSpeechVoice(config.voice)
+  };
+}
+
+export function defineIrodoriService(input: unknown): IrodoriServiceConfig {
+  if (input === undefined) {
+    throw new Error("pico Irodori TTS service config is required");
+  }
+
+  const config = requireRecord(input, "pico Irodori TTS service must be one config object");
+
+  return {
+    id: requireString(config.id, "pico Irodori TTS service id is required"),
+    provider: requireIrodoriProvider(config.provider),
+    localBaseUrl: requireLocalIrodoriBaseUrl(config.localBaseUrl),
+    speaker: requireString(config.speaker, "pico Irodori TTS service speaker is required"),
+    style: requireIrodoriStyle(config.style),
+    numSteps: requirePositiveInteger(
+      config.numSteps,
+      "pico Irodori TTS service numSteps is required"
+    ),
+    seed: requireNonNegativeInteger(config.seed, "pico Irodori TTS service seed is required")
   };
 }
 
@@ -718,6 +793,19 @@ export function createAivisSpeechTtsClient(
   return {
     async *synthesize(request) {
       const source = ttsSynthesisSource(service);
+      if (request.speechPlan !== undefined) {
+        yield {
+          kind: "failed",
+          failure: ttsFailure(
+            service,
+            "invalid_request",
+            "pico TTS Aivis Speech does not support a VoiceDesign speech plan",
+            0
+          )
+        };
+        return;
+      }
+
       const sentences = segmentJapaneseSentences(request.text);
       let chunkCount = 0;
       let totalDurationMs = 0;
@@ -740,6 +828,73 @@ export function createAivisSpeechTtsClient(
           sentenceIndex,
           sentence,
           service,
+          runtime,
+          request.signal
+        );
+
+        if (!result.ok) {
+          yield { kind: "failed", failure: result };
+          return;
+        }
+
+        chunkCount += 1;
+        totalDurationMs += result.chunk.durationMs;
+        yield { kind: "chunk", chunk: result.chunk };
+      }
+
+      yield {
+        kind: "completed",
+        chunkCount,
+        totalDurationMs,
+        source
+      };
+    }
+  };
+}
+
+export function createIrodoriTtsClient(
+  service: IrodoriServiceConfig,
+  options: IrodoriTtsClientOptions = {}
+): TtsClient {
+  const runtime: IrodoriTtsRuntime = {
+    fetch: options.fetch ?? fetch,
+    now: options.now ?? defaultNow,
+    monotonicNow: options.monotonicNow ?? defaultMonotonicNow,
+    ...(options.observeStage === undefined ? {} : { observeStage: options.observeStage })
+  };
+
+  return {
+    async *synthesize(request) {
+      const requestService =
+        request.speechPlan === undefined
+          ? service
+          : Object.freeze({
+              ...service,
+              style: request.speechPlan.style
+            });
+      const source = ttsSynthesisSource(requestService);
+      const sentences = segmentJapaneseSentences(request.text);
+      let chunkCount = 0;
+      let totalDurationMs = 0;
+
+      for (const [sentenceIndex, sentence] of sentences.entries()) {
+        if (request.signal?.aborted) {
+          yield {
+            kind: "failed",
+            failure: ttsFailure(
+              requestService,
+              "cancelled",
+              "pico TTS Irodori request was cancelled",
+              sentenceIndex
+            )
+          };
+          return;
+        }
+
+        const result = await synthesizeSentenceWithIrodori(
+          sentenceIndex,
+          sentence,
+          requestService,
           runtime,
           request.signal
         );
@@ -858,10 +1013,19 @@ async function readTtsSynthesisEventStream(events: AsyncIterable<TtsSynthesisEve
 }
 
 function sameTtsSynthesisSource(left: TtsSynthesisSource, right: TtsSynthesisSource): boolean {
+  if (left.serviceId !== right.serviceId || left.provider !== right.provider) {
+    return false;
+  }
+
+  if (left.provider === "aivis-speech" && right.provider === "aivis-speech") {
+    return left.speakerId === right.speakerId;
+  }
+
   return (
-    left.serviceId === right.serviceId &&
-    Object.is(left.provider, right.provider) &&
-    left.speakerId === right.speakerId
+    left.provider === "irodori" &&
+    right.provider === "irodori" &&
+    left.speaker === right.speaker &&
+    left.style === right.style
   );
 }
 
@@ -902,6 +1066,50 @@ export async function checkAivisSpeechServiceHealth(
     };
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+export async function checkIrodoriServiceHealth(
+  service: IrodoriServiceConfig,
+  fetchImplementation: typeof fetch = fetch,
+  signal?: AbortSignal
+): Promise<IrodoriServiceHealth> {
+  try {
+    const response = await fetchImplementation(new URL("/health", service.localBaseUrl), {
+      method: "GET",
+      redirect: "error",
+      ...(signal === undefined ? {} : { signal })
+    });
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        message: `pico TTS Irodori health request failed with status ${response.status}`
+      };
+    }
+
+    const healthBytes = await readBoundedResponseBody(
+      response,
+      IRODORI_MAX_HEALTH_RESPONSE_BYTES,
+      "pico TTS Irodori health response is malformed"
+    );
+    const health = requireRecord(
+      JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(healthBytes)),
+      "pico TTS Irodori health response is malformed"
+    );
+    if (health.status !== "ok" || health.model_loaded !== true) {
+      return {
+        ok: false,
+        message: "pico TTS Irodori health response is not ready"
+      };
+    }
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `pico TTS Irodori health request failed: ${errorMessage(error)}`
+    };
   }
 }
 
@@ -1526,6 +1734,426 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
+async function synthesizeSentenceWithIrodori(
+  sentenceIndex: number,
+  text: string,
+  service: IrodoriServiceConfig,
+  runtime: IrodoriTtsRuntime,
+  signal: AbortSignal | undefined
+): Promise<
+  | {
+      readonly ok: true;
+      readonly chunk: TtsAudioChunk;
+    }
+  | TtsSynthesisFailure
+> {
+  const startedAt = runtime.now();
+  const startedAtMs = runtime.monotonicNow();
+  const result = await runIrodoriStage(sentenceIndex, service, signal, async (stageSignal) => {
+    const response = await runtime.fetch(new URL("/synthesize_stream", service.localBaseUrl), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        text,
+        speaker: service.speaker,
+        style: service.style,
+        num_steps: service.numSteps,
+        seed: service.seed
+      }),
+      redirect: "error",
+      signal: stageSignal
+    });
+
+    if (!response.ok) {
+      return ttsFailure(
+        service,
+        "backend_error",
+        `pico TTS Irodori synthesis request failed with status ${response.status}`,
+        sentenceIndex
+      );
+    }
+
+    try {
+      const decoded = await decodeIrodoriStreamResponse(response);
+
+      if (!decoded.ok) {
+        return ttsFailure(
+          service,
+          "backend_error",
+          `pico TTS Irodori synthesis stream reported ${decoded.reason}`,
+          sentenceIndex
+        );
+      }
+
+      const wav = decodeWavPcm16le(decoded.wavBytes);
+
+      return {
+        ok: true as const,
+        chunk: {
+          sentenceIndex,
+          text,
+          audio: wav.audio,
+          encoding: "pcm16le" as const,
+          sampleRateHz: wav.sampleRateHz,
+          channels: wav.channels,
+          durationMs: wavDurationMs(wav.audio, wav.sampleRateHz, wav.channels),
+          serviceElapsedMs: decoded.serviceElapsedMs,
+          source: ttsSynthesisSource(service)
+        }
+      };
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw error;
+      }
+
+      return ttsFailure(
+        service,
+        "invalid_response",
+        "pico TTS Irodori response is malformed",
+        sentenceIndex
+      );
+    }
+  });
+
+  observeSettledIrodoriStage(
+    runtime,
+    sentenceIndex,
+    startedAt,
+    startedAtMs,
+    result.ok ? result.value : result
+  );
+
+  if (!result.ok) {
+    return result;
+  }
+
+  return result.value;
+}
+
+async function decodeIrodoriStreamResponse(response: Response): Promise<DecodedIrodoriStream> {
+  const bytes = await readBoundedIrodoriStreamBody(response);
+
+  if (response.headers.get("content-type")?.split(";", 1)[0] !== "application/octet-stream") {
+    throw new Error("pico TTS Irodori response is malformed");
+  }
+
+  return decodeIrodoriStreamBytes(bytes);
+}
+
+async function readBoundedIrodoriStreamBody(response: Response): Promise<Uint8Array> {
+  return readBoundedResponseBody(
+    response,
+    IRODORI_MAX_STREAM_RESPONSE_BYTES,
+    "pico TTS Irodori response is malformed"
+  );
+}
+
+async function readBoundedResponseBody(
+  response: Response,
+  maxBytes: number,
+  malformedMessage: string
+): Promise<Uint8Array> {
+  requireBoundedContentLength(response.headers.get("content-length"), maxBytes, malformedMessage);
+  const reader = response.body?.getReader();
+  if (reader === undefined) {
+    throw new Error(malformedMessage);
+  }
+
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  try {
+    let result = await reader.read();
+    while (!result.done) {
+      totalBytes += result.value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        throw new Error(malformedMessage);
+      }
+      chunks.push(result.value);
+      result = await reader.read();
+    }
+
+    return Buffer.concat(chunks, totalBytes);
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function requireBoundedContentLength(
+  value: string | null,
+  maxBytes: number,
+  malformedMessage: string
+): void {
+  if (value === null) {
+    return;
+  }
+
+  if (!/^(?:0|[1-9]\d*)$/u.test(value) || Number(value) > maxBytes) {
+    throw new Error(malformedMessage);
+  }
+}
+
+function decodeIrodoriStreamBytes(bytes: Uint8Array): DecodedIrodoriStream {
+  const handshakeLine = parseIrodoriStreamLine(bytes, 0);
+  const maxChunkSize = requireIrodoriHandshake(handshakeLine.payload);
+  const chunks: Uint8Array[] = [];
+  let offset = handshakeLine.nextOffset;
+  let expectedIndex = 0;
+  let serviceElapsedMs: number | undefined;
+
+  while (offset < bytes.byteLength) {
+    if (expectedIndex >= IRODORI_MAX_STREAM_FRAMES) {
+      throw new Error("pico TTS Irodori response is malformed");
+    }
+    const headerLine = parseIrodoriStreamLine(bytes, offset);
+    const header = requireIrodoriChunkHeader(headerLine.payload, expectedIndex, maxChunkSize);
+    offset = headerLine.nextOffset;
+    serviceElapsedMs = requireConsistentIrodoriElapsed(serviceElapsedMs, header.elapsedMs);
+
+    if (header.errorCode !== undefined) {
+      if (offset !== bytes.byteLength) {
+        throw new Error("pico TTS Irodori response is malformed");
+      }
+      return { ok: false, reason: header.errorCode };
+    }
+
+    const payloadEnd = offset + header.byteLength;
+    if (payloadEnd > bytes.byteLength) {
+      throw new Error("pico TTS Irodori response is malformed");
+    }
+    chunks.push(bytes.subarray(offset, payloadEnd));
+    offset = payloadEnd;
+    expectedIndex += 1;
+
+    if (header.final) {
+      if (offset !== bytes.byteLength) {
+        throw new Error("pico TTS Irodori response is malformed");
+      }
+      return {
+        ok: true,
+        wavBytes: Buffer.concat(chunks),
+        serviceElapsedMs
+      };
+    }
+  }
+
+  throw new Error("pico TTS Irodori response is malformed");
+}
+
+function parseIrodoriStreamLine(bytes: Uint8Array, offset: number): ParsedIrodoriStreamLine {
+  const lineEnd = bytes.indexOf(0x0a, offset);
+  if (lineEnd <= offset || lineEnd - offset > IRODORI_MAX_STREAM_HEADER_BYTES) {
+    throw new Error("pico TTS Irodori response is malformed");
+  }
+
+  try {
+    return {
+      payload: requireRecord(
+        JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(offset, lineEnd))),
+        "pico TTS Irodori response is malformed"
+      ),
+      nextOffset: lineEnd + 1
+    };
+  } catch {
+    throw new Error("pico TTS Irodori response is malformed");
+  }
+}
+
+function requireIrodoriHandshake(payload: Record<string, unknown>): number {
+  requireExactIrodoriStreamKeys(payload, ["kind", "v", "max_chunk_size"]);
+  const maxChunkSize = payload.max_chunk_size;
+  if (
+    payload.kind !== "handshake" ||
+    payload.v !== 1 ||
+    !Number.isSafeInteger(maxChunkSize) ||
+    typeof maxChunkSize !== "number" ||
+    maxChunkSize <= 0 ||
+    maxChunkSize > 4 * 1024 * 1024
+  ) {
+    throw new Error("pico TTS Irodori response is malformed");
+  }
+
+  return maxChunkSize;
+}
+
+function requireIrodoriChunkHeader(
+  payload: Record<string, unknown>,
+  expectedIndex: number,
+  maxChunkSize: number
+): {
+  readonly byteLength: number;
+  readonly final: boolean;
+  readonly errorCode: "backend_unavailable" | "backpressure" | undefined;
+  readonly elapsedMs: number;
+} {
+  const errorCode = requireOptionalIrodoriStreamErrorCode(payload.error_code);
+  requireExactIrodoriStreamKeys(
+    payload,
+    errorCode === undefined
+      ? ["kind", "v", "index", "nbytes", "final", "elapsed"]
+      : ["kind", "v", "index", "nbytes", "final", "elapsed", "error_code"]
+  );
+  requireIrodoriChunkIdentity(payload, expectedIndex);
+  const byteLength = requireIrodoriChunkByteLength(payload.nbytes, maxChunkSize);
+  const final = requireIrodoriChunkFinal(payload.final);
+  const elapsedMs = requireIrodoriChunkElapsed(payload.elapsed);
+
+  if (errorCode !== undefined && (!final || byteLength !== 0)) {
+    throw new Error("pico TTS Irodori response is malformed");
+  }
+
+  return {
+    byteLength,
+    final,
+    errorCode,
+    elapsedMs
+  };
+}
+
+function requireIrodoriChunkIdentity(
+  payload: Record<string, unknown>,
+  expectedIndex: number
+): void {
+  if (payload.kind !== "chunk" || payload.v !== 1 || payload.index !== expectedIndex) {
+    throw new Error("pico TTS Irodori response is malformed");
+  }
+}
+
+function requireIrodoriChunkByteLength(value: unknown, maxChunkSize: number): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > maxChunkSize
+  ) {
+    throw new Error("pico TTS Irodori response is malformed");
+  }
+
+  return value;
+}
+
+function requireIrodoriChunkFinal(value: unknown): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error("pico TTS Irodori response is malformed");
+  }
+
+  return value;
+}
+
+function requireIrodoriChunkElapsed(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error("pico TTS Irodori response is malformed");
+  }
+
+  return Math.round(value * 1_000);
+}
+
+function requireConsistentIrodoriElapsed(previous: number | undefined, current: number): number {
+  if (previous !== undefined && previous !== current) {
+    throw new Error("pico TTS Irodori response is malformed");
+  }
+
+  return current;
+}
+
+function requireOptionalIrodoriStreamErrorCode(
+  value: unknown
+): "backend_unavailable" | "backpressure" | undefined {
+  if (value === undefined || value === "backend_unavailable" || value === "backpressure") {
+    return value;
+  }
+
+  throw new Error("pico TTS Irodori response is malformed");
+}
+
+function requireExactIrodoriStreamKeys(
+  payload: Record<string, unknown>,
+  expectedKeys: readonly string[]
+): void {
+  if (
+    Object.keys(payload).length !== expectedKeys.length ||
+    expectedKeys.some((key) => !Object.hasOwn(payload, key))
+  ) {
+    throw new Error("pico TTS Irodori response is malformed");
+  }
+}
+
+function observeSettledIrodoriStage(
+  runtime: IrodoriTtsRuntime,
+  sentenceIndex: number,
+  startedAt: string,
+  startedAtMs: number,
+  result: { readonly ok: true } | TtsSynthesisFailure
+): void {
+  const observation = result.ok
+    ? {
+        stage: "synthesis" as const,
+        sentenceIndex,
+        status: "ok" as const,
+        startedAt,
+        durationMs: elapsedSince(startedAtMs, runtime.monotonicNow)
+      }
+    : {
+        stage: "synthesis" as const,
+        sentenceIndex,
+        status: result.reason === "cancelled" ? ("skipped" as const) : ("error" as const),
+        startedAt,
+        durationMs: elapsedSince(startedAtMs, runtime.monotonicNow),
+        errorCode: result.reason
+      };
+
+  try {
+    runtime.observeStage?.(defineTtsProviderStageObservation(observation));
+  } catch {
+    // Provider telemetry is best-effort and cannot change TTS settlement.
+  }
+}
+
+async function runIrodoriStage<T>(
+  sentenceIndex: number,
+  service: IrodoriServiceConfig,
+  signal: AbortSignal | undefined,
+  run: (signal: AbortSignal) => Promise<T>
+): Promise<{ readonly ok: true; readonly value: T } | TtsSynthesisFailure> {
+  if (signal?.aborted) {
+    return ttsFailure(
+      service,
+      "cancelled",
+      "pico TTS Irodori request was cancelled",
+      sentenceIndex
+    );
+  }
+
+  const abortController = new AbortController();
+  const cancel = (): void => {
+    abortController.abort();
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+
+  try {
+    return {
+      ok: true,
+      value: await Promise.race([run(abortController.signal), abortPromise(abortController.signal)])
+    };
+  } catch (error) {
+    if (isAbortError(error)) {
+      return irodoriAbortFailure(service, sentenceIndex);
+    }
+
+    return ttsFailure(
+      service,
+      "backend_error",
+      "pico TTS Irodori synthesis request failed",
+      sentenceIndex
+    );
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+  }
+}
+
 async function synthesizeSentenceWithAivisSpeech(
   sentenceIndex: number,
   text: string,
@@ -1850,6 +2478,8 @@ function decodeWavPcm16le(wav: Uint8Array): {
 type WavChunks = {
   audioFormat?: number;
   bitsPerSample?: number;
+  blockAlign?: number;
+  byteRate?: number;
   channels?: number;
   sampleRateHz?: number;
   audio?: Uint8Array;
@@ -1905,6 +2535,8 @@ function readWavFormatChunk(
   chunks.audioFormat = buffer.readUInt16LE(chunkStart);
   chunks.channels = buffer.readUInt16LE(chunkStart + 2);
   chunks.sampleRateHz = buffer.readUInt32LE(chunkStart + 4);
+  chunks.byteRate = buffer.readUInt32LE(chunkStart + 8);
+  chunks.blockAlign = buffer.readUInt16LE(chunkStart + 12);
   chunks.bitsPerSample = buffer.readUInt16LE(chunkStart + 14);
 }
 
@@ -1925,21 +2557,31 @@ function requireDecodedWav(chunks: WavChunks): {
 }
 
 function isDecodedPcm16leWav(chunks: WavChunks): chunks is DecodedWavChunks {
-  return isPcm16leWavFormat(chunks) && hasPositiveWavMetadata(chunks) && hasAlignedWavAudio(chunks);
+  return isPcm16leWavFormat(chunks) && hasSafeWavMetadata(chunks) && hasAlignedWavAudio(chunks);
 }
 
 function isPcm16leWavFormat(chunks: WavChunks): boolean {
   return chunks.audioFormat === 1 && chunks.bitsPerSample === 16;
 }
 
-function hasPositiveWavMetadata(
+function hasSafeWavMetadata(
   chunks: WavChunks
 ): chunks is WavChunks & { readonly channels: number; readonly sampleRateHz: number } {
+  if (
+    chunks.channels === undefined ||
+    chunks.channels < 1 ||
+    chunks.channels > MAX_PCM_CHANNELS ||
+    chunks.sampleRateHz === undefined ||
+    chunks.sampleRateHz < MIN_PCM_SAMPLE_RATE_HZ ||
+    chunks.sampleRateHz > MAX_PCM_SAMPLE_RATE_HZ
+  ) {
+    return false;
+  }
+
+  const expectedBlockAlign = chunks.channels * PCM16LE_BYTES_PER_SAMPLE;
   return (
-    chunks.channels !== undefined &&
-    chunks.channels > 0 &&
-    chunks.sampleRateHz !== undefined &&
-    chunks.sampleRateHz > 0
+    chunks.blockAlign === expectedBlockAlign &&
+    chunks.byteRate === chunks.sampleRateHz * expectedBlockAlign
   );
 }
 
@@ -1957,7 +2599,8 @@ function requireWavHeader(buffer: Buffer): void {
   if (
     buffer.byteLength < 44 ||
     buffer.toString("ascii", 0, 4) !== "RIFF" ||
-    buffer.toString("ascii", 8, 12) !== "WAVE"
+    buffer.toString("ascii", 8, 12) !== "WAVE" ||
+    buffer.readUInt32LE(4) !== buffer.byteLength - 8
   ) {
     throw new Error("pico TTS Aivis Speech WAV response is malformed");
   }
@@ -2010,6 +2653,22 @@ function requireAivisSpeechProvider(value: unknown): "aivis-speech" {
   throw new Error("pico TTS service provider must be aivis-speech");
 }
 
+function requireIrodoriProvider(value: unknown): "irodori" {
+  if (value === "irodori") {
+    return value;
+  }
+
+  throw new Error("pico Irodori TTS service provider must be irodori");
+}
+
+function requireIrodoriStyle(value: unknown): IrodoriStyle {
+  if (value === "neutral" || value === "calm" || value === "cheerful" || value === "clear") {
+    return value;
+  }
+
+  throw new Error("pico Irodori TTS service style is invalid");
+}
+
 function requireLocalAivisSpeechBaseUrl(value: unknown): string {
   const localBaseUrl = requireString(value, "pico TTS service localBaseUrl is required");
 
@@ -2022,6 +2681,24 @@ function requireLocalAivisSpeechBaseUrl(value: unknown): string {
   requireHttpUrl(parsedUrl);
   requireOriginUrl(parsedUrl);
   requireLoopbackAivisSpeechUrl(parsedUrl);
+
+  return localBaseUrl;
+}
+
+function requireLocalIrodoriBaseUrl(value: unknown): string {
+  const localBaseUrl = requireString(value, "pico Irodori TTS service localBaseUrl is required");
+
+  if (!URL.canParse(localBaseUrl)) {
+    throw new Error("pico Irodori TTS service localBaseUrl must be a valid URL");
+  }
+
+  const parsedUrl = new URL(localBaseUrl);
+
+  requireOriginUrl(parsedUrl);
+
+  if (parsedUrl.protocol !== "http:" || parsedUrl.hostname !== "127.0.0.1") {
+    throw new Error("pico Irodori TTS service must use an http://127.0.0.1 origin");
+  }
 
   return localBaseUrl;
 }
@@ -2041,7 +2718,7 @@ function requireNonNegativeInteger(value: unknown, message: string): number {
 }
 
 function ttsFailure(
-  service: AivisSpeechServiceConfig,
+  service: TtsServiceConfig,
   reason: TtsSynthesisFailure["reason"],
   message: string,
   sentenceIndex: number
@@ -2055,12 +2732,28 @@ function ttsFailure(
   };
 }
 
-function ttsSynthesisSource(service: AivisSpeechServiceConfig): TtsSynthesisSource {
+function ttsSynthesisSource(service: TtsServiceConfig): TtsSynthesisSource {
+  if (service.provider === "irodori") {
+    return {
+      serviceId: service.id,
+      provider: service.provider,
+      speaker: service.speaker,
+      style: service.style
+    };
+  }
+
   return {
     serviceId: service.id,
     provider: service.provider,
     speakerId: service.speakerId
   };
+}
+
+function irodoriAbortFailure(
+  service: IrodoriServiceConfig,
+  sentenceIndex: number
+): TtsSynthesisFailure {
+  return ttsFailure(service, "cancelled", "pico TTS Irodori request was cancelled", sentenceIndex);
 }
 
 function aivisAbortFailure(

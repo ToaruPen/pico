@@ -283,7 +283,7 @@ async function runVoiceSections(
   } catch (error) {
     return [
       failedSection("voice_stt", "apple-speech", errorMessage(error)),
-      failedSection("voice_tts", "aivis-speech", errorMessage(error))
+      failedSection("voice_tts", config.voice.tts.provider, errorMessage(error))
     ];
   }
 }

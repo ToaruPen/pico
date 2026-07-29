@@ -6,6 +6,8 @@
       "!node_modules",
       "!package-lock.json",
       "!.pico-local",
+      "!.codex",
+      "!.superpowers",
       "!tmp",
       "!sidecars/*/.build"
     ]

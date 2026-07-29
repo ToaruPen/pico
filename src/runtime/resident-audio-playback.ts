@@ -9,6 +9,9 @@ const processTerminationGraceMs = 1_000;
 const processKillGraceMs = 1_000;
 const idleOperation = Promise.resolve();
 const maximumFinalSilenceMs = 10_000;
+const minimumPcmSampleRateHz = 8_000;
+const maximumPcmSampleRateHz = 192_000;
+const maximumPcmChannels = 8;
 export const residentPlaybackFinalSilenceMs = 300;
 
 export type ResidentAudioOutputPlan =
@@ -437,9 +440,11 @@ function hasValidPcmFormat(chunk: TtsAudioChunk): boolean {
   return (
     encoding === "pcm16le" &&
     Number.isInteger(chunk.sampleRateHz) &&
-    chunk.sampleRateHz > 0 &&
+    chunk.sampleRateHz >= minimumPcmSampleRateHz &&
+    chunk.sampleRateHz <= maximumPcmSampleRateHz &&
     Number.isInteger(chunk.channels) &&
-    chunk.channels > 0
+    chunk.channels > 0 &&
+    chunk.channels <= maximumPcmChannels
   );
 }
 

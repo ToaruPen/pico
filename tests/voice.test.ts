@@ -5,8 +5,10 @@ import {
   createAivisSpeechTtsClient,
   createAppleSpeechStreamingSttClient,
   createAppleSpeechSttClient,
+  createIrodoriTtsClient,
   defineAivisSpeechService,
   defineAppleSpeechSidecar,
+  defineIrodoriService,
   defineTtsProviderStageObservation,
   parseAppleSpeechSidecarResponse,
   type SttTranscriptionRequest,
@@ -72,6 +74,35 @@ function buildWav(
   Buffer.from(samples).copy(buffer, 44);
 
   return buffer;
+}
+
+function buildIrodoriStreamResponse(wav: Uint8Array, splitAt = wav.byteLength): Response {
+  const chunks = splitAt < wav.byteLength ? [wav.slice(0, splitAt), wav.slice(splitAt)] : [wav];
+  const frames: Uint8Array[] = [
+    Buffer.from(`${JSON.stringify({ kind: "handshake", v: 1, max_chunk_size: 4 * 1024 * 1024 })}\n`)
+  ];
+
+  for (const [index, chunk] of chunks.entries()) {
+    frames.push(
+      Buffer.from(
+        `${JSON.stringify({
+          kind: "chunk",
+          v: 1,
+          index,
+          nbytes: chunk.byteLength,
+          final: index === chunks.length - 1,
+          elapsed: 0.25
+        })}\n`
+      ),
+      chunk
+    );
+  }
+
+  return new Response(bytesToArrayBuffer(Buffer.concat(frames)), {
+    headers: {
+      "content-type": "application/octet-stream"
+    }
+  });
 }
 
 function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -942,6 +973,23 @@ const aivisSource = {
   speakerId: 1
 } as const satisfies TtsSynthesisSource;
 
+const irodoriService = defineIrodoriService({
+  id: "windows-irodori-voicedesign",
+  provider: "irodori",
+  localBaseUrl: "http://127.0.0.1:18923",
+  speaker: "カスミ",
+  style: "calm",
+  numSteps: 30,
+  seed: 42
+});
+
+const irodoriSource = {
+  serviceId: "windows-irodori-voicedesign",
+  provider: "irodori",
+  speaker: "カスミ",
+  style: "calm"
+} as const satisfies TtsSynthesisSource;
+
 function ttsChunk(sentenceIndex: number, durationMs = 1): TtsAudioChunk {
   return {
     sentenceIndex,
@@ -956,6 +1004,36 @@ function ttsChunk(sentenceIndex: number, durationMs = 1): TtsAudioChunk {
 }
 
 describe("Aivis Speech TTS boundary", () => {
+  it("fails fast when a VoiceDesign-only speech plan reaches Aivis", async () => {
+    const client = createAivisSpeechTtsClient(aivisService, {
+      fetch: () => {
+        throw new Error("unsupported VoiceDesign speech plan must not reach Aivis");
+      }
+    });
+
+    await expect(
+      collectEvents(
+        client.synthesize({
+          text: "こんにちは。",
+          speechPlan: {
+            v: 1,
+            style: "calm",
+            annotations: []
+          }
+        })
+      )
+    ).resolves.toMatchObject([
+      {
+        kind: "failed",
+        failure: {
+          reason: "invalid_request",
+          message: "pico TTS Aivis Speech does not support a VoiceDesign speech plan",
+          sentenceIndex: 0
+        }
+      }
+    ]);
+  });
+
   it("validates, allowlists, and freezes provider stage observations", () => {
     const observation = defineTtsProviderStageObservation({
       stage: "audio_query",
@@ -1861,5 +1939,368 @@ describe("Aivis Speech TTS boundary", () => {
         }
       }
     ]);
+  });
+});
+
+describe("Irodori TTS boundary", () => {
+  it("defines Irodori without an application timeout", () => {
+    expect(
+      defineIrodoriService({
+        id: "windows-irodori-voicedesign",
+        provider: "irodori",
+        localBaseUrl: "http://127.0.0.1:18923",
+        speaker: "カスミ",
+        style: "calm",
+        numSteps: 30,
+        seed: 42
+      })
+    ).toEqual({
+      id: "windows-irodori-voicedesign",
+      provider: "irodori",
+      localBaseUrl: "http://127.0.0.1:18923",
+      speaker: "カスミ",
+      style: "calm",
+      numSteps: 30,
+      seed: 42
+    });
+  });
+
+  it("validates the protected VoiceDesign service contract", () => {
+    expect(irodoriService).toEqual({
+      id: "windows-irodori-voicedesign",
+      provider: "irodori",
+      localBaseUrl: "http://127.0.0.1:18923",
+      speaker: "カスミ",
+      style: "calm",
+      numSteps: 30,
+      seed: 42
+    });
+
+    expect(() =>
+      defineIrodoriService({
+        ...irodoriService,
+        provider: "aivis-speech"
+      })
+    ).toThrow("pico Irodori TTS service provider must be irodori");
+    expect(() =>
+      defineIrodoriService({
+        ...irodoriService,
+        localBaseUrl: "https://tts.example.com"
+      })
+    ).toThrow("pico Irodori TTS service must use an http://127.0.0.1 origin");
+    for (const localBaseUrl of [
+      "http://localhost:18923",
+      "http://[::1]:18923",
+      "https://127.0.0.1:18923"
+    ]) {
+      expect(() =>
+        defineIrodoriService({
+          ...irodoriService,
+          localBaseUrl
+        })
+      ).toThrow("pico Irodori TTS service must use an http://127.0.0.1 origin");
+    }
+    expect(() =>
+      defineIrodoriService({
+        ...irodoriService,
+        style: "dramatic"
+      })
+    ).toThrow("pico Irodori TTS service style is invalid");
+  });
+
+  it("synthesizes sentences sequentially and decodes framed binary WAV chunks", async () => {
+    const recordedRequests: RecordedRequest[] = [];
+    const client = createIrodoriTtsClient(irodoriService, {
+      fetch: (input, init) => {
+        recordedRequests.push({ input, init });
+        const body = JSON.parse(requestBody(init)) as { text: string };
+        const samples =
+          body.text === "こんにちは。"
+            ? Buffer.from([0x10, 0, 0x20, 0])
+            : Buffer.from([0x30, 0, 0x40, 0]);
+        const wav = buildWav(samples, { sampleRateHz: 24_000, channels: 1 });
+
+        return Promise.resolve(buildIrodoriStreamResponse(wav, 45));
+      }
+    });
+
+    await expect(
+      collectEvents(client.synthesize({ text: "こんにちは。今日は元気？" }))
+    ).resolves.toEqual([
+      {
+        kind: "chunk",
+        chunk: {
+          sentenceIndex: 0,
+          text: "こんにちは。",
+          audio: Buffer.from([0x10, 0, 0x20, 0]),
+          encoding: "pcm16le",
+          sampleRateHz: 24_000,
+          channels: 1,
+          durationMs: 1,
+          serviceElapsedMs: 250,
+          source: irodoriSource
+        }
+      },
+      {
+        kind: "chunk",
+        chunk: {
+          sentenceIndex: 1,
+          text: "今日は元気？",
+          audio: Buffer.from([0x30, 0, 0x40, 0]),
+          encoding: "pcm16le",
+          sampleRateHz: 24_000,
+          channels: 1,
+          durationMs: 1,
+          serviceElapsedMs: 250,
+          source: irodoriSource
+        }
+      },
+      {
+        kind: "completed",
+        chunkCount: 2,
+        totalDurationMs: 2,
+        source: irodoriSource
+      }
+    ]);
+
+    expect(recordedRequests.map((request) => requestUrl(request.input))).toEqual([
+      "http://127.0.0.1:18923/synthesize_stream",
+      "http://127.0.0.1:18923/synthesize_stream"
+    ]);
+    expect(recordedRequests.map((request) => request.init?.redirect)).toEqual(["error", "error"]);
+    expect(
+      recordedRequests.map((request) => JSON.parse(requestBody(request.init)) as unknown)
+    ).toEqual([
+      {
+        text: "こんにちは。",
+        speaker: "カスミ",
+        style: "calm",
+        num_steps: 30,
+        seed: 42
+      },
+      {
+        text: "今日は元気？",
+        speaker: "カスミ",
+        style: "calm",
+        num_steps: 30,
+        seed: 42
+      }
+    ]);
+  });
+
+  it("applies a per-request verified style without mutating the service default", async () => {
+    const recordedBodies: unknown[] = [];
+    const client = createIrodoriTtsClient(irodoriService, {
+      fetch: (_input, init) => {
+        recordedBodies.push(JSON.parse(requestBody(init)) as unknown);
+        return Promise.resolve(
+          buildIrodoriStreamResponse(
+            buildWav(Buffer.from([0x10, 0]), { sampleRateHz: 24_000, channels: 1 })
+          )
+        );
+      }
+    });
+
+    const plannedEvents = await collectEvents(
+      client.synthesize({
+        text: "おはようございます。",
+        speechPlan: {
+          v: 1,
+          style: "cheerful",
+          annotations: []
+        }
+      })
+    );
+    await collectEvents(client.synthesize({ text: "通常のお知らせです。" }));
+
+    expect(plannedEvents).toMatchObject([
+      {
+        kind: "chunk",
+        chunk: {
+          source: {
+            provider: "irodori",
+            style: "cheerful"
+          }
+        }
+      },
+      {
+        kind: "completed",
+        source: {
+          provider: "irodori",
+          style: "cheerful"
+        }
+      }
+    ]);
+    expect(recordedBodies).toEqual([
+      {
+        text: "おはようございます。",
+        speaker: "カスミ",
+        style: "cheerful",
+        num_steps: 30,
+        seed: 42
+      },
+      {
+        text: "通常のお知らせです。",
+        speaker: "カスミ",
+        style: "calm",
+        num_steps: 30,
+        seed: 42
+      }
+    ]);
+    expect(irodoriService.style).toBe("calm");
+  });
+
+  it.each([
+    ["sample rate", 0xffffffff, 1],
+    ["channel count", 24_000, 9]
+  ])("rejects unsafe Irodori WAV %s metadata", async (_label, sampleRateHz, channels) => {
+    const wav = Buffer.from(
+      buildWav(Buffer.alloc(channels * 2), {
+        sampleRateHz: 24_000,
+        channels
+      })
+    );
+    wav.writeUInt32LE(sampleRateHz, 24);
+    wav.writeUInt32LE(Math.min(0xffffffff, sampleRateHz * channels * 2), 28);
+    const client = createIrodoriTtsClient(irodoriService, {
+      fetch: () => Promise.resolve(buildIrodoriStreamResponse(wav))
+    });
+
+    await expect(collectEvents(client.synthesize({ text: "本文。" }))).resolves.toMatchObject([
+      {
+        kind: "failed",
+        failure: {
+          reason: "invalid_response",
+          message: "pico TTS Irodori response is malformed"
+        }
+      }
+    ]);
+  });
+
+  it("reports malformed Irodori stream frames without exposing their payload", async () => {
+    const client = createIrodoriTtsClient(irodoriService, {
+      fetch: () => Promise.resolve(buildSidecarResponse({ wav_bytes: "not base64!" }))
+    });
+
+    await expect(collectEvents(client.synthesize({ text: "本文。" }))).resolves.toEqual([
+      {
+        kind: "failed",
+        failure: {
+          ok: false,
+          reason: "invalid_response",
+          message: "pico TTS Irodori response is malformed",
+          sentenceIndex: 0,
+          source: irodoriSource
+        }
+      }
+    ]);
+  });
+
+  it("rejects an oversized Irodori stream before reading its body", async () => {
+    const client = createIrodoriTtsClient(irodoriService, {
+      fetch: () =>
+        Promise.resolve(
+          new Response(
+            new ReadableStream({
+              start() {}
+            }),
+            {
+              headers: {
+                "content-length": String(16 * 1024 * 1024 + 1),
+                "content-type": "application/octet-stream"
+              }
+            }
+          )
+        )
+    });
+
+    await expect(collectEvents(client.synthesize({ text: "本文。" }))).resolves.toMatchObject([
+      {
+        kind: "failed",
+        failure: {
+          reason: "invalid_response",
+          message: "pico TTS Irodori response is malformed"
+        }
+      }
+    ]);
+  });
+
+  it("maps Irodori HTTP and caller cancellation failures", async () => {
+    const unavailable = createIrodoriTtsClient(irodoriService, {
+      fetch: () => Promise.resolve(new Response("unavailable", { status: 503 }))
+    });
+    await expect(collectEvents(unavailable.synthesize({ text: "本文。" }))).resolves.toMatchObject([
+      {
+        kind: "failed",
+        failure: {
+          reason: "backend_error",
+          message: "pico TTS Irodori synthesis request failed with status 503"
+        }
+      }
+    ]);
+
+    const abortController = new AbortController();
+    abortController.abort();
+    await expect(
+      collectEvents(
+        createIrodoriTtsClient(irodoriService, {
+          fetch: () => {
+            throw new Error("cancelled synthesis must not fetch");
+          }
+        }).synthesize({ text: "本文。", signal: abortController.signal })
+      )
+    ).resolves.toMatchObject([
+      {
+        kind: "failed",
+        failure: {
+          reason: "cancelled",
+          message: "pico TTS Irodori request was cancelled"
+        }
+      }
+    ]);
+  });
+
+  it("keeps an Irodori request pending until the caller cancels it", async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    const client = createIrodoriTtsClient(irodoriService, {
+      fetch: (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("aborted", "AbortError")),
+            { once: true }
+          );
+        })
+    });
+    let settled = false;
+
+    try {
+      const events = collectEvents(client.synthesize({ text: "本文。", signal: caller.signal }));
+      events.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        }
+      );
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(settled).toBe(false);
+
+      caller.abort();
+      await expect(events).resolves.toMatchObject([
+        {
+          kind: "failed",
+          failure: {
+            reason: "cancelled",
+            message: "pico TTS Irodori request was cancelled"
+          }
+        }
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

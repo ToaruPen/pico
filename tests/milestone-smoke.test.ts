@@ -122,8 +122,23 @@ function requireSection(
 describe("pico milestone smoke suite", () => {
   const isolatedConfigDirectory = mkdtempSync(join(tmpdir(), "pico-milestone-empty-config-"));
   const isolatedConfigPath = join(isolatedConfigDirectory, "pico.local.yaml");
+  const irodoriConfigPath = join(isolatedConfigDirectory, "irodori.yaml");
 
   writeFileSync(isolatedConfigPath, "{}\n");
+  writeFileSync(
+    irodoriConfigPath,
+    `
+voice:
+  tts:
+    provider: irodori
+    irodori:
+      localBaseUrl: http://127.0.0.1:18923
+      speaker: カスミ
+      style: calm
+      numSteps: 30
+      seed: 42
+`
+  );
 
   afterAll(() => {
     rmSync(isolatedConfigDirectory, { recursive: true });
@@ -152,6 +167,23 @@ describe("pico milestone smoke suite", () => {
     expect(picoMilestoneSmokeExitCode(report)).toBe(0);
     expectMilestoneSectionNames(report);
     expectAuditEvidence(report);
+  });
+
+  it("attributes a thrown Irodori voice smoke to the selected provider", async () => {
+    const report = await runPicoMilestoneSmokeSuite(
+      { PICO_CONFIG_PATH: irodoriConfigPath },
+      {
+        ...configuredSectionDependencies(),
+        runVoiceProviderSmoke: () => Promise.reject(new Error("voice smoke failed"))
+      }
+    );
+
+    expect(requireSection(report, "voice_tts")).toEqual({
+      name: "voice_tts",
+      status: "failed",
+      provider: "irodori",
+      reason: "voice smoke failed"
+    });
   });
 
   it("returns a failing process code when any milestone section fails", async () => {

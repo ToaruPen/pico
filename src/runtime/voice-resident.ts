@@ -9,6 +9,7 @@ import type {
   ResidentStreamingSttSession,
   TtsClient
 } from "../modules/voice/index.js";
+import type { VoiceDesignSpeechPlan } from "../modules/voice-design/index.js";
 import type { DeferredToolDeliverableResult } from "./deferred-tool-coordinator.js";
 import type { ResidentAudioCapture, ResidentCaptureSession } from "./resident-audio-io.js";
 import type { ResidentControlEvent, ResidentControlResult } from "./resident-control.js";
@@ -35,6 +36,7 @@ import { recordVoiceStageProbe, type VoiceStageProbe } from "./voice-stage-probe
 
 export type PiAgentTurnResponse = {
   readonly text: string;
+  readonly speechPlan?: VoiceDesignSpeechPlan;
   readonly settled: Promise<void>;
 };
 
@@ -886,6 +888,7 @@ async function processCompletedHoldWork(
   const captureBoundary = createCaptureBoundaryLease(options.captureBoundary);
   const playbackOperation = runTurnPlayback(
     response.text,
+    response.speechPlan,
     turn,
     controller,
     options,
@@ -918,6 +921,7 @@ async function processCompletedHoldWork(
 
 async function runTurnPlayback(
   text: string,
+  speechPlan: VoiceDesignSpeechPlan | undefined,
   turn: ActiveTurn,
   controller: ResidentControlController,
   options: VoiceResidentRuntimeOptions,
@@ -929,6 +933,7 @@ async function runTurnPlayback(
   try {
     return await runTtsPlaybackPipeline({
       text,
+      ...(speechPlan === undefined ? {} : { speechPlan }),
       signal: turn.generation.signal,
       tts: options.tts,
       playback: options.playback,
@@ -1344,7 +1349,7 @@ async function runInteractionFarewell(
   const [playback, piSettlement] = await settleConcurrentOperations(
     isAbortRequested(signal)
       ? Promise.resolve(undefined)
-      : runFarewellPlayback(response.text, ending, options, now, monotonicNow),
+      : runFarewellPlayback(response.text, response.speechPlan, ending, options, now, monotonicNow),
     settlePiResponse(response, options, operatorStages, piStartedAt, piStartedAtMs, monotonicNow)
   );
   if (playback?.status === "failed" || (piSettlement === "failed" && !isAbortRequested(signal))) {
@@ -1371,6 +1376,7 @@ async function settleConcurrentOperations<First, Second>(
 
 async function runFarewellPlayback(
   text: string,
+  speechPlan: VoiceDesignSpeechPlan | undefined,
   ending: InteractionEndingControl,
   options: VoiceResidentRuntimeOptions,
   now: () => string,
@@ -1382,6 +1388,7 @@ async function runFarewellPlayback(
   try {
     result = await runTtsPlaybackPipeline({
       text,
+      ...(speechPlan === undefined ? {} : { speechPlan }),
       signal,
       tts: options.tts,
       playback: options.playback,

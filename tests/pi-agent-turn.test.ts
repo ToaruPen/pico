@@ -2,6 +2,10 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
 import { createStructuredAuditLog } from "../src/modules/audit/index.js";
+import {
+  formatVoiceDesignEnvelope,
+  irodoriVoiceDesignSpeechProfile
+} from "../src/modules/voice-design/index.js";
 import { createPiAgentTurnClient } from "../src/runtime/pi-agent-turn.js";
 import type { ResidentVoiceOperatorEvent } from "../src/runtime/resident-voice-operator.js";
 
@@ -51,6 +55,84 @@ function createSdkToolState(
 }
 
 describe("Pi Agent turn adapter", () => {
+  it("publishes only a speech plan correlated with the canonical final assistant", async () => {
+    const handlers = new Map<string, ((event: never) => unknown)[]>();
+    const nonce = "5LZJ29aPpA3MLBfC0c8VGnN6";
+    let listener: ((event: unknown) => void) | undefined;
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      speechPlan: {
+        profile: irodoriVoiceDesignSpeechProfile,
+        createNonce: () => nonce
+      },
+      createResourceLoader: (input) => {
+        for (const factory of input.extensionFactories) {
+          factory({
+            registerTool: () => undefined,
+            on: (event: string, handler: (event: never) => unknown) => {
+              handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+            }
+          } as never);
+        }
+        return { reload: () => Promise.resolve() };
+      },
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: (inputListener) => {
+              listener = inputListener;
+              return () => undefined;
+            },
+            prompt: async () => {
+              await handlers.get("before_agent_start")?.[0]?.({
+                type: "before_agent_start",
+                prompt: "入口は？",
+                systemPrompt: "Base prompt.",
+                systemPromptOptions: { cwd: testCwd }
+              } as never);
+              const text = "施設の入口は右手です。";
+              const rendered = `${text}${formatVoiceDesignEnvelope(nonce, {
+                v: 1,
+                style: "clear",
+                annotations: []
+              })}`;
+              const assistant = {
+                role: "assistant",
+                content: [{ type: "text", text: rendered }],
+                stopReason: "stop",
+                timestamp: 12_345
+              };
+              const replacement = (await handlers.get("message_end")?.[0]?.({
+                type: "message_end",
+                message: assistant
+              } as never)) as { readonly message?: unknown } | undefined;
+
+              listener?.({
+                type: "agent_end",
+                messages: [replacement?.message ?? assistant],
+                willRetry: false
+              });
+            },
+            dispose: () => undefined
+          }
+        })
+    });
+
+    await expect(
+      client.prompt({ sessionId: "session-1", text: "入口は？" })
+    ).resolves.toMatchObject({
+      text: "施設の入口は右手です。",
+      speechPlan: {
+        v: 1,
+        style: "clear",
+        annotations: []
+      }
+    });
+  });
+
   it("publishes the final response before prompt settlement", async () => {
     let listener: ((event: unknown) => void) | undefined;
     let markFinalResponseObserved: (() => void) | undefined;

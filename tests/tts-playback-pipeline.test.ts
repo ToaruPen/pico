@@ -26,6 +26,36 @@ const source = {
 } as const;
 
 describe("TTS playback pipeline", () => {
+  it("forwards the bounded speech plan with the canonical text", async () => {
+    const requests: unknown[] = [];
+    const speechPlan = {
+      v: 1,
+      style: "clear",
+      annotations: []
+    } as const;
+    const tts: TtsClient = {
+      synthesize(request) {
+        requests.push(request);
+        return ttsFromArray([completedEvent(0)]).synthesize(request);
+      }
+    };
+
+    await runTtsPlaybackPipeline({
+      ...pipelineInput({
+        text: "施設の入口は右手です。",
+        tts,
+        playback: recordingPlayback()
+      }),
+      speechPlan
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      text: "施設の入口は右手です。",
+      speechPlan
+    });
+  });
+
   it("measures trailing PCM16 silence by complete mono and stereo frames", () => {
     expect(measureTrailingPcm16SilenceMs(pcm16([100, 0, 0, 0]), 1_000, 1)).toBe(3);
     expect(measureTrailingPcm16SilenceMs(pcm16([100, -100, 0, 0, 0, 0]), 1_000, 2)).toBe(2);

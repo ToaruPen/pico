@@ -11,3 +11,5 @@ reports/
 tmp/
 config/pico.local.yaml
 .pico-local/
+.codex/
+.superpowers/

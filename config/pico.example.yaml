@@ -125,7 +125,16 @@ voice:
       # timeoutMs=30000, warmupAudioSeconds=0.25, sampleRateHz=16000, channels=1.
       # samplePcm16lePath is only required by the provider smoke command.
   tts:
+    provider: irodori
+    irodori:
+      id: windows-irodori-voicedesign
+      localBaseUrl: http://127.0.0.1:18923
+      speaker: カスミ
+      style: calm
+      numSteps: 30
+      seed: 42
+      # Optional default text: こんにちは。picoの音声スモークです。
+    # Explicit rollback provider; unused while provider is irodori.
     aivis:
       localBaseUrl: http://127.0.0.1:10101
       speakerId: 888753760
-      # Optional default text: こんにちは。picoの音声スモークです。

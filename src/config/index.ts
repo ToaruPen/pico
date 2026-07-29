@@ -27,7 +27,9 @@ export type PicoConfig = DeepReadonly<{
       appleSpeech?: PicoAppleSpeechConfig;
     };
     tts: {
+      provider: PicoTtsProvider;
       aivis?: PicoAivisConfig;
+      irodori?: PicoIrodoriConfig;
     };
   };
 }>;
@@ -300,6 +302,19 @@ export type PicoAivisConfig = {
   readonly text?: string;
 };
 
+export type PicoTtsProvider = "aivis-speech" | "irodori";
+export type PicoIrodoriStyle = "neutral" | "calm" | "cheerful" | "clear";
+
+export type PicoIrodoriConfig = {
+  readonly id?: string;
+  readonly localBaseUrl: string;
+  readonly speaker: string;
+  readonly style: PicoIrodoriStyle;
+  readonly numSteps: number;
+  readonly seed: number;
+  readonly text?: string;
+};
+
 type DeepReadonly<T> = {
   readonly [K in keyof T]: T[K] extends (...arguments_: unknown[]) => unknown
     ? T[K]
@@ -386,7 +401,9 @@ export const emptyPicoConfig: PicoConfig = deepFreeze({
       }
     },
     stt: {},
-    tts: {}
+    tts: {
+      provider: "aivis-speech"
+    }
   }
 });
 
@@ -677,10 +694,16 @@ function defineVoiceTtsConfig(
   voice: Record<string, unknown> | undefined
 ): PicoConfig["voice"]["tts"] {
   const tts = readOptionalRecord(voice?.tts, "pico config voice.tts");
+  if (tts !== undefined) {
+    requireKnownConfigFields(tts, "pico config voice.tts", ["provider", "aivis", "irodori"]);
+  }
   const aivis = readOptionalRecord(tts?.aivis, "pico config voice.tts.aivis");
+  const irodori = readOptionalRecord(tts?.irodori, "pico config voice.tts.irodori");
 
   return {
-    ...(aivis === undefined ? {} : { aivis: defineAivisConfig(aivis) })
+    provider: defineTtsProvider(tts?.provider),
+    ...(aivis === undefined ? {} : { aivis: defineAivisConfig(aivis) }),
+    ...(irodori === undefined ? {} : { irodori: defineIrodoriConfig(irodori) })
   };
 }
 
@@ -1397,6 +1420,51 @@ function defineAivisConfig(input: Record<string, unknown>): PicoAivisConfig {
   };
 }
 
+function defineTtsProvider(value: unknown): PicoTtsProvider {
+  const provider = readOptionalString(value, "pico config voice.tts.provider") ?? "aivis-speech";
+
+  if (provider !== "aivis-speech" && provider !== "irodori") {
+    throw new Error("pico config voice.tts.provider must be aivis-speech or irodori");
+  }
+
+  return provider;
+}
+
+function defineIrodoriConfig(input: Record<string, unknown>): PicoIrodoriConfig {
+  requireKnownConfigFields(input, "pico config voice.tts.irodori", [
+    "id",
+    "localBaseUrl",
+    "speaker",
+    "style",
+    "numSteps",
+    "seed",
+    "text"
+  ]);
+
+  return {
+    ...optionalStringProperty(input, "id", "pico config voice.tts.irodori.id"),
+    localBaseUrl: requireIrodoriBaseUrl(
+      input.localBaseUrl,
+      "pico config voice.tts.irodori.localBaseUrl"
+    ),
+    speaker: requireString(input.speaker, "pico config voice.tts.irodori.speaker"),
+    style: requireIrodoriStyle(input.style),
+    numSteps: requirePositiveInteger(input.numSteps, "pico config voice.tts.irodori.numSteps"),
+    seed: requireNonNegativeInteger(input.seed, "pico config voice.tts.irodori.seed"),
+    ...optionalStringProperty(input, "text", "pico config voice.tts.irodori.text")
+  };
+}
+
+function requireIrodoriStyle(value: unknown): PicoIrodoriStyle {
+  const style = requireString(value, "pico config voice.tts.irodori.style");
+
+  if (style !== "neutral" && style !== "calm" && style !== "cheerful" && style !== "clear") {
+    throw new Error("pico config voice.tts.irodori.style is invalid");
+  }
+
+  return style;
+}
+
 function resolveConfigPath(options: LoadPicoConfigOptions): string {
   const cwd = options.cwd ?? process.cwd();
   const path = options.path ?? defaultConfigPath;
@@ -1613,6 +1681,23 @@ function requireLocalBaseUrl(value: unknown, label: string): string {
 function requireAppleSpeechBaseUrl(value: unknown, label: string): string {
   const localBaseUrl = requireLocalBaseUrl(value, label);
   const parsedUrl = new URL(localBaseUrl);
+
+  if (parsedUrl.protocol !== "http:" || parsedUrl.hostname !== "127.0.0.1") {
+    throw new Error(`${label} must use an http://127.0.0.1 origin`);
+  }
+
+  return localBaseUrl;
+}
+
+function requireIrodoriBaseUrl(value: unknown, label: string): string {
+  const localBaseUrl = requireString(value, label);
+
+  if (!URL.canParse(localBaseUrl)) {
+    throw new Error(`${label} must be a valid URL`);
+  }
+
+  const parsedUrl = new URL(localBaseUrl);
+  requireOriginUrl(parsedUrl, label);
 
   if (parsedUrl.protocol !== "http:" || parsedUrl.hostname !== "127.0.0.1") {
     throw new Error(`${label} must use an http://127.0.0.1 origin`);
@@ -1900,6 +1985,16 @@ function requireNonNegativeInteger(value: unknown, label: string): number {
 
   if (!Number.isInteger(parsed) || parsed < 0) {
     throw new Error(`${label} must be a non-negative integer`);
+  }
+
+  return parsed;
+}
+
+function requirePositiveInteger(value: unknown, label: string): number {
+  const parsed = readOptionalPositiveInteger(value, label);
+
+  if (parsed === undefined) {
+    throw new Error(`${label} is required when ${parentLabel(label)} is set`);
   }
 
   return parsed;

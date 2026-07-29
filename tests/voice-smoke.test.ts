@@ -37,6 +37,27 @@ function buildWav(samples: Uint8Array): ArrayBuffer {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 }
 
+function buildIrodoriStreamResponse(wav: ArrayBuffer): Response {
+  const wavBytes = Buffer.from(wav);
+  const handshake = Buffer.from(
+    `${JSON.stringify({ kind: "handshake", v: 1, max_chunk_size: 4 * 1024 * 1024 })}\n`
+  );
+  const header = Buffer.from(
+    `${JSON.stringify({
+      kind: "chunk",
+      v: 1,
+      index: 0,
+      nbytes: wavBytes.byteLength,
+      final: true,
+      elapsed: 0.1
+    })}\n`
+  );
+
+  return new Response(Buffer.concat([handshake, header, wavBytes]), {
+    headers: { "content-type": "application/octet-stream" }
+  });
+}
+
 function requestUrl(input: RequestInfo | URL): string {
   if (typeof input === "string") {
     return input;
@@ -56,6 +77,28 @@ function ttsSmokeConfig() {
         aivis: {
           localBaseUrl: "http://127.0.0.1:10101",
           speakerId: 1,
+          text: "こんにちは。"
+        }
+      }
+    }
+  });
+}
+
+function irodoriSmokeConfig() {
+  return definePicoConfig({
+    voice: {
+      tts: {
+        provider: "irodori",
+        aivis: {
+          localBaseUrl: "http://127.0.0.1:10101",
+          speakerId: 1
+        },
+        irodori: {
+          localBaseUrl: "http://127.0.0.1:18923",
+          speaker: "カスミ",
+          style: "calm",
+          numSteps: 30,
+          seed: 42,
           text: "こんにちは。"
         }
       }
@@ -110,6 +153,40 @@ describe("voice provider smoke configuration", () => {
         provider: "aivis-speech",
         reason:
           "pico voice TTS smoke failed at sentence 0: backend_error: pico TTS Aivis Speech audio_query request failed with status 503"
+      }
+    });
+  });
+
+  it("smokes the selected Irodori provider and reports its voice identity", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(buildIrodoriStreamResponse(buildWav(Buffer.from([1, 0]))))
+    );
+
+    const monotonicNow = vi.fn().mockReturnValueOnce(1_000).mockReturnValueOnce(1_125);
+
+    await expect(runVoiceProviderSmoke(irodoriSmokeConfig(), { monotonicNow })).resolves.toEqual({
+      stt: {
+        status: "skipped",
+        provider: "apple-speech",
+        reason: "Set voice.stt.appleSpeech in pico config to run the Apple Speech STT smoke."
+      },
+      tts: {
+        status: "passed",
+        provider: "irodori",
+        details: {
+          serviceId: "windows-irodori-voicedesign",
+          speaker: "カスミ",
+          style: "calm",
+          chunkCount: 1,
+          totalAudioBytes: 2,
+          totalDurationMs: 1,
+          wallTimeMs: 125,
+          serviceSynthesisMs: 100,
+          realTimeFactor: 125,
+          sampleRateHz: 16_000,
+          channels: 1,
+          encoding: "pcm16le"
+        }
       }
     });
   });
@@ -175,6 +252,22 @@ describe("voice provider smoke configuration", () => {
         provider: "aivis-speech",
         localBaseUrl: "http://127.0.0.1:10101",
         speakerId: 1
+      }
+    });
+  });
+
+  it("builds only the selected Irodori TTS smoke plan", () => {
+    expect(buildVoiceSmokePlan(irodoriSmokeConfig()).tts).toMatchObject({
+      status: "run",
+      text: "こんにちは。",
+      service: {
+        id: "windows-irodori-voicedesign",
+        provider: "irodori",
+        localBaseUrl: "http://127.0.0.1:18923",
+        speaker: "カスミ",
+        style: "calm",
+        numSteps: 30,
+        seed: 42
       }
     });
   });

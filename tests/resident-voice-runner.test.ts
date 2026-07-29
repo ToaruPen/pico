@@ -19,6 +19,7 @@ import {
   createConfiguredStt,
   createConfiguredTts,
   createResidentVoiceStageProbe,
+  defineResidentPiAgentSpeechPlan,
   formatResidentIoHealthLine,
   recordResidentIoTimingEvent,
   requireResidentVoiceEnabled,
@@ -31,6 +32,7 @@ import {
 import { recordVoiceStageProbe } from "../src/runtime/voice-stage-probe.js";
 
 const aivisBaseUrl = "http://127.0.0.1:10101";
+const irodoriBaseUrl = "http://127.0.0.1:18923";
 
 function residentConfig(output: "ffplay" | "alsa" = "ffplay"): PicoConfig {
   return definePicoConfig({
@@ -61,6 +63,43 @@ function residentConfig(output: "ffplay" | "alsa" = "ffplay"): PicoConfig {
           localBaseUrl: aivisBaseUrl,
           speakerId: 1,
           timeoutMs: 250
+        }
+      }
+    }
+  });
+}
+
+function irodoriResidentConfig(): PicoConfig {
+  return definePicoConfig({
+    voice: {
+      resident: {
+        enabled: true,
+        audioInput: { provider: "avaudioengine", deviceUid: "BuiltInMicrophoneDevice" },
+        audioOutput: { provider: "ffplay", route: "system_default" },
+        control: {
+          provider: "macos_resident_io",
+          keyboard: { provider: "macos", talkKey: "F13", cancelKey: "F14" }
+        }
+      },
+      stt: {
+        appleSpeech: {
+          localBaseUrl: "http://127.0.0.1:8766"
+        }
+      },
+      tts: {
+        provider: "irodori",
+        aivis: {
+          id: "local-aivis",
+          localBaseUrl: aivisBaseUrl,
+          speakerId: 1
+        },
+        irodori: {
+          id: "windows-irodori-voicedesign",
+          localBaseUrl: irodoriBaseUrl,
+          speaker: "カスミ",
+          style: "calm",
+          numSteps: 30,
+          seed: 42
         }
       }
     }
@@ -100,7 +139,39 @@ function wavResponse(): Response {
   return new Response(wav);
 }
 
+async function irodoriWavResponse(): Promise<Response> {
+  const wav = Buffer.from(await wavResponse().arrayBuffer());
+  const handshake = Buffer.from(
+    `${JSON.stringify({ kind: "handshake", v: 1, max_chunk_size: 4 * 1024 * 1024 })}\n`
+  );
+  const header = Buffer.from(
+    `${JSON.stringify({
+      kind: "chunk",
+      v: 1,
+      index: 0,
+      nbytes: wav.byteLength,
+      final: true,
+      elapsed: 0.1
+    })}\n`
+  );
+  return new Response(Buffer.concat([handshake, header, wav]), {
+    headers: { "content-type": "application/octet-stream" }
+  });
+}
+
 describe("resident voice TTS telemetry wiring", () => {
+  it("enables VoiceDesign speech planning only for the explicit Irodori provider", () => {
+    expect(defineResidentPiAgentSpeechPlan(irodoriResidentConfig())).toMatchObject({
+      profile: {
+        profileId: "f0a618870c60d9ee4348449a48a39b12417da141259b5e83472ee13732251842",
+        defaultStyle: "calm",
+        styleAllowlist: ["neutral", "calm", "cheerful", "clear"],
+        annotationAllowlist: {}
+      }
+    });
+    expect(defineResidentPiAgentSpeechPlan(residentConfig())).toBeUndefined();
+  });
+
   it("selects the streaming Apple Speech client for resident production", () => {
     const client = createConfiguredStt(residentConfig());
 
@@ -461,6 +532,51 @@ describe("resident voice TTS telemetry wiring", () => {
     expect(callerObservationCount).toBe(2);
     expect(audit.entries()).toEqual([]);
   });
+
+  it("selects Irodori without calling the configured Aivis endpoint", async () => {
+    const requests: Array<{ readonly url: string; readonly body: string | undefined }> = [];
+    const tts = createConfiguredTts(
+      irodoriResidentConfig(),
+      {},
+      {
+        fetch: async (input, init) => {
+          const url =
+            typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+          requests.push({
+            url,
+            body: typeof init?.body === "string" ? init.body : undefined
+          });
+          return irodoriWavResponse();
+        }
+      }
+    );
+
+    await expect(collectEvents(tts.synthesize({ text: "一文。" }))).resolves.toMatchObject([
+      {
+        kind: "chunk",
+        chunk: {
+          source: {
+            provider: "irodori",
+            speaker: "カスミ",
+            style: "calm"
+          }
+        }
+      },
+      { kind: "completed", chunkCount: 1 }
+    ]);
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:18923/synthesize_stream",
+        body: JSON.stringify({
+          text: "一文。",
+          speaker: "カスミ",
+          style: "calm",
+          num_steps: 30,
+          seed: 42
+        })
+      }
+    ]);
+  });
 });
 
 function unusedAudioCapture(): ResidentAudioCapture {
@@ -473,6 +589,34 @@ function unusedAudioCapture(): ResidentAudioCapture {
 }
 
 describe("resident voice startup readiness", () => {
+  it("checks only the selected Irodori provider and playback", async () => {
+    const calls: string[] = [];
+    const abortController = new AbortController();
+
+    await assertResidentVoiceStartupReadiness(
+      irodoriResidentConfig(),
+      {
+        platform: "darwin",
+        checkAivisHealth: () => {
+          calls.push("aivis");
+          return Promise.resolve({ ok: true });
+        },
+        checkIrodoriHealth: (service, _fetch, signal) => {
+          calls.push(`irodori:${service.localBaseUrl}`);
+          expect(signal).toBe(abortController.signal);
+          return Promise.resolve({ ok: true });
+        },
+        assertPlaybackReadiness: (plan) => {
+          calls.push(`playback:${plan.command}`);
+          return Promise.resolve();
+        }
+      },
+      abortController.signal
+    );
+
+    expect(calls).toEqual([`irodori:${irodoriBaseUrl}`, "playback:ffplay"]);
+  });
+
   it.each([
     {
       platform: "darwin",
@@ -551,13 +695,15 @@ describe("resident voice startup readiness", () => {
 
   it("fails before creating resident loop owners when startup readiness rejects", async () => {
     const calls: string[] = [];
+    const abortController = new AbortController();
 
     await expect(
       runResidentVoiceWithProviders({
         config: residentConfig(),
-        signal: new AbortController().signal,
-        startupReadiness: () => {
+        signal: abortController.signal,
+        startupReadiness: (_config, signal) => {
           calls.push("readiness");
+          expect(signal).toBe(abortController.signal);
           return Promise.reject(new Error("readiness blocked"));
         },
         createPiAgent: () => {

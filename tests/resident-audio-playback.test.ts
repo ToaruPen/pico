@@ -355,7 +355,9 @@ describe("resident continuous audio playback", () => {
     ["odd PCM byte length", { audio: new Uint8Array([1]) }],
     ["unaligned stereo PCM", { audio: new Uint8Array([1, 0]), channels: 2 }],
     ["invalid sample rate", { sampleRateHz: 0 }],
+    ["unsafe sample rate", { sampleRateHz: 0xffffffff }],
     ["invalid channel count", { channels: 0 }],
+    ["unsafe channel count", { audio: new Uint8Array(18), channels: 9 }],
     ["invalid duration", { durationMs: 0 }]
   ] as const)("rejects %s without spawning or writing", (_name, changes) => {
     const spawn = vi.fn(() => createAudioProcess().child);

@@ -22,12 +22,18 @@ import {
   type AivisSpeechServiceConfig,
   type AivisSpeechTtsClientOptions,
   checkAivisSpeechServiceHealth,
+  checkIrodoriServiceHealth,
   createAivisSpeechTtsClient,
   createAppleSpeechStreamingSttClient,
+  createIrodoriTtsClient,
   defineAivisSpeechService,
   defineAppleSpeechSidecar,
-  defineTtsProviderStageObservation
+  defineIrodoriService,
+  defineTtsProviderStageObservation,
+  type IrodoriServiceConfig,
+  type TtsProviderStageObservation
 } from "../modules/voice/index.js";
+import { irodoriVoiceDesignSpeechProfile } from "../modules/voice-design/index.js";
 import { createDeferredToolCoordinator } from "./deferred-tool-coordinator.js";
 import {
   type MacOSResidentIoBridge,
@@ -84,8 +90,11 @@ import {
 export type ResidentVoiceStartupReadinessDependencies = {
   readonly platform?: NodeJS.Platform;
   readonly checkAivisHealth?: typeof checkAivisSpeechServiceHealth;
+  readonly checkIrodoriHealth?: typeof checkIrodoriServiceHealth;
   readonly assertPlaybackReadiness?: (plan: ResidentAudioOutputPlan) => Promise<void>;
 };
+
+type ResidentVoiceStartupReadiness = (config: PicoConfig, signal: AbortSignal) => Promise<void>;
 
 export async function runDirectResidentVoiceHarness(
   createPiAgent: (options: PiAgentTurnClientOptions) => PiAgentTurnClient
@@ -137,12 +146,12 @@ export async function runResidentVoiceWithProviders(input: {
   readonly piAgent?: PiAgentTurnClient;
   readonly createPiAgent?: (options: PiAgentTurnClientOptions) => PiAgentTurnClient;
   readonly createTelemetry?: (options: OpenTelemetryProviderOptions) => PicoTelemetry;
-  readonly startupReadiness?: (config: PicoConfig) => Promise<void>;
+  readonly startupReadiness?: ResidentVoiceStartupReadiness;
   readonly operator?: ResidentVoiceOperatorSink;
 }): Promise<void> {
   const { config, signal } = input;
   requireResidentVoiceEnabled(config);
-  await resolveStartupReadiness(input.startupReadiness)(config);
+  await resolveStartupReadiness(input.startupReadiness)(config, signal);
   const stdoutProbeMode = readVoiceProbeStdoutMode(process.env.PICO_VOICE_PROBE_STDOUT);
   const logRunMode = readResidentVoiceLogRunMode(process.env.PICO_RESIDENT_VOICE_LOG_MODE);
   const runId = readResidentVoiceRunId(process.env.PICO_RESIDENT_VOICE_RUN_ID);
@@ -208,12 +217,14 @@ export async function runResidentVoiceWithProviders(input: {
         undefined,
         { finalSilenceMs: residentPlaybackFinalSilenceMs }
       );
+      const speechPlan = defineResidentPiAgentSpeechPlan(config);
       const piAgent = resolveResidentPiAgent(input.piAgent, input.createPiAgent, {
         cwd: process.cwd(),
         deferredTools: {
           coordinator: deferredTools
         },
         voiceProbe: stageProbe,
+        ...(speechPlan === undefined ? {} : { speechPlan }),
         ...(input.operator === undefined ? {} : { operator: input.operator })
       });
       const speechActivity = await createConfiguredSpeechActivityGate(config);
@@ -363,9 +374,12 @@ export function formatResidentIoHealthLine(
 }
 
 function resolveStartupReadiness(
-  startupReadiness: ((config: PicoConfig) => Promise<void>) | undefined
-): (config: PicoConfig) => Promise<void> {
-  return startupReadiness ?? assertResidentVoiceStartupReadiness;
+  startupReadiness: ResidentVoiceStartupReadiness | undefined
+): ResidentVoiceStartupReadiness {
+  return (
+    startupReadiness ??
+    ((config, signal) => assertResidentVoiceStartupReadiness(config, {}, signal))
+  );
 }
 
 export function createResidentVoiceStageProbe(
@@ -584,6 +598,14 @@ export function requireResidentVoiceEnabled(config: PicoConfig): PicoResidentCon
   }
 
   return requireResidentControlConfig(config);
+}
+
+export function defineResidentPiAgentSpeechPlan(
+  config: PicoConfig
+): PiAgentTurnClientOptions["speechPlan"] | undefined {
+  return config.voice.tts.provider === "irodori"
+    ? { profile: irodoriVoiceDesignSpeechProfile }
+    : undefined;
 }
 
 function requireResidentControlConfig(config: PicoConfig): PicoResidentControlConfig {
@@ -837,15 +859,19 @@ export function createConfiguredTts(
     });
   };
 
-  return createAivisSpeechTtsClient(buildAivisSpeechService(config), {
+  const providerOptions = {
     ...options,
-    observeStage: (observation) => {
+    observeStage: (observation: TtsProviderStageObservation) => {
       const trustedObservation = defineTtsProviderStageObservation(observation);
       const callerObservation = defineTtsProviderStageObservation(observation);
       notifyTtsStageObserver(probeObserver, trustedObservation);
       notifyTtsStageObserver(callerObserver, callerObservation);
     }
-  });
+  };
+
+  return config.voice.tts.provider === "irodori"
+    ? createIrodoriTtsClient(buildIrodoriService(config), providerOptions)
+    : createAivisSpeechTtsClient(buildAivisSpeechService(config), providerOptions);
 }
 
 function notifyTtsStageObserver(
@@ -861,14 +887,13 @@ function notifyTtsStageObserver(
 
 export async function assertResidentVoiceStartupReadiness(
   config: PicoConfig,
-  dependencies: ResidentVoiceStartupReadinessDependencies = {}
+  dependencies: ResidentVoiceStartupReadinessDependencies = {},
+  signal?: AbortSignal
 ): Promise<void> {
-  const healthCheck = dependencies.checkAivisHealth ?? checkAivisSpeechServiceHealth;
   const playbackCheck = dependencies.assertPlaybackReadiness ?? assertResidentPlaybackReadiness;
-  const service = buildAivisSpeechService(config);
   const plan = createResidentAudioOutputPlan(config, dependencies.platform);
   const [healthResult, playbackResult] = await Promise.allSettled([
-    healthCheck(service),
+    checkConfiguredTtsHealth(config, dependencies, signal),
     playbackCheck(plan)
   ]);
 
@@ -887,6 +912,20 @@ export async function assertResidentVoiceStartupReadiness(
   }
 }
 
+function checkConfiguredTtsHealth(
+  config: PicoConfig,
+  dependencies: ResidentVoiceStartupReadinessDependencies,
+  signal: AbortSignal | undefined
+) {
+  if (config.voice.tts.provider === "irodori") {
+    const healthCheck = dependencies.checkIrodoriHealth ?? checkIrodoriServiceHealth;
+    return healthCheck(buildIrodoriService(config), undefined, signal);
+  }
+
+  const healthCheck = dependencies.checkAivisHealth ?? checkAivisSpeechServiceHealth;
+  return healthCheck(buildAivisSpeechService(config));
+}
+
 function buildAivisSpeechService(config: PicoConfig): AivisSpeechServiceConfig {
   const aivis = config.voice.tts.aivis;
 
@@ -900,5 +939,23 @@ function buildAivisSpeechService(config: PicoConfig): AivisSpeechServiceConfig {
     localBaseUrl: aivis.localBaseUrl,
     speakerId: aivis.speakerId,
     timeoutMs: aivis.timeoutMs ?? 30_000
+  });
+}
+
+function buildIrodoriService(config: PicoConfig): IrodoriServiceConfig {
+  const irodori = config.voice.tts.irodori;
+
+  if (irodori === undefined) {
+    throw new Error("pico resident voice requires voice.tts.irodori config");
+  }
+
+  return defineIrodoriService({
+    id: irodori.id ?? "windows-irodori-voicedesign",
+    provider: "irodori",
+    localBaseUrl: irodori.localBaseUrl,
+    speaker: irodori.speaker,
+    style: irodori.style,
+    numSteps: irodori.numSteps,
+    seed: irodori.seed
   });
 }

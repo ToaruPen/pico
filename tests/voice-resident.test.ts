@@ -14,9 +14,11 @@ import type {
   TtsClient,
   TtsSynthesisEvent,
   TtsSynthesisFailure,
+  TtsSynthesisRequest,
   TtsSynthesisResult,
   TtsSynthesisSuccess
 } from "../src/modules/voice/index.js";
+import type { VoiceDesignSpeechPlan } from "../src/modules/voice-design/index.js";
 import type { DeferredToolDeliverableResult } from "../src/runtime/deferred-tool-coordinator.js";
 import type {
   ResidentAudioCapture,
@@ -86,6 +88,31 @@ describe("resident hold-to-talk voice runtime", () => {
     });
     expect(driver.playedChunks).toHaveLength(1);
 
+    await driver.runtime.stop();
+  });
+
+  it("forwards the correlated speech plan to TTS without changing the response text", async () => {
+    vi.useFakeTimers();
+    const speechPlan = {
+      v: 1,
+      style: "cheerful",
+      annotations: []
+    } as const;
+    const driver = createDriver({
+      piResponse: () =>
+        Promise.resolve({
+          text: "おはようございます。",
+          speechPlan
+        })
+    });
+
+    await completeHold(driver, "speech-plan");
+
+    expect(driver.ttsRequests).toHaveLength(1);
+    expect(driver.ttsRequests[0]).toMatchObject({
+      text: "おはようございます。",
+      speechPlan
+    });
     await driver.runtime.stop();
   });
 
@@ -2292,9 +2319,11 @@ function createDriver(
   options: {
     readonly speechDetected?: boolean;
     readonly sttResponse?: (signal: AbortSignal | undefined) => Promise<SttTranscriptionResult>;
-    readonly piResponse?: (
-      signal: AbortSignal | undefined
-    ) => Promise<{ readonly text: string; readonly settled?: Promise<void> }>;
+    readonly piResponse?: (signal: AbortSignal | undefined) => Promise<{
+      readonly text: string;
+      readonly speechPlan?: VoiceDesignSpeechPlan;
+      readonly settled?: Promise<void>;
+    }>;
     readonly ttsResponse?: (signal: AbortSignal | undefined) => Promise<TtsSynthesisResult>;
     readonly ttsEvents?: (signal: AbortSignal | undefined) => AsyncIterable<TtsSynthesisEvent>;
     readonly playbackCompletion?: (signal: AbortSignal | undefined) => Promise<void>;
@@ -2328,6 +2357,7 @@ function createDriver(
 ) {
   const capture = createControlledCapture();
   const sttRequests: SttTranscriptionRequest[] = [];
+  const ttsRequests: TtsSynthesisRequest[] = [];
   const sttWrites: Uint8Array[] = [];
   const piRequests: Array<Parameters<PiAgentTurnClient["prompt"]>[0]> = [];
   const playedChunks: Array<Parameters<VoicePlaybackSession["write"]>[0]> = [];
@@ -2383,10 +2413,14 @@ function createDriver(
   const piAgent: PiAgentTurnClient = {
     async prompt(request) {
       piRequests.push(request);
-      const response = await (options.piResponse?.(request.signal) ??
-        Promise.resolve({ text: "Picoの応答" }));
+      const response: {
+        readonly text: string;
+        readonly speechPlan?: VoiceDesignSpeechPlan;
+        readonly settled?: Promise<void>;
+      } = await (options.piResponse?.(request.signal) ?? Promise.resolve({ text: "Picoの応答" }));
       return {
         text: response.text,
+        ...(response.speechPlan === undefined ? {} : { speechPlan: response.speechPlan }),
         settled: ("settled" in response ? response.settled : undefined) ?? Promise.resolve()
       };
     },
@@ -2400,6 +2434,7 @@ function createDriver(
   };
   const tts: TtsClient = {
     async *synthesize(request) {
+      ttsRequests.push(request);
       if (options.ttsEvents !== undefined) {
         yield* options.ttsEvents(request.signal);
         return;
@@ -2556,6 +2591,7 @@ function createDriver(
     runtime,
     capture,
     sttRequests,
+    ttsRequests,
     sttWrites,
     sttCancels: () => sttCancelCount,
     piRequests,
