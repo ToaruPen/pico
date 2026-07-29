@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -258,6 +258,7 @@ if (isDirectExecution()) {
     repoRoot: process.cwd(),
     homeDirectory,
     configPath: resolve(process.env.PICO_CONFIG_PATH ?? "config/pico.local.yaml"),
+    environmentFilePath: join(homeDirectory, ".pico", "stackchan-mcp", "local-gateway.env"),
     nodePath: process.execPath,
     pathEnvironment: readLaunchdPathEnvironment(process.env, homeDirectory)
   });

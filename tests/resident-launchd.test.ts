@@ -60,6 +60,7 @@ describe("resident launchd service", () => {
       repoRoot: "/Users/monsoon/Dev/pico project",
       homeDirectory: "/Users/monsoon",
       configPath: "/Users/monsoon/Dev/pico/config/pico.local.yaml",
+      environmentFilePath: "/Users/monsoon/.pico/stackchan-mcp/local-gateway.env",
       nodePath: "/Users/monsoon/.nvm/versions/node/v24.13.0/bin/node",
       pathEnvironment: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
     });
@@ -96,6 +97,9 @@ describe("resident launchd service", () => {
     expect(service.plist).toContain(`<string>${service.standardOutputPath}</string>`);
     expect(service.plist).toContain(
       "<string>/Users/monsoon/.nvm/versions/node/v24.13.0/bin/node</string>"
+    );
+    expect(service.plist).toContain(
+      "<string>--env-file=/Users/monsoon/.pico/stackchan-mcp/local-gateway.env</string>"
     );
     expect(service.plist).toContain(
       "<string>/Users/monsoon/Dev/pico project/node_modules/jiti/lib/jiti-cli.mjs</string>"

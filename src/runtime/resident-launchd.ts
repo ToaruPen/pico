@@ -4,6 +4,7 @@ export type ResidentLaunchdServiceOptions = {
   readonly repoRoot: string;
   readonly homeDirectory: string;
   readonly configPath: string;
+  readonly environmentFilePath?: string;
   readonly nodePath: string;
   readonly pathEnvironment: string;
   readonly label?: string;
@@ -117,6 +118,10 @@ export function defineResidentLaunchdService(
   const repoRoot = requireNonEmpty(options.repoRoot, "resident launchd repoRoot");
   const homeDirectory = requireNonEmpty(options.homeDirectory, "resident launchd homeDirectory");
   const configPath = requireNonEmpty(options.configPath, "resident launchd configPath");
+  const environmentFilePath =
+    options.environmentFilePath === undefined
+      ? undefined
+      : requireNonEmpty(options.environmentFilePath, "resident launchd environmentFilePath");
   const nodePath = requireNonEmpty(options.nodePath, "resident launchd nodePath");
   const pathEnvironment = requireNonEmpty(
     options.pathEnvironment,
@@ -145,6 +150,7 @@ export function defineResidentLaunchdService(
       ...service,
       repoRoot,
       configPath,
+      ...(environmentFilePath === undefined ? {} : { environmentFilePath }),
       nodePath,
       pathEnvironment,
       scriptName: defaults.scriptName
@@ -261,6 +267,7 @@ function buildResidentLaunchdPlist(input: {
   readonly label: string;
   readonly repoRoot: string;
   readonly configPath: string;
+  readonly environmentFilePath?: string;
   readonly nodePath: string;
   readonly pathEnvironment: string;
   readonly standardOutputPath: string;
@@ -269,6 +276,10 @@ function buildResidentLaunchdPlist(input: {
 }): string {
   const jitiCliPath = join(input.repoRoot, "node_modules", "jiti", "lib", "jiti-cli.mjs");
   const residentScriptPath = join(input.repoRoot, "scripts", "resident", input.scriptName);
+  const environmentFileArgument =
+    input.environmentFilePath === undefined
+      ? ""
+      : `    <string>--env-file=${escapePlist(input.environmentFilePath)}</string>\n`;
   const voiceEnvironment = `    <key>PICO_VOICE_PROBE_STDOUT</key>
     <string>summary</string>
     <key>PICO_RESIDENT_VOICE_LOG_MODE</key>
@@ -284,7 +295,7 @@ function buildResidentLaunchdPlist(input: {
   <key>ProgramArguments</key>
   <array>
     <string>${escapePlist(input.nodePath)}</string>
-    <string>${escapePlist(jitiCliPath)}</string>
+${environmentFileArgument}    <string>${escapePlist(jitiCliPath)}</string>
     <string>${escapePlist(residentScriptPath)}</string>
   </array>
   <key>WorkingDirectory</key>
