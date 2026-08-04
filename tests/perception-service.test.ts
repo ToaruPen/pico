@@ -9,8 +9,156 @@ const cameraUser = "camera-user";
 const cameraPassword = "camera-password";
 const expectedTapoRtspUrl = (stream: string): string =>
   `rtsp://${cameraUser}:${cameraPassword}@192.168.10.25:554/${stream}`;
+const ollamaTapoSceneRoute = {
+  provider: "ollama" as const,
+  source: "tapo" as const,
+  timeoutMs: 10_000,
+  maxImageEdgePixels: 512
+};
 
 describe("pico perception service", () => {
+  it("fails closed before camera or VLM work when the scene route is omitted", async () => {
+    let cameraCalls = 0;
+    let preparationCalls = 0;
+    let descriptionCalls = 0;
+    const service = createPicoPerceptionService(
+      definePicoConfig({
+        camera: {
+          tapo: {
+            sourceId: "tapo-main",
+            host: "192.168.10.25",
+            user: cameraUser,
+            password: cameraPassword
+          }
+        },
+        vision: {
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434"
+          }
+        }
+      }),
+      {
+        captureSnapshot: () => {
+          cameraCalls += 1;
+          return Promise.resolve({
+            ok: true,
+            sourceId: "tapo-main",
+            mimeType: "image/jpeg",
+            frame: jpegFrame
+          });
+        },
+        prepareFrameForVlm: () => {
+          preparationCalls += 1;
+          return Promise.resolve(jpegFrame);
+        },
+        describeFrame: () => {
+          descriptionCalls += 1;
+          return Promise.reject(new Error("must not describe"));
+        }
+      }
+    );
+
+    expect(service.sceneRoute).toBeUndefined();
+    await expect(service.captureSceneFrame()).resolves.toEqual({
+      status: "failed",
+      reason: "pico camera scene description route is not configured"
+    });
+    await expect(service.describeCameraScene()).resolves.toEqual({
+      status: "failed",
+      reason: "pico camera scene description route is not configured"
+    });
+    expect({ cameraCalls, preparationCalls, descriptionCalls }).toEqual({
+      cameraCalls: 0,
+      preparationCalls: 0,
+      descriptionCalls: 0
+    });
+  });
+
+  it("captures and bounds a StackChan frame for the active agent route", async () => {
+    const preparedInputs: Array<{
+      readonly frame: Uint8Array;
+      readonly maxImageEdgePixels: number;
+    }> = [];
+    const preparedFrame = Uint8Array.of(0xff, 0xd8, 1, 2, 0xff, 0xd9);
+    const service = createPicoPerceptionService(
+      definePicoConfig({
+        camera: {
+          stackchan: {
+            sourceId: "stackchan-core-s3",
+            mcpUrl: "http://127.0.0.1:18767/mcp",
+            bearerTokenEnv: "STACKCHAN_TOKEN"
+          }
+        },
+        vision: {
+          sceneDescription: {
+            provider: "agent",
+            source: "stackchan",
+            maxImageEdgePixels: 512
+          }
+        }
+      }),
+      {
+        now: () => "2026-07-26T09:00:00.000Z",
+        captureStackChanFrame: () =>
+          Promise.resolve({
+            bytes: jpegFrame,
+            mimeType: "image/jpeg"
+          }),
+        prepareFrameForVlm: (frame, maxImageEdgePixels) => {
+          preparedInputs.push({ frame, maxImageEdgePixels });
+          return Promise.resolve(preparedFrame);
+        }
+      }
+    );
+
+    await expect(service.captureSceneFrame()).resolves.toEqual({
+      status: "passed",
+      provider: "agent",
+      sourceId: "stackchan-core-s3",
+      streamPurpose: "scene",
+      frameBytes: 4,
+      vlmFrameBytes: 6,
+      mimeType: "image/jpeg",
+      capturedAt: "2026-07-26T09:00:00.000Z",
+      image: preparedFrame
+    });
+    expect(service.sceneRoute).toEqual({
+      provider: "agent",
+      source: "stackchan",
+      timeoutMs: 30_000,
+      maxImageEdgePixels: 512
+    });
+    expect(preparedInputs).toEqual([{ frame: jpegFrame, maxImageEdgePixels: 512 }]);
+  });
+
+  it("keeps agent scene routing out of the Ollama description path", async () => {
+    const service = createPicoPerceptionService(
+      definePicoConfig({
+        camera: {
+          stackchan: {
+            mcpUrl: "http://127.0.0.1:18767/mcp",
+            bearerTokenEnv: "STACKCHAN_TOKEN"
+          }
+        },
+        vision: {
+          sceneDescription: {
+            provider: "agent",
+            source: "stackchan"
+          }
+        }
+      }),
+      {
+        captureStackChanFrame: () => Promise.reject(new Error("must not capture"))
+      }
+    );
+
+    await expect(service.describeCameraScene()).resolves.toEqual({
+      status: "failed",
+      reason:
+        "pico camera scene description failed: agent route requires the standard image-capable scene tool"
+    });
+  });
+
   it("captures scene snapshots from the high-quality stream without returning image bytes", async () => {
     const observedUrls: string[] = [];
     const service = createPicoPerceptionService(
@@ -454,6 +602,10 @@ describe("pico perception service", () => {
           }
         },
         vision: {
+          sceneDescription: {
+            ...ollamaTapoSceneRoute,
+            timeoutMs: 120_000
+          },
           ollama: {
             localBaseUrl: "http://127.0.0.1:11434",
             maxImageEdgePixels: 512,
@@ -579,6 +731,7 @@ describe("pico perception service", () => {
           }
         },
         vision: {
+          sceneDescription: ollamaTapoSceneRoute,
           ollama: {
             endpointId: "windows-ollama-qwen3-5",
             localBaseUrl: "http://127.0.0.1:11434",
@@ -637,6 +790,7 @@ describe("pico perception service", () => {
           }
         },
         vision: {
+          sceneDescription: ollamaTapoSceneRoute,
           ollama: {
             endpointId: "windows-ollama-qwen3-5",
             localBaseUrl: "http://127.0.0.1:11434",
@@ -700,6 +854,7 @@ describe("pico perception service", () => {
           }
         },
         vision: {
+          sceneDescription: ollamaTapoSceneRoute,
           ollama: {
             endpointId: "windows-qwen",
             localBaseUrl: "http://127.0.0.1:11434",
@@ -755,6 +910,7 @@ describe("pico perception service", () => {
           }
         },
         vision: {
+          sceneDescription: ollamaTapoSceneRoute,
           ollama: {
             localBaseUrl: "http://127.0.0.1:11434"
           }
@@ -792,6 +948,7 @@ describe("pico perception service", () => {
           }
         },
         vision: {
+          sceneDescription: ollamaTapoSceneRoute,
           ollama: {
             localBaseUrl: "http://127.0.0.1:11434",
             auth: {
@@ -838,6 +995,7 @@ describe("pico perception service", () => {
           }
         },
         vision: {
+          sceneDescription: ollamaTapoSceneRoute,
           ollama: {
             localBaseUrl: "http://127.0.0.1:11434"
           }
@@ -882,6 +1040,7 @@ describe("pico perception service", () => {
           }
         },
         vision: {
+          sceneDescription: ollamaTapoSceneRoute,
           ollama: {
             localBaseUrl: "http://127.0.0.1:11434"
           }
@@ -928,6 +1087,7 @@ describe("pico perception service", () => {
           }
         },
         vision: {
+          sceneDescription: ollamaTapoSceneRoute,
           ollama: {
             localBaseUrl: "http://127.0.0.1:11434"
           }
@@ -973,6 +1133,7 @@ describe("pico perception service", () => {
           }
         },
         vision: {
+          sceneDescription: ollamaTapoSceneRoute,
           ollama: {
             localBaseUrl: "http://127.0.0.1:11434"
           }
@@ -1040,6 +1201,7 @@ describe("pico perception service", () => {
           }
         },
         vision: {
+          sceneDescription: ollamaTapoSceneRoute,
           ollama: {
             localBaseUrl: "http://127.0.0.1:11434"
           }
@@ -1109,16 +1271,16 @@ describe("pico perception service", () => {
     });
   });
 
-  it("returns setup failures for camera scene descriptions without VLM config", async () => {
+  it("returns the route-omission failure before VLM setup validation", async () => {
     const service = createPicoPerceptionService(definePicoConfig({}));
 
     await expect(service.describeCameraScene()).resolves.toEqual({
       status: "failed",
-      reason: "vision.ollama is required to use pico_camera_scene_description"
+      reason: "pico camera scene description route is not configured"
     });
   });
 
-  it("returns camera-scene-specific setup failures without Tapo config", async () => {
+  it("returns the route-omission failure before camera setup validation", async () => {
     const service = createPicoPerceptionService(
       definePicoConfig({
         vision: {
@@ -1131,7 +1293,7 @@ describe("pico perception service", () => {
 
     await expect(service.describeCameraScene()).resolves.toEqual({
       status: "failed",
-      reason: "camera.tapo is required to use pico_camera_scene_description"
+      reason: "pico camera scene description route is not configured"
     });
   });
 });

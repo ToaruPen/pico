@@ -46,13 +46,29 @@ export type PicoMilestoneSmokeSectionName =
   | "camera_vlm_scene"
   | "audit_otel";
 
-export type PicoMilestoneSmokeSectionReport = {
-  readonly name: PicoMilestoneSmokeSectionName;
+type PicoMilestoneSmokeSectionBase = {
   readonly status: PicoMilestoneSmokeStatus;
-  readonly provider: string;
   readonly reason?: string;
   readonly details?: Record<string, unknown>;
 };
+
+export type PicoMilestoneSmokeSectionReport = PicoMilestoneSmokeSectionBase &
+  (
+    | {
+        readonly name: Exclude<PicoMilestoneSmokeSectionName, "camera_vlm_scene">;
+        readonly provider: string;
+      }
+    | {
+        readonly name: "camera_vlm_scene";
+        readonly provider: string;
+      }
+    | {
+        readonly name: "camera_vlm_scene";
+        readonly status: "failed";
+        readonly provider?: never;
+        readonly reason: string;
+      }
+  );
 
 export type PicoMilestoneSmokeReport = {
   readonly status: PicoMilestoneSmokeStatus;
@@ -151,9 +167,8 @@ export async function runPicoMilestoneSmokeSuite(
     )
   );
   sections.push(
-    await captureSection("camera_vlm_scene", "tapo-rtsp+ollama", async () =>
-      toSection(
-        "camera_vlm_scene",
+    await captureSection("camera_vlm_scene", cameraVlmSceneProvider(config), async () =>
+      toCameraVlmSceneSection(
         await (dependencies.runCameraVlmSceneSmoke ?? runCameraVlmSceneSmoke)(config)
       )
     )
@@ -251,7 +266,7 @@ function failedConfigProviderSections(error: unknown): readonly PicoMilestoneSmo
     failedSection("tapo_ptz", "tapo-onvif-ptz", reason),
     failedSection("person_detection", "tapo-rtsp+onnxruntime", reason),
     failedSection("ollama_vlm", "ollama", reason),
-    failedSection("camera_vlm_scene", "tapo-rtsp+ollama", reason)
+    failedSection("camera_vlm_scene", undefined, reason)
   ];
 }
 
@@ -499,7 +514,7 @@ function assertAuditOtelRecord(record: OpenTelemetryAuditLogRecord): void {
 
 async function captureSection(
   name: PicoMilestoneSmokeSectionName,
-  provider: string,
+  provider: string | undefined,
   run: () => Promise<PicoMilestoneSmokeSectionReport>
 ): Promise<PicoMilestoneSmokeSectionReport> {
   try {
@@ -518,20 +533,72 @@ function toSection(
     readonly details?: Record<string, unknown>;
   }
 ): PicoMilestoneSmokeSectionReport {
-  return {
+  const section = {
     name,
     status: report.status,
     provider: report.provider,
     ...(report.reason === undefined ? {} : { reason: report.reason }),
     ...(report.details === undefined ? {} : { details: report.details })
   };
+
+  if (name === "camera_vlm_scene") {
+    return {
+      ...section,
+      name
+    };
+  }
+
+  return {
+    ...section,
+    name
+  };
+}
+
+function toCameraVlmSceneSection(
+  report: CameraVlmSceneSmokeReport
+): PicoMilestoneSmokeSectionReport {
+  if ("provider" in report) {
+    return toSection("camera_vlm_scene", report);
+  }
+
+  return {
+    name: "camera_vlm_scene",
+    status: report.status,
+    reason: report.reason
+  };
+}
+
+function cameraVlmSceneProvider(config: PicoConfig): string | undefined {
+  const route = config.vision.sceneDescription;
+  if (route === undefined) {
+    return undefined;
+  }
+
+  if (route.provider === "agent") {
+    return "agent";
+  }
+
+  return route.source === "stackchan" ? "stackchan+ollama" : "tapo-rtsp+ollama";
 }
 
 function failedSection(
   name: PicoMilestoneSmokeSectionName,
-  provider: string,
+  provider: string | undefined,
   reason: string
 ): PicoMilestoneSmokeSectionReport {
+  if (name === "camera_vlm_scene") {
+    return {
+      name,
+      status: "failed",
+      ...(provider === undefined ? {} : { provider }),
+      reason
+    };
+  }
+
+  if (provider === undefined) {
+    throw new Error(`pico milestone smoke ${name} provider is required`);
+  }
+
   return {
     name,
     status: "failed",

@@ -34,11 +34,13 @@ responsible decision makers.
 - Module code uses one folder per module under `src/modules/<module>/index.ts`.
 - Runtime modules cover context, interaction-session control, local models,
   handoff, audit, transport, voice, vision, camera, and channels.
-- Vision provider selection is `Qwen/Qwen3.5-9B` through Ollama `qwen3.5:9b`
-  running on a protected Windows GPU host.
-- The `pico` host reaches the Windows vision host through a Tailscale or
-  Cloudflare-protected SSH tunnel; do not assume the VLM runs on the same
-  machine as Pi Agent.
+- Scene vision provider and camera source are selected explicitly at startup.
+  The `agent` provider sends one bounded image to the current image-capable Pi
+  Agent model; the `ollama` provider retains `Qwen/Qwen3.5-9B` through
+  `qwen3.5:9b`. Provider fallback is prohibited.
+- When the Ollama scene provider is selected, the `pico` host reaches the
+  Windows vision host through a Tailscale or Cloudflare-protected SSH tunnel;
+  do not assume that VLM runs on the same machine as Pi Agent.
 
 ## How
 
@@ -66,7 +68,8 @@ responsible decision makers.
 - Hard-kill residue is reviewed by the scheduled Codex stale-process cleanup.
   Do not add task auto-resume, a custom worker runner, or a TaskRun store to the
   Pico runtime for process cleanup.
-- Provider alternatives are explicit future choices, not hidden runtime chains.
+- Provider selection is an explicit startup choice, never a hidden runtime
+  chain or automatic fallback.
 - Do not add a custom policy engine as an early architecture layer.
 - Remote model access uses protected transport boundaries such as Tailscale ACLs
   or Cloudflare Access/Tunnel, not exposed inbound model ports.

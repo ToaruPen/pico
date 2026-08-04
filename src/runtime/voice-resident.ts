@@ -68,6 +68,11 @@ export type VoiceResidentLogSink = {
   readonly record: (event: VoiceResidentLogEvent) => void;
 };
 
+export type AttentionInteractionOwner = {
+  readonly startInteraction: () => Promise<void>;
+  readonly stopInteraction: () => Promise<void>;
+};
+
 export type VoiceResidentRuntimeOptions = {
   readonly audioCapture: ResidentAudioCapture;
   readonly captureBoundary?: {
@@ -81,6 +86,7 @@ export type VoiceResidentRuntimeOptions = {
   readonly tts: TtsClient;
   readonly playback: VoicePlaybackSink;
   readonly piAgent: PiAgentTurnClient;
+  readonly attention?: AttentionInteractionOwner;
   readonly deferredTools?: {
     readonly collectDeliverableResults: (input: {
       readonly sessionId: string;
@@ -1120,7 +1126,30 @@ async function ensureActiveSession(
     source: "macos_resident_io"
   });
   state.setActiveSessionId(session.id);
+  startAttentionInteraction(options.attention);
   return session.id;
+}
+
+function startAttentionInteraction(owner: AttentionInteractionOwner | undefined): void {
+  if (owner === undefined) {
+    return;
+  }
+
+  try {
+    owner.startInteraction().catch(() => undefined);
+  } catch {
+    // Attention is optional and must not fail a voice turn.
+  }
+}
+
+async function stopAttentionInteraction(
+  owner: AttentionInteractionOwner | undefined
+): Promise<void> {
+  try {
+    await owner?.stopInteraction();
+  } catch {
+    // Attention is optional and must not fail interaction cleanup.
+  }
 }
 
 function reusableSessionId(
@@ -1250,7 +1279,8 @@ async function finalizeEndedInteraction(
   ]);
   const cleanupResults = await Promise.allSettled([
     cancelDeferredAfterInteraction(sessionId, options, deferredAlreadyCancelled),
-    Promise.resolve().then(() => options.piAgent.disposeSession?.(sessionId))
+    Promise.resolve().then(() => options.piAgent.disposeSession?.(sessionId)),
+    stopAttentionInteraction(options.attention)
   ]);
   const cancellationAfterCleanup = closeInteractionEndingCancellationAdmission(ending);
   const lateCancellationResults = await settleFinalInteractionEndingCancellation(
@@ -1668,6 +1698,7 @@ async function shutdownVoiceRuntime(
   await waitForOwnedTurnOperations(ownedTurnOperations);
   const endingResults = await Promise.allSettled([interactionEnding]);
   const ownerResults = await Promise.allSettled([
+    stopAttentionInteraction(options.attention),
     options.playback.stop(),
     options.audioCapture.close(),
     options.echoControl.flush(),

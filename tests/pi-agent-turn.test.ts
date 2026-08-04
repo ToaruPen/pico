@@ -35,6 +35,13 @@ const expectedResidentPiAgentToolNamesWithoutDeferred = expectedResidentPiAgentT
   (toolName) => toolName !== "pico_camera_scene_description_deferred"
 );
 
+const expectedResidentPiAgentStandardToolNames = [
+  "pico_camera_snapshot",
+  "pico_person_detection",
+  "pico_camera_scene_description",
+  ...expectedResidentPiAgentToolNamesWithoutDeferred
+] as const;
+
 function createSdkToolState(
   registeredToolNames: readonly string[] = expectedResidentPiAgentToolNames
 ): {
@@ -611,6 +618,107 @@ describe("Pi Agent turn adapter", () => {
     });
   });
 
+  it("omits camera scene image content from retained validation and operator events", async () => {
+    const imageBase64 = Buffer.from("private camera frame").toString("base64");
+    const validationEvents: unknown[] = [];
+    const operatorEvents: ResidentVoiceOperatorEvent[] = [];
+    let listener: ((event: unknown) => void) | undefined;
+    const client = createPiAgentTurnClient({
+      cwd: testCwd,
+      validation: { record: (event) => validationEvents.push(event) },
+      operator: { record: (event) => operatorEvents.push(event) },
+      createResourceLoader: () => ({
+        reload: () => Promise.resolve()
+      }),
+      createAgentSession: () =>
+        Promise.resolve({
+          session: {
+            ...createSdkToolState(),
+            bindExtensions: () => Promise.resolve(),
+            extensionRunner: inactiveExtensionRunner,
+            subscribe: (inputListener) => {
+              listener = inputListener;
+              return () => undefined;
+            },
+            prompt: () => {
+              listener?.({
+                type: "tool_execution_start",
+                toolCallId: "scene-tool-call",
+                toolName: "pico_camera_scene_description",
+                args: {}
+              });
+              listener?.({
+                type: "tool_execution_end",
+                toolCallId: "scene-tool-call",
+                toolName: "pico_camera_scene_description",
+                result: {
+                  content: [
+                    { type: "text", text: "Analyze this private image." },
+                    { type: "image", data: imageBase64, mimeType: "image/jpeg" }
+                  ],
+                  details: {
+                    provider: "agent",
+                    sourceId: "stackchan-core-s3",
+                    frameBytes: 18,
+                    vlmFrameBytes: 18,
+                    capturedAt: "2026-07-26T05:45:00.000Z"
+                  }
+                },
+                isError: false
+              });
+              listener?.({
+                type: "agent_end",
+                messages: [
+                  {
+                    role: "assistant",
+                    content: [{ type: "text", text: "机が見えます。" }],
+                    stopReason: "stop"
+                  }
+                ],
+                willRetry: false
+              });
+              return Promise.resolve();
+            },
+            dispose: () => undefined
+          }
+        })
+    });
+
+    await expect(
+      client.prompt({ sessionId: "session-1", text: "これ見える？" })
+    ).resolves.toMatchObject({
+      text: "机が見えます。"
+    });
+
+    const retained = JSON.stringify({ validationEvents, operatorEvents });
+    expect(retained).not.toContain(imageBase64);
+    expect(retained).not.toContain("Analyze this private image.");
+    const retainedResult = {
+      imageOmitted: true,
+      details: {
+        provider: "agent",
+        sourceId: "stackchan-core-s3",
+        frameBytes: 18,
+        vlmFrameBytes: 18,
+        capturedAt: "2026-07-26T05:45:00.000Z"
+      }
+    };
+    expect(validationEvents).toContainEqual(
+      expect.objectContaining({
+        kind: "tool_execution_end",
+        toolName: "pico_camera_scene_description",
+        result: retainedResult
+      })
+    );
+    expect(operatorEvents).toContainEqual(
+      expect.objectContaining({
+        kind: "tool_execution_end",
+        toolName: "pico_camera_scene_description",
+        result: retainedResult
+      })
+    );
+  });
+
   it("returns only the final assistant message after an automatic retry", async () => {
     let listener: ((event: unknown) => void) | undefined;
     const client = createPiAgentTurnClient({
@@ -858,6 +966,7 @@ describe("Pi Agent turn adapter", () => {
 
   it("registers standard perception tools for a production child session", async () => {
     const registeredTools: string[] = [];
+    let sessionTools: readonly string[] | undefined;
     const client = createPiAgentTurnClient({
       cwd: testCwd,
       deferredTools: {
@@ -885,17 +994,19 @@ describe("Pi Agent turn adapter", () => {
           reload: () => Promise.resolve()
         };
       },
-      createAgentSession: () =>
-        Promise.resolve({
+      createAgentSession: (input) => {
+        sessionTools = input.tools;
+        return Promise.resolve({
           session: {
-            ...createSdkToolState(),
+            ...createSdkToolState(expectedResidentPiAgentStandardToolNames),
             bindExtensions: () => Promise.resolve(),
             extensionRunner: inactiveExtensionRunner,
             subscribe: () => () => undefined,
             prompt: () => Promise.resolve(),
             dispose: () => undefined
           }
-        })
+        });
+      }
     });
 
     await client.prompt({ sessionId: "session-1", text: "ピコ" });
@@ -905,6 +1016,7 @@ describe("Pi Agent turn adapter", () => {
       "pico_camera_snapshot",
       "pico_person_detection"
     ]);
+    expect(sessionTools).toEqual(expectedResidentPiAgentStandardToolNames);
   });
 
   it("passes host-selected settings to each child SDK session", async () => {

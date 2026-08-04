@@ -1563,6 +1563,39 @@ describe("resident hold-to-talk voice runtime", () => {
     await driver.runtime.stop();
   });
 
+  it("starts attention once for a reused interaction and stops it at cleanup and shutdown", async () => {
+    vi.useFakeTimers();
+    const attentionEvents: string[] = [];
+    const driver = createDriver({
+      attentionEvents,
+      sessionDurationMs: 1_000
+    });
+
+    await completeHold(driver, "first");
+    await completeHold(driver, "second");
+    expect(attentionEvents).toEqual(["start"]);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(driver.disposedSessions).toEqual(["session-1"]));
+    expect(attentionEvents).toEqual(["start", "stop"]);
+
+    await driver.runtime.stop();
+    expect(attentionEvents).toEqual(["start", "stop", "stop"]);
+  });
+
+  it("contains optional attention owner failures outside the voice critical path", async () => {
+    vi.useFakeTimers();
+    const driver = createDriver({
+      attention: {
+        startInteraction: () => Promise.reject(new Error("attention start failed")),
+        stopInteraction: () => Promise.reject(new Error("attention stop failed"))
+      }
+    });
+
+    await completeHold(driver, "voice remains available");
+    await expect(driver.runtime.stop()).resolves.toBeUndefined();
+  });
+
   it("does not begin inactivity farewell until the preceding turn settles", async () => {
     vi.useFakeTimers();
     const turnSettlement = createGate<undefined>();
@@ -2353,6 +2386,11 @@ function createDriver(
       readonly suppress: () => Promise<void>;
       readonly resume: () => Promise<void>;
     };
+    readonly attentionEvents?: string[];
+    readonly attention?: {
+      readonly startInteraction: () => Promise<void>;
+      readonly stopInteraction: () => Promise<void>;
+    };
   } = {}
 ) {
   const capture = createControlledCapture();
@@ -2583,6 +2621,20 @@ function createDriver(
       : { probe: options.probe }),
     validation: { record: (event) => options.validationEvents?.push(event) },
     operator: options.operator ?? { record: (event) => options.operatorEvents?.push(event) },
+    ...(options.attention === undefined && options.attentionEvents === undefined
+      ? {}
+      : {
+          attention: options.attention ?? {
+            startInteraction: () => {
+              options.attentionEvents?.push("start");
+              return Promise.resolve();
+            },
+            stopInteraction: () => {
+              options.attentionEvents?.push("stop");
+              return Promise.resolve();
+            }
+          }
+        }),
     now: () => "2026-07-17T00:00:00.000Z",
     monotonicNow: options.monotonicNow ?? (() => 0)
   });

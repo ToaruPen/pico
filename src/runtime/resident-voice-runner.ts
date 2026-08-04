@@ -76,7 +76,9 @@ import {
   createEnergySpeechActivityGate,
   createTenWasmSpeechActivityGate
 } from "./speech-activity-gate.js";
+import { createConfiguredStackChanAttentionOwner } from "./stackchan-attention-owner.js";
 import {
+  type AttentionInteractionOwner,
   createVoiceResidentRuntime,
   type PiAgentTurnClient,
   type VoiceResidentRuntime
@@ -95,6 +97,9 @@ export type ResidentVoiceStartupReadinessDependencies = {
 };
 
 type ResidentVoiceStartupReadiness = (config: PicoConfig, signal: AbortSignal) => Promise<void>;
+type ResidentAttentionOwnerFactory = (
+  config: PicoConfig
+) => Promise<AttentionInteractionOwner | undefined>;
 
 export async function runDirectResidentVoiceHarness(
   createPiAgent: (options: PiAgentTurnClientOptions) => PiAgentTurnClient
@@ -146,6 +151,7 @@ export async function runResidentVoiceWithProviders(input: {
   readonly piAgent?: PiAgentTurnClient;
   readonly createPiAgent?: (options: PiAgentTurnClientOptions) => PiAgentTurnClient;
   readonly createTelemetry?: (options: OpenTelemetryProviderOptions) => PicoTelemetry;
+  readonly createAttentionOwner?: ResidentAttentionOwnerFactory;
   readonly startupReadiness?: ResidentVoiceStartupReadiness;
   readonly operator?: ResidentVoiceOperatorSink;
 }): Promise<void> {
@@ -220,6 +226,7 @@ export async function runResidentVoiceWithProviders(input: {
       const speechPlan = defineResidentPiAgentSpeechPlan(config);
       const piAgent = resolveResidentPiAgent(input.piAgent, input.createPiAgent, {
         cwd: process.cwd(),
+        perceptionMode: "standard",
         deferredTools: {
           coordinator: deferredTools
         },
@@ -228,6 +235,7 @@ export async function runResidentVoiceWithProviders(input: {
         ...(input.operator === undefined ? {} : { operator: input.operator })
       });
       const speechActivity = await createConfiguredSpeechActivityGate(config);
+      const attention = await resolveAttentionOwner(input.createAttentionOwner)(config);
       const healthPublication = createResidentHealthPublicationGate();
 
       await runResidentControlLifecycle({
@@ -290,6 +298,7 @@ export async function runResidentVoiceWithProviders(input: {
             tts,
             playback,
             piAgent,
+            ...(attention === undefined ? {} : { attention }),
             deferredTools,
             farewell: { enabled: true },
             log: createResidentVoiceRuntimeLogSink(logRunMode, fileLog, stdoutProbeMode),
@@ -380,6 +389,12 @@ function resolveStartupReadiness(
     startupReadiness ??
     ((config, signal) => assertResidentVoiceStartupReadiness(config, {}, signal))
   );
+}
+
+function resolveAttentionOwner(
+  createAttentionOwner: ResidentAttentionOwnerFactory | undefined
+): ResidentAttentionOwnerFactory {
+  return createAttentionOwner ?? createConfiguredStackChanAttentionOwner;
 }
 
 export function createResidentVoiceStageProbe(

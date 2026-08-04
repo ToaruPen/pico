@@ -50,6 +50,13 @@ const residentPiAgentToolNamesWithoutDeferred = Object.freeze(
   )
 );
 
+const residentPiAgentStandardToolNames = Object.freeze([
+  "pico_camera_snapshot",
+  "pico_person_detection",
+  "pico_camera_scene_description",
+  ...residentPiAgentToolNamesWithoutDeferred
+]);
+
 export type PiAgentSdkSession = {
   readonly agent: {
     readonly hasQueuedMessages: () => boolean;
@@ -588,6 +595,10 @@ function requiredResidentPiAgentToolNames(options: PiAgentTurnClientOptions): re
     return options.activeToolNames;
   }
 
+  if (options.perceptionMode === "standard") {
+    return residentPiAgentStandardToolNames;
+  }
+
   return options.deferredTools === undefined
     ? residentPiAgentToolNamesWithoutDeferred
     : residentPiAgentToolNames;
@@ -692,6 +703,65 @@ type CompletedToolExecution = {
   readonly isError: boolean;
 };
 
+const agentCameraSceneToolName = "pico_camera_scene_description";
+
+function retainedToolExecutionResult(toolName: string, result: unknown): unknown {
+  if (toolName !== agentCameraSceneToolName) {
+    return result;
+  }
+
+  return Object.freeze({
+    imageOmitted: true,
+    details: readCameraSceneResultDetails(result)
+  });
+}
+
+function readCameraSceneResultDetails(result: unknown): Readonly<Record<string, string | number>> {
+  const resultRecord = readUnknownRecord(result);
+  const candidate = readUnknownRecord(resultRecord?.details);
+  if (candidate === undefined) {
+    return Object.freeze({});
+  }
+
+  return Object.freeze({
+    ...(candidate.provider === "agent" ? { provider: candidate.provider } : {}),
+    ...retainedStringDetail(candidate, "sourceId"),
+    ...retainedNonnegativeIntegerDetail(candidate, "frameBytes"),
+    ...retainedNonnegativeIntegerDetail(candidate, "vlmFrameBytes"),
+    ...retainedStringDetail(candidate, "capturedAt")
+  });
+}
+
+function readUnknownRecord(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : undefined;
+}
+
+function retainedStringDetail(
+  details: Readonly<Record<string, unknown>>,
+  field: "sourceId" | "capturedAt"
+): Readonly<Record<string, string>> {
+  const value = details[field];
+  return typeof value === "string" ? { [field]: value } : {};
+}
+
+function retainedNonnegativeIntegerDetail(
+  details: Readonly<Record<string, unknown>>,
+  field: "frameBytes" | "vlmFrameBytes"
+): Readonly<Record<string, number>> {
+  const value = details[field];
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? { [field]: value }
+    : {};
+}
+
+function retainedCompletedToolResult(completed: CompletedToolExecution | undefined): unknown {
+  return completed === undefined
+    ? undefined
+    : retainedToolExecutionResult(completed.toolName, completed.result);
+}
+
 function createPromptObservation(
   options: PiAgentTurnClientOptions,
   output: string[],
@@ -738,6 +808,7 @@ function createPromptObservation(
     const occurredAt = now();
     const durationMs = elapsedSince(pending.startedAtMs, monotonicNow);
     pendingTools.delete(toolCallId);
+    const retainedResult = retainedCompletedToolResult(completed);
     if (completed !== undefined) {
       options.validation?.record({
         kind: "tool_execution_end",
@@ -745,7 +816,7 @@ function createPromptObservation(
         sessionId,
         toolCallId,
         toolName: completed.toolName,
-        result: completed.result,
+        result: retainedResult,
         isError: completed.isError,
         durationMs
       });
@@ -756,7 +827,7 @@ function createPromptObservation(
       toolName: completed?.toolName ?? pending.toolName,
       status,
       durationMs,
-      ...(completed === undefined ? {} : { result: completed.result }),
+      ...(completed === undefined ? {} : { result: retainedResult }),
       ...(errorCode === undefined ? {} : { errorCode })
     });
     recordPiStage(options, "pi_tool_execution", status, pending.startedAt, durationMs, errorCode);

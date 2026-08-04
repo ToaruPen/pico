@@ -13,11 +13,14 @@ export type PicoConfig = DeepReadonly<{
   };
   camera: {
     tapo?: PicoTapoConfig;
+    stackchan?: PicoStackChanConfig;
     personFollow: PicoPersonFollowConfig;
   };
   vision: {
     ollama?: PicoOllamaConfig;
     personDetection: PicoPersonDetectionConfig;
+    attentionDetection?: PicoAttentionDetectionConfig;
+    sceneDescription?: PicoSceneDescriptionConfig;
   };
   voice: {
     resident: PicoVoiceResidentConfig;
@@ -72,6 +75,58 @@ export type PicoTapoConfig = {
   readonly maxFrameBytes?: number;
 };
 
+export type PicoStackChanConfig = {
+  readonly sourceId?: string;
+  readonly mcpUrl: string;
+  readonly bearerTokenEnv: string;
+  readonly timeoutMs: number;
+  readonly maxFrameBytes: number;
+  readonly streamFps: number;
+  readonly streamJpegQuality: number;
+  readonly follow: PicoStackChanFollowConfig;
+};
+
+export type PicoStackChanTargetFilterConfig =
+  | {
+      readonly enabled: false;
+    }
+  | {
+      readonly enabled: true;
+      readonly minimumCutoffHz: number;
+      readonly speedCoefficient: number;
+      readonly derivativeCutoffHz: number;
+    };
+
+export type PicoStackChanFollowConfig =
+  | {
+      readonly enabled: false;
+    }
+  | {
+      readonly enabled: true;
+      readonly commandTransport: "async-latest";
+      readonly commandRateHz: number;
+      readonly maxPendingCommandAgeMs: number;
+      readonly frameIntervalMs: number;
+      readonly maxFrameAgeMs: number;
+      readonly homeYaw: number;
+      readonly homePitch: number;
+      readonly trackingPitchMin: number;
+      readonly deadZone: number;
+      readonly deadZoneRelease: number;
+      readonly stepQuantization: "round" | "error-feedback";
+      readonly targetFilter: PicoStackChanTargetFilterConfig;
+      readonly yawGainDeg: number;
+      readonly pitchGainDeg: number;
+      readonly flipYaw: -1 | 1;
+      readonly flipPitch: -1 | 1;
+      readonly maxStepDeg: number;
+      readonly moveSpeedDps: number;
+      readonly lostHoldMs: number;
+      readonly scanDwellMs: number;
+      readonly scanYaw: readonly number[];
+      readonly scanPitch: readonly number[];
+    };
+
 export type PicoPersonFollowConfig = {
   readonly enabled: boolean;
   readonly sourceCameraId?: string;
@@ -119,6 +174,28 @@ export type PicoPersonDetectionOutputLayout =
   | "cxcywh_score_class"
   | "yolox_coco_raw";
 export type PicoPersonDetectionCoordinateScale = "pixel" | "normalized";
+
+export type PicoAttentionDetectionConfig =
+  | {
+      readonly enabled: false;
+    }
+  | {
+      readonly enabled: true;
+      readonly provider: "onnxruntime";
+      readonly modelFamily: "pinto441-yolox-body-head-hand-face-dist";
+      readonly modelPath: string;
+      readonly inputWidth: number;
+      readonly inputHeight: number;
+      readonly headConfidenceThreshold: number;
+      readonly faceConfidenceThreshold: number;
+    };
+
+export type PicoSceneDescriptionConfig = {
+  readonly provider: "ollama" | "agent";
+  readonly source: "tapo" | "stackchan";
+  readonly timeoutMs: number;
+  readonly maxImageEdgePixels: number;
+};
 
 export type PicoEchoControlMode = "aec" | "platform_voice_processing" | "half_duplex";
 export type PicoEchoControlProvider =
@@ -450,14 +527,18 @@ export function definePicoConfig(input: unknown): PicoConfig {
     "voice"
   ]);
 
-  return deepFreeze({
+  const config = {
     pico: definePicoSection(root),
     session: defineSessionSection(root),
     telemetry: defineTelemetrySection(root),
     camera: defineCameraSection(root),
     vision: defineVisionSection(root),
     voice: defineVoiceSection(root)
-  });
+  } satisfies PicoConfig;
+
+  requireCompatibleCameraAndVisionConfig(config);
+
+  return deepFreeze(config);
 }
 
 function definePicoSection(root: Record<string, unknown>): PicoConfig["pico"] {
@@ -633,10 +714,12 @@ function defineTelemetryOtelConfig(
 function defineCameraSection(root: Record<string, unknown>): PicoConfig["camera"] {
   const camera = readOptionalRecord(root.camera, "pico config camera");
   const tapo = readOptionalRecord(camera?.tapo, "pico config camera.tapo");
+  const stackchan = readOptionalRecord(camera?.stackchan, "pico config camera.stackchan");
   const personFollow = readOptionalRecord(camera?.personFollow, "pico config camera.personFollow");
 
   return {
     ...(tapo === undefined ? {} : { tapo: defineTapoConfig(tapo) }),
+    ...(stackchan === undefined ? {} : { stackchan: defineStackChanConfig(stackchan) }),
     personFollow: definePersonFollowConfig(personFollow)
   };
 }
@@ -648,11 +731,63 @@ function defineVisionSection(root: Record<string, unknown>): PicoConfig["vision"
     vision?.personDetection,
     "pico config vision.personDetection"
   );
+  const attentionDetection = readOptionalRecord(
+    vision?.attentionDetection,
+    "pico config vision.attentionDetection"
+  );
+  const sceneDescription = readOptionalRecord(
+    vision?.sceneDescription,
+    "pico config vision.sceneDescription"
+  );
 
   return {
     ...(ollama === undefined ? {} : { ollama: defineOllamaConfig(ollama) }),
-    personDetection: definePersonDetectionConfig(personDetection)
+    personDetection: definePersonDetectionConfig(personDetection),
+    ...(attentionDetection === undefined
+      ? {}
+      : { attentionDetection: defineAttentionDetectionConfig(attentionDetection) }),
+    ...(sceneDescription === undefined
+      ? {}
+      : { sceneDescription: defineSceneDescriptionConfig(sceneDescription) })
   };
+}
+
+function requireCompatibleCameraAndVisionConfig(config: PicoConfig): void {
+  requireStackChanAttentionCompatibility(config);
+  requireSceneSourceCompatibility(config);
+  requireSceneProviderCompatibility(config);
+}
+
+function requireStackChanAttentionCompatibility(config: PicoConfig): void {
+  if (
+    config.camera.stackchan?.follow.enabled === true &&
+    config.vision.attentionDetection?.enabled !== true
+  ) {
+    throw new Error(
+      "pico config vision.attentionDetection.enabled=true is required when camera.stackchan.follow.enabled=true"
+    );
+  }
+}
+
+function requireSceneSourceCompatibility(config: PicoConfig): void {
+  const sceneDescription = config.vision.sceneDescription;
+  if (sceneDescription?.source === "stackchan" && config.camera.stackchan === undefined) {
+    throw new Error(
+      "pico config camera.stackchan is required when vision.sceneDescription.source=stackchan"
+    );
+  }
+  if (sceneDescription?.source === "tapo" && config.camera.tapo === undefined) {
+    throw new Error("pico config camera.tapo is required when vision.sceneDescription.source=tapo");
+  }
+}
+
+function requireSceneProviderCompatibility(config: PicoConfig): void {
+  const sceneDescription = config.vision.sceneDescription;
+  if (sceneDescription?.provider === "ollama" && config.vision.ollama === undefined) {
+    throw new Error(
+      "pico config vision.ollama is required when vision.sceneDescription.provider=ollama"
+    );
+  }
 }
 
 function defineVoiceSection(root: Record<string, unknown>): PicoConfig["voice"] {
@@ -1094,6 +1229,263 @@ function defineTapoConfig(input: Record<string, unknown>): PicoTapoConfig {
   };
 }
 
+function defineStackChanConfig(input: Record<string, unknown>): PicoStackChanConfig {
+  requireKnownConfigFields(input, "pico config camera.stackchan", [
+    "sourceId",
+    "mcpUrl",
+    "bearerTokenEnv",
+    "timeoutMs",
+    "maxFrameBytes",
+    "streamFps",
+    "streamJpegQuality",
+    "follow"
+  ]);
+  const follow = readOptionalRecord(input.follow, "pico config camera.stackchan.follow");
+
+  return {
+    ...optionalStringProperty(input, "sourceId", "pico config camera.stackchan.sourceId"),
+    mcpUrl: requireLocalMcpUrl(input.mcpUrl, "pico config camera.stackchan.mcpUrl"),
+    bearerTokenEnv: requireEnvironmentVariableName(
+      input.bearerTokenEnv,
+      "pico config camera.stackchan.bearerTokenEnv"
+    ),
+    timeoutMs:
+      readOptionalBoundedPositiveInteger(
+        input.timeoutMs,
+        "pico config camera.stackchan.timeoutMs",
+        maxNodeTimeoutMs
+      ) ?? 10_000,
+    maxFrameBytes:
+      readOptionalPositiveInteger(
+        input.maxFrameBytes,
+        "pico config camera.stackchan.maxFrameBytes"
+      ) ?? 5 * 1024 * 1024,
+    streamFps:
+      readOptionalBoundedPositiveInteger(
+        input.streamFps,
+        "pico config camera.stackchan.streamFps",
+        20
+      ) ?? 20,
+    streamJpegQuality:
+      readOptionalBoundedPositiveInteger(
+        input.streamJpegQuality,
+        "pico config camera.stackchan.streamJpegQuality",
+        100
+      ) ?? 60,
+    follow: defineStackChanFollowConfig(follow)
+  };
+}
+
+// eslint-disable-next-line complexity
+function defineStackChanFollowConfig(
+  input: Record<string, unknown> | undefined
+): PicoStackChanFollowConfig {
+  if (input === undefined) {
+    return { enabled: false };
+  }
+
+  requireKnownConfigFields(input, "pico config camera.stackchan.follow", [
+    "enabled",
+    "commandTransport",
+    "commandRateHz",
+    "maxPendingCommandAgeMs",
+    "frameIntervalMs",
+    "maxFrameAgeMs",
+    "homeYaw",
+    "homePitch",
+    "trackingPitchMin",
+    "deadZone",
+    "deadZoneRelease",
+    "stepQuantization",
+    "targetFilter",
+    "yawGainDeg",
+    "pitchGainDeg",
+    "flipYaw",
+    "flipPitch",
+    "maxStepDeg",
+    "moveSpeedDps",
+    "lostHoldMs",
+    "scanDwellMs",
+    "scanYaw",
+    "scanPitch"
+  ]);
+  const enabled =
+    readOptionalBoolean(input.enabled, "pico config camera.stackchan.follow.enabled") ?? false;
+
+  if (!enabled) {
+    return { enabled: false };
+  }
+
+  const deadZone =
+    readOptionalBoundedDeadZone(input.deadZone, "pico config camera.stackchan.follow.deadZone") ??
+    0.1;
+  const deadZoneRelease =
+    readOptionalBoundedDeadZone(
+      input.deadZoneRelease,
+      "pico config camera.stackchan.follow.deadZoneRelease"
+    ) ?? 0.14;
+  if (deadZoneRelease < deadZone) {
+    throw new Error("pico config camera.stackchan.follow.deadZoneRelease must be >= deadZone");
+  }
+
+  return {
+    enabled: true,
+    commandTransport: requireLiteralString(
+      input.commandTransport,
+      "pico config camera.stackchan.follow.commandTransport",
+      "async-latest"
+    ),
+    commandRateHz:
+      readOptionalBoundedPositiveInteger(
+        input.commandRateHz,
+        "pico config camera.stackchan.follow.commandRateHz",
+        10
+      ) ?? 10,
+    maxPendingCommandAgeMs:
+      readOptionalBoundedInteger(
+        input.maxPendingCommandAgeMs,
+        "pico config camera.stackchan.follow.maxPendingCommandAgeMs",
+        50,
+        500
+      ) ?? 180,
+    frameIntervalMs:
+      readOptionalBoundedPositiveInteger(
+        input.frameIntervalMs,
+        "pico config camera.stackchan.follow.frameIntervalMs",
+        maxNodeTimeoutMs
+      ) ?? 125,
+    maxFrameAgeMs:
+      readOptionalBoundedPositiveInteger(
+        input.maxFrameAgeMs,
+        "pico config camera.stackchan.follow.maxFrameAgeMs",
+        maxNodeTimeoutMs
+      ) ?? 180,
+    homeYaw:
+      readOptionalBoundedInteger(
+        input.homeYaw,
+        "pico config camera.stackchan.follow.homeYaw",
+        -90,
+        90
+      ) ?? 0,
+    homePitch:
+      readOptionalBoundedInteger(
+        input.homePitch,
+        "pico config camera.stackchan.follow.homePitch",
+        5,
+        85
+      ) ?? 35,
+    trackingPitchMin:
+      readOptionalBoundedInteger(
+        input.trackingPitchMin,
+        "pico config camera.stackchan.follow.trackingPitchMin",
+        5,
+        85
+      ) ?? 5,
+    deadZone,
+    deadZoneRelease,
+    stepQuantization: requireOneOfStrings(
+      input.stepQuantization,
+      "pico config camera.stackchan.follow.stepQuantization",
+      ["round", "error-feedback"] as const
+    ),
+    targetFilter: defineStackChanTargetFilterConfig(input.targetFilter),
+    yawGainDeg:
+      readOptionalPositiveNumber(
+        input.yawGainDeg,
+        "pico config camera.stackchan.follow.yawGainDeg"
+      ) ?? 40,
+    pitchGainDeg:
+      readOptionalPositiveNumber(
+        input.pitchGainDeg,
+        "pico config camera.stackchan.follow.pitchGainDeg"
+      ) ?? 30,
+    flipYaw:
+      readOptionalDirection(input.flipYaw, "pico config camera.stackchan.follow.flipYaw") ?? 1,
+    flipPitch:
+      readOptionalDirection(input.flipPitch, "pico config camera.stackchan.follow.flipPitch") ?? -1,
+    maxStepDeg:
+      readOptionalPositiveNumber(
+        input.maxStepDeg,
+        "pico config camera.stackchan.follow.maxStepDeg"
+      ) ?? 4,
+    moveSpeedDps:
+      readOptionalBoundedInteger(
+        input.moveSpeedDps,
+        "pico config camera.stackchan.follow.moveSpeedDps",
+        15,
+        240
+      ) ?? 90,
+    lostHoldMs:
+      readOptionalBoundedPositiveInteger(
+        input.lostHoldMs,
+        "pico config camera.stackchan.follow.lostHoldMs",
+        maxNodeTimeoutMs
+      ) ?? 1000,
+    scanDwellMs:
+      readOptionalBoundedPositiveInteger(
+        input.scanDwellMs,
+        "pico config camera.stackchan.follow.scanDwellMs",
+        maxNodeTimeoutMs
+      ) ?? 900,
+    scanYaw: requireBoundedIntegerArray(
+      input.scanYaw ?? [-35, 0, 35],
+      "pico config camera.stackchan.follow.scanYaw",
+      -90,
+      90
+    ),
+    scanPitch: requireBoundedIntegerArray(
+      input.scanPitch ?? [35, 25],
+      "pico config camera.stackchan.follow.scanPitch",
+      5,
+      85
+    )
+  };
+}
+
+function defineStackChanTargetFilterConfig(input: unknown): PicoStackChanTargetFilterConfig {
+  const label = "pico config camera.stackchan.follow.targetFilter";
+  const config = requireRecord(input, label);
+  const enabled = readOptionalBoolean(config.enabled, `${label}.enabled`);
+
+  if (enabled === undefined) {
+    throw new Error(
+      `${label}.enabled is required when camera.stackchan.follow.targetFilter is set`
+    );
+  }
+  if (!enabled) {
+    requireKnownConfigFields(config, label, ["enabled"]);
+    return { enabled: false };
+  }
+
+  requireKnownConfigFields(config, label, [
+    "enabled",
+    "minimumCutoffHz",
+    "speedCoefficient",
+    "derivativeCutoffHz"
+  ]);
+  return {
+    enabled: true,
+    minimumCutoffHz: requireBoundedNumber(
+      config.minimumCutoffHz,
+      `${label}.minimumCutoffHz`,
+      0.1,
+      30
+    ),
+    speedCoefficient: requireBoundedNumber(
+      config.speedCoefficient,
+      `${label}.speedCoefficient`,
+      0,
+      30
+    ),
+    derivativeCutoffHz: requireBoundedNumber(
+      config.derivativeCutoffHz,
+      `${label}.derivativeCutoffHz`,
+      0.1,
+      30
+    )
+  };
+}
+
 function optionalTapoStreamsProperty(value: unknown): Pick<PicoTapoConfig, "streams"> {
   const streams = readOptionalRecord(value, "pico config camera.tapo.streams");
 
@@ -1209,6 +1601,100 @@ function defineOllamaConfig(input: Record<string, unknown>): PicoOllamaConfig {
       "pico config vision.ollama.maxImageEdgePixels",
       maxOllamaImageEdgePixels
     )
+  };
+}
+
+function defineAttentionDetectionConfig(
+  input: Record<string, unknown>
+): PicoAttentionDetectionConfig {
+  requireKnownConfigFields(input, "pico config vision.attentionDetection", [
+    "enabled",
+    "provider",
+    "modelFamily",
+    "modelPath",
+    "inputWidth",
+    "inputHeight",
+    "headConfidenceThreshold",
+    "faceConfidenceThreshold"
+  ]);
+  const enabled =
+    readOptionalBoolean(input.enabled, "pico config vision.attentionDetection.enabled") ?? false;
+
+  if (input.modelFamily !== undefined) {
+    requireLiteralString(
+      input.modelFamily,
+      "pico config vision.attentionDetection.modelFamily",
+      "pinto441-yolox-body-head-hand-face-dist"
+    );
+  }
+
+  if (!enabled) {
+    return { enabled: false };
+  }
+
+  return {
+    enabled: true,
+    provider: requireLiteralString(
+      input.provider,
+      "pico config vision.attentionDetection.provider",
+      "onnxruntime"
+    ),
+    modelFamily: requireLiteralString(
+      input.modelFamily,
+      "pico config vision.attentionDetection.modelFamily",
+      "pinto441-yolox-body-head-hand-face-dist"
+    ),
+    modelPath: requireString(input.modelPath, "pico config vision.attentionDetection.modelPath"),
+    inputWidth: requirePositiveInteger(
+      input.inputWidth,
+      "pico config vision.attentionDetection.inputWidth"
+    ),
+    inputHeight: requirePositiveInteger(
+      input.inputHeight,
+      "pico config vision.attentionDetection.inputHeight"
+    ),
+    headConfidenceThreshold:
+      readOptionalConfidenceThreshold(
+        input.headConfidenceThreshold,
+        "pico config vision.attentionDetection.headConfidenceThreshold"
+      ) ?? 0.35,
+    faceConfidenceThreshold:
+      readOptionalConfidenceThreshold(
+        input.faceConfidenceThreshold,
+        "pico config vision.attentionDetection.faceConfidenceThreshold"
+      ) ?? 0.4
+  };
+}
+
+function defineSceneDescriptionConfig(input: Record<string, unknown>): PicoSceneDescriptionConfig {
+  requireKnownConfigFields(input, "pico config vision.sceneDescription", [
+    "provider",
+    "source",
+    "timeoutMs",
+    "maxImageEdgePixels"
+  ]);
+
+  return {
+    provider: requireOneOfStrings(input.provider, "pico config vision.sceneDescription.provider", [
+      "ollama",
+      "agent"
+    ]),
+    source: requireOneOfStrings(input.source, "pico config vision.sceneDescription.source", [
+      "tapo",
+      "stackchan"
+    ]),
+    timeoutMs:
+      readOptionalBoundedPositiveInteger(
+        input.timeoutMs,
+        "pico config vision.sceneDescription.timeoutMs",
+        maxNodeTimeoutMs
+      ) ?? 30_000,
+    maxImageEdgePixels:
+      readOptionalBoundedPositiveInteger(
+        input.maxImageEdgePixels,
+        "pico config vision.sceneDescription.maxImageEdgePixels",
+        maxOllamaImageEdgePixels
+      ) ?? 512
   };
 }
 
@@ -1493,7 +1979,18 @@ function resolveConfigRelativePaths(config: PicoConfig, baseDirectory: string): 
                 config.vision.personDetection.modelPath
               )
             })
-      }
+      },
+      ...(config.vision.attentionDetection?.enabled !== true
+        ? {}
+        : {
+            attentionDetection: {
+              ...config.vision.attentionDetection,
+              modelPath: resolveConfigRelativePath(
+                baseDirectory,
+                config.vision.attentionDetection.modelPath
+              )
+            }
+          })
     },
     voice: {
       ...config.voice,
@@ -1638,6 +2135,82 @@ function requireNumber(value: number | undefined, label: string): number {
   }
 
   return value;
+}
+
+function requirePositiveInteger(value: unknown, label: string): number {
+  const parsed = readOptionalPositiveInteger(value, label);
+
+  if (parsed === undefined) {
+    throw new Error(`${label} is required when ${parentLabel(label)} is set`);
+  }
+
+  return parsed;
+}
+
+function requireLiteralString<const T extends string>(
+  value: unknown,
+  label: string,
+  expected: T
+): T {
+  const parsed = requireString(value, label);
+
+  if (parsed !== expected) {
+    throw new Error(`${label} must be ${expected}`);
+  }
+
+  return expected;
+}
+
+function requireOneOfStrings<const T extends readonly string[]>(
+  value: unknown,
+  label: string,
+  expected: T
+): T[number] {
+  const parsed = requireString(value, label);
+
+  if (!expected.includes(parsed)) {
+    throw new Error(`${label} must be ${expected.join(" or ")}`);
+  }
+
+  return parsed;
+}
+
+function requireEnvironmentVariableName(value: unknown, label: string): string {
+  const name = requireString(value, label);
+
+  if (!/^[A-Z_][A-Z0-9_]*$/u.test(name)) {
+    throw new Error(`${label} must be an uppercase environment variable name`);
+  }
+
+  return name;
+}
+
+function requireLocalMcpUrl(value: unknown, label: string): string {
+  const url = requireString(value, label);
+
+  if (!URL.canParse(url)) {
+    throw new Error(`${label} must be a valid URL`);
+  }
+
+  const parsedUrl = new URL(url);
+
+  if (
+    (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") ||
+    !isLoopbackHostname(parsedUrl.hostname) ||
+    hasUrlCredentialsOrSuffix(parsedUrl)
+  ) {
+    throw new Error(`${label} must use a local URL`);
+  }
+
+  return url;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  return new Set(["127.0.0.1", "localhost", "[::1]"]).has(hostname);
+}
+
+function hasUrlCredentialsOrSuffix(url: URL): boolean {
+  return url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "";
 }
 
 function requirePersonDetectionModelFamily(value: "pinto0309" | undefined): "pinto0309" {
@@ -1786,6 +2359,65 @@ function readOptionalBoolean(value: unknown, label: string): boolean | undefined
   }
 
   return value;
+}
+
+function readOptionalBoundedInteger(
+  value: unknown,
+  label: string,
+  minimum: number,
+  maximum: number
+): number | undefined {
+  const parsed = readOptionalNumber(value, label);
+
+  if (parsed !== undefined && (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum)) {
+    throw new Error(`${label} must be an integer from ${minimum} through ${maximum}`);
+  }
+
+  return parsed;
+}
+
+function readOptionalBoundedDeadZone(value: unknown, label: string): number | undefined {
+  const parsed = readOptionalNumber(value, label);
+
+  if (parsed !== undefined && (!Number.isFinite(parsed) || parsed < 0 || parsed >= 0.5)) {
+    throw new Error(`${label} must be >= 0 and < 0.5`);
+  }
+
+  return parsed;
+}
+
+function readOptionalDirection(value: unknown, label: string): -1 | 1 | undefined {
+  const parsed = readOptionalNumber(value, label);
+
+  if (parsed === undefined) {
+    return undefined;
+  }
+  if (parsed !== -1 && parsed !== 1) {
+    throw new Error(`${label} must be -1 or 1`);
+  }
+
+  return parsed;
+}
+
+function requireBoundedIntegerArray(
+  value: unknown,
+  label: string,
+  minimum: number,
+  maximum: number
+): readonly number[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`${label} must be a non-empty array`);
+  }
+
+  return value.map((entry, index) => {
+    const parsed = readOptionalBoundedInteger(entry, `${label}[${index}]`, minimum, maximum);
+
+    if (parsed === undefined) {
+      throw new Error(`${label}[${index}] is required`);
+    }
+
+    return parsed;
+  });
 }
 
 function readOptionalDeadZone(value: unknown): number | undefined {
@@ -1990,16 +2622,6 @@ function requireNonNegativeInteger(value: unknown, label: string): number {
   return parsed;
 }
 
-function requirePositiveInteger(value: unknown, label: string): number {
-  const parsed = readOptionalPositiveInteger(value, label);
-
-  if (parsed === undefined) {
-    throw new Error(`${label} is required when ${parentLabel(label)} is set`);
-  }
-
-  return parsed;
-}
-
 function requireTenVadHopSize(value: unknown, label: string): 160 | 256 {
   const parsed = readOptionalNumber(value, label);
 
@@ -2061,6 +2683,24 @@ function readOptionalPositiveNumber(value: unknown, label: string): number | und
 
   if (!Number.isFinite(parsed) || parsed <= 0) {
     throw new Error(`${label} must be a positive number`);
+  }
+
+  return parsed;
+}
+
+function requireBoundedNumber(
+  value: unknown,
+  label: string,
+  minimum: number,
+  maximum: number
+): number {
+  const parsed = readOptionalNumber(value, label);
+
+  if (parsed === undefined) {
+    throw new Error(`${label} is required when ${parentLabel(label)} is set`);
+  }
+  if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${label} must be a number from ${minimum} through ${maximum}`);
   }
 
   return parsed;

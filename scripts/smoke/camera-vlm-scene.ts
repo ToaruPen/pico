@@ -8,11 +8,17 @@ import {
   createFfmpegRtspSnapshotTransport,
   createRtspSnapshotClient
 } from "../../src/modules/camera/index.js";
+import type { StackChanJpegFrame } from "../../src/modules/stackchan/index.js";
 import {
   createOllamaSceneDescriptionClient,
   type SceneDescription,
   type SceneDescriptionRequest
 } from "../../src/modules/vision/index.js";
+import {
+  createPicoPerceptionService,
+  PICO_SCENE_ROUTE_NOT_CONFIGURED_REASON,
+  type PicoCameraSceneFrameResult
+} from "../../src/runtime/perception-service.js";
 import { buildOllamaVlmSmokePlan } from "./ollama-vlm-connectivity.js";
 import { readRtspSensitiveValues, redactRtspSensitiveValues } from "./rtsp-redaction.js";
 import { buildTapoRtspSmokePlan } from "./tapo-rtsp-snapshot.js";
@@ -20,6 +26,10 @@ import { buildTapoRtspSmokePlan } from "./tapo-rtsp-snapshot.js";
 export type CameraVlmSceneSmokeStatus = "passed" | "failed" | "skipped";
 
 export type CameraVlmSceneSmokeReport =
+  | {
+      readonly status: "failed";
+      readonly reason: string;
+    }
   | {
       readonly status: "passed";
       readonly provider: "tapo-rtsp+ollama";
@@ -35,14 +45,55 @@ export type CameraVlmSceneSmokeReport =
       };
     }
   | {
+      readonly status: "passed";
+      readonly provider: "agent";
+      readonly source: "tapo" | "stackchan";
+      readonly details: {
+        readonly sourceId: string;
+        readonly frameBytes: number;
+        readonly vlmFrameBytes: number;
+        readonly mimeType: "image/jpeg";
+        readonly timeoutMs: number;
+        readonly preparedForActiveAgent: true;
+      };
+    }
+  | {
       readonly status: "failed" | "skipped";
       readonly provider: "tapo-rtsp+ollama";
+      readonly reason: string;
+    }
+  | {
+      readonly status: "failed";
+      readonly provider: "agent";
+      readonly source: "tapo" | "stackchan";
+      readonly reason: string;
+    }
+  | {
+      readonly status: "passed";
+      readonly provider: "stackchan+ollama";
+      readonly source: "stackchan";
+      readonly details: {
+        readonly sourceId: string;
+        readonly frameBytes: number;
+        readonly vlmFrameBytes: number;
+        readonly mimeType: "image/jpeg";
+        readonly endpointId: string;
+        readonly model: "qwen3.5:9b";
+        readonly timeoutMs: number;
+        readonly scene: SceneDescription;
+      };
+    }
+  | {
+      readonly status: "failed";
+      readonly provider: "stackchan+ollama";
+      readonly source: "stackchan";
       readonly reason: string;
     };
 
 type CameraVlmSceneSmokePlan = {
   readonly camera: Extract<ReturnType<typeof buildTapoRtspSmokePlan>, { readonly status: "run" }>;
   readonly vlm: Extract<ReturnType<typeof buildOllamaVlmSmokePlan>, { readonly status: "run" }>;
+  readonly timeoutMs: number;
   readonly maxImageEdgePixels: number;
   readonly sensitiveValues: readonly string[];
 };
@@ -57,14 +108,31 @@ export type CameraVlmSceneSmokeDependencies = {
   readonly captureFrame?: (plan: CameraVlmSceneSmokePlan) => Promise<CapturedFrame>;
   readonly prepareFrame?: (frame: Uint8Array, maxImageEdgePixels: number) => Promise<Uint8Array>;
   readonly describeFrame?: (request: SceneDescriptionRequest) => Promise<SceneDescription>;
+  readonly captureAgentSceneFrame?: () => Promise<PicoCameraSceneFrameResult>;
+  readonly captureStackChanFrame?: () => Promise<StackChanJpegFrame>;
 };
 
-const defaultMaxImageEdgePixels = 512;
-
+// eslint-disable-next-line complexity
 export async function runCameraVlmSceneSmoke(
   config: PicoConfig = loadPicoConfigFromEnvironment(),
   dependencies: CameraVlmSceneSmokeDependencies = {}
 ): Promise<CameraVlmSceneSmokeReport> {
+  const route = config.vision.sceneDescription;
+  if (route === undefined) {
+    return {
+      status: "failed",
+      reason: PICO_SCENE_ROUTE_NOT_CONFIGURED_REASON
+    };
+  }
+
+  if (route.provider === "agent") {
+    return runAgentScenePreparation(config, dependencies);
+  }
+
+  if (route.source === "stackchan") {
+    return runStackChanOllamaScene(config, dependencies);
+  }
+
   const plan = buildCameraVlmSceneSmokePlan(config);
 
   if (plan.status === "skip") {
@@ -102,8 +170,100 @@ export async function runCameraVlmSceneSmoke(
       mimeType: captured.mimeType,
       endpointId: scene.source.endpointId,
       model: scene.source.model,
-      timeoutMs: plan.vlm.timeoutMs,
+      timeoutMs: plan.timeoutMs,
       scene
+    }
+  };
+}
+
+async function runAgentScenePreparation(
+  config: PicoConfig,
+  dependencies: CameraVlmSceneSmokeDependencies
+): Promise<CameraVlmSceneSmokeReport> {
+  const route = config.vision.sceneDescription;
+  if (route?.provider !== "agent") {
+    throw new Error("agent scene route is required");
+  }
+
+  try {
+    const frame = await (
+      dependencies.captureAgentSceneFrame ?? createPicoPerceptionService(config).captureSceneFrame
+    )();
+    if (frame.status === "failed") {
+      return {
+        status: "failed",
+        provider: "agent",
+        source: route.source,
+        reason: frame.reason
+      };
+    }
+
+    return {
+      status: "passed",
+      provider: "agent",
+      source: route.source,
+      details: {
+        sourceId: frame.sourceId,
+        frameBytes: frame.frameBytes,
+        vlmFrameBytes: frame.vlmFrameBytes,
+        mimeType: frame.mimeType,
+        timeoutMs: route.timeoutMs,
+        preparedForActiveAgent: true
+      }
+    };
+  } catch {
+    return {
+      status: "failed",
+      provider: "agent",
+      source: route.source,
+      reason: "pico agent scene preparation failed"
+    };
+  }
+}
+
+async function runStackChanOllamaScene(
+  config: PicoConfig,
+  dependencies: CameraVlmSceneSmokeDependencies
+): Promise<CameraVlmSceneSmokeReport> {
+  const route = config.vision.sceneDescription;
+  if (route?.provider !== "ollama" || route.source !== "stackchan") {
+    throw new Error("StackChan Ollama scene route is required");
+  }
+
+  const result = await createPicoPerceptionService(config, {
+    ...(dependencies.captureStackChanFrame === undefined
+      ? {}
+      : { captureStackChanFrame: dependencies.captureStackChanFrame }),
+    ...(dependencies.prepareFrame === undefined
+      ? {}
+      : { prepareFrameForVlm: dependencies.prepareFrame }),
+    ...(dependencies.describeFrame === undefined
+      ? {}
+      : { describeFrame: dependencies.describeFrame })
+  }).describeCameraScene();
+
+  if (result.status === "failed") {
+    return {
+      status: "failed",
+      provider: "stackchan+ollama",
+      source: "stackchan",
+      reason: result.reason
+    };
+  }
+
+  return {
+    status: "passed",
+    provider: "stackchan+ollama",
+    source: "stackchan",
+    details: {
+      sourceId: result.sourceId,
+      frameBytes: result.frameBytes,
+      vlmFrameBytes: result.vlmFrameBytes,
+      mimeType: result.mimeType,
+      endpointId: result.scene.source.endpointId,
+      model: result.scene.source.model,
+      timeoutMs: route.timeoutMs,
+      scene: result.scene
     }
   };
 }
@@ -136,6 +296,11 @@ function buildCameraVlmSceneSmokePlan(config: PicoConfig):
       readonly status: "skip";
       readonly reason: string;
     } {
+  const route = config.vision.sceneDescription;
+  if (route?.provider !== "ollama" || route.source !== "tapo") {
+    throw new Error("Tapo Ollama scene route is required");
+  }
+
   const cameraPlan = buildTapoRtspSmokePlan(config);
   const vlmPlan = buildOllamaVlmSmokePlan(config);
 
@@ -165,7 +330,8 @@ function buildCameraVlmSceneSmokePlan(config: PicoConfig):
     status: "run",
     camera: cameraPlan,
     vlm: vlmPlan,
-    maxImageEdgePixels: config.vision.ollama?.maxImageEdgePixels ?? defaultMaxImageEdgePixels,
+    timeoutMs: route.timeoutMs,
+    maxImageEdgePixels: route.maxImageEdgePixels,
     sensitiveValues: readSensitiveValues(config, cameraPlan.source.url)
   };
 }
@@ -214,7 +380,7 @@ async function describeSceneFrame(
       image: frame,
       mimeType: "image/jpeg",
       purpose: "staff_requested_snapshot",
-      timeoutMs: plan.vlm.timeoutMs
+      timeoutMs: plan.timeoutMs
     });
   } catch (error) {
     throw new CameraVlmSceneSmokeError(

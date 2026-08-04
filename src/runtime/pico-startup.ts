@@ -106,6 +106,7 @@ async function startPico(
     throw new PicoStartupUserError("configured Pico model authentication is unavailable");
   }
 
+  requireAgentSceneImageCapability(config, model);
   pi.setThinkingLevel(modelConfig.thinkingLevel);
   const controller = options.createController(
     context,
@@ -121,6 +122,15 @@ async function startPico(
     await controller.start();
   } catch (error) {
     throw new PicoStartupUserError(describeControllerStartFailure(error));
+  }
+}
+
+function requireAgentSceneImageCapability(
+  config: PicoConfig,
+  model: NonNullable<ExtensionContext["model"]>
+): void {
+  if (config.vision.sceneDescription?.provider === "agent" && !model.input.includes("image")) {
+    throw new PicoStartupUserError("configured Pico model does not support image input");
   }
 }
 

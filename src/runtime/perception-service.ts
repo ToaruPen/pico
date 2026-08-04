@@ -12,6 +12,10 @@ import {
 } from "../modules/camera/index.js";
 import { defineSelectedModelEndpoint } from "../modules/local-models/index.js";
 import {
+  createStackChanAdapterFromConfig,
+  type StackChanJpegFrame
+} from "../modules/stackchan/index.js";
+import {
   createOllamaSceneDescriptionClient,
   type SceneDescription,
   type SceneDescriptionRequest
@@ -34,8 +38,9 @@ const defaultMaxFrameBytes = 5 * 1024 * 1024;
 const defaultOllamaEndpointId = "windows-ollama-qwen3-5";
 const defaultOllamaTunnelKind = "tailscale_ssh";
 const defaultOllamaSshTarget = "pico-vision-host";
-const defaultOllamaTimeoutMs = 10_000;
-const defaultOllamaMaxImageEdgePixels = 512;
+
+export const PICO_SCENE_ROUTE_NOT_CONFIGURED_REASON =
+  "pico camera scene description route is not configured";
 
 export type PicoCameraSnapshotResult =
   | {
@@ -82,8 +87,34 @@ export type PicoCameraSceneDescriptionResult =
       readonly reason: string;
     };
 
+export type PicoSceneRoute = {
+  readonly provider: "ollama" | "agent";
+  readonly source: "tapo" | "stackchan";
+  readonly timeoutMs: number;
+  readonly maxImageEdgePixels: number;
+};
+
+export type PicoCameraSceneFrameResult =
+  | {
+      readonly status: "passed";
+      readonly provider: "ollama" | "agent";
+      readonly sourceId: string;
+      readonly streamPurpose: "scene";
+      readonly frameBytes: number;
+      readonly vlmFrameBytes: number;
+      readonly mimeType: "image/jpeg";
+      readonly capturedAt: string;
+      readonly image: Uint8Array;
+    }
+  | {
+      readonly status: "failed";
+      readonly reason: string;
+    };
+
 export type PicoPerceptionService = {
+  readonly sceneRoute?: PicoSceneRoute;
   readonly captureSceneSnapshot: () => Promise<PicoCameraSnapshotResult>;
+  readonly captureSceneFrame: () => Promise<PicoCameraSceneFrameResult>;
   readonly detectPeople: () => Promise<PicoPersonDetectionResult>;
   readonly describeCameraScene: () => Promise<PicoCameraSceneDescriptionResult>;
 };
@@ -101,19 +132,26 @@ export type PicoPerceptionServiceDependencies = {
     maxImageEdgePixels: number
   ) => Promise<Uint8Array>;
   readonly describeFrame?: (request: SceneDescriptionRequest) => Promise<SceneDescription>;
+  readonly captureStackChanFrame?: () => Promise<StackChanJpegFrame>;
   readonly probe?: VoiceStageProbe;
   readonly now?: () => string;
 };
+
+function resolveSceneRoute(config: PicoConfig): PicoSceneRoute | undefined {
+  return config.vision.sceneDescription;
+}
 
 export function createPicoPerceptionService(
   config: PicoConfig,
   dependencies: PicoPerceptionServiceDependencies = {}
 ): PicoPerceptionService {
   const now = dependencies.now ?? (() => new Date().toISOString());
+  const sceneRoute = resolveSceneRoute(config);
   const inFlightCapturePurposes = new Set<"scene" | "detection">();
   let cameraSceneDescriptionInFlight = false;
 
   return {
+    ...(sceneRoute === undefined ? {} : { sceneRoute }),
     async captureSceneSnapshot() {
       let source: RtspSnapshotSource;
       try {
@@ -153,6 +191,35 @@ export function createPicoPerceptionService(
         frameBytes: snapshot.frame.byteLength,
         capturedAt: now()
       };
+    },
+    async captureSceneFrame() {
+      if (sceneRoute === undefined) {
+        return {
+          status: "failed",
+          reason: PICO_SCENE_ROUTE_NOT_CONFIGURED_REASON
+        };
+      }
+
+      if (cameraSceneDescriptionInFlight) {
+        return {
+          status: "failed",
+          reason:
+            "pico camera scene frame failed: in_flight: previous camera scene operation is still in flight"
+        };
+      }
+
+      cameraSceneDescriptionInFlight = true;
+      try {
+        return await capturePreparedSceneFrame({
+          config,
+          dependencies,
+          route: sceneRoute,
+          inFlightCapturePurposes,
+          now
+        });
+      } finally {
+        cameraSceneDescriptionInFlight = false;
+      }
     },
     async detectPeople() {
       let detector: EnabledPersonDetectionConfig;
@@ -237,13 +304,30 @@ export function createPicoPerceptionService(
       }
     },
     async describeCameraScene() {
-      let endpoint: SceneDescriptionRequest["endpoint"];
-      let source: RtspSnapshotSource;
+      if (sceneRoute === undefined) {
+        return {
+          status: "failed",
+          reason: PICO_SCENE_ROUTE_NOT_CONFIGURED_REASON
+        };
+      }
 
+      if (sceneRoute.provider === "agent") {
+        return {
+          status: "failed",
+          reason:
+            "pico camera scene description failed: agent route requires the standard image-capable scene tool"
+        };
+      }
+
+      let endpoint: SceneDescriptionRequest["endpoint"];
       try {
         endpoint = requireOllamaEndpoint(config);
-        source = buildTapoSceneSnapshotSource(config, "pico_camera_scene_description");
-      } catch (error: unknown) {
+        if (sceneRoute.source === "tapo") {
+          buildTapoSceneSnapshotSource(config, "pico_camera_scene_description");
+        } else if (config.camera.stackchan === undefined) {
+          throw new Error("camera.stackchan is required to use pico_camera_scene_description");
+        }
+      } catch (error) {
         return {
           status: "failed",
           reason: sanitizeRtspMessage(errorMessage(error), config)
@@ -261,32 +345,24 @@ export function createPicoPerceptionService(
       cameraSceneDescriptionInFlight = true;
 
       try {
-        const snapshot = await captureSnapshotSafely(
+        const frame = await capturePreparedSceneFrame({
           config,
-          source,
-          "scene",
-          inFlightCapturePurposes,
           dependencies,
+          route: sceneRoute,
+          inFlightCapturePurposes,
           now
-        );
+        });
 
-        if (!snapshot.ok) {
-          return {
-            status: "failed",
-            reason: `pico camera scene description failed: ${snapshot.reason}: ${sanitizeRtspMessage(
-              snapshot.message,
-              config,
-              source
-            )}`
-          };
+        if (frame.status === "failed") {
+          return frame;
         }
 
-        return await describeSnapshotScene({
+        return await describePreparedSceneFrame({
           config,
           dependencies,
+          route: sceneRoute,
+          frame,
           endpoint,
-          source,
-          snapshot,
           now
         });
       } finally {
@@ -459,40 +535,192 @@ async function resizeJpegForVlm(
     .toBuffer();
 }
 
-type DescribeSnapshotSceneInput = {
+type CapturedRawSceneFrame = {
+  readonly sourceId: string;
+  readonly mimeType: "image/jpeg";
+  readonly frame: Uint8Array;
+  readonly source?: RtspSnapshotSource;
+};
+
+type CapturePreparedSceneFrameInput = {
   readonly config: PicoConfig;
   readonly dependencies: PicoPerceptionServiceDependencies;
-  readonly endpoint: SceneDescriptionRequest["endpoint"];
-  readonly source: RtspSnapshotSource;
-  readonly snapshot: Extract<RtspSnapshotResult, { readonly ok: true }>;
+  readonly route: PicoSceneRoute;
+  readonly inFlightCapturePurposes: Set<"scene" | "detection">;
   readonly now: () => string;
 };
 
-async function describeSnapshotScene({
+async function capturePreparedSceneFrame({
   config,
   dependencies,
-  endpoint,
-  source,
-  snapshot,
+  route,
+  inFlightCapturePurposes,
   now
-}: DescribeSnapshotSceneInput): Promise<PicoCameraSceneDescriptionResult> {
+}: CapturePreparedSceneFrameInput): Promise<PicoCameraSceneFrameResult> {
+  let captured: CapturedRawSceneFrame;
+
+  try {
+    captured = await captureConfiguredSceneFrame(
+      config,
+      route,
+      inFlightCapturePurposes,
+      dependencies,
+      now
+    );
+  } catch (error) {
+    return {
+      status: "failed",
+      reason: `pico camera scene description failed: ${sanitizeRtspMessage(
+        errorMessage(error),
+        config
+      )}`
+    };
+  }
+
   let preparedFrame: Uint8Array | undefined;
+  const preparationStartedAt = now();
+  const preparationStartedMs = performance.now();
+  try {
+    const prepareFrame = dependencies.prepareFrameForVlm ?? resizeJpegForVlm;
+    preparedFrame = await prepareFrame(captured.frame, route.maxImageEdgePixels);
+
+    return {
+      status: "passed",
+      provider: route.provider,
+      sourceId: captured.sourceId,
+      streamPurpose: "scene",
+      frameBytes: captured.frame.byteLength,
+      vlmFrameBytes: preparedFrame.byteLength,
+      mimeType: captured.mimeType,
+      capturedAt: now(),
+      image: preparedFrame
+    };
+  } catch (error) {
+    recordPerceptionStage(
+      dependencies.probe,
+      "vlm_scene_description",
+      "error",
+      preparationStartedAt,
+      preparationStartedMs
+    );
+    return {
+      status: "failed",
+      reason: `pico camera scene description failed: ${sanitizeRtspMessage(
+        errorMessage(error),
+        config,
+        captured.source,
+        readImageSensitiveValues(captured.frame, preparedFrame)
+      )}`
+    };
+  }
+}
+
+async function captureConfiguredSceneFrame(
+  config: PicoConfig,
+  route: PicoSceneRoute,
+  inFlightCapturePurposes: Set<"scene" | "detection">,
+  dependencies: PicoPerceptionServiceDependencies,
+  now: () => string
+): Promise<CapturedRawSceneFrame> {
+  if (route.source === "stackchan") {
+    return captureStackChanSceneFrame(config, dependencies, now);
+  }
+
+  const source = buildTapoSceneSnapshotSource(config, "pico_camera_scene_description");
+  const snapshot = await captureSnapshotSafely(
+    config,
+    source,
+    "scene",
+    inFlightCapturePurposes,
+    dependencies,
+    now
+  );
+
+  if (!snapshot.ok) {
+    throw new Error(`${snapshot.reason}: ${sanitizeRtspMessage(snapshot.message, config, source)}`);
+  }
+
+  return {
+    sourceId: snapshot.sourceId,
+    mimeType: snapshot.mimeType,
+    frame: snapshot.frame,
+    source
+  };
+}
+
+async function captureStackChanSceneFrame(
+  config: PicoConfig,
+  dependencies: PicoPerceptionServiceDependencies,
+  now: () => string
+): Promise<CapturedRawSceneFrame> {
+  const stackchan = config.camera.stackchan;
+  if (stackchan === undefined) {
+    throw new Error("camera.stackchan is required to capture a StackChan scene");
+  }
+
+  const startedAt = now();
+  const startedMs = performance.now();
+
+  try {
+    const frame = await (
+      dependencies.captureStackChanFrame ?? (() => captureStackChanFrameOnce(stackchan))
+    )();
+    recordPerceptionStage(dependencies.probe, "camera_capture", "ok", startedAt, startedMs, {
+      "pico.voice.frame_bytes": frame.bytes.byteLength
+    });
+
+    return {
+      sourceId: stackchan.sourceId ?? "stackchan-core-s3",
+      mimeType: frame.mimeType,
+      frame: frame.bytes
+    };
+  } catch (error) {
+    recordPerceptionStage(dependencies.probe, "camera_capture", "error", startedAt, startedMs);
+    throw error;
+  }
+}
+
+async function captureStackChanFrameOnce(
+  config: NonNullable<PicoConfig["camera"]["stackchan"]>
+): Promise<StackChanJpegFrame> {
+  const adapter = createStackChanAdapterFromConfig(config);
+  await adapter.connect();
+  try {
+    return await adapter.captureJpeg();
+  } finally {
+    await adapter.close();
+  }
+}
+
+type DescribePreparedSceneFrameInput = {
+  readonly config: PicoConfig;
+  readonly dependencies: PicoPerceptionServiceDependencies;
+  readonly route: PicoSceneRoute;
+  readonly frame: Extract<PicoCameraSceneFrameResult, { readonly status: "passed" }>;
+  readonly endpoint: SceneDescriptionRequest["endpoint"];
+  readonly now: () => string;
+};
+
+async function describePreparedSceneFrame({
+  config,
+  dependencies,
+  route,
+  frame,
+  endpoint,
+  now
+}: DescribePreparedSceneFrameInput): Promise<PicoCameraSceneDescriptionResult> {
   const vlmStartedAt = now();
   const vlmStartedMs = performance.now();
 
   try {
-    const maxImageEdgePixels =
-      config.vision.ollama?.maxImageEdgePixels ?? defaultOllamaMaxImageEdgePixels;
-    const prepareFrame = dependencies.prepareFrameForVlm ?? resizeJpegForVlm;
     const describeFrame =
       dependencies.describeFrame ?? createOllamaSceneDescriptionClient().describeScene;
-    preparedFrame = await prepareFrame(snapshot.frame, maxImageEdgePixels);
     const scene = await describeFrame({
       endpoint,
-      image: preparedFrame,
+      image: frame.image,
       mimeType: "image/jpeg",
       purpose: "staff_requested_snapshot",
-      timeoutMs: config.vision.ollama?.timeoutMs ?? defaultOllamaTimeoutMs
+      timeoutMs: route.timeoutMs
     });
     recordPerceptionStage(
       dependencies.probe,
@@ -501,38 +729,32 @@ async function describeSnapshotScene({
       vlmStartedAt,
       vlmStartedMs,
       {
-        "pico.voice.frame_bytes": snapshot.frame.byteLength,
-        "pico.voice.vlm_frame_bytes": preparedFrame.byteLength
+        "pico.voice.frame_bytes": frame.frameBytes,
+        "pico.voice.vlm_frame_bytes": frame.vlmFrameBytes
       }
     );
-    const imageSensitiveValues = readImageSensitiveValues(snapshot.frame, preparedFrame);
+    const imageSensitiveValues = readImageSensitiveValues(frame.image);
 
     return {
       status: "passed",
-      sourceId: snapshot.sourceId,
+      sourceId: frame.sourceId,
       streamPurpose: "scene",
-      frameBytes: snapshot.frame.byteLength,
-      vlmFrameBytes: preparedFrame.byteLength,
-      mimeType: snapshot.mimeType,
-      capturedAt: now(),
-      scene: sanitizeSceneDescription(scene, config, source, imageSensitiveValues)
+      frameBytes: frame.frameBytes,
+      vlmFrameBytes: frame.vlmFrameBytes,
+      mimeType: frame.mimeType,
+      capturedAt: frame.capturedAt,
+      scene: sanitizeSceneDescription(scene, config, undefined, imageSensitiveValues)
     };
   } catch (error: unknown) {
-    recordVlmSceneDescriptionError(
-      dependencies.probe,
-      snapshot,
-      preparedFrame,
-      vlmStartedAt,
-      vlmStartedMs
-    );
+    recordVlmSceneDescriptionError(dependencies.probe, frame, vlmStartedAt, vlmStartedMs);
 
     return {
       status: "failed",
       reason: `pico camera scene description failed: ${sanitizeRtspMessage(
         errorMessage(error),
         config,
-        source,
-        readImageSensitiveValues(snapshot.frame, preparedFrame)
+        undefined,
+        readImageSensitiveValues(frame.image)
       )}`
     };
   }
@@ -540,23 +762,20 @@ async function describeSnapshotScene({
 
 function recordVlmSceneDescriptionError(
   probe: VoiceStageProbe | undefined,
-  snapshot: Extract<RtspSnapshotResult, { readonly ok: true }>,
-  preparedFrame: Uint8Array | undefined,
+  frame: Extract<PicoCameraSceneFrameResult, { readonly status: "passed" }>,
   startedAt: string,
   startedMs: number
 ): void {
   recordPerceptionStage(probe, "vlm_scene_description", "error", startedAt, startedMs, {
-    "pico.voice.frame_bytes": snapshot.frame.byteLength,
-    ...(preparedFrame === undefined
-      ? {}
-      : { "pico.voice.vlm_frame_bytes": preparedFrame.byteLength })
+    "pico.voice.frame_bytes": frame.frameBytes,
+    "pico.voice.vlm_frame_bytes": frame.vlmFrameBytes
   });
 }
 
 function sanitizeSceneDescription(
   scene: SceneDescription,
   config: PicoConfig,
-  source: RtspSnapshotSource,
+  source: RtspSnapshotSource | undefined,
   imageSensitiveValues: readonly string[]
 ): SceneDescription {
   const sanitizeText = (text: string) =>

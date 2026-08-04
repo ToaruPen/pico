@@ -40,6 +40,12 @@ function configuredPicoConfig(): PicoConfig {
       }
     },
     vision: {
+      sceneDescription: {
+        provider: "ollama",
+        source: "tapo",
+        timeoutMs: 45_000,
+        maxImageEdgePixels: 512
+      },
       ollama: {
         localBaseUrl: "http://127.0.0.1:11434",
         timeoutMs: 45_000
@@ -51,12 +57,168 @@ function configuredPicoConfig(): PicoConfig {
 const passThroughFrame = (frame: Uint8Array): Promise<Uint8Array> => Promise.resolve(frame);
 
 describe("camera to VLM scene smoke", () => {
-  it("skips when camera and VLM configuration are absent", async () => {
-    await expect(runCameraVlmSceneSmoke(definePicoConfig({}))).resolves.toEqual({
-      status: "skipped",
-      provider: "tapo-rtsp+ollama",
-      reason:
-        "Set camera.tapo and vision.ollama in pico config to run the camera to VLM scene smoke."
+  it("fails closed before dependencies when legacy camera and Ollama settings omit the route", async () => {
+    let captureCalls = 0;
+    let preparationCalls = 0;
+    let descriptionCalls = 0;
+    let agentCaptureCalls = 0;
+    let stackChanCaptureCalls = 0;
+    const config = definePicoConfig({
+      camera: {
+        tapo: {
+          host: "192.168.10.25",
+          user: "camera-user",
+          password: "camera-passphrase"
+        }
+      },
+      vision: {
+        ollama: {
+          localBaseUrl: "http://127.0.0.1:11434"
+        }
+      }
+    });
+
+    const report = await runCameraVlmSceneSmoke(config, {
+      captureFrame: () => {
+        captureCalls += 1;
+        return Promise.reject(new Error("must not capture Tapo"));
+      },
+      prepareFrame: () => {
+        preparationCalls += 1;
+        return Promise.reject(new Error("must not prepare"));
+      },
+      describeFrame: () => {
+        descriptionCalls += 1;
+        return Promise.reject(new Error("must not describe"));
+      },
+      captureAgentSceneFrame: () => {
+        agentCaptureCalls += 1;
+        return Promise.reject(new Error("must not capture for agent"));
+      },
+      captureStackChanFrame: () => {
+        stackChanCaptureCalls += 1;
+        return Promise.reject(new Error("must not capture StackChan"));
+      }
+    });
+
+    expect(report).toEqual({
+      status: "failed",
+      reason: "pico camera scene description route is not configured"
+    });
+    expect({
+      captureCalls,
+      preparationCalls,
+      descriptionCalls,
+      agentCaptureCalls,
+      stackChanCaptureCalls
+    }).toEqual({
+      captureCalls: 0,
+      preparationCalls: 0,
+      descriptionCalls: 0,
+      agentCaptureCalls: 0,
+      stackChanCaptureCalls: 0
+    });
+  });
+
+  it("prepares an agent-routed StackChan frame without invoking Ollama", async () => {
+    const report = await runCameraVlmSceneSmoke(
+      definePicoConfig({
+        camera: {
+          stackchan: {
+            sourceId: "stackchan-core-s3",
+            mcpUrl: "http://127.0.0.1:18767/mcp",
+            bearerTokenEnv: "STACKCHAN_TOKEN"
+          }
+        },
+        vision: {
+          sceneDescription: {
+            provider: "agent",
+            source: "stackchan",
+            timeoutMs: 30_000,
+            maxImageEdgePixels: 512
+          }
+        }
+      }),
+      {
+        captureAgentSceneFrame: () =>
+          Promise.resolve({
+            status: "passed",
+            provider: "agent",
+            sourceId: "stackchan-core-s3",
+            streamPurpose: "scene",
+            frameBytes: 20,
+            vlmFrameBytes: 10,
+            mimeType: "image/jpeg",
+            capturedAt: "2026-07-26T10:00:00.000Z",
+            image: jpegFrame
+          })
+      }
+    );
+
+    expect(report).toEqual({
+      status: "passed",
+      provider: "agent",
+      source: "stackchan",
+      details: {
+        sourceId: "stackchan-core-s3",
+        frameBytes: 20,
+        vlmFrameBytes: 10,
+        mimeType: "image/jpeg",
+        timeoutMs: 30_000,
+        preparedForActiveAgent: true
+      }
+    });
+    expect(JSON.stringify(report)).not.toContain(Buffer.from(jpegFrame).toString("base64"));
+  });
+
+  it("prepares an agent-routed Tapo frame without invoking Ollama", async () => {
+    const report = await runCameraVlmSceneSmoke(
+      definePicoConfig({
+        camera: {
+          tapo: {
+            host: "192.168.10.25",
+            user: "camera-user",
+            password: "camera-passphrase"
+          }
+        },
+        vision: {
+          sceneDescription: {
+            provider: "agent",
+            source: "tapo",
+            timeoutMs: 30_000,
+            maxImageEdgePixels: 512
+          }
+        }
+      }),
+      {
+        captureAgentSceneFrame: () =>
+          Promise.resolve({
+            status: "passed",
+            provider: "agent",
+            sourceId: "tapo-rtsp",
+            streamPurpose: "scene",
+            frameBytes: 20,
+            vlmFrameBytes: 10,
+            mimeType: "image/jpeg",
+            capturedAt: "2026-07-26T10:00:00.000Z",
+            image: jpegFrame
+          }),
+        describeFrame: () => Promise.reject(new Error("must not invoke Ollama"))
+      }
+    );
+
+    expect(report).toEqual({
+      status: "passed",
+      provider: "agent",
+      source: "tapo",
+      details: {
+        sourceId: "tapo-rtsp",
+        frameBytes: 20,
+        vlmFrameBytes: 10,
+        mimeType: "image/jpeg",
+        timeoutMs: 30_000,
+        preparedForActiveAgent: true
+      }
     });
   });
 
@@ -101,6 +263,118 @@ describe("camera to VLM scene smoke", () => {
     expect(JSON.stringify(report)).not.toContain(Buffer.from(jpegFrame).toString("base64"));
   });
 
+  it("captures StackChan for an Ollama route without requiring Tapo", async () => {
+    let stackChanCaptureCalls = 0;
+    const describedImages: Uint8Array[] = [];
+    const report = await runCameraVlmSceneSmoke(
+      definePicoConfig({
+        camera: {
+          stackchan: {
+            sourceId: "stackchan-core-s3",
+            mcpUrl: "http://127.0.0.1:18767/mcp",
+            bearerTokenEnv: "STACKCHAN_TOKEN"
+          }
+        },
+        vision: {
+          sceneDescription: {
+            provider: "ollama",
+            source: "stackchan",
+            timeoutMs: 45_000,
+            maxImageEdgePixels: 512
+          },
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434"
+          }
+        }
+      }),
+      {
+        captureStackChanFrame: () => {
+          stackChanCaptureCalls += 1;
+          return Promise.resolve({
+            bytes: jpegFrame,
+            mimeType: "image/jpeg"
+          });
+        },
+        prepareFrame: passThroughFrame,
+        describeFrame: (request) => {
+          describedImages.push(request.image);
+          return Promise.resolve(scene);
+        }
+      }
+    );
+
+    expect(stackChanCaptureCalls).toBe(1);
+    expect(describedImages).toEqual([jpegFrame]);
+    expect(report).toEqual({
+      status: "passed",
+      provider: "stackchan+ollama",
+      source: "stackchan",
+      details: {
+        sourceId: "stackchan-core-s3",
+        frameBytes: 4,
+        vlmFrameBytes: 4,
+        mimeType: "image/jpeg",
+        endpointId: "windows-ollama-qwen3-5",
+        model: "qwen3.5:9b",
+        timeoutMs: 45_000,
+        scene
+      }
+    });
+  });
+
+  it("honors StackChan as the Ollama source when Tapo is also configured", async () => {
+    let tapoCaptureCalls = 0;
+    let stackChanCaptureCalls = 0;
+    const report = await runCameraVlmSceneSmoke(
+      definePicoConfig({
+        camera: {
+          tapo: {
+            host: "192.168.10.25",
+            user: "camera-user",
+            password: "camera-passphrase"
+          },
+          stackchan: {
+            sourceId: "stackchan-core-s3",
+            mcpUrl: "http://127.0.0.1:18767/mcp",
+            bearerTokenEnv: "STACKCHAN_TOKEN"
+          }
+        },
+        vision: {
+          sceneDescription: {
+            provider: "ollama",
+            source: "stackchan",
+            timeoutMs: 45_000,
+            maxImageEdgePixels: 512
+          },
+          ollama: {
+            localBaseUrl: "http://127.0.0.1:11434"
+          }
+        }
+      }),
+      {
+        captureFrame: () => {
+          tapoCaptureCalls += 1;
+          return Promise.reject(new Error("must not capture Tapo"));
+        },
+        captureStackChanFrame: () => {
+          stackChanCaptureCalls += 1;
+          return Promise.resolve({
+            bytes: jpegFrame,
+            mimeType: "image/jpeg"
+          });
+        },
+        prepareFrame: passThroughFrame,
+        describeFrame: () => Promise.resolve(scene)
+      }
+    );
+
+    expect(report.status).toBe("passed");
+    expect({ tapoCaptureCalls, stackChanCaptureCalls }).toEqual({
+      tapoCaptureCalls: 0,
+      stackChanCaptureCalls: 1
+    });
+  });
+
   it("bounds captured frames before sending them to the VLM endpoint", async () => {
     const capturedFrame = new Uint8Array([0xff, 0xd8, 0x01, 0xff, 0xd9]);
     const preparedFrame = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
@@ -119,6 +393,11 @@ describe("camera to VLM scene smoke", () => {
           }
         },
         vision: {
+          sceneDescription: {
+            provider: "ollama",
+            source: "tapo",
+            maxImageEdgePixels: 512
+          },
           ollama: {
             localBaseUrl: "http://127.0.0.1:11434",
             maxImageEdgePixels: 512

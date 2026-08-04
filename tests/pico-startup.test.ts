@@ -66,12 +66,22 @@ function createStartupHarness(options: {
   };
 }
 
-function createContext(events: string[], modelAvailable = true): ExtensionContext {
+function createContext(
+  events: string[],
+  modelAvailable = true,
+  modelInput?: readonly ("text" | "image")[]
+): ExtensionContext {
   return {
     modelRegistry: {
       find(provider: string, id: string) {
         events.push(`find-model:${provider}/${id}`);
-        return modelAvailable ? { provider, id } : undefined;
+        return modelAvailable
+          ? {
+              provider,
+              id,
+              ...(modelInput === undefined ? {} : { input: modelInput })
+            }
+          : undefined;
       }
     },
     ui: {
@@ -207,6 +217,62 @@ describe("Pico startup", () => {
       expect(controllerCreations).toBe(0);
       expect(events.at(-1)).toBe("shutdown");
       expect(events).toContain(`notify:error:Pico startup failed: ${reason}`);
+    }
+  });
+
+  it("requires image input only when scene routing uses the active agent", async () => {
+    const agentSceneConfig = definePicoConfig({
+      pico: {
+        model: {
+          provider: "openai-codex",
+          id: "gpt-5.6-sol",
+          thinkingLevel: "medium"
+        }
+      },
+      camera: {
+        stackchan: {
+          mcpUrl: "http://127.0.0.1:18767/mcp",
+          bearerTokenEnv: "STACKCHAN_TOKEN"
+        }
+      },
+      vision: {
+        sceneDescription: {
+          provider: "agent",
+          source: "stackchan"
+        }
+      }
+    });
+
+    for (const [input, shouldStart] of [
+      [["text"], false],
+      [["text", "image"], true]
+    ] as const) {
+      const events: string[] = [];
+      const harness = createStartupHarness({ pico: true, events });
+      let controllerCreations = 0;
+
+      registerPicoStartup(harness.api as never, {
+        loadConfig: () => agentSceneConfig,
+        createController: () => {
+          controllerCreations += 1;
+          return completedController();
+        }
+      });
+      await harness.emit(
+        "session_start",
+        { type: "session_start" },
+        createContext(events, true, input)
+      );
+
+      expect(controllerCreations).toBe(shouldStart ? 1 : 0);
+      if (shouldStart) {
+        expect(events).not.toContain("shutdown");
+      } else {
+        expect(events).toContain(
+          "notify:error:Pico startup failed: configured Pico model does not support image input"
+        );
+        expect(events.at(-1)).toBe("shutdown");
+      }
     }
   });
 

@@ -92,6 +92,441 @@ describe("pico YAML config", () => {
     ).toThrow("pico config pico.model.id");
   });
 
+  it("parses StackChan follow, PINTO attention detection, and agent scene routing", () => {
+    const config = definePicoConfig({
+      camera: {
+        stackchan: {
+          sourceId: "stackchan-core-s3",
+          mcpUrl: "http://127.0.0.1:18767/mcp",
+          bearerTokenEnv: "STACKCHAN_TOKEN",
+          timeoutMs: 10_000,
+          maxFrameBytes: 5 * 1024 * 1024,
+          follow: {
+            enabled: true,
+            commandTransport: "async-latest",
+            stepQuantization: "round",
+            targetFilter: {
+              enabled: true,
+              minimumCutoffHz: 1,
+              speedCoefficient: 2,
+              derivativeCutoffHz: 1
+            },
+            commandRateHz: 10,
+            maxPendingCommandAgeMs: 180,
+            frameIntervalMs: 125,
+            maxFrameAgeMs: 180,
+            homeYaw: 0,
+            homePitch: 35,
+            trackingPitchMin: 23,
+            deadZone: 0.1,
+            deadZoneRelease: 0.14,
+            yawGainDeg: 40,
+            pitchGainDeg: 30,
+            flipYaw: 1,
+            flipPitch: -1,
+            maxStepDeg: 4,
+            moveSpeedDps: 90,
+            lostHoldMs: 1000,
+            scanDwellMs: 900,
+            scanYaw: [-35, 0, 35],
+            scanPitch: [35, 25]
+          }
+        }
+      },
+      vision: {
+        attentionDetection: {
+          enabled: true,
+          provider: "onnxruntime",
+          modelFamily: "pinto441-yolox-body-head-hand-face-dist",
+          modelPath: "/opt/pico/models/pinto-attention.onnx",
+          inputWidth: 320,
+          inputHeight: 256,
+          headConfidenceThreshold: 0.35,
+          faceConfidenceThreshold: 0.4
+        },
+        sceneDescription: {
+          provider: "agent",
+          source: "stackchan",
+          timeoutMs: 30_000,
+          maxImageEdgePixels: 512
+        }
+      }
+    });
+
+    expect(config.camera.stackchan).toEqual({
+      sourceId: "stackchan-core-s3",
+      mcpUrl: "http://127.0.0.1:18767/mcp",
+      bearerTokenEnv: "STACKCHAN_TOKEN",
+      timeoutMs: 10_000,
+      maxFrameBytes: 5 * 1024 * 1024,
+      streamFps: 20,
+      streamJpegQuality: 60,
+      follow: {
+        enabled: true,
+        commandTransport: "async-latest",
+        stepQuantization: "round",
+        targetFilter: {
+          enabled: true,
+          minimumCutoffHz: 1,
+          speedCoefficient: 2,
+          derivativeCutoffHz: 1
+        },
+        commandRateHz: 10,
+        maxPendingCommandAgeMs: 180,
+        frameIntervalMs: 125,
+        maxFrameAgeMs: 180,
+        homeYaw: 0,
+        homePitch: 35,
+        trackingPitchMin: 23,
+        deadZone: 0.1,
+        deadZoneRelease: 0.14,
+        yawGainDeg: 40,
+        pitchGainDeg: 30,
+        flipYaw: 1,
+        flipPitch: -1,
+        maxStepDeg: 4,
+        moveSpeedDps: 90,
+        lostHoldMs: 1000,
+        scanDwellMs: 900,
+        scanYaw: [-35, 0, 35],
+        scanPitch: [35, 25]
+      }
+    });
+    expect(config.vision.attentionDetection).toEqual({
+      enabled: true,
+      provider: "onnxruntime",
+      modelFamily: "pinto441-yolox-body-head-hand-face-dist",
+      modelPath: "/opt/pico/models/pinto-attention.onnx",
+      inputWidth: 320,
+      inputHeight: 256,
+      headConfidenceThreshold: 0.35,
+      faceConfidenceThreshold: 0.4
+    });
+    expect(config.vision.sceneDescription).toEqual({
+      provider: "agent",
+      source: "stackchan",
+      timeoutMs: 30_000,
+      maxImageEdgePixels: 512
+    });
+    const follow = config.camera.stackchan?.follow;
+    expect(follow?.enabled).toBe(true);
+    if (follow?.enabled !== true) {
+      throw new Error("expected enabled StackChan follow config");
+    }
+    expect(Object.isFrozen(follow.scanYaw)).toBe(true);
+  });
+
+  it("rejects unsafe StackChan, attention detection, and scene route settings", () => {
+    const configured = (
+      stackchan: Record<string, unknown>,
+      attentionDetection: Record<string, unknown> = { enabled: false },
+      sceneDescription?: Record<string, unknown>
+    ) => ({
+      camera: { stackchan },
+      vision: {
+        attentionDetection,
+        ...(sceneDescription === undefined ? {} : { sceneDescription })
+      }
+    });
+    const baseStackChan = {
+      mcpUrl: "http://127.0.0.1:18767/mcp",
+      bearerTokenEnv: "STACKCHAN_TOKEN"
+    };
+
+    expect(() =>
+      definePicoConfig(
+        configured({
+          ...baseStackChan,
+          mcpUrl: "https://stackchan.example.com/mcp"
+        })
+      )
+    ).toThrow("pico config camera.stackchan.mcpUrl must use a local URL");
+    expect(() =>
+      definePicoConfig(
+        configured({
+          ...baseStackChan,
+          bearerTokenEnv: "STACKCHAN-TOKEN"
+        })
+      )
+    ).toThrow("pico config camera.stackchan.bearerTokenEnv");
+    expect(() => definePicoConfig(configured({ ...baseStackChan, streamFps: 21 }))).toThrow(
+      "pico config camera.stackchan.streamFps"
+    );
+    expect(() => definePicoConfig(configured({ ...baseStackChan, streamJpegQuality: 0 }))).toThrow(
+      "pico config camera.stackchan.streamJpegQuality"
+    );
+    expect(() =>
+      definePicoConfig(
+        configured({
+          ...baseStackChan,
+          follow: {
+            enabled: true,
+            commandTransport: "async-latest",
+            stepQuantization: "truncate",
+            targetFilter: { enabled: false }
+          }
+        })
+      )
+    ).toThrow("pico config camera.stackchan.follow.stepQuantization");
+    expect(() =>
+      definePicoConfig(
+        configured({
+          ...baseStackChan,
+          follow: {
+            enabled: true,
+            commandTransport: "async-latest",
+            targetFilter: { enabled: false }
+          }
+        })
+      )
+    ).toThrow("pico config camera.stackchan.follow.stepQuantization");
+    expect(() =>
+      definePicoConfig(
+        configured({
+          ...baseStackChan,
+          follow: {
+            enabled: true,
+            commandTransport: "async-latest",
+            stepQuantization: "round"
+          }
+        })
+      )
+    ).toThrow("pico config camera.stackchan.follow.targetFilter");
+    expect(() =>
+      definePicoConfig(
+        configured({
+          ...baseStackChan,
+          follow: {
+            enabled: true,
+            commandTransport: "async-latest",
+            stepQuantization: "round",
+            targetFilter: { enabled: false, minimumCutoffHz: 1 }
+          }
+        })
+      )
+    ).toThrow("pico config camera.stackchan.follow.targetFilter has unknown field minimumCutoffHz");
+    expect(() =>
+      definePicoConfig(
+        configured({
+          ...baseStackChan,
+          follow: {
+            enabled: true,
+            commandTransport: "async-latest",
+            stepQuantization: "round",
+            targetFilter: {}
+          }
+        })
+      )
+    ).toThrow("pico config camera.stackchan.follow.targetFilter.enabled");
+    expect(() =>
+      definePicoConfig(
+        configured({
+          ...baseStackChan,
+          follow: {
+            enabled: true,
+            commandTransport: "async-latest",
+            stepQuantization: "round",
+            targetFilter: {
+              enabled: true,
+              minimumCutoffHz: 1,
+              speedCoefficient: 2
+            }
+          }
+        })
+      )
+    ).toThrow("pico config camera.stackchan.follow.targetFilter.derivativeCutoffHz");
+    for (const [field, value] of [
+      ["minimumCutoffHz", 0.09],
+      ["minimumCutoffHz", 30.01],
+      ["speedCoefficient", -0.01],
+      ["speedCoefficient", 30.01],
+      ["derivativeCutoffHz", 0.09],
+      ["derivativeCutoffHz", 30.01]
+    ] as const) {
+      expect(() =>
+        definePicoConfig(
+          configured({
+            ...baseStackChan,
+            follow: {
+              enabled: true,
+              commandTransport: "async-latest",
+              stepQuantization: "round",
+              targetFilter: {
+                enabled: true,
+                minimumCutoffHz: 1,
+                speedCoefficient: 2,
+                derivativeCutoffHz: 1,
+                [field]: value
+              }
+            }
+          })
+        )
+      ).toThrow(`pico config camera.stackchan.follow.targetFilter.${field}`);
+    }
+    for (const [field, value] of [
+      ["moveSpeedDps", 14],
+      ["moveSpeedDps", 241],
+      ["scanDwellMs", 0],
+      ["maxFrameAgeMs", 0],
+      ["deadZoneRelease", 0.5]
+    ] as const) {
+      expect(() =>
+        definePicoConfig(
+          configured({
+            ...baseStackChan,
+            follow: {
+              enabled: true,
+              commandTransport: "async-latest",
+              stepQuantization: "round",
+              targetFilter: { enabled: false },
+              [field]: value
+            }
+          })
+        )
+      ).toThrow(`pico config camera.stackchan.follow.${field}`);
+    }
+    expect(() =>
+      definePicoConfig(
+        configured({
+          ...baseStackChan,
+          follow: {
+            enabled: true,
+            commandTransport: "async-latest",
+            stepQuantization: "round",
+            targetFilter: { enabled: false },
+            deadZone: 0.2,
+            deadZoneRelease: 0.1
+          }
+        })
+      )
+    ).toThrow("pico config camera.stackchan.follow.deadZoneRelease must be >= deadZone");
+    expect(() =>
+      definePicoConfig(
+        configured(
+          {
+            ...baseStackChan,
+            follow: {
+              enabled: true,
+              commandTransport: "async-latest",
+              stepQuantization: "round",
+              targetFilter: { enabled: false },
+              scanYaw: [-35, 0, 35],
+              scanPitch: [35]
+            }
+          },
+          { enabled: false }
+        )
+      )
+    ).toThrow("vision.attentionDetection.enabled=true");
+    for (const [field, value] of [
+      ["commandTransport", "move-head"],
+      ["commandRateHz", 11],
+      ["maxPendingCommandAgeMs", 49]
+    ] as const) {
+      expect(() =>
+        definePicoConfig(
+          configured({
+            ...baseStackChan,
+            follow: {
+              enabled: true,
+              commandTransport: "async-latest",
+              stepQuantization: "round",
+              targetFilter: { enabled: false },
+              [field]: value
+            }
+          })
+        )
+      ).toThrow(`pico config camera.stackchan.follow.${field}`);
+    }
+    expect(() =>
+      definePicoConfig({
+        vision: {
+          attentionDetection: {
+            enabled: true,
+            provider: "onnxruntime",
+            modelFamily: "pinto434-yolox-body-head-hand-face",
+            modelPath: "/tmp/model.onnx",
+            inputWidth: 320,
+            inputHeight: 256
+          }
+        }
+      })
+    ).toThrow(
+      "pico config vision.attentionDetection.modelFamily must be pinto441-yolox-body-head-hand-face-dist"
+    );
+    expect(() =>
+      definePicoConfig({
+        vision: {
+          sceneDescription: {
+            provider: "automatic",
+            source: "tapo"
+          }
+        }
+      })
+    ).toThrow("pico config vision.sceneDescription.provider");
+    expect(() =>
+      definePicoConfig({
+        vision: {
+          sceneDescription: {
+            provider: "agent",
+            source: "stackchan"
+          }
+        }
+      })
+    ).toThrow("camera.stackchan is required");
+    expect(() =>
+      definePicoConfig({
+        camera: {
+          tapo: {
+            host: "192.168.3.25",
+            user: "camera-user",
+            password: "camera-password"
+          }
+        },
+        vision: {
+          sceneDescription: {
+            provider: "ollama",
+            source: "tapo"
+          }
+        }
+      })
+    ).toThrow("vision.ollama is required");
+  });
+
+  it("validates supplied attention model families even when detection is disabled", () => {
+    expect(
+      definePicoConfig({
+        vision: {
+          attentionDetection: {
+            enabled: false
+          }
+        }
+      }).vision.attentionDetection
+    ).toEqual({ enabled: false });
+    expect(
+      definePicoConfig({
+        vision: {
+          attentionDetection: {
+            enabled: false,
+            modelFamily: "pinto441-yolox-body-head-hand-face-dist"
+          }
+        }
+      }).vision.attentionDetection
+    ).toEqual({ enabled: false });
+    expect(() =>
+      definePicoConfig({
+        vision: {
+          attentionDetection: {
+            enabled: false,
+            modelFamily: "pinto434-yolox-body-head-hand-face"
+          }
+        }
+      })
+    ).toThrow(
+      "pico config vision.attentionDetection.modelFamily must be pinto441-yolox-body-head-hand-face-dist"
+    );
+  });
+
   it("returns empty config when the local config file is absent", () => {
     const directory = mkdtempSync(join(tmpdir(), "pico-config-missing-"));
 

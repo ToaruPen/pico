@@ -28,6 +28,26 @@ instructions.
 - `just ast`: run ast-grep rule tests and scans.
 - `just test`: run Vitest.
 - `just format`: apply Biome formatting.
+- `npm run field:stackchan-camera-grid -- --enable-live-run --model-path <onnx> --report-output <json>`:
+  move StackChan through the bounded home/left/right optical grid, capture one
+  CoreS3 frame per pose, run PINTO 441-S Dist head/face detection, and write only
+  aggregate quality/detection metadata. The report file is mode `0600` and
+  contains no image; Pico deletes each validated source capture after its
+  bounded read without touching older or adjacent gateway captures.
+- `npm run field:stackchan-center-calibration -- --enable-live-run --duration-ms <ms> --max-frames <n> --minimum-target-frames <n> --model-path <onnx> --report-output <json>`:
+  verify StackChan reaches its configured home pose, process at least 20 new
+  CoreS3 camera sequences, verify the final home readback, and atomically write
+  aggregate PINTO head/face centering metrics without saving images. Failed
+  reports retain a bounded failure code and any safe aggregate already observed,
+  but never raw errors or individual detections.
+- `npm run field:stackchan-face-follow -- --enable-live-run --duration-ms <ms> --max-frames <n> --model-path <onnx> --report-output <json>`:
+  run bounded conversation-style StackChan head/face following, drain the
+  active inference, return home, and write aggregate runtime metadata.
+- `npm run field:stackchan-motion-continuity -- --enable-live-run --report-output <json>`:
+  drive the live head through a bounded monotonic triangle wave using the
+  production latest-only target lane, sample aggregate yaw continuity at
+  20 ms intervals, return home, and write a mode-`0600` report without
+  retaining a position timeline.
 
 ## Deterministic Tooling
 
@@ -86,7 +106,10 @@ metadata evidence. If a diagnostic display pipeline uses `tee`, enable
 
 - Pi Agent package entry: `package.json` `pi.extensions`.
 - Module layout: one folder per module under `src/modules/<module>/index.ts`.
-- Vision provider: `Qwen/Qwen3.5-9B` through Ollama `qwen3.5:9b`.
+- Scene vision provider is selected explicitly by
+  `vision.sceneDescription.provider`: `agent` sends one bounded image tool
+  result to the active image-capable Pi/Codex model; `ollama` keeps the
+  protected `Qwen/Qwen3.5-9B` route. There is no provider fallback.
 - Vision host: protected Windows GPU host reached through Tailscale or
   Cloudflare-protected SSH tunneling.
 - STT provider: Apple Speech through the loopback Swift sidecar.
@@ -101,6 +124,10 @@ metadata evidence. If a diagnostic display pipeline uses `tee`, enable
   Aivis Speech remains an explicit configuration rollback.
 - Camera candidate: Tapo C210 through RTSP first, ONVIF only when bounded PTZ is
   needed.
+- StackChan CoreS3 camera/head access uses the authenticated loopback
+  `stackchan-mcp` Streamable HTTP endpoint. Bearer token values stay in the
+  configured environment variable. PINTO 441-S Dist provides local head/face
+  coordinates only; Pico does not identify or persist people.
 - Identity Registry XLSX processing: use ExcelJS with the fixed local roster
   schema and ordinary file/row/cell bounds. Do not add a custom ZIP parser.
 

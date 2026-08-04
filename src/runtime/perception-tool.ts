@@ -2,12 +2,17 @@ import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-
 import { Type } from "typebox";
 
 import { loadPicoConfigFromEnvironment, type PicoConfig } from "../config/index.js";
+import { AGENT_SCENE_IMAGE_INSTRUCTION } from "../modules/vision/index.js";
 import type {
   DeferredToolCoordinator,
   DeferredToolEnqueueResult,
   DeferredToolExecutionResult
 } from "./deferred-tool-coordinator.js";
-import { createPicoPerceptionService, type PicoPerceptionService } from "./perception-service.js";
+import {
+  createPicoPerceptionService,
+  PICO_SCENE_ROUTE_NOT_CONFIGURED_REASON,
+  type PicoPerceptionService
+} from "./perception-service.js";
 import type { VoiceStageProbe } from "./voice-stage-probe.js";
 
 const emptyParameters = Type.Object({});
@@ -21,6 +26,14 @@ export type PicoPerceptionToolOptions = {
 export type PicoDeferredPerceptionToolOptions = PicoPerceptionToolOptions & {
   readonly coordinator: Pick<DeferredToolCoordinator, "enqueue">;
   readonly sessionId: string;
+};
+
+export type PicoSceneToolDetails = {
+  readonly provider?: "agent";
+  readonly sourceId?: string;
+  readonly frameBytes?: number;
+  readonly vlmFrameBytes?: number;
+  readonly capturedAt?: string;
 };
 
 export function createPicoCameraSnapshotTool(
@@ -73,24 +86,23 @@ export function createPicoPersonDetectionTool(
 
 export function createPicoCameraSceneDescriptionTool(
   options: PicoPerceptionToolOptions = {}
-): ToolDefinition<typeof emptyParameters> {
+): ToolDefinition<typeof emptyParameters, PicoSceneToolDetails> {
   const getService = createLazyServiceResolver(options);
 
   return {
     name: "pico_camera_scene_description",
     label: "Pico Camera Scene",
-    description: "Describe one Tapo camera scene through the configured bounded VLM path.",
-    promptSnippet: "Describe one Tapo camera scene through the bounded VLM path.",
+    description: "Describe one configured camera scene through the selected bounded VLM path.",
+    promptSnippet: "Describe one configured camera scene through the bounded VLM path.",
     promptGuidelines: [
-      "Use pico_camera_scene_description when staff asks what the camera can currently see.",
+      "Use pico_camera_scene_description when the user asks what the camera can currently see.",
+      "Do not ask for a second confirmation before capturing one image.",
       "Do not use pico_camera_scene_description to identify children, infer private traits, score behavior, diagnose, or make final safety decisions."
     ],
     parameters: emptyParameters,
     executionMode: "sequential",
     async execute() {
-      return executeWithResolvedService("pico_camera_scene_description", getService, (service) =>
-        service.describeCameraScene()
-      );
+      return executeSceneDescription(getService);
     }
   };
 }
@@ -104,12 +116,12 @@ export function createPicoCameraSceneDescriptionDeferredTool(
     name: "pico_camera_scene_description_deferred",
     label: "Pico Camera Scene Deferred",
     description:
-      "Queue one bounded Tapo camera scene description for resident voice without blocking the current voice turn.",
+      "Queue one bounded configured camera scene description for resident voice without blocking the current voice turn.",
     promptSnippet:
-      "Queue a camera scene check when staff asks what the camera can currently see; continue the voice conversation while it runs.",
+      "Queue a camera scene check when the user asks what the camera can currently see; continue the voice conversation while it runs.",
     promptGuidelines: [
-      "Use pico_camera_scene_description_deferred only for explicit staff camera/scene requests in resident voice.",
-      "Tell staff briefly that you will check and report back; do not wait for the camera result in the same turn.",
+      "Use pico_camera_scene_description_deferred only for explicit user camera/scene requests in resident voice.",
+      "Tell the user briefly that you will check and report back; do not wait for the camera result in the same turn.",
       "Do not identify children, infer private traits, score behavior, diagnose, or make final safety decisions."
     ],
     parameters: emptyParameters,
@@ -182,6 +194,73 @@ async function executeWithResolvedService(
 function textResult(value: unknown): AgentToolResult<Record<string, never>> {
   return {
     content: [{ type: "text", text: JSON.stringify(value) }],
+    details: {}
+  };
+}
+
+async function executeSceneDescription(
+  getService: () => PicoPerceptionService
+): Promise<AgentToolResult<PicoSceneToolDetails>> {
+  let service: PicoPerceptionService;
+
+  try {
+    service = getService();
+  } catch {
+    return sceneTextResult({
+      status: "failed",
+      reason: "pico perception service configuration failed"
+    });
+  }
+
+  if (service.sceneRoute === undefined) {
+    return sceneTextResult({
+      status: "failed",
+      reason: PICO_SCENE_ROUTE_NOT_CONFIGURED_REASON
+    });
+  }
+
+  if (service.sceneRoute.provider === "ollama") {
+    return sceneTextResult(await service.describeCameraScene());
+  }
+
+  const frame = await service.captureSceneFrame();
+  if (frame.status === "failed") {
+    return sceneTextResult(frame);
+  }
+
+  return {
+    content: [
+      {
+        type: "text",
+        text: AGENT_SCENE_IMAGE_INSTRUCTION
+      },
+      {
+        type: "image",
+        data: Buffer.from(frame.image).toString("base64"),
+        mimeType: frame.mimeType
+      }
+    ],
+    details: {
+      provider: "agent",
+      sourceId: frame.sourceId,
+      frameBytes: frame.frameBytes,
+      vlmFrameBytes: frame.vlmFrameBytes,
+      capturedAt: frame.capturedAt
+    }
+  };
+}
+
+function sceneTextResult(result: unknown): AgentToolResult<PicoSceneToolDetails> {
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({
+          tool: "pico_camera_scene_description",
+          result
+        })
+      }
+    ],
     details: {}
   };
 }

@@ -26,6 +26,9 @@ export const visionModuleMetadata = {
 const BOUNDED_SCENE_PROMPT =
   "Return exactly one JSON object and no markdown. The object must have these keys: summary, observedPeople, environment, humanAttention, uncertainty. Each key except summary must be an array of strings. Describe only visible after-school care scene details. Do not identify children, infer private traits, diagnose, score, or make final safety decisions. If no people, attention items, or uncertainties are visible, use an empty array. Uncertainty must be an array of short strings.";
 
+export const AGENT_SCENE_IMAGE_INSTRUCTION =
+  "Describe only what is visibly present in the attached after-school care camera image and answer the staff request briefly in Japanese. Do not identify people, infer private traits, diagnose, score behavior, or make final safety decisions. State uncertainty when the image is unclear.";
+
 const OLLAMA_REQUEST_TIMEOUT_MS = 30_000;
 const OLLAMA_ERROR_BODY_MAX_CHARS = 500;
 const visionBoundaryMarkers = [

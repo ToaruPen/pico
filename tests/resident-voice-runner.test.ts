@@ -718,6 +718,24 @@ describe("resident voice startup readiness", () => {
     ).rejects.toThrow("readiness blocked");
     expect(calls).toEqual(["readiness"]);
   });
+
+  it("selects standard perception tools for resident production", async () => {
+    let perceptionMode: string | undefined;
+
+    await expect(
+      runResidentVoiceWithProviders({
+        config: residentConfig(),
+        signal: new AbortController().signal,
+        startupReadiness: () => Promise.resolve(),
+        createPiAgent: (options) => {
+          perceptionMode = options.perceptionMode;
+          throw new Error("captured resident Pi Agent options");
+        }
+      })
+    ).rejects.toThrow("captured resident Pi Agent options");
+
+    expect(perceptionMode).toBe("standard");
+  });
 });
 
 describe("resident voice runner ownership", () => {

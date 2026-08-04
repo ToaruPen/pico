@@ -22,6 +22,41 @@ telemetry:
     shutdownTimeoutMs: 5000
 
 camera:
+  stackchan:
+    sourceId: stackchan-core-s3
+    # stackchan-mcp local gateway. Put the token value in STACKCHAN_TOKEN;
+    # never place the token itself in this YAML.
+    mcpUrl: http://127.0.0.1:18767/mcp
+    bearerTokenEnv: STACKCHAN_TOKEN
+    timeoutMs: 10000
+    maxFrameBytes: 5242880
+    streamFps: 20
+    streamJpegQuality: 60
+    follow:
+      enabled: false
+      commandTransport: async-latest
+      commandRateHz: 10
+      maxPendingCommandAgeMs: 180
+      frameIntervalMs: 125
+      maxFrameAgeMs: 180
+      # Optical home is intentionally pitched down from the mechanical center.
+      homeYaw: 0
+      homePitch: 35
+      deadZone: 0.10
+      deadZoneRelease: 0.14
+      stepQuantization: round
+      targetFilter:
+        enabled: false
+      yawGainDeg: 40
+      pitchGainDeg: 30
+      flipYaw: 1
+      flipPitch: -1
+      maxStepDeg: 4
+      moveSpeedDps: 90
+      lostHoldMs: 1000
+      scanDwellMs: 900
+      scanYaw: [-35, 0, 35]
+      scanPitch: [35, 25]
   tapo:
     sourceId: tapo-rtsp
     host: 192.168.10.25
@@ -43,6 +78,13 @@ camera:
     lostTargetTimeoutMs: 1500
 
 vision:
+  # The current Pi/Codex model receives one bounded image as tool content.
+  # Use provider=ollama to retain the protected Windows Ollama route instead.
+  sceneDescription:
+    provider: agent
+    source: stackchan
+    timeoutMs: 30000
+    maxImageEdgePixels: 512
   ollama:
     # This must be a pico-host loopback URL served by a protected SSH local
     # forward to Windows native Ollama on the vision host, not a direct
@@ -69,6 +111,15 @@ vision:
     coordinateScale: pixel
     frameIntervalMs: 500
     confidenceThreshold: 0.55
+  attentionDetection:
+    enabled: false
+    provider: onnxruntime
+    modelFamily: pinto441-yolox-body-head-hand-face-dist
+    modelPath: /opt/pico/models/pinto441/yolox_s_body_head_hand_face_dist_0189_0.4952_post_1x3x256x320.onnx
+    inputWidth: 320
+    inputHeight: 256
+    headConfidenceThreshold: 0.35
+    faceConfidenceThreshold: 0.4
 
 voice:
   resident:

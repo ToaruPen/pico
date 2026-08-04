@@ -1,0 +1,2157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pico.local/schemas/stackchan-attention-replay-report-v7.json",
+  "title": "StackChan Attention Replay Report v7",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "evidenceKind",
+    "runtimeEvidenceSource",
+    "status",
+    "reportSchemaHash",
+    "eventSchemaHash",
+    "metricDefinitionHash",
+    "metricImplementationHash",
+    "acceptanceProfileHash",
+    "fixtureHash",
+    "scenarioInputHash",
+    "producerSourceHash",
+    "comparisonSetHash",
+    "metadata",
+    "scenarios",
+    "repeatDeterminism"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 7
+    },
+    "evidenceKind": {
+      "type": "string",
+      "enum": ["qualified", "historical-normalized"]
+    },
+    "runtimeEvidenceSource": {
+      "type": "string",
+      "enum": ["recorded-final-events", "legacy-scenario-status"]
+    },
+    "status": {
+      "$ref": "#/$defs/status"
+    },
+    "reportSchemaHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "eventSchemaHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "metricDefinitionHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "metricImplementationHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "acceptanceProfileHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "fixtureHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "scenarioInputHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "producerSourceHash": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/hash"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "comparisonSetHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    },
+    "scenarios": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/scenario"
+      }
+    },
+    "repeatDeterminism": {
+      "$ref": "#/$defs/repeatDeterminism"
+    }
+  },
+  "$defs": {
+    "status": {
+      "type": "string",
+      "enum": ["passed", "failed"]
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "acceptanceValue": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "acceptanceRule": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "maximum"],
+          "properties": {
+            "type": {
+              "const": "absolute-maximum"
+            },
+            "maximum": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "minimum"],
+          "properties": {
+            "type": {
+              "const": "absolute-minimum"
+            },
+            "minimum": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "expected"],
+          "properties": {
+            "type": {
+              "const": "absolute-boolean"
+            },
+            "expected": {
+              "type": "boolean"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "maximumRatio"],
+          "properties": {
+            "type": {
+              "const": "relative-maximum-regression"
+            },
+            "maximumRatio": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "maximumDrop"],
+          "properties": {
+            "type": {
+              "const": "maximum-absolute-drop"
+            },
+            "maximumDrop": {
+              "$ref": "#/$defs/nonNegativeNumber"
+            }
+          }
+        }
+      ]
+    },
+    "acceptanceCheckVerdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "scenarioId",
+        "metric",
+        "rule",
+        "status",
+        "baselineValue",
+        "candidateValue",
+        "observedRegressionRatio",
+        "failureReason"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["objective", "guardrail"]
+        },
+        "scenarioId": {
+          "type": "string",
+          "enum": [
+            "static-hold",
+            "slow-continuous-tracking",
+            "fast-reversals",
+            "target-loss-reacquisition",
+            "stop-home"
+          ]
+        },
+        "metric": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rule": {
+          "$ref": "#/$defs/acceptanceRule"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "baselineValue": {
+          "$ref": "#/$defs/acceptanceValue"
+        },
+        "candidateValue": {
+          "$ref": "#/$defs/acceptanceValue"
+        },
+        "observedRegressionRatio": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "failureReason": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "invalid-value",
+                "negative-value",
+                "non-finite-value",
+                "null-value",
+                "threshold-not-met",
+                "zero-baseline"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "acceptanceVerdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verdictVersion",
+        "status",
+        "acceptanceProfileVersion",
+        "acceptanceProfileHash",
+        "comparisonSetHash",
+        "baselineCanonicalReportHash",
+        "candidateCanonicalReportHash",
+        "checks"
+      ],
+      "properties": {
+        "verdictVersion": {
+          "const": 1
+        },
+        "status": {
+          "type": "string",
+          "enum": ["accepted", "rejected"]
+        },
+        "acceptanceProfileVersion": {
+          "const": 6
+        },
+        "acceptanceProfileHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "comparisonSetHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "baselineCanonicalReportHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "candidateCanonicalReportHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/acceptanceCheckVerdict"
+          }
+        }
+      }
+    },
+    "finiteNumber": {
+      "type": "number"
+    },
+    "nonNegativeNumber": {
+      "type": "number",
+      "minimum": 0
+    },
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "nullableNumber": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "nullableNonNegativeNumber": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "nullableNonNegativeInteger": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "nullableString": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pose": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["yaw", "pitch"],
+      "properties": {
+        "yaw": {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        "pitch": {
+          "$ref": "#/$defs/finiteNumber"
+        }
+      }
+    },
+    "nullablePose": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/pose"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "p50", "p90", "p95", "p99", "max"],
+      "properties": {
+        "count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "p50": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "p90": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "p95": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "p99": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "max": {
+          "$ref": "#/$defs/nullableNumber"
+        }
+      }
+    },
+    "derivativeSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["yaw", "pitch", "combined"],
+      "properties": {
+        "yaw": {
+          "$ref": "#/$defs/distribution"
+        },
+        "pitch": {
+          "$ref": "#/$defs/distribution"
+        },
+        "combined": {
+          "$ref": "#/$defs/distribution"
+        }
+      }
+    },
+    "kinematicsSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["velocity", "acceleration", "jerk", "normalizedRoughness"],
+      "properties": {
+        "velocity": {
+          "$ref": "#/$defs/derivativeSummary"
+        },
+        "acceleration": {
+          "$ref": "#/$defs/derivativeSummary"
+        },
+        "jerk": {
+          "$ref": "#/$defs/derivativeSummary"
+        },
+        "normalizedRoughness": {
+          "$ref": "#/$defs/axisSummary"
+        }
+      }
+    },
+    "axisSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["yaw", "pitch", "combined"],
+      "properties": {
+        "yaw": {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        "pitch": {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        "combined": {
+          "$ref": "#/$defs/finiteNumber"
+        }
+      }
+    },
+    "angularPath": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request", "dispatch", "command", "confirmed"],
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "dispatch": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "command": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "confirmed": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        }
+      }
+    },
+    "worldKeyframe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["atMs", "pose", "occluded"],
+      "properties": {
+        "atMs": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "pose": {
+          "$ref": "#/$defs/pose"
+        },
+        "occluded": {
+          "type": "boolean"
+        },
+        "interpolation": {
+          "const": "linear"
+        },
+        "normalizedError": {
+          "$ref": "#/$defs/pose"
+        }
+      }
+    },
+    "runtimeScenarioInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "durationMs", "world"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": ["slow-continuous-tracking", "fast-reversals", "target-loss-reacquisition"]
+        },
+        "durationMs": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "world": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/worldKeyframe"
+          }
+        }
+      }
+    },
+    "legacyStaticScenarioInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "durationMs", "world"],
+      "properties": {
+        "id": {
+          "const": "static-hold"
+        },
+        "durationMs": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "world": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/worldKeyframe"
+          }
+        }
+      }
+    },
+    "staticBoundaryProbeInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["probeId", "axis", "initialSign", "normalizedError"],
+      "properties": {
+        "probeId": {
+          "type": "string"
+        },
+        "axis": {
+          "type": "string",
+          "enum": ["yaw", "pitch"]
+        },
+        "initialSign": {
+          "type": "number",
+          "enum": [-1, 1]
+        },
+        "normalizedError": {
+          "type": "number",
+          "enum": [0.09, 0.11, 0.13, 0.15]
+        }
+      }
+    },
+    "staticBoundaryScenarioInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "probes"],
+      "properties": {
+        "id": {
+          "const": "static-hold"
+        },
+        "probes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/staticBoundaryProbeInput"
+          }
+        }
+      }
+    },
+    "stopVariantInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variant", "durationMs", "world"],
+      "properties": {
+        "variant": {
+          "$ref": "#/$defs/stopVariant"
+        },
+        "durationMs": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "world": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/worldKeyframe"
+          }
+        }
+      }
+    },
+    "stopHomeScenarioInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "variants"],
+      "properties": {
+        "id": {
+          "const": "stop-home"
+        },
+        "variants": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/stopVariantInput"
+          }
+        }
+      }
+    },
+    "canonicalScenarioInput": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/runtimeScenarioInput"
+        },
+        {
+          "$ref": "#/$defs/legacyStaticScenarioInput"
+        },
+        {
+          "$ref": "#/$defs/staticBoundaryScenarioInput"
+        },
+        {
+          "$ref": "#/$defs/stopHomeScenarioInput"
+        }
+      ]
+    },
+    "laneCounters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted",
+        "replaced",
+        "dispatched",
+        "confirmed",
+        "failed",
+        "staleDiscarded",
+        "noOpDiscarded",
+        "pendingDepth",
+        "activeCalls",
+        "maximumPendingDepth",
+        "maximumActiveCalls",
+        "postStopDispatches",
+        "postStopDispatchAttempts"
+      ],
+      "properties": {
+        "accepted": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "replaced": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "dispatched": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "confirmed": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "failed": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "staleDiscarded": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "noOpDiscarded": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "pendingDepth": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "activeCalls": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "maximumPendingDepth": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "maximumActiveCalls": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "postStopDispatches": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "postStopDispatchAttempts": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    },
+    "postStopProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schedulerTickRejected",
+        "lanePhase",
+        "dispatchAttempts",
+        "dispatchedBefore",
+        "dispatchedAfter",
+        "confirmedBefore",
+        "confirmedAfter"
+      ],
+      "properties": {
+        "schedulerTickRejected": {
+          "type": "boolean"
+        },
+        "lanePhase": {
+          "type": "string",
+          "enum": ["starting", "running", "stopping", "stopped", "failed"]
+        },
+        "dispatchAttempts": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "dispatchedBefore": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "dispatchedAfter": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "confirmedBefore": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "confirmedAfter": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    },
+    "nullablePostStopProbe": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/postStopProbe"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "finalRuntimeEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "framesProcessed",
+        "lastAcceptedFrameSequence",
+        "staleFramesDiscarded",
+        "observationTicksStarted",
+        "observationTicksCompleted",
+        "observationOverlapAttempts",
+        "maximumConcurrentObservationTicks",
+        "errorCodes"
+      ],
+      "properties": {
+        "phase": {
+          "type": "string",
+          "enum": ["idle", "starting", "running", "stopping", "stopped"]
+        },
+        "framesProcessed": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "lastAcceptedFrameSequence": {
+          "$ref": "#/$defs/nullableNonNegativeInteger"
+        },
+        "staleFramesDiscarded": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "observationTicksStarted": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "observationTicksCompleted": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "observationOverlapAttempts": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "maximumConcurrentObservationTicks": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "errorCodes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "start_failed",
+              "tick_failed",
+              "scheduler_cancel_failed",
+              "lane_stop_failed",
+              "lane_close_failed",
+              "home_failed",
+              "close_failed"
+            ]
+          }
+        }
+      }
+    },
+    "nullableFinalRuntimeEvidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/finalRuntimeEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "axisQuantizationDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "normalizedError",
+        "rawCorrectionDeg",
+        "clampedCorrectionDeg",
+        "legacyRoundedStepDeg",
+        "quantizedStepDeg",
+        "residualBeforeDeg",
+        "residualAfterDeg",
+        "residualAction"
+      ],
+      "properties": {
+        "normalizedError": {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        "rawCorrectionDeg": {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        "clampedCorrectionDeg": {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        "legacyRoundedStepDeg": {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        "quantizedStepDeg": {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        "residualBeforeDeg": {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        "residualAfterDeg": {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        "residualAction": {
+          "type": "string",
+          "enum": [
+            "round-disabled",
+            "reset-centered",
+            "reset-zero-correction",
+            "reset-direct-step",
+            "reset-direction-reversal",
+            "residual-accumulate",
+            "residual-release"
+          ]
+        }
+      }
+    },
+    "quantizationDistribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "p50", "p90", "p95", "max"],
+      "properties": {
+        "count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "p50": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "p90": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "p95": {
+          "$ref": "#/$defs/nullableNumber"
+        },
+        "max": {
+          "$ref": "#/$defs/nullableNumber"
+        }
+      }
+    },
+    "quantizationZeroRuns": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "completedCount",
+        "censoredCount",
+        "durationMs",
+        "lengthTicks",
+        "releaseStepAbsDeg"
+      ],
+      "properties": {
+        "completedCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "censoredCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "durationMs": {
+          "$ref": "#/$defs/quantizationDistribution"
+        },
+        "lengthTicks": {
+          "$ref": "#/$defs/quantizationDistribution"
+        },
+        "releaseStepAbsDeg": {
+          "$ref": "#/$defs/quantizationDistribution"
+        }
+      }
+    },
+    "quantizationReleaseOutcomes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dispatched", "replaced", "noop", "stale", "none"],
+      "properties": {
+        "dispatched": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "replaced": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "noop": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "stale": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "none": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    },
+    "quantizationAxisSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "zeroRuns",
+        "residualReleaseCount",
+        "residualReleaseOutcomes",
+        "residualReleaseTicksWithoutConfirmedUpdate",
+        "unDispatchedResidualReleaseCount",
+        "directionReversalResetCount",
+        "exactHalfStepHitCount",
+        "negativeZeroCount"
+      ],
+      "properties": {
+        "zeroRuns": {
+          "$ref": "#/$defs/quantizationZeroRuns"
+        },
+        "residualReleaseCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "residualReleaseOutcomes": {
+          "$ref": "#/$defs/quantizationReleaseOutcomes"
+        },
+        "residualReleaseTicksWithoutConfirmedUpdate": {
+          "$ref": "#/$defs/quantizationDistribution"
+        },
+        "unDispatchedResidualReleaseCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "directionReversalResetCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "exactHalfStepHitCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "negativeZeroCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    },
+    "quantizationSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["yaw", "pitch"],
+      "properties": {
+        "yaw": {
+          "$ref": "#/$defs/quantizationAxisSummary"
+        },
+        "pitch": {
+          "$ref": "#/$defs/quantizationAxisSummary"
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "decisionAtMs",
+        "observedAtMs",
+        "quantizationMode",
+        "centered",
+        "baseConfirmedPose",
+        "requestedPose",
+        "requestSequence",
+        "effectOutcome",
+        "ticksWithoutConfirmedUpdate",
+        "yaw",
+        "pitch"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "decisionAtMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "observedAtMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "quantizationMode": {
+          "type": "string",
+          "enum": ["round", "error-feedback"]
+        },
+        "centered": {
+          "type": "boolean"
+        },
+        "baseConfirmedPose": {
+          "$ref": "#/$defs/pose"
+        },
+        "requestedPose": {
+          "$ref": "#/$defs/nullablePose"
+        },
+        "requestSequence": {
+          "$ref": "#/$defs/nullableNonNegativeInteger"
+        },
+        "effectOutcome": {
+          "type": "string",
+          "enum": ["dispatched", "replaced", "noop", "stale", "none"]
+        },
+        "ticksWithoutConfirmedUpdate": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "yaw": {
+          "$ref": "#/$defs/axisQuantizationDiagnostic"
+        },
+        "pitch": {
+          "$ref": "#/$defs/axisQuantizationDiagnostic"
+        }
+      }
+    },
+    "nullableDecision": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/decision"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "timestampMs",
+        "observationId",
+        "variant",
+        "frameSequence",
+        "runtimeAcceptedFrameSequence",
+        "targetWorldPose",
+        "targetSegmentIndex",
+        "detectorState",
+        "targetErrorDeg",
+        "targetNormalizedError",
+        "probeId",
+        "isProbeObservation",
+        "centered",
+        "controllerMode",
+        "decision",
+        "requestSequence",
+        "requestedPose",
+        "dispatchSequence",
+        "dispatchedRequestPose",
+        "dispatchedPose",
+        "confirmedSequence",
+        "noOpDiscardedSequence",
+        "confirmedBeforeDispatch",
+        "plannedBeforeDispatch",
+        "rpcConfirmedPose",
+        "pendingAgeMs",
+        "generation",
+        "counters",
+        "clear",
+        "stop",
+        "stopRequestedAtMs",
+        "home",
+        "homeAcknowledgedAtMs",
+        "homeAcknowledgedPose",
+        "postStopProbe",
+        "finalRuntimeEvidence"
+      ],
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "timestampMs": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "observationId": {
+          "type": "string"
+        },
+        "variant": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/stopVariant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "frameSequence": {
+          "$ref": "#/$defs/nullableNonNegativeInteger"
+        },
+        "runtimeAcceptedFrameSequence": {
+          "$ref": "#/$defs/nullableNonNegativeInteger"
+        },
+        "targetWorldPose": {
+          "$ref": "#/$defs/nullablePose"
+        },
+        "targetSegmentIndex": {
+          "$ref": "#/$defs/nullableNonNegativeInteger"
+        },
+        "detectorState": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": ["visible", "occluded", "outside-fov"]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "targetErrorDeg": {
+          "$ref": "#/$defs/nullablePose"
+        },
+        "targetNormalizedError": {
+          "$ref": "#/$defs/nullablePose"
+        },
+        "probeId": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "isProbeObservation": {
+          "type": "boolean"
+        },
+        "centered": {
+          "type": "boolean"
+        },
+        "controllerMode": {
+          "type": "string",
+          "enum": ["acquire", "track", "hold", "scan"]
+        },
+        "decision": {
+          "$ref": "#/$defs/nullableDecision"
+        },
+        "requestSequence": {
+          "$ref": "#/$defs/nullableNonNegativeInteger"
+        },
+        "requestedPose": {
+          "$ref": "#/$defs/nullablePose"
+        },
+        "dispatchSequence": {
+          "$ref": "#/$defs/nullableNonNegativeInteger"
+        },
+        "dispatchedRequestPose": {
+          "$ref": "#/$defs/nullablePose"
+        },
+        "dispatchedPose": {
+          "$ref": "#/$defs/nullablePose"
+        },
+        "confirmedSequence": {
+          "$ref": "#/$defs/nullableNonNegativeInteger"
+        },
+        "noOpDiscardedSequence": {
+          "$ref": "#/$defs/nullableNonNegativeInteger"
+        },
+        "confirmedBeforeDispatch": {
+          "$ref": "#/$defs/pose"
+        },
+        "plannedBeforeDispatch": {
+          "$ref": "#/$defs/pose"
+        },
+        "rpcConfirmedPose": {
+          "$ref": "#/$defs/pose"
+        },
+        "pendingAgeMs": {
+          "$ref": "#/$defs/nullableNonNegativeNumber"
+        },
+        "generation": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "counters": {
+          "$ref": "#/$defs/laneCounters"
+        },
+        "clear": {
+          "type": "boolean"
+        },
+        "stop": {
+          "type": "boolean"
+        },
+        "stopRequestedAtMs": {
+          "$ref": "#/$defs/nullableNonNegativeNumber"
+        },
+        "home": {
+          "type": "boolean"
+        },
+        "homeAcknowledgedAtMs": {
+          "$ref": "#/$defs/nullableNonNegativeNumber"
+        },
+        "homeAcknowledgedPose": {
+          "$ref": "#/$defs/nullablePose"
+        },
+        "postStopProbe": {
+          "$ref": "#/$defs/nullablePostStopProbe"
+        },
+        "finalRuntimeEvidence": {
+          "$ref": "#/$defs/nullableFinalRuntimeEvidence"
+        }
+      }
+    },
+    "aggregates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestKinematics",
+        "dispatchKinematics",
+        "commandKinematics",
+        "confirmedKinematics",
+        "targetAbsoluteError",
+        "angularPathDeg",
+        "velocityTotalVariation",
+        "directionReversals",
+        "centeredRatio",
+        "settlingMs",
+        "settlingIntervalCount",
+        "settlingCensoredCount",
+        "quantization",
+        "dispatchIntervalMs",
+        "replyToNextDispatchMs",
+        "samePoseRequests",
+        "samePoseDispatches",
+        "samePoseScanDispatches",
+        "redundantSamePoseRequests",
+        "nonzeroStaticCommands",
+        "dispatchCount",
+        "staleDispatchCount",
+        "postStopNormalDispatchCount",
+        "postStopDispatchAttemptCount",
+        "pendingMaximum",
+        "activeMaximum",
+        "activeOverlapCount",
+        "reacquisitionLatencyMs",
+        "homeErrorDeg",
+        "homeCompletionMs",
+        "waypointReachRatio",
+        "prematureWaypointAdvances",
+        "insufficientPostArrivalDwells",
+        "actualPostArrivalDwellMs",
+        "minimumPostArrivalDwellMs",
+        "dwellBeforeArrivalMs",
+        "progressReversals",
+        "observationCount",
+        "visibilityEligibleFrames",
+        "visibleFrames",
+        "outsideFovFrames",
+        "visibilityRatio",
+        "scanDispatchCount",
+        "effectiveConfirmedMovements",
+        "settlingUncensoredRatio",
+        "plannedTargetReversals",
+        "staticBoundaryObservationCount",
+        "staticBoundaryPrematureReleaseCount",
+        "staticBoundaryRequestOverflowCount",
+        "trackingRequiredReversalDispatches",
+        "trackingRequiredReversalOccupancyMs",
+        "trackingProvablyRedundantDispatches",
+        "trackingProvablyRedundantOccupancyMs",
+        "trackingProvablyRedundantDiscarded",
+        "trackingOrdinaryDispatches",
+        "reversalResponseLatencyMs",
+        "sameAbsoluteTargetWhileActive",
+        "pendingSameTargetReplacements",
+        "effectiveConfirmedProgressIntervalMs",
+        "initialEffectiveConfirmedProgressLatencyMs",
+        "activeNonCenteredTrackingEpisodesWithoutConfirmedProgress",
+        "maximumConfirmedStepDeg",
+        "trackingDecisionCount",
+        "trackingCenteredHoldCount",
+        "trackingQuantizedNoOpCount",
+        "trackingMoveRequestCount"
+      ],
+      "properties": {
+        "requestKinematics": {
+          "$ref": "#/$defs/kinematicsSummary"
+        },
+        "dispatchKinematics": {
+          "$ref": "#/$defs/kinematicsSummary"
+        },
+        "commandKinematics": {
+          "$ref": "#/$defs/kinematicsSummary"
+        },
+        "confirmedKinematics": {
+          "$ref": "#/$defs/kinematicsSummary"
+        },
+        "targetAbsoluteError": {
+          "$ref": "#/$defs/derivativeSummary"
+        },
+        "angularPathDeg": {
+          "$ref": "#/$defs/angularPath"
+        },
+        "velocityTotalVariation": {
+          "$ref": "#/$defs/axisSummary"
+        },
+        "directionReversals": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["yaw", "pitch", "combined"],
+          "properties": {
+            "yaw": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "pitch": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            },
+            "combined": {
+              "$ref": "#/$defs/nonNegativeInteger"
+            }
+          }
+        },
+        "centeredRatio": {
+          "$ref": "#/$defs/nullableNonNegativeNumber"
+        },
+        "settlingMs": {
+          "$ref": "#/$defs/distribution"
+        },
+        "settlingIntervalCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "settlingCensoredCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "quantization": {
+          "$ref": "#/$defs/quantizationSummary"
+        },
+        "dispatchIntervalMs": {
+          "$ref": "#/$defs/distribution"
+        },
+        "replyToNextDispatchMs": {
+          "$ref": "#/$defs/distribution"
+        },
+        "samePoseRequests": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "samePoseDispatches": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "samePoseScanDispatches": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "redundantSamePoseRequests": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "nonzeroStaticCommands": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "dispatchCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "staleDispatchCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "postStopNormalDispatchCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "postStopDispatchAttemptCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "pendingMaximum": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "activeMaximum": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "activeOverlapCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "reacquisitionLatencyMs": {
+          "$ref": "#/$defs/nullableNonNegativeNumber"
+        },
+        "homeErrorDeg": {
+          "$ref": "#/$defs/pose"
+        },
+        "homeCompletionMs": {
+          "$ref": "#/$defs/nullableNonNegativeNumber"
+        },
+        "waypointReachRatio": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "prematureWaypointAdvances": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "insufficientPostArrivalDwells": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "actualPostArrivalDwellMs": {
+          "$ref": "#/$defs/distribution"
+        },
+        "minimumPostArrivalDwellMs": {
+          "$ref": "#/$defs/nullableNonNegativeNumber"
+        },
+        "dwellBeforeArrivalMs": {
+          "$ref": "#/$defs/distribution"
+        },
+        "progressReversals": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "observationCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "visibilityEligibleFrames": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "visibleFrames": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "outsideFovFrames": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "visibilityRatio": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "scanDispatchCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "effectiveConfirmedMovements": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "settlingUncensoredRatio": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "plannedTargetReversals": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "staticBoundaryObservationCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "staticBoundaryPrematureReleaseCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "staticBoundaryRequestOverflowCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "trackingRequiredReversalDispatches": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "trackingRequiredReversalOccupancyMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "trackingProvablyRedundantDispatches": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "trackingProvablyRedundantOccupancyMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "trackingProvablyRedundantDiscarded": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "trackingOrdinaryDispatches": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "reversalResponseLatencyMs": {
+          "$ref": "#/$defs/distribution"
+        },
+        "sameAbsoluteTargetWhileActive": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "pendingSameTargetReplacements": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "effectiveConfirmedProgressIntervalMs": {
+          "$ref": "#/$defs/distribution"
+        },
+        "initialEffectiveConfirmedProgressLatencyMs": {
+          "$ref": "#/$defs/distribution"
+        },
+        "activeNonCenteredTrackingEpisodesWithoutConfirmedProgress": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "maximumConfirmedStepDeg": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "trackingDecisionCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "trackingCenteredHoldCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "trackingQuantizedNoOpCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "trackingMoveRequestCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    },
+    "invariants": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "angleBounds",
+        "pendingDepth",
+        "activeCalls",
+        "noOverlap",
+        "noStale",
+        "noPostStopNormalDispatch",
+        "homeReturned",
+        "errorFree",
+        "runtimeStopped",
+        "framesAndTicksComplete",
+        "sufficientPostArrivalDwell",
+        "targetLossAcceptance",
+        "noSamePoseScanDispatches",
+        "postStopQuiescent",
+        "staticBoundaryQualified",
+        "slowTrackingQualified",
+        "fastReversalQualified",
+        "stopVariantsQualified",
+        "absoluteSafety",
+        "qualityDataPresent",
+        "trackingDecisionPartition"
+      ],
+      "properties": {
+        "angleBounds": {
+          "type": "boolean"
+        },
+        "pendingDepth": {
+          "type": "boolean"
+        },
+        "activeCalls": {
+          "type": "boolean"
+        },
+        "noOverlap": {
+          "type": "boolean"
+        },
+        "noStale": {
+          "type": "boolean"
+        },
+        "noPostStopNormalDispatch": {
+          "type": "boolean"
+        },
+        "homeReturned": {
+          "type": "boolean"
+        },
+        "errorFree": {
+          "type": "boolean"
+        },
+        "runtimeStopped": {
+          "type": "boolean"
+        },
+        "framesAndTicksComplete": {
+          "type": "boolean"
+        },
+        "sufficientPostArrivalDwell": {
+          "type": "boolean"
+        },
+        "targetLossAcceptance": {
+          "type": "boolean"
+        },
+        "noSamePoseScanDispatches": {
+          "type": "boolean"
+        },
+        "postStopQuiescent": {
+          "type": "boolean"
+        },
+        "staticBoundaryQualified": {
+          "type": "boolean"
+        },
+        "slowTrackingQualified": {
+          "type": "boolean"
+        },
+        "fastReversalQualified": {
+          "type": "boolean"
+        },
+        "stopVariantsQualified": {
+          "type": "boolean"
+        },
+        "absoluteSafety": {
+          "type": "boolean"
+        },
+        "qualityDataPresent": {
+          "type": "boolean"
+        },
+        "trackingDecisionPartition": {
+          "type": "boolean"
+        }
+      }
+    },
+    "runtimeStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "framesProcessed",
+        "lastAcceptedFrameSequence",
+        "staleFramesDiscarded",
+        "observationTicksStarted",
+        "observationTicksCompleted",
+        "observationOverlapAttempts",
+        "maximumConcurrentObservationTicks",
+        "expectedFramesProcessed",
+        "expectedObservationTicks",
+        "errorCount",
+        "errorCodes"
+      ],
+      "properties": {
+        "phase": {
+          "type": "string",
+          "enum": ["idle", "starting", "running", "stopping", "stopped"]
+        },
+        "framesProcessed": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "lastAcceptedFrameSequence": {
+          "$ref": "#/$defs/nullableNonNegativeInteger"
+        },
+        "staleFramesDiscarded": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "observationTicksStarted": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "observationTicksCompleted": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "observationOverlapAttempts": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "maximumConcurrentObservationTicks": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "expectedFramesProcessed": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "expectedObservationTicks": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "errorCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "errorCodes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "start_failed",
+              "tick_failed",
+              "scheduler_cancel_failed",
+              "lane_stop_failed",
+              "lane_close_failed",
+              "home_failed",
+              "close_failed"
+            ]
+          }
+        }
+      }
+    },
+    "lossWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "startMs", "endMs"],
+      "properties": {
+        "phase": {
+          "type": "string",
+          "enum": ["before-search", "during-search", "before-reacquisition"]
+        },
+        "startMs": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "endMs": {
+          "$ref": "#/$defs/nullableNonNegativeNumber"
+        }
+      }
+    },
+    "stopVariant": {
+      "type": "string",
+      "enum": ["track-moving", "pending-present", "scan-active"]
+    },
+    "stopVariantResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "variant",
+        "status",
+        "canonicalHash",
+        "preconditionReached",
+        "runtimeStopped",
+        "laneStopped",
+        "schedulerTickRejected",
+        "stoppedLaneUpdateRejected",
+        "pendingDrained",
+        "activeDrained",
+        "noPostStopDispatch",
+        "homeAcknowledged",
+        "homeErrorDeg",
+        "homeAcknowledgementCount"
+      ],
+      "properties": {
+        "variant": {
+          "$ref": "#/$defs/stopVariant"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "canonicalHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "preconditionReached": {
+          "type": "boolean"
+        },
+        "runtimeStopped": {
+          "type": "boolean"
+        },
+        "laneStopped": {
+          "type": "boolean"
+        },
+        "schedulerTickRejected": {
+          "type": "boolean"
+        },
+        "stoppedLaneUpdateRejected": {
+          "type": "boolean"
+        },
+        "pendingDrained": {
+          "type": "boolean"
+        },
+        "activeDrained": {
+          "type": "boolean"
+        },
+        "noPostStopDispatch": {
+          "type": "boolean"
+        },
+        "homeAcknowledged": {
+          "type": "boolean"
+        },
+        "homeErrorDeg": {
+          "$ref": "#/$defs/pose"
+        },
+        "homeAcknowledgementCount": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    },
+    "stopVariantResults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["track-moving", "pending-present", "scan-active"],
+      "properties": {
+        "track-moving": {
+          "$ref": "#/$defs/stopVariantResult"
+        },
+        "pending-present": {
+          "$ref": "#/$defs/stopVariantResult"
+        },
+        "scan-active": {
+          "$ref": "#/$defs/stopVariantResult"
+        }
+      }
+    },
+    "nullableStopVariantResults": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/stopVariantResults"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "canonicalInput",
+        "canonicalInputHash",
+        "canonicalHash",
+        "lossWindows",
+        "events",
+        "aggregates",
+        "invariants",
+        "runtimeStatus",
+        "stopVariants"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "static-hold",
+            "slow-continuous-tracking",
+            "fast-reversals",
+            "target-loss-reacquisition",
+            "stop-home"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "canonicalInput": {
+          "$ref": "#/$defs/canonicalScenarioInput"
+        },
+        "canonicalInputHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "canonicalHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "lossWindows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/lossWindow"
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/event"
+          }
+        },
+        "aggregates": {
+          "$ref": "#/$defs/aggregates"
+        },
+        "invariants": {
+          "$ref": "#/$defs/invariants"
+        },
+        "runtimeStatus": {
+          "$ref": "#/$defs/runtimeStatus"
+        },
+        "stopVariants": {
+          "$ref": "#/$defs/nullableStopVariantResults"
+        }
+      }
+    },
+    "scenarioHashRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "static-hold",
+        "slow-continuous-tracking",
+        "fast-reversals",
+        "target-loss-reacquisition",
+        "stop-home"
+      ],
+      "properties": {
+        "static-hold": {
+          "$ref": "#/$defs/hash"
+        },
+        "slow-continuous-tracking": {
+          "$ref": "#/$defs/hash"
+        },
+        "fast-reversals": {
+          "$ref": "#/$defs/hash"
+        },
+        "target-loss-reacquisition": {
+          "$ref": "#/$defs/hash"
+        },
+        "stop-home": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "rawScenarioEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonicalInput", "events"],
+      "properties": {
+        "canonicalInput": {
+          "$ref": "#/$defs/canonicalScenarioInput"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/event"
+          }
+        }
+      }
+    },
+    "repeatDeterminism": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested",
+        "deterministic",
+        "evidenceRuns",
+        "canonicalHashes",
+        "scenarioHashes",
+        "comparisonSetHashes"
+      ],
+      "properties": {
+        "requested": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "deterministic": {
+          "type": "boolean"
+        },
+        "evidenceRuns": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/rawScenarioEvidence"
+            }
+          }
+        },
+        "canonicalHashes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hash"
+          }
+        },
+        "scenarioHashes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/scenarioHashRecord"
+          }
+        },
+        "comparisonSetHashes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/hash"
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtimeFactory",
+        "clock",
+        "quantizationMode",
+        "motionEvidence",
+        "fixture",
+        "percentile",
+        "roughnessDefinition",
+        "derivativeRule",
+        "gateway"
+      ],
+      "properties": {
+        "runtimeFactory": {
+          "const": "createStackChanAttentionRuntime"
+        },
+        "clock": {
+          "const": "virtual-monotonic"
+        },
+        "quantizationMode": {
+          "type": "string",
+          "enum": ["round", "error-feedback"]
+        },
+        "motionEvidence": {
+          "const": "virtual-confirmed-not-physical"
+        },
+        "fixture": {
+          "$ref": "#/$defs/fixture"
+        },
+        "percentile": {
+          "$ref": "#/$defs/percentileMetadata"
+        },
+        "roughnessDefinition": {
+          "const": "sum(abs(delta[k]-delta[k-1]))/max(sum(abs(delta[k])),1deg)"
+        },
+        "derivativeRule": {
+          "const": "dt<=0 fails the run"
+        },
+        "gateway": {
+          "$ref": "#/$defs/gatewayMetadata"
+        }
+      }
+    },
+    "percentileMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method", "definition", "quantiles"],
+      "properties": {
+        "method": {
+          "const": "nearest-rank"
+        },
+        "definition": {
+          "const": "sorted[ceil(q*n)-1]"
+        },
+        "quantiles": {
+          "const": [0.5, 0.9, 0.95, 0.99]
+        }
+      }
+    },
+    "gatewayMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "absoluteRequests",
+        "reclampFromPlannedPose",
+        "maximumActiveCalls",
+        "quantizationDeg",
+        "pendingPolicy",
+        "homeDispatch"
+      ],
+      "properties": {
+        "absoluteRequests": {
+          "const": true
+        },
+        "reclampFromPlannedPose": {
+          "const": true
+        },
+        "maximumActiveCalls": {
+          "const": 1
+        },
+        "quantizationDeg": {
+          "const": 1
+        },
+        "pendingPolicy": {
+          "const": "latest-wins"
+        },
+        "homeDispatch": {
+          "const": "adapter-only-after-lane-stop"
+        }
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seed",
+        "syntheticFovDeg",
+        "staticProbeDurationMs",
+        "virtualDeviceCommandDurationMs",
+        "pendingStopVirtualDeviceCommandDurationMs",
+        "follow"
+      ],
+      "properties": {
+        "seed": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "syntheticFovDeg": {
+          "$ref": "#/$defs/pose"
+        },
+        "staticProbeDurationMs": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "virtualDeviceCommandDurationMs": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "pendingStopVirtualDeviceCommandDurationMs": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "follow": {
+          "$ref": "#/$defs/followFixture"
+        }
+      }
+    },
+    "followFixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "commandTransport",
+        "stepQuantization",
+        "targetFilter",
+        "commandRateHz",
+        "maxPendingCommandAgeMs",
+        "frameIntervalMs",
+        "maxFrameAgeMs",
+        "homeYaw",
+        "homePitch",
+        "trackingPitchMin",
+        "deadZone",
+        "deadZoneRelease",
+        "yawGainDeg",
+        "pitchGainDeg",
+        "flipYaw",
+        "flipPitch",
+        "maxStepDeg",
+        "moveSpeedDps",
+        "lostHoldMs",
+        "scanDwellMs",
+        "scanYaw",
+        "scanPitch"
+      ],
+      "properties": {
+        "enabled": {
+          "const": true
+        },
+        "commandTransport": {
+          "const": "async-latest"
+        },
+        "stepQuantization": {
+          "type": "string",
+          "enum": ["round", "error-feedback"]
+        },
+        "targetFilter": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled"],
+          "properties": {
+            "enabled": {
+              "const": false
+            }
+          }
+        },
+        "commandRateHz": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "maxPendingCommandAgeMs": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "frameIntervalMs": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "maxFrameAgeMs": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "homeYaw": {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        "homePitch": {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        "trackingPitchMin": {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        "deadZone": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "deadZoneRelease": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "yawGainDeg": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "pitchGainDeg": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "flipYaw": {
+          "type": "number",
+          "enum": [-1, 1]
+        },
+        "flipPitch": {
+          "type": "number",
+          "enum": [-1, 1]
+        },
+        "maxStepDeg": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "moveSpeedDps": {
+          "$ref": "#/$defs/nonNegativeNumber"
+        },
+        "lostHoldMs": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "scanDwellMs": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "scanYaw": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/finiteNumber"
+          }
+        },
+        "scanPitch": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/finiteNumber"
+          }
+        }
+      }
+    }
+  }
+}

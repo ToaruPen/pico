@@ -186,6 +186,84 @@ voice:
     });
   });
 
+  it("retains a route-omitted camera scene failure without a provider field", async () => {
+    const report = await runPicoMilestoneSmokeSuite(
+      { PICO_CONFIG_PATH: isolatedConfigPath },
+      {
+        ...configuredSectionDependencies(),
+        runCameraVlmSceneSmoke: () =>
+          Promise.resolve({
+            status: "failed",
+            reason: "pico camera scene description route is not configured"
+          })
+      }
+    );
+
+    expect(requireSection(report, "camera_vlm_scene")).toEqual({
+      name: "camera_vlm_scene",
+      status: "failed",
+      reason: "pico camera scene description route is not configured"
+    });
+  });
+
+  it("does not synthesize a camera scene provider when execution throws before route selection", async () => {
+    const report = await runPicoMilestoneSmokeSuite(
+      { PICO_CONFIG_PATH: isolatedConfigPath },
+      {
+        ...configuredSectionDependencies(),
+        runCameraVlmSceneSmoke: () => {
+          throw new Error("camera scene execution failed before route selection");
+        }
+      }
+    );
+
+    expect(requireSection(report, "camera_vlm_scene")).toEqual({
+      name: "camera_vlm_scene",
+      status: "failed",
+      reason: "camera scene execution failed before route selection"
+    });
+  });
+
+  it("retains the selected camera scene provider when execution throws after route selection", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "pico-milestone-agent-scene-config-"));
+    const configPath = join(directory, "pico.local.yaml");
+    writeFileSync(
+      configPath,
+      `
+camera:
+  tapo:
+    host: 192.168.10.25
+    user: camera-user
+    password: camera-passphrase
+vision:
+  sceneDescription:
+    provider: agent
+    source: tapo
+`
+    );
+
+    try {
+      const report = await runPicoMilestoneSmokeSuite(
+        { PICO_CONFIG_PATH: configPath },
+        {
+          ...configuredSectionDependencies(),
+          runCameraVlmSceneSmoke: () => {
+            throw new Error("selected agent scene execution failed");
+          }
+        }
+      );
+
+      expect(requireSection(report, "camera_vlm_scene")).toEqual({
+        name: "camera_vlm_scene",
+        status: "failed",
+        provider: "agent",
+        reason: "selected agent scene execution failed"
+      });
+    } finally {
+      rmSync(directory, { recursive: true });
+    }
+  });
+
   it("returns a failing process code when any milestone section fails", async () => {
     const report = await runPicoMilestoneSmokeSuite(
       { PICO_CONFIG_PATH: isolatedConfigPath },
