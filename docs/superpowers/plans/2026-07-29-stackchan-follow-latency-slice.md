@@ -163,11 +163,14 @@ Run:
 npx vitest run tests/config.test.ts
 ```
 
-Expected: unknown-field or missing-property failures for both new fields.
+Expected: boundary failures for invalid values, a missing-field failure for `maxFrameAgeMs`, and
+normalization of an omitted `deadZoneRelease` to `0.14`.
 
 - [x] **Step 3: Extend the config contract and parser**
 
-Add these required properties to the enabled union:
+Add these required properties to the normalized enabled union returned by the parser. Raw YAML may
+omit `deadZoneRelease`; omission normalizes to `0.14`, so TypeScript runtime consumers always
+receive a required numeric value:
 
 ```ts
 readonly maxFrameAgeMs: number;

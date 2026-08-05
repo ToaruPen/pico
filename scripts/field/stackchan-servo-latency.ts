@@ -599,12 +599,11 @@ async function runContentionBlock(
     if (leaseId !== undefined) {
       try {
         headTargetLaneSummary = projectContentionLaneSummary(await headTargetLane.stop(leaseId));
-        leaseId = undefined;
       } catch {
         failedUpdates++;
       }
     }
-    if (connected && leaseId === undefined) {
+    if (connected) {
       home = await restoreConnectedContentionHome(input, adapter);
     }
     try {
@@ -727,8 +726,13 @@ async function measureContentionCommands(
   let nextCommandAtMs = startedAtMs;
   while (nextCommandAtMs < deadlineMs) {
     await input.waitMs(Math.max(0, nextCommandAtMs - input.monotonicNowMs()));
-    if (loadMeasurements.failed) {
-      return { failedUpdates: 1, minimumCommandedPitch };
+    const terminalFailureCount = contentionCommandTerminalFailureCount(
+      input.monotonicNowMs(),
+      deadlineMs,
+      loadMeasurements.failed
+    );
+    if (terminalFailureCount !== undefined) {
+      return { failedUpdates: terminalFailureCount, minimumCommandedPitch };
     }
     const measured = commandIndex >= contentionWarmupCommands;
     const commandStartedAtMs = input.monotonicNowMs();
@@ -760,6 +764,17 @@ async function measureContentionCommands(
     nextCommandAtMs += contentionCommandIntervalMs;
   }
   return { failedUpdates: 0, minimumCommandedPitch };
+}
+
+function contentionCommandTerminalFailureCount(
+  nowMs: number,
+  deadlineMs: number,
+  loadFailed: boolean
+): 0 | 1 | undefined {
+  if (nowMs >= deadlineMs) {
+    return 0;
+  }
+  return loadFailed ? 1 : undefined;
 }
 
 function createConditionMeasurements(): Record<
@@ -1218,7 +1233,8 @@ function createServoOnlyAdapterFromConfig(
     requestInit: {
       headers: {
         authorization: `Bearer ${token}`
-      }
+      },
+      redirect: "error"
     }
   });
   const client: StackChanMcpClient = {
@@ -1356,7 +1372,8 @@ function createStabilityDiagnostics(
     requestInit: {
       headers: {
         authorization: `Bearer ${token}`
-      }
+      },
+      redirect: "error"
     }
   });
   let connected = false;
@@ -1442,7 +1459,8 @@ export async function readContentionCameraStatus(
     fetch(cameraStatusUrl, {
       headers: {
         authorization: `Bearer ${token}`
-      }
+      },
+      signal: AbortSignal.timeout(config.timeoutMs)
     }),
     readCameraStreamLifecycle(config, token)
   ]);
@@ -1475,7 +1493,8 @@ async function readCameraStreamLifecycle(
     requestInit: {
       headers: {
         authorization: `Bearer ${token}`
-      }
+      },
+      redirect: "error"
     }
   });
   try {

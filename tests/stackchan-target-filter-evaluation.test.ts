@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   evaluateStackChanTargetFilterCandidates,
+  measureFirstCorrectReversalLatency,
+  type StackChanTargetFilterBaselineResult,
   type StackChanTargetFilterCandidateResult
 } from "../scripts/field/stackchan-target-filter-evaluation.js";
 
@@ -67,6 +69,24 @@ describe("StackChan target-filter deterministic evaluation", () => {
     }
   });
 
+  it("does not publish candidate acceptance on the raw baseline", () => {
+    const result = evaluateStackChanTargetFilterCandidates();
+
+    expect(Object.hasOwn(result.raw, "acceptance")).toBe(false);
+  });
+
+  it("fails when a reversal response was not measured", () => {
+    expect(() =>
+      measureFirstCorrectReversalLatency(
+        [
+          { observedAtMs: 4_000, stepYaw: 0 },
+          { observedAtMs: 4_125, stepYaw: 1 }
+        ],
+        4_000
+      )
+    ).toThrow("reversal response was not measured");
+  });
+
   it("selects only accepted candidates with stable lexicographic ranking", () => {
     const result = evaluateStackChanTargetFilterCandidates();
     const accepted = result.candidates.filter(({ acceptance }) => acceptance.passed);
@@ -112,7 +132,9 @@ describe("StackChan target-filter deterministic evaluation", () => {
   });
 });
 
-function expectFiniteMetrics(run: StackChanTargetFilterCandidateResult): void {
+function expectFiniteMetrics(
+  run: StackChanTargetFilterBaselineResult | StackChanTargetFilterCandidateResult
+): void {
   for (const metrics of [run.stationary, run.reversal]) {
     for (const value of [
       metrics.filteredCenterTotalVariation,
@@ -130,7 +152,7 @@ function expectFiniteMetrics(run: StackChanTargetFilterCandidateResult): void {
 }
 
 function rankTuple(
-  raw: StackChanTargetFilterCandidateResult,
+  raw: StackChanTargetFilterBaselineResult,
   candidate: StackChanTargetFilterCandidateResult
 ): readonly number[] {
   if (!candidate.config.enabled) {

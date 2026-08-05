@@ -55,11 +55,7 @@ type PicoMilestoneSmokeSectionBase = {
 export type PicoMilestoneSmokeSectionReport = PicoMilestoneSmokeSectionBase &
   (
     | {
-        readonly name: Exclude<PicoMilestoneSmokeSectionName, "camera_vlm_scene">;
-        readonly provider: string;
-      }
-    | {
-        readonly name: "camera_vlm_scene";
+        readonly name: PicoMilestoneSmokeSectionName;
         readonly provider: string;
       }
     | {
@@ -533,24 +529,12 @@ function toSection(
     readonly details?: Record<string, unknown>;
   }
 ): PicoMilestoneSmokeSectionReport {
-  const section = {
+  return {
     name,
     status: report.status,
     provider: report.provider,
     ...(report.reason === undefined ? {} : { reason: report.reason }),
     ...(report.details === undefined ? {} : { details: report.details })
-  };
-
-  if (name === "camera_vlm_scene") {
-    return {
-      ...section,
-      name
-    };
-  }
-
-  return {
-    ...section,
-    name
   };
 }
 

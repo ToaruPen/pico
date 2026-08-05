@@ -12,7 +12,7 @@
 
 Repository policy forbids commits unless the user explicitly requests them. Replace each normal commit step with a diff/status checkpoint.
 
-### Task 1: Add explicit scene route config
+## Task 1: Add explicit scene route config
 
 **Files:**
 - Modify: `src/config/index.ts`
@@ -54,14 +54,16 @@ export type PicoSceneDescriptionConfig = {
 };
 ```
 
-Default to the existing behavior (`ollama` + `tapo`) only when the section is absent. An explicit
-section with missing provider/source fails.
+An absent `vision.sceneDescription` section fails immediately with the fixed route-omission
+result, before any camera capture or VLM request. A present section must explicitly contain both
+`provider` and `source`; an incomplete section fails configuration validation. There is no
+implicit `ollama` + `tapo` route.
 
 - [ ] **Step 4: Verify GREEN**
 
 Run focused config tests and typecheck.
 
-### Task 2: Generalize scene frame capture without changing Ollama behavior
+## Task 2: Generalize scene frame capture without changing Ollama behavior
 
 **Files:**
 - Modify: `src/runtime/perception-service.ts`
@@ -102,7 +104,7 @@ Keep current strict schema parsing and source metadata.
 
 Run perception-service and existing vision/Ollama tests.
 
-### Task 3: Return an image tool result for the agent route
+## Task 3: Return an image tool result for the agent route
 
 **Files:**
 - Modify: `src/runtime/perception-tool.ts`
@@ -153,7 +155,7 @@ npx vitest run tests/perception-tool.test.ts tests/perception-service.test.ts te
 
 Expected: PASS.
 
-### Task 4: Enforce image-capable agent models at startup
+## Task 4: Enforce image-capable agent models at startup
 
 **Files:**
 - Modify: `src/runtime/pico-startup.ts`
@@ -185,7 +187,7 @@ if (
 
 Run startup tests and typecheck.
 
-### Task 5: Validate routes and document operation
+## Task 5: Validate routes and document operation
 
 **Files:**
 - Modify: `scripts/smoke/camera-vlm-scene.ts`

@@ -151,7 +151,8 @@ describe("camera to VLM scene smoke", () => {
             mimeType: "image/jpeg",
             capturedAt: "2026-07-26T10:00:00.000Z",
             image: jpegFrame
-          })
+          }),
+        describeFrame: () => Promise.reject(new Error("must not invoke Ollama"))
       }
     );
 
@@ -168,10 +169,11 @@ describe("camera to VLM scene smoke", () => {
         preparedForActiveAgent: true
       }
     });
-    expect(JSON.stringify(report)).not.toContain(Buffer.from(jpegFrame).toString("base64"));
+    expect(JSON.stringify(report)).not.toMatch(/"(?:bytes|image)"/u);
   });
 
   it("prepares an agent-routed Tapo frame without invoking Ollama", async () => {
+    let describeCalls = 0;
     const report = await runCameraVlmSceneSmoke(
       definePicoConfig({
         camera: {
@@ -203,7 +205,10 @@ describe("camera to VLM scene smoke", () => {
             capturedAt: "2026-07-26T10:00:00.000Z",
             image: jpegFrame
           }),
-        describeFrame: () => Promise.reject(new Error("must not invoke Ollama"))
+        describeFrame: () => {
+          describeCalls += 1;
+          return Promise.reject(new Error("must not invoke Ollama"));
+        }
       }
     );
 
@@ -220,6 +225,45 @@ describe("camera to VLM scene smoke", () => {
         preparedForActiveAgent: true
       }
     });
+    expect(describeCalls).toBe(0);
+  });
+
+  it("preserves useful redacted detail when agent scene preparation fails", async () => {
+    const report = await runCameraVlmSceneSmoke(
+      definePicoConfig({
+        camera: {
+          tapo: {
+            host: "192.168.10.25",
+            user: "camera-user",
+            password: "camera-passphrase"
+          }
+        },
+        vision: {
+          sceneDescription: {
+            provider: "agent",
+            source: "tapo",
+            timeoutMs: 30_000,
+            maxImageEdgePixels: 512
+          }
+        }
+      }),
+      {
+        captureAgentSceneFrame: () =>
+          Promise.reject(new Error("camera-user camera-passphrase capture timed out"))
+      }
+    );
+
+    expect(report).toMatchObject({
+      status: "failed",
+      provider: "agent",
+      source: "tapo"
+    });
+    if (!("reason" in report)) {
+      throw new Error("expected failed agent scene report");
+    }
+    expect(report.reason).toContain("capture timed out");
+    expect(report.reason).not.toContain("camera-user");
+    expect(report.reason).not.toContain("camera-passphrase");
   });
 
   it("captures one camera frame and sends it to the selected VLM endpoint", async () => {
@@ -260,7 +304,7 @@ describe("camera to VLM scene smoke", () => {
         scene
       }
     });
-    expect(JSON.stringify(report)).not.toContain(Buffer.from(jpegFrame).toString("base64"));
+    expect(JSON.stringify(report)).not.toMatch(/"(?:bytes|image)"/u);
   });
 
   it("captures StackChan for an Ollama route without requiring Tapo", async () => {

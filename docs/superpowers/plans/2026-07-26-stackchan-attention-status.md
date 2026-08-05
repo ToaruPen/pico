@@ -12,7 +12,7 @@
 
 リポジトリ指示とユーザー指定に従い、この計画ではcommit、push、PRを行わない。
 
-### Task 1: Controller target observation
+## Task 1: Controller target observation
 
 **Files:**
 - Modify: `src/modules/stackchan/attention-controller.ts`
@@ -52,7 +52,7 @@ Run: `npx vitest run tests/stackchan-attention-controller.test.ts`
 
 Expected: PASS。
 
-### Task 2: Runtime live status and bounded counters
+## Task 2: Runtime live status and bounded counters
 
 **Files:**
 - Modify: `src/runtime/stackchan-attention-runtime.ts`
@@ -100,7 +100,7 @@ Run: `npx vitest run tests/stackchan-attention-runtime.test.ts`
 
 Expected: PASS。
 
-### Task 3: Owner status forwarding
+## Task 3: Owner status forwarding
 
 **Files:**
 - Modify: `src/runtime/stackchan-attention-owner.ts`
@@ -126,7 +126,7 @@ Run: `npx vitest run tests/stackchan-attention-owner.test.ts`
 
 Expected: PASS。
 
-### Task 4: Aggregate-only field report
+## Task 4: Aggregate-only field report
 
 **Files:**
 - Modify: `scripts/field/stackchan-face-follow.ts`
@@ -162,7 +162,7 @@ Run: `npx vitest run tests/stackchan-face-follow-field.test.ts`
 
 Expected: PASS。
 
-### Task 5: Full verification
+## Task 5: Full verification
 
 **Files:**
 - Verify only
@@ -189,7 +189,7 @@ Expected: typecheck、lint、ast、testがすべてPASS。
 
 - [ ] **Step 3: Run secret scan**
 
-Run: `/Users/monsoon/Dev/dotfiles/node_modules/.bin/secretlint .`
+Run: `npx secretlint .`
 
 Expected: PASS。画像、token、ローカルsecretを新規出力しない。
 

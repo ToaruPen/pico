@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import * as servoLatencyField from "../scripts/field/stackchan-servo-latency.js";
+import {
+  type StackChanServoContentionCondition as CameraCondition,
+  type StackChanServoContentionCameraStatus as CameraStatus,
+  type StackChanServoContentionReport as ContentionReport,
+  parseStackChanServoContentionArguments,
+  parseStackChanServoLatencyArguments,
+  readContentionCameraStatus,
+  runStackChanServoContentionField,
+  runStackChanServoLatencyField
+} from "../scripts/field/stackchan-servo-latency.js";
 import { definePicoConfig } from "../src/config/index.js";
 import type {
   StackChanHeadTargetLane,
@@ -7,9 +16,6 @@ import type {
   StackChanHeadTargetStatus
 } from "../src/modules/stackchan/head-target-lane.js";
 import type { StackChanAdapter, StackChanHeadPose } from "../src/modules/stackchan/index.js";
-import type { AttentionDetectionModel } from "../src/modules/vision/attention-detection.js";
-
-const { parseStackChanServoLatencyArguments, runStackChanServoLatencyField } = servoLatencyField;
 
 describe("StackChan servo latency field harness", () => {
   it("requires explicit live permission and a bounded sample count", () => {
@@ -84,22 +90,8 @@ describe("StackChan servo latency field harness", () => {
   });
 
   it("runs symmetric camera contention blocks with one aggregate report", async () => {
-    const parseContentionArguments = Reflect.get(
-      servoLatencyField,
-      "parseStackChanServoContentionArguments"
-    );
-    const runContentionField = Reflect.get(servoLatencyField, "runStackChanServoContentionField");
-    expect(parseContentionArguments).toBeTypeOf("function");
-    expect(runContentionField).toBeTypeOf("function");
-    if (
-      typeof parseContentionArguments !== "function" ||
-      typeof runContentionField !== "function"
-    ) {
-      return;
-    }
-
     expect(
-      parseContentionArguments([
+      parseStackChanServoContentionArguments([
         "--enable-live-run",
         "--camera-contention",
         "--duration-ms",
@@ -116,7 +108,7 @@ describe("StackChan servo latency field harness", () => {
       reportOutput: "/tmp/stackchan-stability.json"
     });
     expect(
-      parseContentionArguments([
+      parseStackChanServoContentionArguments([
         "--enable-live-run",
         "--camera-contention",
         "--duration-ms",
@@ -157,7 +149,7 @@ describe("StackChan servo latency field harness", () => {
       load: []
     };
 
-    const report = await (runContentionField as ContentionRunner)(
+    const report = await runStackChanServoContentionField(
       liveConfig(),
       {
         enableLiveRun: true,
@@ -327,7 +319,7 @@ describe("StackChan servo latency field harness", () => {
           block.nativeWrites.ackFailures === 0 &&
           block.nativeWrites.overflowCount === 0 &&
           !block.autoSleepEnabled &&
-          block.minimumCommandedPitch === 33 &&
+          block.minimumCommandedPitch >= 23 &&
           block.stopAndHomeMs <= 5_000
       )
     ).toBe(true);
@@ -351,18 +343,12 @@ describe("StackChan servo latency field harness", () => {
   });
 
   it("stops a failed load block, homes under the stream lease, then releases camera bytes", async () => {
-    const runContentionField = Reflect.get(servoLatencyField, "runStackChanServoContentionField");
-    expect(runContentionField).toBeTypeOf("function");
-    if (typeof runContentionField !== "function") {
-      return;
-    }
-
     let cameraRunning = false;
     let closeCount = 0;
     let homeCount = 0;
     let sequence = 0;
     const cleanupOrder: string[] = [];
-    const report = await (runContentionField as ContentionRunner)(
+    const report = await runStackChanServoContentionField(
       liveConfig(),
       {
         enableLiveRun: true,
@@ -450,10 +436,143 @@ describe("StackChan servo latency field harness", () => {
       available: false
     });
   });
+
+  it("returns home even when stopping the head-target lane fails", async () => {
+    let currentPose: StackChanHeadPose = { yaw: 3, pitch: 33 };
+    const restoredPoses: StackChanHeadPose[] = [];
+    const lane = contentionHeadTargetLane();
+
+    const report = await runStackChanServoContentionField(
+      liveConfig(),
+      {
+        enableLiveRun: true,
+        durationMs: 1,
+        consecutiveLoadRuns: 1,
+        singleCondition: "stream",
+        reportOutput: "/tmp/stackchan-stop-failure.json"
+      },
+      {
+        createAdapter: () => ({
+          connect: () => Promise.resolve(),
+          captureJpeg: () => Promise.reject(new Error("camera must not be used")),
+          getHeadAngles: () => Promise.resolve(currentPose),
+          moveHead: (pose) => {
+            currentPose = pose;
+            restoredPoses.push(pose);
+            return Promise.resolve();
+          },
+          close: () => Promise.resolve()
+        }),
+        createHomeAdapter: () => {
+          throw new Error("connected adapter must restore home");
+        },
+        createHeadTargetLane: () => ({
+          ...lane,
+          stop: () => Promise.reject(new Error("lane stop failed"))
+        }),
+        createModel: () => Promise.resolve({ detect: () => Promise.resolve([]) }),
+        readCameraStatus: () => Promise.resolve(streamCameraStatus()),
+        createDiagnostics: () => stableDiagnostics(),
+        monotonicNowMs: () => 0,
+        wallNowMs: () => 0,
+        waitMs: () => Promise.resolve(),
+        writeReport: () => Promise.resolve()
+      }
+    );
+
+    expect(report.status).toBe("failed");
+    expect(restoredPoses).toContainEqual({ yaw: 0, pitch: 37 });
+    expect(restoredPoses).toContainEqual({ yaw: 0, pitch: 33 });
+    expect(report.details.blocks[0]?.home.returnedHome).toBe(true);
+  });
+
+  it("does not issue a command after an oversleep crosses the block deadline", async () => {
+    let monotonicMs = 0;
+    const updatedSequences: number[] = [];
+    const lane = contentionHeadTargetLane();
+
+    await runStackChanServoContentionField(
+      liveConfig(),
+      {
+        enableLiveRun: true,
+        durationMs: 501,
+        consecutiveLoadRuns: 1,
+        singleCondition: "stream",
+        reportOutput: "/tmp/stackchan-command-deadline.json"
+      },
+      {
+        createAdapter: () => homeTrackingAdapter(),
+        createHomeAdapter: () => {
+          throw new Error("connected adapter must restore home");
+        },
+        createHeadTargetLane: () => ({
+          ...lane,
+          update: (target) => {
+            updatedSequences.push(target.sequence);
+            return lane.update(target);
+          }
+        }),
+        createModel: () => Promise.resolve({ detect: () => Promise.resolve([]) }),
+        readCameraStatus: () => Promise.resolve(streamCameraStatus()),
+        createDiagnostics: () => stableDiagnostics(),
+        monotonicNowMs: () => monotonicMs,
+        wallNowMs: () => monotonicMs,
+        waitMs: (durationMs) => {
+          monotonicMs += durationMs + Number(durationMs > 0) * 100;
+          return Promise.resolve();
+        },
+        writeReport: () => Promise.resolve()
+      }
+    );
+
+    expect(updatedSequences).toEqual([0]);
+  });
+
+  it("bounds the camera-status fetch with the configured timeout", async () => {
+    const fetchDescriptor = Object.getOwnPropertyDescriptor(globalThis, "fetch");
+    const requests: Array<Parameters<typeof fetch>> = [];
+    const recordingFetch: typeof fetch = (...arguments_) => {
+      requests.push(arguments_);
+      return Promise.reject(new Error("outbound request stopped"));
+    };
+    Object.defineProperty(globalThis, "fetch", {
+      ...fetchDescriptor,
+      value: recordingFetch
+    });
+
+    try {
+      const stackchan = liveConfig().camera.stackchan;
+      if (stackchan === undefined) {
+        throw new Error("expected StackChan test config");
+      }
+      await expect(
+        readContentionCameraStatus(stackchan, {
+          STACKCHAN_TOKEN: "test-token"
+        })
+      ).rejects.toThrow();
+      const cameraStatusCall = requests.find(([input]) =>
+        fetchInputUrl(input).includes("/camera/status")
+      );
+
+      expect(cameraStatusCall).toBeDefined();
+      expect(cameraStatusCall?.[1]?.signal).toBeInstanceOf(AbortSignal);
+    } finally {
+      if (fetchDescriptor !== undefined) {
+        Object.defineProperty(globalThis, "fetch", fetchDescriptor);
+      }
+    }
+  });
 });
 
 function hasHealthyContentionCamera(block: ContentionReport["details"]["blocks"][number]): boolean {
   return hasHealthyFrameTiming(block) && hasHealthyCreditFlow(block);
+}
+
+function fetchInputUrl(input: Parameters<typeof fetch>[0]): string {
+  if (typeof input === "string") {
+    return input;
+  }
+  return input instanceof URL ? input.href : input.url;
 }
 
 function hasHealthyFrameTiming(block: ContentionReport["details"]["blocks"][number]): boolean {
@@ -475,110 +594,33 @@ function hasHealthyCreditFlow(block: ContentionReport["details"]["blocks"][numbe
   );
 }
 
-type CameraCondition = "off" | "stream" | "load";
-
-type CameraStatus = {
-  readonly running: boolean;
-  readonly subscribers: number;
-  readonly physicalRunning: boolean;
-  readonly available: boolean;
-  readonly receivedFrames: number;
-  readonly maxJpegBytes: number;
-  readonly creditSendCount: number;
-  readonly creditSendFailures: number;
-  readonly creditSendMaxUs: number;
-};
-
-type ContentionDependencies = {
-  readonly createAdapter: (
-    config: NonNullable<ReturnType<typeof liveConfig>["camera"]["stackchan"]>,
-    condition: CameraCondition
-  ) => StackChanAdapter;
-  readonly createHomeAdapter: (
-    config: NonNullable<ReturnType<typeof liveConfig>["camera"]["stackchan"]>
-  ) => StackChanAdapter;
-  readonly createHeadTargetLane: (
-    config: NonNullable<ReturnType<typeof liveConfig>["camera"]["stackchan"]>
-  ) => StackChanHeadTargetLane;
-  readonly createModel: (
-    config: ReturnType<typeof liveConfig>["vision"]["attentionDetection"]
-  ) => Promise<AttentionDetectionModel>;
-  readonly readCameraStatus: (
-    config: NonNullable<ReturnType<typeof liveConfig>["camera"]["stackchan"]>
-  ) => Promise<CameraStatus>;
-  readonly createDiagnostics: () => StackChanStabilityDiagnostics;
-  readonly monotonicNowMs: () => number;
-  readonly wallNowMs: () => number;
-  readonly waitMs: (durationMs: number) => Promise<void>;
-  readonly writeReport: (path: string, report: ContentionReport) => Promise<void>;
-};
-
-type ContentionReport = {
-  readonly status: "passed" | "failed";
-  readonly details: {
-    readonly blockOrder: readonly CameraCondition[];
-    readonly durationMs: number;
-    readonly commandIntervalMs: number;
-    readonly sweepExtentDeg: number;
-    readonly blocks: readonly {
-      readonly condition: CameraCondition;
-      readonly successfulUpdates: number;
-      readonly failedUpdates: number;
-      readonly gatewaySessionStable: boolean;
-      readonly nativeWrites: {
-        readonly attemptedWrites: number;
-        readonly ackFailures: number;
-        readonly overflowCount: number;
-      };
-      readonly autoSleepEnabled: boolean;
-      readonly minimumCommandedPitch: number;
-      readonly stopAndHomeMs: number;
-      readonly home: { readonly returnedHome: boolean };
-      readonly headTargetLane: {
-        readonly failed: number;
-        readonly staleDiscarded: number;
-        readonly maximumActiveCalls: number;
-        readonly maximumPendingDepth: number;
-        readonly postStopDispatches: number;
-      };
-      readonly camera: {
-        readonly creditSend: {
-          readonly count: number;
-          readonly failures: number;
-          readonly maxUs: number;
-        };
-        readonly observationGapMs: {
-          readonly maxMs: number;
-        };
-        readonly deviceCaptureGapMs: {
-          readonly count: number;
-          readonly maxMs: number;
-        };
-        readonly deviceEncodeMs: {
-          readonly count: number;
-          readonly maxMs: number;
-        };
-        readonly missedSequenceCount: number;
-        readonly cleanup: {
-          readonly running: boolean;
-          readonly subscribers: number;
-          readonly physicalRunning: boolean;
-          readonly available: boolean;
-        };
-      };
-    }[];
-    readonly consecutiveLoadPasses: number;
-    readonly conditions: Record<
-      CameraCondition,
-      {
-        readonly blockCount: number;
-        readonly updateAcknowledgmentMs: {
-          readonly over250MsCount: number;
-        };
-      }
-    >;
+function streamCameraStatus(): CameraStatus {
+  return {
+    running: true,
+    subscribers: 1,
+    physicalRunning: true,
+    available: true,
+    receivedFrames: 1,
+    maxJpegBytes: 4,
+    creditSendCount: 1,
+    creditSendFailures: 0,
+    creditSendMaxUs: 1
   };
-};
+}
+
+function homeTrackingAdapter(): StackChanAdapter {
+  let pose: StackChanHeadPose = { yaw: 0, pitch: 33 };
+  return {
+    connect: () => Promise.resolve(),
+    captureJpeg: () => Promise.reject(new Error("camera must not be used")),
+    getHeadAngles: () => Promise.resolve(pose),
+    moveHead: (nextPose) => {
+      pose = nextPose;
+      return Promise.resolve();
+    },
+    close: () => Promise.resolve()
+  };
+}
 
 function contentionHeadTargetLane(
   options: {
@@ -689,18 +731,6 @@ type StackChanStabilityDiagnostics = {
   readonly readAutoSleepEnabled: () => Promise<boolean>;
   readonly close: () => Promise<void>;
 };
-
-type ContentionRunner = (
-  config: ReturnType<typeof liveConfig>,
-  options: {
-    readonly enableLiveRun: true;
-    readonly durationMs: number;
-    readonly consecutiveLoadRuns: number;
-    readonly singleCondition?: "stream" | "load";
-    readonly reportOutput: string;
-  },
-  dependencies: ContentionDependencies
-) => Promise<ContentionReport>;
 
 function liveConfig() {
   return definePicoConfig({

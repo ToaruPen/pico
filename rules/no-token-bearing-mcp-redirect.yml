@@ -1,0 +1,21 @@
+id: no-token-bearing-mcp-redirect
+language: TypeScript
+severity: error
+message: Token-bearing MCP transports must reject HTTP redirects.
+rule:
+  all:
+    - pattern: |
+        new StreamableHTTPClientTransport($URL, {
+          $$$OPTIONS
+        })
+    - has:
+        pattern:
+          context: "const options = { authorization: $TOKEN };"
+          selector: pair
+        stopBy: end
+    - not:
+        has:
+          pattern:
+            context: 'const options = { redirect: "error" };'
+            selector: pair
+          stopBy: end

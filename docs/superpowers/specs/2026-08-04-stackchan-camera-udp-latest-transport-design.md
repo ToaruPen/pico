@@ -1,5 +1,9 @@
 # StackChan camera UDP latest-only transport設計
 
+> **Historical rejected design — non-executable.** The original SCU1 draft below is retained as
+> investigation history. It must not be implemented or deployed without the AEAD, stream-epoch,
+> nonce-uniqueness, and replay-window requirements added to this document.
+
 ## 目的
 
 人物追従で残る間欠停止を、camera媒体だけを再送しないlatest-only datagramへ移すことで除去する。既知の滑らかな人物追従制御器、MCP control、音声WebSocket、servo spring、Gateway head-target laneには変更を加えない。
@@ -99,7 +103,11 @@ Gatewayはactive device sessionごとに未完成frameを一つだけ保持す�
 - 未完成frameは500 msを超えた時点で、次のdatagram処理またはstream cleanup時に破棄する。専用cleanup workerは追加しない。
 - stream start、stop、session token変更、camera/control disconnectで未完成frameを消去する。
 
-sequenceはstream startごとに1から始まる。Gatewayもstream start時にreassembly stateをresetするため、同じsession内のstream再開を新しいepochとして扱う。
+sequenceはstream startごとに1から始めるだけではepochを識別できない。各stream startで
+128-bit random stream epochを生成してauthenticated WebSocket上で合意し、すべての
+datagram headerへ載せる。Gatewayはcurrent epoch以外のchunk/creditをallocation前に
+破棄し、restart前の遅延datagramを現streamへ混入させない。reassembly resetだけを
+epoch境界としてはならない。
 
 ## firmware data flow
 
@@ -140,7 +148,15 @@ UDP listener、session registry、assemblerはcamera moduleの責務とし、hea
 - Gatewayはtokenに加えてcamera WebSocket peerのsource IPとUDP source IPを一致させる。
 - 不正datagramはpayload allocation前にrejectする。
 - UDP portをinternetへ公開しない。既存Gatewayと同じ保護されたlocal/Tailscale境界でbindする。
-- CRC32は認証ではない。session tokenとsource IPがsession bindingを所有する。
+- CRC32は偶発的な再構築破損の検出専用であり、認証ではない。
+- authenticated WebSocketでstreamごとのkey materialと128-bit epochを合意する。frameと
+  creditはdirection-separated keyを使うAEADでheaderとpayload全体を認証し、nonceを
+  epochと単調datagram counterから一意に導出する。
+- receiverはcurrent epochだけを受け入れ、directionごとのbounded replay windowで
+  duplicate/old counterをrejectする。AEAD検証前にframe payloadをallocate/publishせず、
+  token/source IP検査は追加のrouting filterとしてのみ使う。
+- 利用するESP-IDF暗号primitive、key derivation、nonce layout、counter wrap/rekeyを独立に
+  reviewし、C++/Python golden vectorとtamper/replay試験を通すまで本設計を実装可能としない。
 
 ## deterministic tests
 
@@ -149,6 +165,8 @@ UDP listener、session registry、assemblerはcamera moduleの責務とし、hea
 - C++とPythonで同一golden vectorを検証する。
 - 1,200 byte上限、chunk index/count、network byte order、token、CRC32を検証する。
 - zero length、過大frame、未知version/kind、短いheaderをrejectする。
+- stream restart後に届いた旧epoch datagramをrejectする。
+- header/payload改変、credit偽造、duplicate/old counter、direction違いのreplayをrejectする。
 
 ### Gateway reassembly
 

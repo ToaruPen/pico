@@ -48,6 +48,19 @@ instructions.
   production latest-only target lane, sample aggregate yaw continuity at
   20 ms intervals, return home, and write a mode-`0600` report without
   retaining a position timeline.
+- `npm run field:stackchan-head-target-lane -- --enable-live-run --duration-ms <ms> --update-hz <hz> --status-hz <hz> --report-output <json>`:
+  stress the latest-only head-target lane at explicit update and status rates,
+  restore home, and write aggregate latency, rate, depth, and safety metrics.
+- `npm run field:stackchan-attention-replay -- --report-output <absolute-json> --repeat 3 --producer-source-hash <sha256> [--step-quantization round|error-feedback]`:
+  run the deterministic attention-controller replay and write its
+  schema-validated aggregate comparison report. Inspect `--help` before use
+  because qualification inputs and output paths are explicit.
+- `npm run field:stackchan-attention-replay-evidence -- build <required flag/value pairs>`:
+  build or verify a private deterministic replay evidence bundle from explicit
+  report, source, contract, and output paths.
+- `npm run field:stackchan-target-filter-evaluation -- --report-output <json>`:
+  evaluate the fixed-seed target-filter grid and atomically write the selected
+  candidate and aggregate acceptance metrics without camera or device access.
 
 ## Deterministic Tooling
 
@@ -67,6 +80,8 @@ instructions.
 - `rules/no-test-doubles.yml`: blocks mock/stub/fake/fallback identifiers in
   source and tests.
 - `rules/no-automatic-fallback.yml`: blocks try/catch provider fallback chains.
+- `rules/no-token-bearing-mcp-redirect.yml`: requires token-bearing MCP HTTP
+  transports to reject redirects.
 
 If a repeated review rule can be expressed structurally, add or update an
 ast-grep rule and test instead of relying on AGENTS.md prose.

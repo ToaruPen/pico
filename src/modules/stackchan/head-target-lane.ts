@@ -219,7 +219,8 @@ export function createStackChanHeadTargetLaneFromConfig(
     requestInit: {
       headers: {
         authorization: `Bearer ${token}`
-      }
+      },
+      redirect: "error"
     }
   });
   const client: StackChanMcpClient = {

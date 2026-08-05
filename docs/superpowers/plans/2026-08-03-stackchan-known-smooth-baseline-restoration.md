@@ -4,7 +4,7 @@
 
 **Goal:** Restore the operator-approved face/head incremental controller while retaining single-flight Gateway dispatch, disabled auto-sleep, and the temporary 23-degree pitch safety floor.
 
-**Architecture:** Revert only post-approval behavior at the detector/controller boundary. Keep the existing transport and firmware surfaces unchanged, then validate the restored boundary with deterministic unit/runtime tests before any attended hardware motion.
+**Architecture:** Tasks 1–5 revert post-approval behavior at the detector/controller boundary while preserving the existing transport and firmware surfaces. Task 6 records a later, separately authorized continuation that changes the spring firmware and runtime/field evidence; its Pico, Gateway, firmware-host, and firmware-build gates are part of this plan's final scope.
 
 **Tech Stack:** TypeScript, Vitest, PINTO postprocessed detections, Python asyncio Gateway.
 
@@ -65,7 +65,7 @@ Run: `./node_modules/.bin/vitest run tests/stackchan-attention-controller.test.t
 
 - [x] **Step 1: Update runtime expectations to the configured step cap and no short-loss refresh**
 
-The runtime already delegates to the pure controller, so no production runtime change is expected.
+For this task the runtime already delegates to the pure controller, so no production runtime change is expected. The separately scoped Task 6 later changes the runtime evidence boundary.
 
 - [x] **Step 2: Run controller, detector, runtime, lane, and config tests**
 

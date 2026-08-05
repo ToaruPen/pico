@@ -103,7 +103,10 @@ export function parseStackChanMotionContinuityArguments(
   }
   const reportOutput = requireString(values, "--report-output");
   const expected = new Set(["--enable-live-run", "--report-output"]);
-  if (values.size !== expected.size || [...values.keys()].some((name) => !expected.has(name))) {
+  if (
+    values.size !== expected.size ||
+    Array.from(values.keys()).some((name) => !expected.has(name))
+  ) {
     throw new Error("motion continuity arguments are invalid");
   }
   if (!isAbsolute(reportOutput)) {
@@ -163,13 +166,14 @@ export function summarizeStackChanMotionContinuity(
   const stationaryRatio =
     eligibleIntervals === 0 ? 1 : roundThousandths(stationaryIntervals / eligibleIntervals);
   const sampleGapMs = summarizeDistribution(gaps);
+  const roundedMaximumStepDeg = roundHundredths(maximumStepDeg);
   const qualified =
     eligibleIntervals >= 50 &&
     stationaryRatio <= 0.1 &&
     longestStationaryMs <= 80 &&
     reverseIntervals === 0 &&
     sampleGapMs.p95 <= 40 &&
-    maximumStepDeg <= 4;
+    roundedMaximumStepDeg <= 4;
 
   return {
     sampleCount: samples.length,
@@ -180,7 +184,7 @@ export function summarizeStackChanMotionContinuity(
     stationaryRatio,
     longestStationaryMs: roundHundredths(longestStationaryMs),
     sampleGapMs,
-    maximumStepDeg,
+    maximumStepDeg: roundedMaximumStepDeg,
     qualified
   };
 }
@@ -313,13 +317,33 @@ export async function runStackChanMotionContinuitySweep(options: {
     eligibleAfterMs: Number.POSITIVE_INFINITY
   };
 
-  await Promise.all([publishMotionTargets(), sampleMotionState()]);
+  const cancellation: { requested: boolean } = { requested: false };
+  const cancellationRequested = (): boolean => cancellation.requested;
+  const [publication, sampling] = await Promise.allSettled([
+    publishMotionTargets().catch((error: unknown) => {
+      cancellation.requested = true;
+      throw error;
+    }),
+    sampleMotionState().catch((error: unknown) => {
+      cancellation.requested = true;
+      throw error;
+    })
+  ]);
+  if (publication.status === "rejected") {
+    throw publication.reason;
+  }
+  if (sampling.status === "rejected") {
+    throw sampling.reason;
+  }
   return samples;
 
   async function publishMotionTargets(): Promise<void> {
     for (const [index, target] of options.targets.entries()) {
       const targetDueAtMs = startedAtMs + index * timing.targetIntervalMs;
       await waitUntil(targetDueAtMs);
+      if (cancellationRequested()) {
+        return;
+      }
       await options.lane.update({
         leaseId: options.leaseId,
         sequence: index + 1,
@@ -337,12 +361,15 @@ export async function runStackChanMotionContinuitySweep(options: {
 
   async function sampleMotionState(): Promise<void> {
     let nextSampleAtMs = startedAtMs;
-    while (monotonicNowMs() < deadlineMs) {
+    while (!cancellationRequested() && monotonicNowMs() < deadlineMs) {
       await waitUntil(nextSampleAtMs);
-      if (monotonicNowMs() >= deadlineMs) {
+      if (cancellationRequested() || monotonicNowMs() >= deadlineMs) {
         return;
       }
       const motion = await options.lane.motionStatus(options.leaseId);
+      if (cancellationRequested()) {
+        return;
+      }
       const observedAtMs = monotonicNowMs();
       samples.push({
         observedAtMs: roundHundredths(observedAtMs - startedAtMs),

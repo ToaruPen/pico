@@ -211,12 +211,15 @@ async function runAgentScenePreparation(
         preparedForActiveAgent: true
       }
     };
-  } catch {
+  } catch (error) {
     return {
       status: "failed",
       provider: "agent",
       source: route.source,
-      reason: "pico agent scene preparation failed"
+      reason: `pico agent scene preparation failed: ${redactRtspSensitiveValues(
+        errorMessage(error),
+        readDirectExecutionSensitiveValues(config)
+      )}`
     };
   }
 }

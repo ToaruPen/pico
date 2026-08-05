@@ -39,6 +39,17 @@ describe("StackChan camera grid field harness", () => {
     expect(() =>
       parseStackChanCameraGridArguments(["--enable-live-run", "--report-output", "/tmp/out.json"])
     ).toThrow("--model-path");
+    expect(() =>
+      parseStackChanCameraGridArguments([
+        "--enable-live-run",
+        "--model-path",
+        "/tmp/model.onnx",
+        "--report-output",
+        "/tmp/out.json",
+        "--surprise",
+        "value"
+      ])
+    ).toThrow("unknown option: --surprise");
   });
 
   it("records aggregate quality and detection metadata without image bytes", async () => {

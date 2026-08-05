@@ -10,7 +10,19 @@
 
 **Scope constraint:** Tasks 1-7 preserve all pre-existing dirty worktree changes and do not commit, push, clean, reset, update firmware, reboot hardware, or change production defaults. The user subsequently authorized a separately audited real-device cycle; that continuation remains one-shot, fail-closed, and does not authorize commit or push.
 
-**Progress (2026-08-02):** Tasks 1-7は完了した。error-feedback、最小移動時間、wrong-way cancelは比較で不採用とし、既存の速度継承は追加変更不要と確認した。次の下流候補として、ファームウェアのnative `WritePos`直前にdefault-offのexact duplicate suppressionと固定長telemetryをTDD実装した。host 49/49、Gateway 795 pass/5 skip、firmware script 30/30、ESP-IDF 5.5.2 buildを通過し、ChatGPT Proから一回限りのOTA/ABBA実機評価承認を得た。
+## Authoritative status (2026-08-02)
+
+| Work | Status |
+| --- | --- |
+| Tasks 1–7 below | Complete |
+| Host-only raw IMU/scorable-window continuation | Complete |
+| Adapter implementation and firmware build/link for the IMU continuation | Pending |
+| Gateway restart, hardware connection, and OTA | Pending; not attempted |
+
+The unchecked boxes below preserve the original execution script; this table is authoritative and
+they must not be interpreted as pending work.
+
+Tasks 1-7は完了した。error-feedback、最小移動時間、wrong-way cancelは比較で不採用とし、既存の速度継承は追加変更不要と確認した。次の下流候補として、ファームウェアのnative `WritePos`直前にdefault-offのexact duplicate suppressionと固定長telemetryをTDD実装した。host 49/49、Gateway 795 pass/5 skip、firmware script 30/30、ESP-IDF 5.5.2 buildを通過し、ChatGPT Proから一回限りのOTA/ABBA実機評価承認を得た。
 
 実機runnerは、更新前後のready-session分離、更新後session固定、final native write pending gate、識別子非保存、auto torque releaseの保存・一時無効化・復元を追加のRed→Green 9テストで固定した。2026-08-02の一回限りrunは、実機から43/46-tool ready-sessionが180秒間確立しなかったため、OTA転送前に`OTA blocked`として停止した。OTA、再起動、サーボ駆動、設定変更、ABBA blockはいずれも0で、自動再試行はしていない。証拠は`/tmp/stackchan-field-20260802/evidence/20260801T202122Z-abba/`に保存した。
 

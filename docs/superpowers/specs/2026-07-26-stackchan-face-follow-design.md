@@ -240,7 +240,9 @@ field follow reportで永続化する人物由来の集計は `targetFrames`、`
 - MCP transport error は固定 code/message に変換し、raw exception を上位へ渡さない。
 - process内のStackChan captureはcapture lane、head moveはmove laneで個別にFIFO
   直列化する。異なるadapter間でも同種操作は重ねないが、captureとhead moveは相互に
-  待たせない。MCP request timeoutは各lane取得後に開始する。
+  待たせない。各requestのtimeout/cancellationはlane取得待ちから開始し、期限切れの
+  waiterをqueueから除去する。取消済みwaiterは後からlaneを取得して実行してはならない。
+  MCP callは同じ残余deadline内で完了させる。
 - optional attention failure は resident voice conversation を終了させない。
 - 連続した error による provider fallback は行わない。
 - MCP client close と home return failure は bounded shutdown result に含める。

@@ -182,7 +182,7 @@ function updateZeroRun(
   sample: AttentionQuantizationAxisSample
 ): void {
   if (state.activeRun !== undefined && state.activeRun.boundary !== sample.boundary) {
-    closeZeroRun(state, sample.timestampMs);
+    closeZeroRun(state, state.activeRun.lastAtMs);
   }
   if (state.activeRun !== undefined && isQuantizedCorrection(sample, false)) {
     closeZeroRun(state, sample.timestampMs, sample.quantizedStepDeg);

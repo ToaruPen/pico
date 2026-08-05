@@ -12,7 +12,7 @@
 
 リポジトリ指示とユーザー指定に従い、この計画では commit、push、PR を行わない。
 
-### Task 1: 自然さ優先の設定契約
+## Task 1: 自然さ優先の設定契約
 
 **Files:**
 - Modify: `src/config/index.ts`
@@ -140,7 +140,7 @@ Run: `npx vitest run tests/config.test.ts`
 
 Expected: PASS。
 
-### Task 2: 観測周期から独立した見回し滞在
+## Task 2: 観測周期から独立した見回し滞在
 
 **Files:**
 - Modify: `src/modules/stackchan/attention-controller.ts`
@@ -242,7 +242,7 @@ Run: `npx vitest run tests/stackchan-attention-controller.test.ts`
 
 Expected: PASS。既存scan sequenceテストは各入力時刻を `scanDwellMs` 以上離して更新する。
 
-### Task 3: 明示速度を adapter と runtime に通す
+## Task 3: 明示速度を adapter と runtime に通す
 
 **Files:**
 - Modify: `src/modules/stackchan/index.ts`
@@ -343,7 +343,7 @@ Run: `npx vitest run tests/stackchan.test.ts tests/stackchan-attention-runtime.t
 
 Expected: PASS。
 
-### Task 4: 静的検証と実機チューニング
+## Task 4: 静的検証と実機チューニング
 
 **Files:**
 - Modify: `.pico-local/field-stackchan.yaml`

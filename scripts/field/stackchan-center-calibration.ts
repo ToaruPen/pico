@@ -20,6 +20,10 @@ import {
   type AttentionMetricsSummary,
   createAttentionMetricsAccumulator
 } from "./stackchan-attention-metrics.js";
+import {
+  parseStackChanFieldArguments,
+  requireStackChanFieldStringArgument
+} from "./stackchan-field-arguments.js";
 import { writePrivateJsonReport } from "./stackchan-field-report.js";
 
 export type StackChanCenterCalibrationOptions = {
@@ -110,6 +114,8 @@ export type StackChanCenterCalibrationDependencies = {
 
 const provider = "stackchan-cores3+pinto441-dist" as const;
 const failedReason = "StackChan center calibration field run failed";
+const minimumTargetFrames = 20;
+const maximumTargetFrames = 10_000;
 const allowedOptions = new Set([
   "--enable-live-run",
   "--duration-ms",
@@ -122,7 +128,7 @@ const allowedOptions = new Set([
 export function parseStackChanCenterCalibrationArguments(
   arguments_: readonly string[]
 ): StackChanCenterCalibrationOptions {
-  const values = parseNamedArguments(arguments_);
+  const values = parseStackChanFieldArguments(arguments_, allowedOptions);
   if (!values.has("--enable-live-run")) {
     throw new Error("--enable-live-run is required");
   }
@@ -131,9 +137,14 @@ export function parseStackChanCenterCalibrationArguments(
     enableLiveRun: true,
     durationMs: requireBoundedPositiveInteger(values, "--duration-ms", 120_000),
     maxFrames: requireBoundedPositiveInteger(values, "--max-frames", 10_000),
-    minimumTargetFrames: requireBoundedIntegerRange(values, "--minimum-target-frames", 20, 10_000),
-    modelPath: requireStringArgument(values, "--model-path"),
-    reportOutput: requireStringArgument(values, "--report-output")
+    minimumTargetFrames: requireBoundedIntegerRange(
+      values,
+      "--minimum-target-frames",
+      minimumTargetFrames,
+      maximumTargetFrames
+    ),
+    modelPath: requireStackChanFieldStringArgument(values, "--model-path"),
+    reportOutput: requireStackChanFieldStringArgument(values, "--report-output")
   };
 }
 
@@ -208,7 +219,9 @@ export async function runStackChanCenterCalibrationField(
         frameAgesMs,
         inferenceMs,
         monotonicNowMs,
-        wallNowMs
+        wallNowMs,
+        waitMs,
+        frameIntervalMs: 1_000 / stackchan.streamFps
       });
     } finally {
       runEndedWallMs = wallNowMs();
@@ -351,6 +364,8 @@ type CalibrationLoopOptions = {
   readonly inferenceMs: number[];
   readonly monotonicNowMs: () => number;
   readonly wallNowMs: () => number;
+  readonly waitMs: (durationMs: number) => Promise<void>;
+  readonly frameIntervalMs: number;
 };
 
 async function runCalibrationLoop(input: CalibrationLoopOptions): Promise<void> {
@@ -364,6 +379,7 @@ async function runCalibrationLoop(input: CalibrationLoopOptions): Promise<void> 
     captures += 1;
     const sequence = requireFrameSequence(frame.sequence);
     if (inferredSequences.has(sequence)) {
+      await input.waitMs(input.frameIntervalMs);
       continue;
     }
     inferredSequences.add(sequence);
@@ -540,8 +556,9 @@ async function optionalFileStatus(
     if (isMissingPathError(error)) {
       return undefined;
     }
+    // eslint-disable-next-line preserve-caught-error -- Field errors must not expose local paths.
+    throw new Error("calibration path validation failed");
   }
-  throw new Error("calibration path validation failed");
 }
 
 function isMissingPathError(error: unknown): boolean {
@@ -553,44 +570,12 @@ function isMissingPathError(error: unknown): boolean {
   );
 }
 
-function parseNamedArguments(arguments_: readonly string[]): Map<string, string | true> {
-  const values = new Map<string, string | true>();
-  for (let index = 0; index < arguments_.length; index += 1) {
-    const name = arguments_[index];
-    if (name === undefined || !name.startsWith("--")) {
-      throw new Error("field arguments must use named --options");
-    }
-    if (!allowedOptions.has(name)) {
-      throw new Error(`unknown option: ${name}`);
-    }
-    if (name === "--enable-live-run") {
-      values.set(name, true);
-      continue;
-    }
-    const value = arguments_[index + 1];
-    if (value === undefined || value.startsWith("--")) {
-      throw new Error(`${name} requires a value`);
-    }
-    values.set(name, value);
-    index += 1;
-  }
-  return values;
-}
-
-function requireStringArgument(values: ReadonlyMap<string, string | true>, name: string): string {
-  const value = values.get(name);
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error(`${name} is required`);
-  }
-  return value;
-}
-
 function requireBoundedPositiveInteger(
   values: ReadonlyMap<string, string | true>,
   name: string,
   maximum: number
 ): number {
-  const value = Number(requireStringArgument(values, name));
+  const value = Number(requireStackChanFieldStringArgument(values, name));
   if (!Number.isInteger(value) || value < 1 || value > maximum) {
     throw new Error(`${name} must be a positive integer up to ${maximum}`);
   }
@@ -603,7 +588,7 @@ function requireBoundedIntegerRange(
   minimum: number,
   maximum: number
 ): number {
-  const value = Number(requireStringArgument(values, name));
+  const value = Number(requireStackChanFieldStringArgument(values, name));
   if (!Number.isInteger(value) || value < minimum || value > maximum) {
     throw new Error(`${name} must be an integer from ${minimum} through ${maximum}`);
   }
@@ -611,7 +596,7 @@ function requireBoundedIntegerRange(
 }
 
 function requireMinimumTargetFrames(value: number): void {
-  if (!Number.isInteger(value) || value < 20 || value > 10_000) {
+  if (!Number.isInteger(value) || value < minimumTargetFrames || value > maximumTargetFrames) {
     throw new Error("--minimum-target-frames must be an integer from 20 through 10000");
   }
 }

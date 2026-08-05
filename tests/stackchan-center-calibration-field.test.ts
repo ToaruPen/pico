@@ -366,6 +366,7 @@ describe("StackChan center calibration field harness", () => {
     });
     const modelInputs: PintoAttentionDetectionModelOptions[] = [];
     let detectionCalls = 0;
+    const waits: number[] = [];
     let written: StackChanCenterCalibrationReport | undefined;
     const report = await runStackChanCenterCalibrationField(
       liveConfig(),
@@ -391,6 +392,10 @@ describe("StackChan center calibration field harness", () => {
             }
           });
         },
+        waitMs: (durationMs) => {
+          waits.push(durationMs);
+          return Promise.resolve();
+        },
         writeReport: (_path, value) => {
           written = value;
           return Promise.resolve();
@@ -411,6 +416,7 @@ describe("StackChan center calibration field harness", () => {
       }
     ]);
     expect(detectionCalls).toBe(20);
+    expect(waits).toEqual([1_000 / 12]);
     expect(report).toEqual({
       status: "passed",
       provider: "stackchan-cores3+pinto441-dist",

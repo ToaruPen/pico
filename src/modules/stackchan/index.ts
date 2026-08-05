@@ -247,7 +247,8 @@ export function createStackChanAdapterFromConfig(
       requestInit: {
         headers: {
           authorization: `Bearer ${token}`
-        }
+        },
+        redirect: "error"
       }
     });
     client = {

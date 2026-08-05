@@ -179,6 +179,7 @@ describe("StackChan head target lane field harness", () => {
           pitch: 0
         }
       });
+      expect(lane.statusCallCount()).toBe(150);
       expect(events).toEqual(["connect", "home", "read", "close"]);
       expect((await stat(reportOutput)).mode & 0o777).toBe(0o600);
       expect(serialized).not.toMatch(
@@ -228,6 +229,37 @@ describe("StackChan head target lane field harness", () => {
       dispatched: 200
     });
     expect(written).toEqual(report);
+  });
+
+  it("scales the dispatch floor for a valid low update rate", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const events: string[] = [];
+
+    const run = runStackChanHeadTargetLaneField(
+      fieldConfig(),
+      {
+        enableLiveRun: true,
+        durationMs: 30_000,
+        updateHz: 5,
+        statusHz: 5,
+        reportOutput: "/tmp/not-written.json"
+      },
+      {
+        createLane: () => simulatedLane(1),
+        createAdapter: () => homeAdapter(events),
+        monotonicNowMs: () => Date.now(),
+        writeReport: () => Promise.resolve()
+      }
+    );
+
+    await vi.advanceTimersByTimeAsync(31_500);
+
+    await expect(run).resolves.toMatchObject({
+      passed: true,
+      requestedUpdateHz: 5,
+      deviceDispatchRateHz: 5
+    });
   });
 
   it("uses confirmed apply-correlated replies rather than send starts for the rate gate", async () => {
@@ -303,7 +335,7 @@ function fieldConfig() {
 function simulatedLane(
   dispatchDivisor = 2,
   confirmationDivisor = dispatchDivisor
-): StackChanHeadTargetLane {
+): StackChanHeadTargetLane & { readonly statusCallCount: () => number } {
   const leaseId = "field-lease";
   let accepted = 0;
   let statusCalls = 0;
@@ -381,10 +413,8 @@ function simulatedLane(
           });
         }, 20);
       }),
-    close: () => {
-      expect(statusCalls).toBe(150);
-      return Promise.resolve();
-    }
+    close: () => Promise.resolve(),
+    statusCallCount: () => statusCalls
   };
 }
 

@@ -69,6 +69,9 @@ export type CenteringEvaluation = {
 type RejectedClassification = Pick<CenteringEvaluation, "classification" | "candidate">;
 type ConvergenceAxis = "horizontal" | "vertical";
 
+const MINIMUM_TARGET_FRAMES = 20;
+const FIRST_CENTERED_LIMIT_MS = 5_000;
+
 export function evaluateCenteringCandidate(input: CenteringEvaluationInput): CenteringEvaluation {
   if (!hasValidMetrics(input)) {
     return {
@@ -96,12 +99,12 @@ export function evaluateCenteringCandidate(input: CenteringEvaluationInput): Cen
 
 function collectAcceptanceReasons(input: CenteringEvaluationInput): CenteringAcceptanceReason[] {
   const reasons: CenteringAcceptanceReason[] = [];
-  if (input.targetFrames < 20) {
+  if (input.targetFrames < MINIMUM_TARGET_FRAMES) {
     reasons.push("insufficient-target-frames");
   }
   if (input.diagnostics.firstCenteredMs === undefined) {
     reasons.push("first-centered-missing");
-  } else if (input.diagnostics.firstCenteredMs > 5_000) {
+  } else if (input.diagnostics.firstCenteredMs > FIRST_CENTERED_LIMIT_MS) {
     reasons.push("first-centered-late");
   }
   if (input.diagnostics.evaluationWindow.centeredRatio < 0.7) {
@@ -151,7 +154,7 @@ function classifyRejectedCandidate(input: CenteringEvaluationInput): RejectedCla
 function classifyNonTunableRejection(
   input: CenteringEvaluationInput
 ): RejectedClassification | undefined {
-  if (input.targetFrames < 20) {
+  if (input.targetFrames < MINIMUM_TARGET_FRAMES) {
     return { classification: "insufficient-target" };
   }
   if (input.errors > 0 || !input.returnedHome) {
@@ -296,7 +299,8 @@ function selectConvergenceAxis(input: CenteringEvaluationInput): ConvergenceAxis
 function canEvaluateConvergence(input: CenteringEvaluationInput): boolean {
   return (
     input.diagnostics.servoLimitFrames === 0 &&
-    (input.diagnostics.firstCenteredMs === undefined || input.diagnostics.firstCenteredMs > 5_000)
+    (input.diagnostics.firstCenteredMs === undefined ||
+      input.diagnostics.firstCenteredMs > FIRST_CENTERED_LIMIT_MS)
   );
 }
 

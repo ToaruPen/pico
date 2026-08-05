@@ -1,6 +1,9 @@
 # StackChan Camera UDP Latest-Only Transport Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Historical rejected design — non-executable.** Do not execute the checkboxes below. The SCU1
+> draft relied on a routing token, source binding, sequence, and CRC, but lacked cryptographic
+> datagram authentication, an on-wire stream epoch, and replay rejection. A successor plan must
+> first define and review the AEAD/session/replay contract described in the corresponding design.
 
 **Goal:** Replace only StackChan camera JPEG delivery with an authenticated UDP latest-only protocol so a lost packet cannot impose TCP retransmission head-of-line blocking on person-follow perception.
 
@@ -239,6 +242,12 @@ class CameraDatagramEndpoint(asyncio.DatagramProtocol):
     def sendto(self, data: bytes, addr: tuple[str, int]) -> None: ...
     def close(self) -> None: ...
 ```
+
+This historical API is insufficient and must not be implemented as written. A successor session
+must authenticate every frame and credit datagram with AEAD, bind it to a per-stream on-wire epoch,
+use nonce-unique direction-separated keys established through the authenticated WebSocket, and
+reject duplicate or stale counters with a bounded replay window. Token/source routing remains an
+additional pre-allocation check and never substitutes for message authentication.
 
 In `ESP32Manager.start`, start the WebSocket server, resolve its actual port, then call `loop.create_datagram_endpoint(..., local_addr=(host, actual_ws_port if port != 0 else 0))`. Store and advertise the actual UDP port. Route datagrams by `peek_token()` to exactly one active camera session and schedule completed-frame handling on the event loop.
 

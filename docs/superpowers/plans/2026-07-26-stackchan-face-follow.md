@@ -12,7 +12,7 @@
 
 Repository policy forbids commits unless the user explicitly requests them. Replace each normal commit step with a diff/status checkpoint.
 
-### Task 1: Add strict StackChan and attention config
+## Task 1: Add strict StackChan and attention config
 
 **Files:**
 - Modify: `src/config/index.ts`
@@ -100,7 +100,7 @@ Expected: PASS.
 
 Run `git diff --check` and inspect only the intended config/test/example files.
 
-### Task 2: Add an authenticated StackChan MCP adapter
+## Task 2: Add an authenticated StackChan MCP adapter
 
 **Files:**
 - Create: `src/modules/stackchan/index.ts`
@@ -165,7 +165,9 @@ export type StackChanAdapter = {
 
 The production factory uses `Client` and `StreamableHTTPClientTransport` with
 `requestInit.headers.authorization`. Resolve the token from the configured environment variable
-and reject missing/empty values. Never place the token or capture path in thrown messages.
+and reject missing/empty values. Set `requestInit.redirect` to `"error"` on every transport that
+attaches this header so the bearer token is never forwarded across a redirect. Never place the
+token or capture path in thrown messages.
 
 - [ ] **Step 5: Verify GREEN**
 
@@ -184,7 +186,7 @@ Expected: PASS.
 Run `git diff --check` and confirm the lockfile contains only the new direct dependency and its
 required transitive entries.
 
-### Task 3: Implement PINTO 441-S Dist head/face detection
+## Task 3: Implement PINTO 441-S Dist head/face detection
 
 **Files:**
 - Create: `src/modules/vision/attention-detection.ts`
@@ -262,7 +264,7 @@ npm run typecheck
 
 Expected: PASS.
 
-### Task 4: Implement the bounded attention state machine
+## Task 4: Implement the bounded attention state machine
 
 **Files:**
 - Create: `src/modules/stackchan/attention-controller.ts`
@@ -315,7 +317,7 @@ type AttentionEffect =
 
 Run the focused test and `npm run typecheck`.
 
-### Task 5: Implement the asynchronous StackChan attention runtime
+## Task 5: Implement the asynchronous StackChan attention runtime
 
 **Files:**
 - Create: `src/runtime/stackchan-attention-runtime.ts`
@@ -359,7 +361,7 @@ Use `setInterval().unref()`, one active tick promise, and a run token to suppres
 
 Run focused tests, typecheck, lint, and ast-grep.
 
-### Task 6: Bind attention to the resident interaction lifecycle
+## Task 6: Bind attention to the resident interaction lifecycle
 
 **Files:**
 - Modify: `src/runtime/voice-resident.ts`
@@ -398,7 +400,7 @@ config must allocate no MCP connection, ONNX session, or timer.
 
 Run the focused tests and `npm run typecheck`.
 
-### Task 7: Add bounded field harnesses and verify the real device
+## Task 7: Add bounded field harnesses and verify the real device
 
 **Files:**
 - Create: `scripts/field/stackchan-camera-grid.ts`

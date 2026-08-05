@@ -17,6 +17,10 @@ import {
   createPintoAttentionDetectionModel,
   selectAttentionTarget
 } from "../../src/modules/vision/attention-detection.js";
+import {
+  parseStackChanFieldArguments,
+  requireStackChanFieldStringArgument
+} from "./stackchan-field-arguments.js";
 
 export type StackChanCameraGridOptions = {
   readonly enableLiveRun: true;
@@ -75,19 +79,20 @@ export type StackChanCameraGridDependencies = {
 };
 
 const provider = "stackchan-cores3+pinto441-dist" as const;
+const allowedOptions = new Set(["--enable-live-run", "--model-path", "--report-output"]);
 
 export function parseStackChanCameraGridArguments(
   arguments_: readonly string[]
 ): StackChanCameraGridOptions {
-  const values = parseNamedArguments(arguments_);
+  const values = parseStackChanFieldArguments(arguments_, allowedOptions);
   if (!values.has("--enable-live-run")) {
     throw new Error("--enable-live-run is required");
   }
 
   return {
     enableLiveRun: true,
-    modelPath: requireArgument(values, "--model-path"),
-    reportOutput: requireArgument(values, "--report-output")
+    modelPath: requireStackChanFieldStringArgument(values, "--model-path"),
+    reportOutput: requireStackChanFieldStringArgument(values, "--report-output")
   };
 }
 
@@ -236,35 +241,6 @@ function writeJsonReport(path: string, report: StackChanCameraGridReport): Promi
     encoding: "utf8",
     mode: 0o600
   });
-}
-
-function parseNamedArguments(arguments_: readonly string[]): Map<string, string | true> {
-  const values = new Map<string, string | true>();
-  for (let index = 0; index < arguments_.length; index += 1) {
-    const name = arguments_[index];
-    if (name === undefined || !name.startsWith("--")) {
-      throw new Error("field arguments must use named --options");
-    }
-    if (name === "--enable-live-run") {
-      values.set(name, true);
-      continue;
-    }
-    const value = arguments_[index + 1];
-    if (value === undefined || value.startsWith("--")) {
-      throw new Error(`${name} requires a value`);
-    }
-    values.set(name, value);
-    index += 1;
-  }
-  return values;
-}
-
-function requireArgument(values: ReadonlyMap<string, string | true>, name: string): string {
-  const value = values.get(name);
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error(`${name} is required`);
-  }
-  return value;
 }
 
 function samePose(left: StackChanHeadPose, right: StackChanHeadPose): boolean {

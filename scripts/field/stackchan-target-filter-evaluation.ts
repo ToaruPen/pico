@@ -60,10 +60,13 @@ export type StackChanTargetFilterAcceptance = {
   readonly checks: readonly StackChanTargetFilterAcceptanceCheck[];
 };
 
-export type StackChanTargetFilterCandidateResult = {
+export type StackChanTargetFilterBaselineResult = {
   readonly config: PicoStackChanTargetFilterConfig;
   readonly stationary: StackChanTargetFilterTraceMetrics;
   readonly reversal: StackChanTargetFilterTraceMetrics;
+};
+
+export type StackChanTargetFilterCandidateResult = StackChanTargetFilterBaselineResult & {
   readonly acceptance: StackChanTargetFilterAcceptance;
 };
 
@@ -77,7 +80,7 @@ export type StackChanTargetFilterEvaluation = {
   readonly seed: number;
   readonly sampleIntervalMs: number;
   readonly thresholds: StackChanTargetFilterEvaluationThresholds;
-  readonly raw: StackChanTargetFilterCandidateResult;
+  readonly raw: StackChanTargetFilterBaselineResult;
   readonly candidates: readonly StackChanTargetFilterCandidateResult[];
   readonly selected?: StackChanTargetFilterCandidateResult;
 };
@@ -107,10 +110,10 @@ export function evaluateStackChanTargetFilterCandidates(
 ): StackChanTargetFilterEvaluation {
   const thresholds = { ...DEFAULT_THRESHOLDS, ...thresholdOverrides };
   const traces = createEvaluationTraces();
-  const raw = simulateCandidate({ enabled: false }, traces.stationary, traces.reversal);
+  const raw = simulateConfiguration({ enabled: false }, traces.stationary, traces.reversal);
   const candidates = [0.5, 1, 1.5, 2].flatMap((minimumCutoffHz) =>
     [0.5, 1, 2, 4].map((speedCoefficient) => {
-      const result = simulateCandidate(
+      const result = simulateConfiguration(
         {
           enabled: true,
           minimumCutoffHz,
@@ -127,7 +130,7 @@ export function evaluateStackChanTargetFilterCandidates(
     })
   );
   const accepted = candidates.filter(({ acceptance }) => acceptance.passed);
-  const selected = [...accepted].sort((left, right) => compareCandidateRank(raw, left, right))[0];
+  const selected = accepted.sort((left, right) => compareCandidateRank(raw, left, right))[0];
 
   return {
     seed: EVALUATION_SEED,
@@ -178,11 +181,11 @@ function createLinearCongruentialGenerator(seed: number): () => number {
   };
 }
 
-function simulateCandidate(
+function simulateConfiguration(
   targetFilter: PicoStackChanTargetFilterConfig,
   stationaryTrace: readonly TraceSample[],
   reversalTrace: readonly TraceSample[]
-): StackChanTargetFilterCandidateResult {
+): StackChanTargetFilterBaselineResult {
   const stationarySamples = simulateTrace(stationaryTrace, targetFilter);
   const reversalSamples = simulateTrace(reversalTrace, targetFilter);
   return {
@@ -191,8 +194,7 @@ function simulateCandidate(
     reversal: summarizeTrace(
       reversalSamples,
       REVERSAL_SEGMENT_SAMPLE_COUNT * 2 * SAMPLE_INTERVAL_MS
-    ),
-    acceptance: { passed: true, checks: baselineChecks() }
+    )
   };
 }
 
@@ -277,7 +279,15 @@ function summarizeTrace(
   const commandVelocityTotalVariation = totalVariation([0, ...velocities]);
   const finalPose = samples.at(-1)?.pose ?? { yaw: 0, pitch: 35 };
   const firstCorrectReversalLatencyMs =
-    reversalAtMs === undefined ? 0 : firstCorrectReversalLatency(samples, reversalAtMs);
+    reversalAtMs === undefined
+      ? 0
+      : measureFirstCorrectReversalLatency(
+          samples.map(({ sample, stepYaw }) => ({
+            observedAtMs: sample.observedAtMs,
+            stepYaw
+          })),
+          reversalAtMs
+        );
 
   return {
     filteredCenterTotalVariation: round(totalVariation(centers)),
@@ -304,16 +314,17 @@ function summarizeTrace(
   };
 }
 
-function firstCorrectReversalLatency(
-  samples: readonly SimulatedSample[],
+export function measureFirstCorrectReversalLatency(
+  samples: readonly { readonly observedAtMs: number; readonly stepYaw: number }[],
   reversalAtMs: number
 ): number {
   const response = samples.find(
-    ({ sample, stepYaw }) => sample.observedAtMs >= reversalAtMs && stepYaw < 0
+    ({ observedAtMs, stepYaw }) => observedAtMs >= reversalAtMs && stepYaw < 0
   );
-  return response === undefined
-    ? samples.length * SAMPLE_INTERVAL_MS
-    : response.sample.observedAtMs - reversalAtMs;
+  if (response === undefined) {
+    throw new Error("target-filter reversal response was not measured");
+  }
+  return response.observedAtMs - reversalAtMs;
 }
 
 function countExtraDirectionReversals(
@@ -337,8 +348,8 @@ function countExtraDirectionReversals(
 }
 
 function evaluateAcceptance(
-  raw: StackChanTargetFilterCandidateResult,
-  candidate: StackChanTargetFilterCandidateResult,
+  raw: StackChanTargetFilterBaselineResult,
+  candidate: StackChanTargetFilterBaselineResult,
   thresholds: StackChanTargetFilterEvaluationThresholds
 ): StackChanTargetFilterAcceptance {
   const commandPathMaximum =
@@ -387,8 +398,8 @@ function check(
 }
 
 function countSafetyRegressions(
-  raw: StackChanTargetFilterCandidateResult,
-  candidate: StackChanTargetFilterCandidateResult
+  raw: StackChanTargetFilterBaselineResult,
+  candidate: StackChanTargetFilterBaselineResult
 ): number {
   return (["stationary", "reversal"] as const).reduce((total, trace) => {
     const baseline = raw[trace].safety;
@@ -405,18 +416,8 @@ function countSafetyRegressions(
   }, 0);
 }
 
-function baselineChecks(): readonly StackChanTargetFilterAcceptanceCheck[] {
-  return [
-    check("stationary-command-path-total-variation", 0, 0),
-    check("stationary-maximum-integer-step", 0, 0),
-    check("reversal-response-delay", 0, 0),
-    check("reversal-direction-stability", 0, 0),
-    check("absolute-safety-nonregression", 0, 0)
-  ];
-}
-
 function compareCandidateRank(
-  raw: StackChanTargetFilterCandidateResult,
+  raw: StackChanTargetFilterBaselineResult,
   left: StackChanTargetFilterCandidateResult,
   right: StackChanTargetFilterCandidateResult
 ): number {
@@ -432,7 +433,7 @@ function compareCandidateRank(
 }
 
 function candidateRank(
-  raw: StackChanTargetFilterCandidateResult,
+  raw: StackChanTargetFilterBaselineResult,
   candidate: StackChanTargetFilterCandidateResult
 ): readonly number[] {
   if (!candidate.config.enabled) {

@@ -93,6 +93,34 @@ describe("StackChan attention metrics", () => {
     expect(summary.negativeZeroCount).toBe(2);
   });
 
+  it("closes a boundary-interrupted zero run at its last sample", () => {
+    const summary = summarizeAttentionQuantizationAxis([
+      quantizationSample(0, {
+        boundary: "first",
+        rawCorrectionDeg: 0.4,
+        residualAction: "residual-accumulate"
+      }),
+      quantizationSample(125, {
+        boundary: "first",
+        rawCorrectionDeg: 0.4,
+        residualAction: "residual-accumulate"
+      }),
+      quantizationSample(10_000, {
+        boundary: "second",
+        rawCorrectionDeg: 0.4,
+        residualAction: "residual-accumulate"
+      })
+    ]);
+
+    expect(summary.zeroRuns.durationMs).toEqual({
+      count: 2,
+      p50: 0,
+      p90: 125,
+      p95: 125,
+      max: 125
+    });
+  });
+
   it("deduplicates sequences and counts target labels", () => {
     const metrics = createAttentionMetricsAccumulator({ runStartedAtMs: 1_000, deadZone: 0.1 });
 

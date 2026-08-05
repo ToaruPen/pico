@@ -1,12 +1,10 @@
 # StackChan Async Latest Head Target Implementation Plan
 
-> 2026-07-31 contract correction: this file preserves the original execution history. The
-> implemented and canonical contract is the corresponding design spec: at most two active device
-> calls, one replaceable pending target, max-step reclamping from the planned dispatch frontier,
-> and ordered confirmation commits. References below to one active call or confirmed-pose
-> reclamping are superseded by that design spec and the production gateway tests.
-
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Historical record — non-executable.** This file preserves the original execution history.
+> Do not execute any checkbox or code instruction below. Its active-two/planned-frontier correction
+> was also superseded by the later production single-flight contract (`active=1`, one replaceable
+> pending target) and the current Gateway tests. Use the current implementation, tests, and latest
+> restoration/stability plans as the executable source of truth.
 
 **Goal:** Move StackChan follow commands through a gateway-owned asynchronous latest-only lane so Pico acknowledgments do not wait for ESP32 device responses.
 

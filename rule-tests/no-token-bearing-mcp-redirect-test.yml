@@ -1,0 +1,16 @@
+id: no-token-bearing-mcp-redirect
+valid:
+  - |
+      const transport = new StreamableHTTPClientTransport(url, {
+        requestInit: {
+          headers: { authorization: `Bearer ${token}` },
+          redirect: "error"
+        }
+      });
+invalid:
+  - |
+      const transport = new StreamableHTTPClientTransport(url, {
+        requestInit: {
+          headers: { authorization: `Bearer ${token}` }
+        }
+      });

@@ -10,13 +10,13 @@
 
 ---
 
-### Task 1: Gateway latest-frame store and `SCL1` demultiplexing
+## Task 1: Gateway latest-frame store and `SCL1` demultiplexing
 
-**Files:**
-- Create: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/gateway/stackchan_mcp/camera_stream.py`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/gateway/stackchan_mcp/esp32_client.py`
-- Test: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/gateway/tests/test_camera_stream.py`
-- Test: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/gateway/tests/test_esp32_client.py`
+**Files (relative to the sibling `stackchan-mcp` repository):**
+- Create: `gateway/stackchan_mcp/camera_stream.py`
+- Modify: `gateway/stackchan_mcp/esp32_client.py`
+- Test: `gateway/tests/test_camera_stream.py`
+- Test: `gateway/tests/test_esp32_client.py`
 
 - [ ] **Step 1: Write failing parser and latest-only store tests**
 
@@ -58,23 +58,25 @@
       def status(self) -> dict[str, int | bool | None]: ...
   ```
 
-  `ESP32Manager._handler` must call the parser only when the binary payload starts with `SCL1`; other binary payloads remain raw Opus. A valid camera frame is published and returns one media credit to the device. Invalid `SCL1` is logged and never forwarded to STT.
+  `ESP32Manager._handler` must call the parser only when the binary payload starts with `SCL1`; other binary payloads remain raw Opus. Invalid `SCL1` is logged and never forwarded to STT.
+
+  Every claimed media credit has exactly one terminal disposition. Invalid or stale frames rejected before a transport send, unsent latest-slot replacements, and unsent frames discarded during disconnect or quiesce restore one credit exactly once. A published frame consumes its credit. Once a transport send has been attempted, either success or failure also consumes the credit; failed sends are not refunded or retried, preventing a failed transport from creating a self-amplifying retry loop. Subsequent bounded grants restore forward progress. Host tests cover invalid/stale input, latest-slot replacement, pre-send disconnect, send failure, and successful publication, and assert that no disposition restores or consumes a credit twice.
 
 - [ ] **Step 4: Run focused tests and verify GREEN**
 
   Run the same focused pytest command and require zero failures.
 
-### Task 2: Gateway stream lifecycle and authenticated latest-frame HTTP route
+## Task 2: Gateway stream lifecycle and authenticated latest-frame HTTP route
 
-**Files:**
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/gateway/stackchan_mcp/camera_stream.py`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/gateway/stackchan_mcp/protocol.py`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/gateway/stackchan_mcp/esp32_client.py`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/gateway/stackchan_mcp/http_server.py`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/gateway/stackchan_mcp/stdio_server.py`
-- Test: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/gateway/tests/test_camera_stream.py`
-- Test: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/gateway/tests/test_http_server.py`
-- Test: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/gateway/tests/test_stdio_server.py`
+**Files (relative to the sibling `stackchan-mcp` repository):**
+- Modify: `gateway/stackchan_mcp/camera_stream.py`
+- Modify: `gateway/stackchan_mcp/protocol.py`
+- Modify: `gateway/stackchan_mcp/esp32_client.py`
+- Modify: `gateway/stackchan_mcp/http_server.py`
+- Modify: `gateway/stackchan_mcp/stdio_server.py`
+- Test: `gateway/tests/test_camera_stream.py`
+- Test: `gateway/tests/test_http_server.py`
+- Test: `gateway/tests/test_stdio_server.py`
 
 - [ ] **Step 1: Write failing lifecycle and HTTP tests**
 
@@ -115,21 +117,21 @@
 
   Run the same focused pytest command and require zero failures.
 
-### Task 3: Firmware media-credit JPEG producer
+## Task 3: Firmware media-credit JPEG producer
 
-**Files:**
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/firmware/main/boards/common/camera.h`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/firmware/main/boards/common/esp_video.h`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/firmware/main/boards/common/esp_video.cc`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/firmware/main/protocols/protocol.h`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/firmware/main/protocols/websocket_protocol.h`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/firmware/main/protocols/websocket_protocol.cc`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/firmware/main/application.h`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/firmware/main/application.cc`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/firmware/main/mcp_server.cc`
-- Create: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/firmware/main/camera_stream_protocol.h`
-- Test: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/firmware/host_test/test_camera_stream_protocol.cc`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/stackchan-mcp/camera-stream/firmware/host_test/CMakeLists.txt`
+**Files (relative to the sibling `stackchan-mcp` repository):**
+- Modify: `firmware/main/boards/common/camera.h`
+- Modify: `firmware/main/boards/common/esp_video.h`
+- Modify: `firmware/main/boards/common/esp_video.cc`
+- Modify: `firmware/main/protocols/protocol.h`
+- Modify: `firmware/main/protocols/websocket_protocol.h`
+- Modify: `firmware/main/protocols/websocket_protocol.cc`
+- Modify: `firmware/main/application.h`
+- Modify: `firmware/main/application.cc`
+- Modify: `firmware/main/mcp_server.cc`
+- Create: `firmware/main/camera_stream_protocol.h`
+- Test: `firmware/host_test/test_camera_stream_protocol.cc`
+- Modify: `firmware/host_test/CMakeLists.txt`
 
 - [ ] **Step 1: Write a failing host test for the wire envelope and latest slot**
 
@@ -174,15 +176,15 @@
 
   Require both commands to exit zero before flashing.
 
-### Task 4: Pico stream lease and latest-frame reader
+## Task 4: Pico stream lease and latest-frame reader
 
-**Files:**
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/pico/stackchan-face-follow-vlm-routing/src/config/index.ts`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/pico/stackchan-face-follow-vlm-routing/config/pico.example.yaml`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/pico/stackchan-face-follow-vlm-routing/src/modules/stackchan/index.ts`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/pico/stackchan-face-follow-vlm-routing/tests/config.test.ts`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/pico/stackchan-face-follow-vlm-routing/tests/stackchan.test.ts`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/pico/stackchan-face-follow-vlm-routing/tests/stackchan-attention-runtime.test.ts`
+**Files (relative to this Pico repository):**
+- Modify: `src/config/index.ts`
+- Modify: `config/pico.example.yaml`
+- Modify: `src/modules/stackchan/index.ts`
+- Modify: `tests/config.test.ts`
+- Modify: `tests/stackchan.test.ts`
+- Modify: `tests/stackchan-attention-runtime.test.ts`
 
 - [ ] **Step 1: Write failing config and adapter tests**
 
@@ -211,12 +213,12 @@
 
   Run the same focused Vitest command and require zero failures.
 
-### Task 5: Full verification and bounded hardware measurement
+## Task 5: Full verification and bounded hardware measurement
 
-**Files:**
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/pico/stackchan-face-follow-vlm-routing/scripts/field/stackchan-face-follow.ts`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/pico/stackchan-face-follow-vlm-routing/tests/stackchan-face-follow-field.test.ts`
-- Modify: `/Users/monsoon/.config/superpowers/worktrees/pico/stackchan-face-follow-vlm-routing/docs/field-tests/2026-07-26-stackchan-face-follow-vlm-routing.md`
+**Files (relative to this Pico repository):**
+- Modify: `scripts/field/stackchan-face-follow.ts`
+- Modify: `tests/stackchan-face-follow-field.test.ts`
+- Modify: `docs/field-tests/2026-07-26-stackchan-face-follow-vlm-routing.md`
 
 - [ ] **Step 1: Write failing aggregate-metric tests**
 
@@ -234,7 +236,7 @@
 
   ```bash
   cd gateway && uv run pytest && uv run ruff check .
-  cd /Users/monsoon/.config/superpowers/worktrees/pico/stackchan-face-follow-vlm-routing && just check
+  just check
   ```
 
 - [ ] **Step 4: Flash only after announcing the destructive device action**

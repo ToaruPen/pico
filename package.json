@@ -54,7 +54,7 @@
     "lint": "eslint .",
     "format": "biome format --write .",
     "format:check": "biome ci .",
-    "ast": "ast-grep scan --config sgconfig.yml src tests",
+    "ast": "ast-grep scan --config sgconfig.yml src scripts tests",
     "ast:test": "ast-grep test --config sgconfig.yml --skip-snapshot-tests",
     "check": "npm run typecheck && npm run lint && npm run ast:test && npm run ast && npm run format:check && npm run test",
     "check:ci": "bash scripts/ci/run-quality-gates.sh"

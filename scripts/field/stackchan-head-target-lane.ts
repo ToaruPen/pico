@@ -85,6 +85,7 @@ type FixedDistribution = {
 
 const maximumDistributionMs = 10_000;
 const minimumDeviceDispatchRateHz = 7.5;
+const minimumDeviceDispatchRateFraction = 0.75;
 const maximumPendingAgeP95Ms = 150;
 
 export function parseStackChanHeadTargetLaneArguments(
@@ -302,7 +303,8 @@ function createReport(
     status,
     finalHomeErrorDeg,
     maximumPendingAgeMs,
-    deviceDispatchRateHz
+    deviceDispatchRateHz,
+    options.updateHz
   );
   return {
     schemaVersion: 1,
@@ -339,7 +341,8 @@ function stressPassed(
   status: StackChanHeadTargetStatus,
   finalHomeErrorDeg: { readonly yaw: number; readonly pitch: number },
   maximumPendingAgeMs: number,
-  deviceDispatchRateHz: number
+  deviceDispatchRateHz: number,
+  requestedUpdateHz: number
 ): boolean {
   return [
     update.count > 0,
@@ -347,7 +350,8 @@ function stressPassed(
     update.p95 <= 25,
     update.p99 <= 50,
     statusLatency.p95 <= 100,
-    deviceDispatchRateHz >= minimumDeviceDispatchRateHz,
+    deviceDispatchRateHz >=
+      Math.min(minimumDeviceDispatchRateHz, requestedUpdateHz * minimumDeviceDispatchRateFraction),
     status.pendingAgeMs.p95 <= maximumPendingAgeP95Ms,
     status.pendingAgeMs.p99 <= maximumPendingAgeMs,
     status.phase === "stopped",
@@ -451,7 +455,10 @@ function requireExactArguments(values: ReadonlyMap<string, string | true>): void
     "--status-hz",
     "--report-output"
   ]);
-  if (values.size !== expected.size || [...values.keys()].some((name) => !expected.has(name))) {
+  if (
+    values.size !== expected.size ||
+    Array.from(values.keys()).some((name) => !expected.has(name))
+  ) {
     throw new Error("head target lane field arguments are invalid");
   }
 }

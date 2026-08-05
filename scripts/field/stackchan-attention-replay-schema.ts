@@ -165,11 +165,61 @@ function consumeJsonStringEscape(state: JsonParserState): void {
 }
 
 function parseJsonNumber(state: JsonParserState): void {
-  const match = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:e[+-]?\d+)?/iu.exec(state.raw.slice(state.index));
-  if (match === null) {
+  const start = state.index;
+  consumeNumberToken(state, "-");
+  if (consumeNumberToken(state, "0")) {
+    // A leading zero is the complete integer part.
+  } else if (isNonZeroDigit(state.raw[state.index])) {
+    consumeDigits(state);
+  } else {
     throw invalidJson(state, "expected a JSON value");
   }
-  state.index += match[0].length;
+  if (consumeNumberToken(state, ".")) {
+    requireNumberDigits(state);
+  }
+  if (isExponentMarker(state.raw[state.index])) {
+    state.index += 1;
+    if (state.raw[state.index] === "+" || state.raw[state.index] === "-") {
+      state.index += 1;
+    }
+    requireNumberDigits(state);
+  }
+  if (state.index === start) {
+    throw invalidJson(state, "expected a JSON value");
+  }
+}
+
+function consumeNumberToken(state: JsonParserState, token: string): boolean {
+  if (state.raw[state.index] !== token) {
+    return false;
+  }
+  state.index += 1;
+  return true;
+}
+
+function requireNumberDigits(state: JsonParserState): void {
+  if (!isDigit(state.raw[state.index])) {
+    throw invalidJson(state, "invalid number");
+  }
+  consumeDigits(state);
+}
+
+function consumeDigits(state: JsonParserState): void {
+  while (isDigit(state.raw[state.index])) {
+    state.index += 1;
+  }
+}
+
+function isDigit(token: string | undefined): boolean {
+  return token !== undefined && token >= "0" && token <= "9";
+}
+
+function isNonZeroDigit(token: string | undefined): boolean {
+  return token !== undefined && token >= "1" && token <= "9";
+}
+
+function isExponentMarker(token: string | undefined): boolean {
+  return token === "e" || token === "E";
 }
 
 function consumeJsonLiteral(state: JsonParserState, literal: string): void {
@@ -446,6 +496,10 @@ function validateString(
   schema: StackChanAttentionReplayJsonSchema,
   path: string
 ): ValidationIssue | undefined {
+  const minimumLengthIssue = validateMinimumLength(value, schema.minLength, path);
+  if (minimumLengthIssue !== undefined) {
+    return minimumLengthIssue;
+  }
   const pattern = schema.pattern;
   if (pattern === undefined) {
     return undefined;
@@ -456,6 +510,26 @@ function validateString(
   return new RegExp(pattern, "u").test(value)
     ? undefined
     : { path, message: `string does not match ${pattern}` };
+}
+
+function validateMinimumLength(
+  value: string,
+  minimumLength: unknown,
+  path: string
+): ValidationIssue | undefined {
+  if (minimumLength !== undefined) {
+    if (
+      typeof minimumLength !== "number" ||
+      !Number.isInteger(minimumLength) ||
+      minimumLength < 0
+    ) {
+      return { path, message: "schema minLength must be a non-negative integer" };
+    }
+    if (value.length < minimumLength) {
+      return { path, message: `string must have at least ${minimumLength} characters` };
+    }
+  }
+  return undefined;
 }
 
 function validateNumber(
@@ -549,11 +623,15 @@ function stableJson(value: unknown): string {
   }
   if (isRecord(value)) {
     const entries = Object.entries(value)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => compareCodeUnits(left, right))
       .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`);
     return `{${entries.join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function requiredKeys(schema: StackChanAttentionReplayJsonSchema): readonly string[] {

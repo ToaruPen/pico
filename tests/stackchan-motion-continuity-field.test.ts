@@ -84,6 +84,17 @@ describe("StackChan motion continuity field harness", () => {
     });
   });
 
+  it("rounds the maximum step before applying the four-degree gate", () => {
+    const samples = Array.from({ length: 62 }, (_, index) =>
+      sample(index * 20, index * 4.000_000_000_000_001, index === 0 ? 0 : 1)
+    );
+
+    expect(summarizeStackChanMotionContinuity(samples)).toMatchObject({
+      maximumStepDeg: 4,
+      qualified: true
+    });
+  });
+
   it("does not classify reversal coast or inactive dwell as a stop", () => {
     const samples: StackChanMotionSample[] = [
       sample(0, 0, 0),
@@ -201,8 +212,70 @@ describe("StackChan motion continuity field harness", () => {
 
     await waitFor(() => updates.length === 3);
     expect(updates).toEqual([1, 2, 3]);
-    releaseTelemetry?.();
+    expect(releaseTelemetry).toBeTypeOf("function");
+    if (releaseTelemetry === undefined) {
+      throw new Error("telemetry resolver was not initialized");
+    }
+    releaseTelemetry();
     await run;
+  });
+
+  it("stops sampling after target publication fails", async () => {
+    let releaseTelemetry: (() => void) | undefined;
+    let observeUpdateFailure: (() => void) | undefined;
+    const telemetryGate = new Promise<void>((resolve) => {
+      releaseTelemetry = resolve;
+    });
+    const updateFailed = new Promise<void>((resolve) => {
+      observeUpdateFailure = resolve;
+    });
+    let statusCalls = 0;
+    const lane: StackChanMotionTelemetryLane = {
+      connect: () => Promise.resolve(),
+      start: () => Promise.reject(new Error("not used")),
+      update: () => {
+        observeUpdateFailure?.();
+        return Promise.reject(new Error("target publication failed"));
+      },
+      clear: () => Promise.reject(new Error("not used")),
+      status: () => Promise.reject(new Error("not used")),
+      stop: () => Promise.reject(new Error("not used")),
+      close: () => Promise.resolve(),
+      motionStatus: async () => {
+        statusCalls += 1;
+        await telemetryGate;
+        return {
+          yaw: 0,
+          pitch: 33,
+          targetYaw: 4,
+          targetPitch: 33,
+          moving: true
+        };
+      }
+    };
+
+    const run = runStackChanMotionContinuitySweep({
+      lane,
+      leaseId: "lease-a",
+      pitch: 33,
+      targets: [{ yaw: 4, direction: 1, beginsLeg: true, continuesAfter: false }],
+      timing: {
+        sampleIntervalMs: 1,
+        targetIntervalMs: 5,
+        reversalGuardMs: 0,
+        settleMs: 20
+      }
+    });
+
+    await updateFailed;
+    expect(releaseTelemetry).toBeTypeOf("function");
+    if (releaseTelemetry === undefined) {
+      throw new Error("telemetry resolver was not initialized");
+    }
+    releaseTelemetry();
+    await expect(run).rejects.toThrow("target publication failed");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(statusCalls).toBe(1);
   });
 });
 

@@ -199,7 +199,7 @@ voice:
       }
     );
 
-    expect(requireSection(report, "camera_vlm_scene")).toEqual({
+    expect(requireSection(report, "camera_vlm_scene")).toStrictEqual({
       name: "camera_vlm_scene",
       status: "failed",
       reason: "pico camera scene description route is not configured"
@@ -217,7 +217,7 @@ voice:
       }
     );
 
-    expect(requireSection(report, "camera_vlm_scene")).toEqual({
+    expect(requireSection(report, "camera_vlm_scene")).toStrictEqual({
       name: "camera_vlm_scene",
       status: "failed",
       reason: "camera scene execution failed before route selection"

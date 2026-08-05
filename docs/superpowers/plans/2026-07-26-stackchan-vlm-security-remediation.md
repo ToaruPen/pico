@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Remove the implicit scene route
+## Task 1: Remove the implicit scene route
 
 **Files:**
 - Modify: `src/runtime/perception-service.ts`
@@ -71,7 +71,7 @@ provider.
 
 Run the three focused test files and `just typecheck`. Expected: all pass.
 
-### Task 2: Contain MCP errors and consume ephemeral regular captures
+## Task 2: Contain MCP errors and consume ephemeral regular captures
 
 **Files:**
 - Modify: `src/modules/stackchan/index.ts`
@@ -141,6 +141,12 @@ Before reading, require `await handle.stat()` to report a regular file. Keep the
 path before returning bytes. Attempt both cleanup operations even if one fails; any filesystem
 failure remains contained by the fixed capture-read error.
 
+The narrow file-access seam cannot unlink by descriptor. Therefore the canonical capture root
+must be mode `0700` and owned by the same operating-system user as Pico and the local Gateway;
+no other local actor may create, rename, or replace entries in that directory. Local deployment
+must preserve this ownership boundary. This invariant is required for path-based
+cleanup to remain bound to the file that was validated and read.
+
 - [ ] **Step 5: Run tests to verify GREEN**
 
 Run:
@@ -157,7 +163,7 @@ just ast
 Expected: all pass, and an `rg` search for injected secret/path/body literals finds them only in
 negative assertions and fixtures.
 
-### Task 3: Re-review and validate the complete feature
+## Task 3: Re-review and validate the complete feature
 
 **Files:**
 - Verify: `docs/superpowers/specs/2026-07-26-vlm-provider-routing-design.md`

@@ -234,12 +234,13 @@ home復帰は合格した。
 同じ441-S Dist設定で30秒・最大3frameのbounded followを実行した。
 
 - processed frames: 3
-- move commands: 2（直前のgrid結果とcontroller動作から、対象不在時のbounded scanと推定）
+- move commands: unknown（このrunのharnessは指令数を計測していない）
 - runtime errors: 0
 - final readback: yaw 0°、pitch 34°
 - configured home: yaw 0°、pitch 35°
 - home tolerance: ±1°
-- result: passed
+- home-return result: passed
+- command-count qualification: excluded（計測済み指令数を要求する判定には使用しない）
 
 private reportはどちらもmode `0600`で、画像、token、capture pathを含まない。
 
