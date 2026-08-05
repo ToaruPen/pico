@@ -721,18 +721,29 @@ describe("resident voice startup readiness", () => {
 
   it("selects standard perception tools for resident production", async () => {
     let perceptionMode: string | undefined;
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", {
+      ...platformDescriptor,
+      value: "darwin"
+    });
 
-    await expect(
-      runResidentVoiceWithProviders({
-        config: residentConfig(process.platform === "darwin" ? "ffplay" : "alsa"),
-        signal: new AbortController().signal,
-        startupReadiness: () => Promise.resolve(),
-        createPiAgent: (options) => {
-          perceptionMode = options.perceptionMode;
-          throw new Error("captured resident Pi Agent options");
-        }
-      })
-    ).rejects.toThrow("captured resident Pi Agent options");
+    try {
+      await expect(
+        runResidentVoiceWithProviders({
+          config: residentConfig(),
+          signal: new AbortController().signal,
+          startupReadiness: () => Promise.resolve(),
+          createPiAgent: (options) => {
+            perceptionMode = options.perceptionMode;
+            throw new Error("captured resident Pi Agent options");
+          }
+        })
+      ).rejects.toThrow("captured resident Pi Agent options");
+    } finally {
+      if (platformDescriptor !== undefined) {
+        Object.defineProperty(process, "platform", platformDescriptor);
+      }
+    }
 
     expect(perceptionMode).toBe("standard");
   });

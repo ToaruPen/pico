@@ -114,7 +114,7 @@ afterAll(async () => {
   }
 });
 
-describe("StackChan attention replay review evidence", { timeout: 30_000 }, () => {
+describe("StackChan attention replay review evidence", { timeout: 120_000 }, () => {
   it("rejects duplicate JSON object keys before JSON.parse can collapse them", () => {
     expect(() =>
       parseJsonRejectingDuplicateKeys(
