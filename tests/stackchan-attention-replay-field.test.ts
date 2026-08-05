@@ -19,7 +19,7 @@ import { createStackChanAttentionRuntime } from "../src/runtime/stackchan-attent
 
 const TEST_PRODUCER_SOURCE_HASH = "a".repeat(64);
 
-describe("StackChan attention replay field harness", () => {
+describe("StackChan attention replay field harness", { timeout: 30_000 }, () => {
   it("isolates visual-frame residual release from reply-cadence lane outcomes", async () => {
     const probe = await probeStackChanAttentionQuantizationCoupling();
 

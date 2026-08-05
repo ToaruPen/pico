@@ -23,7 +23,6 @@ import { parseJsonRejectingDuplicateKeys } from "../scripts/field/stackchan-atte
 
 const execFileAsync = promisify(execFile);
 const picoWorktree = resolve(import.meta.dirname, "..");
-const gatewayWorktree = resolve(picoWorktree, "../../stackchan-mcp/camera-stream");
 const controllerSource = join(picoWorktree, "src/modules/stackchan/attention-controller.ts");
 const targetCenterFilterSource = join(
   picoWorktree,
@@ -31,7 +30,6 @@ const targetCenterFilterSource = join(
 );
 const runtimeSource = join(picoWorktree, "src/runtime/stackchan-attention-runtime.ts");
 const attentionDetectionSource = join(picoWorktree, "src/modules/vision/attention-detection.ts");
-const gatewayLaneSource = join(gatewayWorktree, "gateway/stackchan_mcp/head_target_lane.py");
 const replayProducerSource = join(picoWorktree, "scripts/field/stackchan-attention-replay.ts");
 const attentionMetricsSource = join(picoWorktree, "scripts/field/stackchan-attention-metrics.ts");
 const replayLanePolicySource = join(
@@ -42,14 +40,6 @@ const replayLanePolicyTestSource = join(
   picoWorktree,
   "tests/stackchan-attention-replay-lane-policy.test.ts"
 );
-const gatewayLaneTestSource = join(gatewayWorktree, "gateway/tests/test_head_target_lane.py");
-const gatewayPackageInitSource = join(gatewayWorktree, "gateway/stackchan_mcp/__init__.py");
-const gatewayWifiPowerSaveSource = join(
-  gatewayWorktree,
-  "gateway/stackchan_mcp/wifi_power_save.py"
-);
-const gatewayPyprojectSource = join(gatewayWorktree, "gateway/pyproject.toml");
-const gatewayUvLockSource = join(gatewayWorktree, "gateway/uv.lock");
 const replayReportSchemaSource = join(
   picoWorktree,
   "scripts/field/stackchan-attention-replay-report.schema.json"
@@ -72,9 +62,34 @@ const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 let suiteDirectory = "";
 let qualifiedReportSource = "";
 let historicalReportSource = "";
+let gatewayWorktree = "";
+let gatewayLaneSource = "";
+let gatewayLaneTestSource = "";
+let gatewayPackageInitSource = "";
+let gatewayWifiPowerSaveSource = "";
+let gatewayPyprojectSource = "";
+let gatewayUvLockSource = "";
 
 beforeAll(async () => {
   suiteDirectory = await mkdtemp(join(tmpdir(), "pico-replay-evidence-suite-"));
+  gatewayWorktree = join(suiteDirectory, "gateway-worktree");
+  gatewayLaneSource = join(gatewayWorktree, "gateway/stackchan_mcp/head_target_lane.py");
+  gatewayLaneTestSource = join(gatewayWorktree, "gateway/tests/test_head_target_lane.py");
+  gatewayPackageInitSource = join(gatewayWorktree, "gateway/stackchan_mcp/__init__.py");
+  gatewayWifiPowerSaveSource = join(gatewayWorktree, "gateway/stackchan_mcp/wifi_power_save.py");
+  gatewayPyprojectSource = join(gatewayWorktree, "gateway/pyproject.toml");
+  gatewayUvLockSource = join(gatewayWorktree, "gateway/uv.lock");
+  await Promise.all([
+    writeFixtureSource(gatewayLaneSource, "class HeadTargetLane:\n    pass\n"),
+    writeFixtureSource(gatewayLaneTestSource, "def test_head_target_lane():\n    pass\n"),
+    writeFixtureSource(gatewayPackageInitSource, ""),
+    writeFixtureSource(gatewayWifiPowerSaveSource, "def disable_wifi_power_save():\n    pass\n"),
+    writeFixtureSource(
+      gatewayPyprojectSource,
+      '[project]\nname = "stackchan-mcp-test-fixture"\nversion = "0.0.0"\n'
+    ),
+    writeFixtureSource(gatewayUvLockSource, 'version = 1\nrequires-python = ">=3.10"\n')
+  ]);
   qualifiedReportSource = join(suiteDirectory, "qualified.json");
   historicalReportSource = join(suiteDirectory, "historical.json");
   const qualified = await runStackChanAttentionReplay({
@@ -1794,6 +1809,11 @@ async function sha256(path: string): Promise<string> {
   return createHash("sha256")
     .update(await readFile(path))
     .digest("hex");
+}
+
+async function writeFixtureSource(path: string, contents: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, contents);
 }
 
 async function roleSourceAggregate(

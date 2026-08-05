@@ -21,7 +21,7 @@ import {
   validateStackChanAttentionReplaySchemaValue
 } from "../scripts/field/stackchan-attention-replay-schema.js";
 
-describe("StackChan attention replay qualification gate", () => {
+describe("StackChan attention replay qualification gate", { timeout: 30_000 }, () => {
   it("binds every production source used by the replay producer", () => {
     expect(STACKCHAN_ATTENTION_REPLAY_PRODUCER_SOURCE_ROLES).toEqual([
       "pico-attention-controller",

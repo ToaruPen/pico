@@ -724,7 +724,7 @@ describe("resident voice startup readiness", () => {
 
     await expect(
       runResidentVoiceWithProviders({
-        config: residentConfig(),
+        config: residentConfig(process.platform === "darwin" ? "ffplay" : "alsa"),
         signal: new AbortController().signal,
         startupReadiness: () => Promise.resolve(),
         createPiAgent: (options) => {
