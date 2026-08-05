@@ -528,11 +528,15 @@ describe("StackChan servo latency field harness", () => {
     expect(updatedSequences).toEqual([0]);
   });
 
-  it("bounds the camera-status fetch with the configured timeout", async () => {
+  it("bounds camera-status fetches and rejects redirects before following link-local URLs", async () => {
     const fetchDescriptor = Object.getOwnPropertyDescriptor(globalThis, "fetch");
     const requests: Array<Parameters<typeof fetch>> = [];
     const recordingFetch: typeof fetch = (...arguments_) => {
       requests.push(arguments_);
+      const [input, request] = arguments_;
+      if (fetchInputUrl(input).includes("/camera/status") && request?.redirect !== "error") {
+        return recordingFetch("http://169.254.169.254/latest/meta-data", request);
+      }
       return Promise.reject(new Error("outbound request stopped"));
     };
     Object.defineProperty(globalThis, "fetch", {
@@ -556,6 +560,10 @@ describe("StackChan servo latency field harness", () => {
 
       expect(cameraStatusCall).toBeDefined();
       expect(cameraStatusCall?.[1]?.signal).toBeInstanceOf(AbortSignal);
+      expect(cameraStatusCall?.[1]?.redirect).toBe("error");
+      expect(
+        requests.some(([input]) => fetchInputUrl(input).startsWith("http://169.254.169.254/"))
+      ).toBe(false);
     } finally {
       if (fetchDescriptor !== undefined) {
         Object.defineProperty(globalThis, "fetch", fetchDescriptor);

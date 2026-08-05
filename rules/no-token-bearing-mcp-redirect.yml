@@ -4,10 +4,7 @@ severity: error
 message: Token-bearing MCP transports must reject HTTP redirects.
 rule:
   all:
-    - pattern: |
-        new StreamableHTTPClientTransport($URL, {
-          $$$OPTIONS
-        })
+    - kind: object
     - has:
         pattern:
           context: "const options = { authorization: $TOKEN };"
@@ -18,4 +15,16 @@ rule:
           pattern:
             context: 'const options = { redirect: "error" };'
             selector: pair
-          stopBy: end
+    - inside:
+        all:
+          - kind: pair
+          - has:
+              field: key
+              regex: ^requestInit$
+          - inside:
+              pattern: |
+                new StreamableHTTPClientTransport($URL, {
+                  $$$OPTIONS
+                })
+              stopBy: end
+        field: value

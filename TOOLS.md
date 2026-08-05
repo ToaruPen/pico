@@ -49,18 +49,37 @@ instructions.
   20 ms intervals, return home, and write a mode-`0600` report without
   retaining a position timeline.
 - `npm run field:stackchan-head-target-lane -- --enable-live-run --duration-ms <ms> --update-hz <hz> --status-hz <hz> --report-output <json>`:
-  stress the latest-only head-target lane at explicit update and status rates,
-  restore home, and write aggregate latency, rate, depth, and safety metrics.
+  stress the live latest-only lane for 1,000–60,000 ms at an update rate of
+  1–50 Hz and status rate of 1–10 Hz. A successful run stops the lease, restores
+  home, and writes a mode-`0600` aggregate latency/rate/depth/safety report with
+  no pose timeline or camera data. Failure attempts to stop and close the lane
+  and adapter, emits only the fixed command-failed message, and does not claim a
+  completed report.
 - `npm run field:stackchan-attention-replay -- --report-output <absolute-json> --repeat 3 --producer-source-hash <sha256> [--step-quantization round|error-feedback]`:
-  run the deterministic attention-controller replay and write its
-  schema-validated aggregate comparison report. Inspect `--help` before use
-  because qualification inputs and output paths are explicit.
-- `npm run field:stackchan-attention-replay-evidence -- build <required flag/value pairs>`:
-  build or verify a private deterministic replay evidence bundle from explicit
-  report, source, contract, and output paths.
+  run exactly three repetitions of the fixed deterministic scenario set without
+  camera or device access. It validates the producer SHA-256 and report schema
+  before atomically writing a mode-`0600` report; invalid arguments or execution
+  failure return a fixed JSON failure and leave no temporary output. Retained
+  events are synthetic replay evidence, not captured images or personal data.
+- `npm run field:stackchan-attention-replay-evidence -- build --output-archive <absolute.tar.gz> --staging-dir <absolute-dir> <all report/source/test/log/attestation paths and three externally pinned SHA-256 values>`:
+  require every build option as a flag/value pair, normalized absolute and
+  non-overlapping paths, absent outputs, canonical reports/contracts, exact
+  source scope, passing logs, and external hashes. Success retains the verified
+  staging directory and deterministic archive and prints the archive path/hash;
+  failure emits fixed JSON and removes both outputs. The bundle retains the
+  declared source, test, log, contract, and synthetic replay artifacts, never
+  live images or device captures.
+- `npm run field:stackchan-attention-replay-evidence -- verify --evidence-dir <absolute-dir> --expected-start-attestation-sha256 <sha256> --expected-comparison-baseline-sha256 <sha256> --expected-comparison-contract-sha256 <sha256>`:
+  read-only verify an extracted evidence directory against its complete file
+  roster, checksums, schemas, fresh replay, source manifests, and three external
+  pins. It writes no artifact, prints only passed JSON on success, and returns a
+  fixed execution-failed JSON on any mismatch.
 - `npm run field:stackchan-target-filter-evaluation -- --report-output <json>`:
-  evaluate the fixed-seed target-filter grid and atomically write the selected
-  candidate and aggregate acceptance metrics without camera or device access.
+  evaluate the fixed seed `20260801` across the 16 configured cutoff/speed
+  candidates and bounded synthetic stationary/reversal traces, without camera
+  or device access. Success atomically writes a mode-`0600` selected-candidate
+  and aggregate acceptance report. Invalid arguments or no accepted candidate
+  exit nonzero; the temporary file is removed and no final report is retained.
 
 ## Deterministic Tooling
 
@@ -80,8 +99,9 @@ instructions.
 - `rules/no-test-doubles.yml`: blocks mock/stub/fake/fallback identifiers in
   source and tests.
 - `rules/no-automatic-fallback.yml`: blocks try/catch provider fallback chains.
-- `rules/no-token-bearing-mcp-redirect.yml`: requires token-bearing MCP HTTP
-  transports to reject redirects.
+- `rules/no-token-bearing-mcp-redirect.yml`: flags a token-bearing authorization
+  value nested under `requestInit` unless that same `requestInit` object has a
+  direct `redirect: "error"` property; outer or header-level lookalikes fail.
 
 If a repeated review rule can be expressed structurally, add or update an
 ast-grep rule and test instead of relying on AGENTS.md prose.

@@ -1460,6 +1460,7 @@ export async function readContentionCameraStatus(
       headers: {
         authorization: `Bearer ${token}`
       },
+      redirect: "error",
       signal: AbortSignal.timeout(config.timeoutMs)
     }),
     readCameraStreamLifecycle(config, token)

@@ -14,3 +14,19 @@ invalid:
           headers: { authorization: `Bearer ${token}` }
         }
       });
+  - |
+      const transport = new StreamableHTTPClientTransport(url, {
+        requestInit: {
+          headers: { authorization: `Bearer ${token}` }
+        },
+        redirect: "error"
+      });
+  - |
+      const transport = new StreamableHTTPClientTransport(url, {
+        requestInit: {
+          headers: {
+            authorization: `Bearer ${token}`,
+            redirect: "error"
+          }
+        }
+      });

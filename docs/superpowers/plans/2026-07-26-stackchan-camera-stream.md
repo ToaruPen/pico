@@ -60,7 +60,23 @@
 
   `ESP32Manager._handler` must call the parser only when the binary payload starts with `SCL1`; other binary payloads remain raw Opus. Invalid `SCL1` is logged and never forwarded to STT.
 
-  Every claimed media credit has exactly one terminal disposition. Invalid or stale frames rejected before a transport send, unsent latest-slot replacements, and unsent frames discarded during disconnect or quiesce restore one credit exactly once. A published frame consumes its credit. Once a transport send has been attempted, either success or failure also consumes the credit; failed sends are not refunded or retried, preventing a failed transport from creating a self-amplifying retry loop. Subsequent bounded grants restore forward progress. Host tests cover invalid/stale input, latest-slot replacement, pre-send disconnect, send failure, and successful publication, and assert that no disposition restores or consumes a credit twice.
+  Firmware owns each credit after a Gateway grant. `EspVideo::ClaimStreamCredit`
+  consumes one credit before delivering a captured frame, and the firmware
+  `Application` is the sole per-frame restoration owner through
+  `RefundCameraStreamCredit`; the Gateway never refunds a claimed credit.
+  `Application::SendCameraJpeg` restores once when packet construction rejects
+  the frame. `CameraPacketSendLane` restores once when an unsent packet is
+  replaced, rejected after lane shutdown, or removed by quiesce/destruction.
+  Once the lane invokes `SendCameraPacket`, the credit is consumed whether the
+  transport is disconnected, the send fails, or the Gateway receives and
+  publishes the frame. Gateway parser rejection, stale-frame rejection, and
+  `LatestCameraFrameStore` replacement are therefore downstream observations,
+  not refund paths. The Gateway restores forward capacity only with a later
+  bounded grant, independently of any one frame. Firmware host tests cover
+  invalid packet construction, latest-slot replacement, shutdown/quiesce,
+  failed send, and successful send; Gateway tests cover invalid/stale input,
+  downstream replacement, disconnect, and publication. Each test asserts the
+  applicable terminal disposition without a leak or double refund.
 
 - [ ] **Step 4: Run focused tests and verify GREEN**
 
